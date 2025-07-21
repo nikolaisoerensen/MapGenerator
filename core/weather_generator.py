@@ -1,381 +1,1044 @@
 """
-Weather System Generation
-Handles rain distribution, wind simulation, and temperature mapping
-Includes orographic effects and wind-based weather patterns
+Path: core/weather_generator.py
+
+Funktionsweise: Dynamisches Wetter- und Feuchtigkeitssystem
+- Terrain-basierte Temperaturberechnung (Altitude, Sonneneinstrahlung, Breitengrad (Input: heightmap, shade_map) der Luft.
+- Windfeld-Simulation mit Ablenkung um Berge und Abbremsen durch Geländegradienten-Analyse (slopemap).
+    - Konvektion: Wärmetransport durch Windströme
+    - Orographischer Regen: Feuchtigkeitstransport
+    - Precipation durch Abkühlen/Aufsteigen der Luft
+    - Evaporation durch Bodenfeuchtigkeit (Input: soil_moist_map)
+    - OpenSimplex-Noise für  Variation in Temperatur-, Feuchte- und Luftdruck an Kartengrenze
+    - Regen wird ausgelöst durch Erreichen eines Feuchtigkeitsgrenzwertes von über 1.0. Dieser berechnet sich aus rho_max = 5*exp(0.06*T) mit T aus temp_map und der Luftfeuchtigkeit in der jeweiligen Zelle.
+
+Parameter Input:
+- air_temp_entry (Lufttemperatur bei Karteneintritt)
+- solar_power (max. solare Gewinne (default 20°C))
+- altitude_cooling (Abkühlen der Luft pro 100 m Altitude(default 6°C))
+- thermic_effect (Thermische Verformung der Windvektoren durch shademap)
+- wind_speed_factor (Windgeschwindigkeit je Luftdruckdifferenz)
+- terrain_factor (Einfluss von Terrain auf Wind und Temperatur)
+- flow_direction, flow_accumulation (optional: Wasserfluss-Informationen)
+
+data_manager Input:
+- map_seed
+- heightmap
+- shade_map
+- soil_moist_map
+
+Output:
+- wind_map (Windvektoren (Richtung und Geschwindigkeit)) in m/s
+- temp_map (2D-Feld, Lufttemperatur) in °C
+- precip_map (2D-Feld, Regenfall) in gH20/m2
+- humid_map (2D-Feld, Luftfeuchte) in gH20/m3
+
+Klassen:
+WeatherSystemGenerator
+    Funktionsweise: Hauptklasse für dynamisches Wetter- und Feuchtigkeitssystem
+    Aufgabe: Koordiniert Temperatur, Wind, Niederschlag und Luftfeuchtigkeit
+    Methoden: generate_weather_system(), update_weather_cycle(), integrate_atmospheric_effects()
+
+TemperatureCalculator
+    Funktionsweise: Berechnet Lufttemperatur basierend auf Altitude, Sonneneinstrahlung und Breitengrad
+    Aufgabe: Erstellt temp_map als Grundlage für alle Weather-Berechnungen
+    Methoden: calculate_altitude_cooling(), apply_solar_heating(), add_latitude_gradient()
+
+WindFieldSimulator
+    Funktionsweise: Simuliert Windfeld mit Ablenkung um Berge und Geländegradienten-Analyse
+    Aufgabe: Erstellt wind_map für Konvektion und Orographischen Regen
+    Methoden: simulate_pressure_gradients(), apply_terrain_deflection(), calculate_thermal_effects()
+
+PrecipitationSystem
+    Funktionsweise: Berechnet Niederschlag durch Feuchtigkeits-Transport und Kondensation
+    Aufgabe: Erstellt precip_map basierend auf Luftfeuchtigkeit und Geländeeffekten
+    Methoden: calculate_orographic_precipitation(), simulate_moisture_transport(), trigger_precipitation_events()
+
+AtmosphericMoistureManager
+    Funktionsweise: Verwaltet Luftfeuchtigkeit durch Evaporation und Konvektion
+    Aufgabe: Erstellt humid_map mit realistischer Feuchtigkeits-Verteilung
+    Methoden: calculate_evaporation(), transport_moisture(), apply_humidity_diffusion()
 """
 
 import numpy as np
 from opensimplex import OpenSimplex
-from scipy.ndimage import gaussian_filter, distance_transform_edt
+from core.base_generator import BaseGenerator
 
-def calculate_hillshade(heightmap, sun_azimuth=75, sun_elevation=50, scale=1.0):
+class WeatherData:
     """
-    Berechnet Hillshade (Schattenwurf) für Heightmap
-    sun_azimuth: 90° = Sonne im Süden, 180° = Osten, 0° = Westen
-    sun_elevation: 60° = Sonnenstand über Horizont
+    Funktionsweise: Container für alle Weather-Daten mit Metainformationen
+    Aufgabe: Speichert wind_map, temp_map, precip_map, humid_map und LOD-Informationen
     """
-    # Konvertiere zu Radians
-    azimuth_rad = np.radians(sun_azimuth)
-    elevation_rad = np.radians(sun_elevation)
+    def __init__(self):
+        self.wind_map = None      # (height, width, 2) - Windvektoren in m/s
+        self.temp_map = None      # (height, width) - Temperatur in °C
+        self.precip_map = None    # (height, width) - Niederschlag in gH2O/m²
+        self.humid_map = None     # (height, width) - Luftfeuchtigkeit in gH2O/m³
+        self.lod_level = "LOD64"  # Aktueller LOD-Level
+        self.actual_size = 64     # Tatsächliche Kartengröße
+        self.parameters = {}      # Verwendete Parameter für Cache-Management
 
-    # Berechne Gradienten (Steigung in x und y Richtung)
-    grad_y, grad_x = np.gradient(heightmap / scale)
+class TemperatureCalculator:
+    """
+    Funktionsweise: Berechnet Lufttemperatur basierend auf Altitude, Sonneneinstrahlung und Breitengrad
+    Aufgabe: Erstellt temp_map als Grundlage für alle Weather-Berechnungen
+    """
 
-    # Berechne Oberflächennormalen
-    # Slope (Steigung) und Aspect (Ausrichtung) der Oberfläche
-    slope = np.arctan(np.sqrt(grad_x ** 2 + grad_y ** 2))
-    aspect = np.arctan2(-grad_y, grad_x)  # Negative y wegen Koordinatensystem
+    def __init__(self, air_temp_entry=15.0, solar_power=20.0, altitude_cooling=6.0):
+        """
+        Funktionsweise: Initialisiert Temperatur-Calculator mit Standard-Parametern
+        Aufgabe: Setup der Temperatur-Berechnungs-Parameter
+        Parameter: air_temp_entry, solar_power, altitude_cooling - Temperatur-Parameter
+        """
+        self.air_temp_entry = air_temp_entry
+        self.solar_power = solar_power
+        self.altitude_cooling = altitude_cooling  # °C pro 100m
 
-    # Sonnenvektor in kartesischen Koordinaten
-    sun_x = np.sin(azimuth_rad) * np.cos(elevation_rad)
-    sun_y = np.cos(azimuth_rad) * np.cos(elevation_rad)
-    sun_z = np.sin(elevation_rad)
+    def calculate_altitude_cooling(self, heightmap):
+        """
+        Funktionsweise: Berechnet Temperaturabnahme durch Altitude (60°C pro km - 10x verstärkt)
+        Aufgabe: Dramatische Höhen-Temperatur-Effekte für das System
+        Parameter: heightmap (numpy.ndarray) - Höhendaten
+        Returns: numpy.ndarray - Temperatur-Reduktion durch Altitude
+        """
+        # 60°C pro 1000m = 6°C pro 100m (10x verstärkt gegenüber real)
+        altitude_temp_reduction = heightmap * (self.altitude_cooling / 100.0)
+        return altitude_temp_reduction
 
-    # Oberflächennormalen in kartesischen Koordinaten
-    normal_x = -np.sin(slope) * np.sin(aspect)
-    normal_y = -np.sin(slope) * np.cos(aspect)
-    normal_z = np.cos(slope)
+    def apply_solar_heating(self, shade_map):
+        """
+        Funktionsweise: Wendet solare Erwärmung basierend auf Verschattung an
+        Aufgabe: Sonneneinstrahlung beeinflusst lokale Temperatur
+        Parameter: shade_map (numpy.ndarray) - Verschattungsdaten (0=Schatten, 1=Sonne)
+        Returns: numpy.ndarray - Temperatur-Änderung durch Sonneneinstrahlung
+        """
+        # Shade-Map: 0 (Schatten) bis 1 (volle Sonne)
+        # Bei voller Sonne: +solar_power/2, bei Schatten: -solar_power/2
+        solar_temp_change = (shade_map - 0.5) * self.solar_power
+        return solar_temp_change
 
-    # Dot Product: Winkel zwischen Sonne und Oberflächennormale
-    illumination = (sun_x * normal_x +
-                    sun_y * normal_y +
-                    sun_z * normal_z)
+    def add_latitude_gradient(self, map_shape):
+        """
+        Funktionsweise: Fügt Breitengrad-Gradienten hinzu (Äquator-zu-Pol-Simulation)
+        Aufgabe: Nord-Süd Temperatur-Gradient über die Karte
+        Parameter: map_shape (tuple) - Dimensionen der Karte
+        Returns: numpy.ndarray - Temperatur-Gradient von Süd nach Nord
+        """
+        height, width = map_shape
+        latitude_gradient = np.zeros((height, width), dtype=np.float32)
 
-    # Klemme auf [0,1] - negative Werte sind im Schatten
-    hillshade = np.clip(illumination, 0, 1)
+        for y in range(height):
+            # y=0 (Süd) = 0°C Änderung, y=height (Nord) = +5°C
+            latitude_temp_change = (y / (height - 1)) * 5.0
+            latitude_gradient[y, :] = latitude_temp_change
 
-    return hillshade
+        return latitude_gradient
 
-def get_neighbors(heightmap, y, x):
-    """Gibt gültige Nachbarkoordinaten zurück """
-    h, w = heightmap.shape
-    neighbors = []
-    for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-        ny, nx = y + dy, x + dx
-        if 0 <= ny < h and 0 <= nx < w:
-            neighbors.append((ny, nx))
-    return neighbors
+    def calculate_base_temperature(self, heightmap, shade_map, noise_variation):
+        """
+        Funktionsweise: Berechnet Basis-Temperaturfeld aus allen Komponenten
+        Aufgabe: Kombiniert Altitude, Solar und Latitude-Effekte zu temp_map
+        Parameter: heightmap, shade_map, noise_variation - Alle Temperatur-Eingaben
+        Returns: numpy.ndarray - Basis-Temperaturfeld
+        """
+        # Basis-Temperatur
+        base_temp = np.full(heightmap.shape, self.air_temp_entry, dtype=np.float32)
 
-class RainGenerator:
-    """Regenkarten-Generator mit Windfeld-Simulation """
+        # Altitude-Cooling anwenden
+        altitude_reduction = self.calculate_altitude_cooling(heightmap)
+        base_temp -= altitude_reduction
 
-    def __init__(self, world):
-        self.world = world
-        self.wind_x = None
-        self.wind_y = None
-        self.wind_speed = None
-        self.wind_direction = None
-        self.moisture_map = None
-        self.air_temperature = None
-        self.hillshade = None
-        self.sediment_map = np.zeros_like(world.heightmap)
+        # Solar-Heating anwenden
+        solar_change = self.apply_solar_heating(shade_map)
+        base_temp += solar_change
 
-    def calculate_terrain_temperature(self, base_temp=15.0, elevation_lapse=25.0):  # Reduziert von 65 auf 25
-        heightmap = self.world.heightmap
-        height, width = heightmap.shape
+        # Latitude-Gradient anwenden
+        latitude_change = self.add_latitude_gradient(heightmap.shape)
+        base_temp += latitude_change
 
-        self.hillshade = calculate_hillshade(heightmap, sun_azimuth=0, sun_elevation=60)
-        terrain_temp = np.zeros((height, width))
+        # Noise-Variation anwenden
+        base_temp += noise_variation
+
+        return base_temp
+
+
+class WindFieldSimulator:
+    """
+    Funktionsweise: Simuliert Windfeld mit Ablenkung um Berge und Geländegradienten-Analyse
+    Aufgabe: Erstellt wind_map für Konvektion und Orographischen Regen
+    """
+
+    def __init__(self, wind_speed_factor=1.0, terrain_factor=1.0, thermic_effect=1.0):
+        """
+        Funktionsweise: Initialisiert Wind-Simulator mit Geschwindigkeits- und Terrain-Faktoren
+        Aufgabe: Setup der Wind-Simulations-Parameter
+        Parameter: wind_speed_factor, terrain_factor, thermic_effect - Wind-Parameter
+        """
+        self.wind_speed_factor = wind_speed_factor
+        self.terrain_factor = terrain_factor
+        self.thermic_effect = thermic_effect
+
+    def simulate_pressure_gradients(self, map_shape, noise_generator):
+        """
+        Funktionsweise: Simuliert Druckgradienten von West nach Ost mit Noise-Modulation
+        Aufgabe: Grundlegendes Windfeld durch Druckdifferenzen
+        Parameter: map_shape, noise_generator - Map-Dimensionen und Noise-Generator
+        Returns: numpy.ndarray - Druckfeld für Wind-Berechnung
+        """
+        height, width = map_shape
+        pressure_field = np.zeros((height, width), dtype=np.float32)
 
         for y in range(height):
             for x in range(width):
-                elevation_km = heightmap[y, x] / (self.world.scale * 1000)
+                # Basis-Druckgradient: West (hoch) nach Ost (niedrig)
+                base_pressure = 1.0 - (x / (width - 1)) * 0.3
 
-                latitude_factor = y / height
-                latitude_temp = latitude_factor * 8.0  # Reduziert von 10 auf 8
+                # Noise-Modulation für Turbulenz
+                noise_x = x / width * 4.0
+                noise_y = y / height * 4.0
+                noise_variation = noise_generator.noise2(noise_x, noise_y) * 0.15
 
-                elevation_temp = -elevation_lapse * elevation_km
+                pressure_field[y, x] = base_pressure + noise_variation
 
-                solar_heating = self.hillshade[y, x] * 5.0  # Reduziert von 8 auf 5
+        return pressure_field
 
-                terrain_temp[y, x] = base_temp + latitude_temp + elevation_temp + solar_heating
-
-        return terrain_temp
-
-    def generate_wind_field_with_temperature(self, base_wind_speed=1.0, terrain_factor=0.3,
-                                             initial_air_temp=15.0, temp_noise_amplitude=2.25):
+    def apply_terrain_deflection(self, pressure_field, slopemap, heightmap):
         """
-        Generiert 2D-Windfeld mit Terrain-Deflection und Lufttemperatur-Transport
+        Funktionsweise: Wendet Terrain-Ablenkung auf Windfeld an (Düsen-/Blockierungs-Effekte)
+        Aufgabe: Realistische Wind-Terrain-Interaktion
+        Parameter: pressure_field, slopemap, heightmap - Druck, Slopes und Höhen
+        Returns: numpy.ndarray - Wind-Vektoren (vx, vy) in m/s
         """
-        heightmap = self.world.heightmap
-        height, width = heightmap.shape
-
-        wind_speed = np.zeros((height, width))
-        wind_direction = np.zeros((height, width))
-        self.wind_x = np.zeros((height, width))
-        self.wind_y = np.zeros((height, width))
-        self.air_temperature = np.zeros((height, width))
-
-        terrain_temp = self.calculate_terrain_temperature()
-        noise_gen = OpenSimplex(self.world.seed + 100)
-        grad_y, grad_x = np.gradient(heightmap)
+        height, width = pressure_field.shape
+        wind_field = np.zeros((height, width, 2), dtype=np.float32)
 
         for y in range(height):
-            y_noise = noise_gen.noise2(0, y * 0.1)
-            initial_temp = initial_air_temp + y_noise * temp_noise_amplitude  # 15 ± 2.25 = ±15%
-
-            # Wind kommt jetzt von WESTEN (x=0) und geht nach OSTEN
-            west_wind_strength = base_wind_speed * (1.0 + y_noise * 0.15)
-            current_speed = west_wind_strength
-            current_direction = 0.0  # 0° = Richtung Osten
-            current_air_temp = initial_temp
-
             for x in range(width):
-                if x > 0:
-                    height_diff = heightmap[y, x] - heightmap[y, x - 1]
-                    speed_change = -height_diff * terrain_factor * 0.01
-                    current_speed = max(0.1, current_speed + speed_change)
+                # Druckgradient berechnen
+                wind_x = 0.0
+                wind_y = 0.0
 
-                    terrain_deflection = np.arctan2(grad_y[y, x], grad_x[y, x]) * terrain_factor * 0.3
-                    current_direction += terrain_deflection
-                    current_direction *= 0.8
+                # X-Richtung (West-Ost Gradient)
+                if x > 0 and x < width - 1:
+                    pressure_grad_x = (pressure_field[y, x + 1] - pressure_field[y, x - 1]) * 0.5
+                    wind_x = -pressure_grad_x * self.wind_speed_factor * 10.0
 
-                    terrain_exchange_rate = 0.1
-                    retention_rate = 0.9
-                    current_air_temp = (current_air_temp * retention_rate +
-                                        terrain_temp[y, x] * terrain_exchange_rate)
+                # Y-Richtung (Nord-Süd Gradient)
+                if y > 0 and y < height - 1:
+                    pressure_grad_y = (pressure_field[y + 1, x] - pressure_field[y - 1, x]) * 0.5
+                    wind_y = -pressure_grad_y * self.wind_speed_factor * 10.0
 
-                wind_speed[y, x] = current_speed
-                wind_direction[y, x] = current_direction
-                self.air_temperature[y, x] = current_air_temp
+                # Terrain-Deflection anwenden
+                if 0 <= y < height and 0 <= x < width:
+                    # Slope-basierte Ablenkung
+                    slope_x = slopemap[y, x, 0] if x < slopemap.shape[1] else 0
+                    slope_y = slopemap[y, x, 1] if y < slopemap.shape[0] else 0
 
-                # Wind zeigt nach Osten (positive x-Richtung)
-                self.wind_x[y, x] = current_speed * np.cos(current_direction)
-                self.wind_y[y, x] = current_speed * np.sin(current_direction)
+                    # Wind wird um Berghänge abgelenkt
+                    deflection_factor = self.terrain_factor * 0.5
+                    wind_x += slope_y * deflection_factor  # Slope in Y-Richtung lenkt Wind in X ab
+                    wind_y -= slope_x * deflection_factor  # Slope in X-Richtung lenkt Wind in Y ab
 
-        self.wind_x = gaussian_filter(self.wind_x, sigma=1.0)
-        self.wind_y = gaussian_filter(self.wind_y, sigma=1.0)
-        self.air_temperature = gaussian_filter(self.air_temperature, sigma=1.5)
+                    # Düseneffekt in Tälern, Abbremsung an Bergen
+                    elevation = heightmap[y, x]
+                    elevation_factor = 1.0 - (elevation / 1000.0) * 0.3  # Bremsung in Höhe
+                    wind_x *= max(0.2, elevation_factor)
+                    wind_y *= max(0.2, elevation_factor)
 
-        self.wind_speed = np.sqrt(self.wind_x ** 2 + self.wind_y ** 2)
-        self.wind_direction = np.arctan2(self.wind_y, self.wind_x)
+                wind_field[y, x, 0] = wind_x
+                wind_field[y, x, 1] = wind_y
 
-        return self.wind_speed, self.wind_direction, self.air_temperature
+        return wind_field
 
-    def generate_orographic_rain_with_wind(self, base_wind_speed=1.0, terrain_factor=0.3,
-                                           rain_threshold=0.5, initial_moisture=1.0,
-                                           moisture_recovery=0.03, diffusion_strength=0.3):
+    def calculate_thermal_effects(self, wind_field, temp_map, shade_map):
         """
-        Regensimulation mit Windfeld-Integration und Temperatur
+        Funktionsweise: Berechnet thermische Konvektion und modifiziert Windfeld
+        Aufgabe: Thermisch induzierte Windkomponenten durch Temperaturunterschiede
+        Parameter: wind_field, temp_map, shade_map - Wind, Temperatur und Verschattung
+        Returns: numpy.ndarray - Modifiziertes Windfeld mit thermischen Effekten
         """
-        heightmap = self.world.heightmap
-        height, width = heightmap.shape
+        height, width = wind_field.shape[:2]
+        thermal_wind = np.copy(wind_field)
 
-        # Windfeld mit Temperatur generieren
-        wind_speed, wind_direction, air_temp = self.generate_wind_field_with_temperature(
-            base_wind_speed, terrain_factor
-        )
+        for y in range(1, height - 1):
+            for x in range(1, width - 1):
+                # Temperaturgradienten berechnen
+                temp_grad_x = (temp_map[y, x + 1] - temp_map[y, x - 1]) * 0.5
+                temp_grad_y = (temp_map[y + 1, x] - temp_map[y - 1, x]) * 0.5
 
-        rain_map = np.zeros((height, width))
-        moisture_map = np.zeros((height, width))
-        rain_indicator = np.zeros((height, width))
-        temp_rain = np.zeros((height, width))
+                # Thermische Konvektion
+                # Warme Bereiche erzeugen Aufwinde, kalte Abwinde
+                local_temp = temp_map[y, x]
+                avg_temp = np.mean(temp_map)
+                temp_diff = local_temp - avg_temp
+
+                # Konvektive Windkomponente
+                convection_strength = temp_diff * self.thermic_effect * 0.1
+
+                # Hangwind-Effekte
+                shade_influence = (shade_map[y, x] - 0.5) * self.thermic_effect * 0.2
+
+                # Thermische Modifikation anwenden
+                thermal_wind[y, x, 0] += temp_grad_x * 0.1 + convection_strength
+                thermal_wind[y, x, 1] += temp_grad_y * 0.1 + shade_influence
+
+        return thermal_wind
+
+
+class AtmosphericMoistureManager:
+    """
+    Funktionsweise: Verwaltet Luftfeuchtigkeit durch Evaporation und Konvektion
+    Aufgabe: Erstellt humid_map mit realistischer Feuchtigkeits-Verteilung
+    """
+
+    def __init__(self):
+        """
+        Funktionsweise: Initialisiert Atmospheric-Moisture-Manager
+        Aufgabe: Setup der Feuchtigkeits-Verwaltung
+        """
+        pass
+
+    def calculate_evaporation(self, soil_moist_map, temp_map, wind_field):
+        """
+        Funktionsweise: Berechnet Evaporation von Bodenfeuchtigkeit in Atmosphäre
+        Aufgabe: Feuchtigkeitseintrag durch Verdunstung
+        Parameter: soil_moist_map, temp_map, wind_field - Bodenfeuchtigkeit, Temperatur, Wind
+        Returns: numpy.ndarray - Evaporations-Rate
+        """
+        height, width = soil_moist_map.shape
+        evaporation_map = np.zeros((height, width), dtype=np.float32)
 
         for y in range(height):
-            moisture = initial_moisture
-            rain_ind = 0.0
-
             for x in range(width):
-                current_elevation = heightmap[y, x]
+                soil_moisture = soil_moist_map[y, x]
+                temperature = temp_map[y, x]
+                wind_speed = np.sqrt(wind_field[y, x, 0] ** 2 + wind_field[y, x, 1] ** 2)
 
-                if x > 0:
-                    effective_height_diff = current_elevation - heightmap[y, x - 1]
-                    wind_influence = abs(self.wind_x[y, x]) / (self.wind_speed[y, x] + 0.1)
+                # Evaporation steigt mit Temperatur und Windgeschwindigkeit
+                temp_factor = max(0, (temperature - 0) / 30.0)  # 0°C - 30°C Bereich
+                wind_factor = min(2.0, wind_speed / 5.0)  # Wind bis 5 m/s berücksichtigt
+                moisture_factor = soil_moisture / 100.0  # Soil moisture als Prozent
 
-                    # Temperatur-Effekt: kältere Luft kondensiert leichter
-                    temp_factor = max(0.5, 1.5 - air_temp[y, x] / 20.0)  # Kältere Luft = mehr Regen
+                evaporation_rate = moisture_factor * temp_factor * (1.0 + wind_factor) * 10.0
+                evaporation_map[y, x] = evaporation_rate
 
-                    rain_ind += effective_height_diff * 0.02 * wind_influence * temp_factor
-                    rain_ind = max(0.0, rain_ind)
+        return evaporation_map
 
-                if rain_ind > rain_threshold and moisture > 0:
-                    rainfall = min(
-                        moisture * rain_ind * wind_speed[y, x] * 0.1,
-                        moisture * 0.7
-                    )
-                    temp_rain[y, x] = rainfall
-                    moisture -= rainfall
-                    rain_ind *= 0.7
+    def transport_moisture(self, humid_map, wind_field, dt=1.0):
+        """
+        Funktionsweise: Transportiert Luftfeuchtigkeit entsprechend Windfeld (Advektion)
+        Aufgabe: Feuchtigkeits-Transport durch Wind
+        Parameter: humid_map, wind_field, dt - Feuchtigkeit, Wind, Zeitschritt
+        Returns: numpy.ndarray - Transportierte Feuchtigkeits-Verteilung
+        """
+        height, width = humid_map.shape
+        new_humid_map = np.copy(humid_map)
 
-                moisture_map[y, x] = moisture
-                rain_indicator[y, x] = rain_ind
-                moisture = min(1.0, moisture + moisture_recovery)
+        # Simplified advection
+        for y in range(1, height - 1):
+            for x in range(1, width - 1):
+                wind_x = wind_field[y, x, 0] * dt
+                wind_y = wind_field[y, x, 1] * dt
 
-        rain_map = temp_rain.copy()
+                # Source-Position für Advektion
+                source_x = x - wind_x
+                source_y = y - wind_y
 
-        # Diffusions-Iterationen mit Temperatur-Einfluss
-        for iteration in range(3):
-            diffused_rain = gaussian_filter(rain_map, sigma=1.5) * diffusion_strength
+                # Bounds checking
+                source_x = max(0, min(width - 1, source_x))
+                source_y = max(0, min(height - 1, source_y))
+
+                # Bilineare Interpolation für smooth transport
+                x0, y0 = int(source_x), int(source_y)
+                x1, y1 = min(x0 + 1, width - 1), min(y0 + 1, height - 1)
+
+                fx = source_x - x0
+                fy = source_y - y0
+
+                # Interpolation
+                h00 = humid_map[y0, x0]
+                h10 = humid_map[y0, x1]
+                h01 = humid_map[y1, x0]
+                h11 = humid_map[y1, x1]
+
+                h0 = h00 * (1 - fx) + h10 * fx
+                h1 = h01 * (1 - fx) + h11 * fx
+
+                new_humid_map[y, x] = h0 * (1 - fy) + h1 * fy
+
+        return new_humid_map
+
+    def apply_humidity_diffusion(self, humid_map, iterations=3):
+        """
+        Funktionsweise: Wendet Diffusion auf Feuchtigkeitsfeld an für natürliche Verteilung
+        Aufgabe: Glättet extreme Feuchtigkeits-Gradienten
+        Parameter: humid_map, iterations - Feuchtigkeit und Anzahl Diffusions-Schritte
+        Returns: numpy.ndarray - Diffused Humidity-Map
+        """
+        height, width = humid_map.shape
+        diffused_map = np.copy(humid_map)
+
+        diffusion_rate = 0.1
+
+        for _ in range(iterations):
+            new_map = np.copy(diffused_map)
 
             for y in range(1, height - 1):
                 for x in range(1, width - 1):
-                    if rain_map[y, x] > 0:
-                        wind_dir = self.wind_direction[y, x]
-                        wind_str = self.wind_speed[y, x]
+                    # Nachbarn mitteln
+                    neighbors = [
+                        diffused_map[y - 1, x], diffused_map[y + 1, x],
+                        diffused_map[y, x - 1], diffused_map[y, x + 1]
+                    ]
 
-                        dx = int(np.round(np.cos(wind_dir)))
-                        dy = int(np.round(np.sin(wind_dir)))
+                    neighbor_avg = np.mean(neighbors)
+                    current_value = diffused_map[y, x]
 
-                        target_x = min(width - 1, max(0, x + dx))
-                        target_y = min(height - 1, max(0, y + dy))
+                    # Diffusion anwenden
+                    new_map[y, x] = current_value + (neighbor_avg - current_value) * diffusion_rate
 
-                        transfer = rain_map[y, x] * 0.1 * wind_str * diffusion_strength
-                        rain_map[target_y, target_x] += transfer
-                        rain_map[y, x] -= transfer * 0.5
+            diffused_map = new_map
 
-            rain_map = rain_map * (1 - diffusion_strength) + diffused_rain
+        return diffused_map
 
-        self.moisture_map = moisture_map
-        return np.clip(rain_map, 0.0, 1.0)
 
-    def calculate_evaporation_map(self, water_network, temperature_map):
-        evaporation = np.zeros_like(self.world.heightmap)
+class PrecipitationSystem:
+    """
+    Funktionsweise: Berechnet Niederschlag durch Feuchtigkeits-Transport und Kondensation
+    Aufgabe: Erstellt precip_map basierend auf Luftfeuchtigkeit und Geländeeffekten
+    """
 
-        # Verdunstung aus Gewässern (Punkt 5)
-        if water_network:
-            water_mask = np.zeros_like(self.world.heightmap)
-            for water_type in ['streams', 'rivers', 'major_rivers', 'lakes']:
-                if water_type in water_network:
-                    water_mask = np.maximum(water_mask, water_network[water_type])
+    def __init__(self):
+        """
+        Funktionsweise: Initialisiert Precipitation-System
+        Aufgabe: Setup der Niederschlags-Berechnung
+        """
+        pass
 
-            # Verdunstungsrate abhängig von Temperatur und Wasserfläche
-            evaporation += water_mask * temperature_map * 0.3
+    def calculate_orographic_precipitation(self, humid_map, wind_field, heightmap, slopemap):
+        """
+        Funktionsweise: Berechnet orographischen Niederschlag durch Luv-/Lee-Effekte
+        Aufgabe: Bergbedingte Niederschlags-Verteilung
+        Parameter: humid_map, wind_field, heightmap, slopemap - Feuchtigkeit, Wind, Terrain
+        Returns: numpy.ndarray - Orographischer Niederschlag
+        """
+        height, width = humid_map.shape
+        oro_precip = np.zeros((height, width), dtype=np.float32)
 
-        # Verdunstung aus feuchten Böden
-        if hasattr(self, 'moisture_map') and self.moisture_map is not None:
-            soil_evaporation = self.moisture_map * temperature_map * 0.1
-            evaporation += soil_evaporation
+        for y in range(height):
+            for x in range(width):
+                if x >= slopemap.shape[1] or y >= slopemap.shape[0]:
+                    continue
 
-        return evaporation
+                humidity = humid_map[y, x]
+                wind_x = wind_field[y, x, 0]
+                wind_y = wind_field[y, x, 1]
+                wind_speed = np.sqrt(wind_x ** 2 + wind_y ** 2)
 
-    def calculate_thermal_convection(self, temperature_map):
-        # Thermische Aufwinde in warmen Tälern (Punkt 6)
-        grad_y, grad_x = np.gradient(self.world.heightmap)
-        slope = np.sqrt(grad_x ** 2 + grad_y ** 2)
+                # Slope in Windrichtung
+                slope_x = slopemap[y, x, 0]
+                slope_y = slopemap[y, x, 1]
 
-        # Täler haben niedrige Slope, hohe Temperatur = starke Konvektion
-        valley_mask = slope < np.percentile(slope, 30)  # Untere 30% = Täler
-        warm_mask = temperature_map > np.percentile(temperature_map, 70)  # Obere 30% = warm
+                # Dot-Product: Wind-Richtung vs Slope-Richtung
+                wind_slope_alignment = (wind_x * slope_x + wind_y * slope_y) / max(0.1, wind_speed)
 
-        convection_strength = valley_mask.astype(float) * warm_mask.astype(float) * temperature_map
+                # Aufwinde an Luvhängen verstärken Niederschlag
+                if wind_slope_alignment > 0:  # Wind gegen Hang
+                    orographic_factor = wind_slope_alignment * wind_speed * 0.5
+                    oro_precip[y, x] = humidity * orographic_factor * 0.1
 
-        # Konvektion fördert lokale Niederschläge
-        convection_rain = gaussian_filter(convection_strength, sigma=2.0) * 0.2
+        return oro_precip
 
-        return convection_rain
+    def simulate_moisture_transport(self, humid_map, temp_map):
+        """
+        Funktionsweise: Simuliert Feuchtigkeits-Kondensation basierend auf Temperatur
+        Aufgabe: Temperaturbedingte Niederschlags-Auslösung
+        Parameter: humid_map, temp_map - Feuchtigkeit und Temperatur
+        Returns: numpy.ndarray - Kondensations-Niederschlag
+        """
+        height, width = humid_map.shape
+        condensation_precip = np.zeros((height, width), dtype=np.float32)
 
-    def calculate_downstream_moisture(self, initial_rain_map, flow_direction, flow_accumulation):
-        moisture_transport = initial_rain_map.copy()
-        height, width = initial_rain_map.shape
+        for y in range(height):
+            for x in range(width):
+                humidity = humid_map[y, x]
+                temperature = temp_map[y, x]
 
-        # Flow directions wie in WaterGenerator
-        directions = [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]
+                # Sättigungsdampfdichte: rho_max = 5*exp(0.06*T)
+                rho_max = 5.0 * np.exp(0.06 * temperature)
 
-        # Sortiere Pixel nach Höhe (von hoch zu niedrig)
-        height_order = np.unravel_index(
-            np.argsort(self.world.heightmap, axis=None)[::-1],
-            self.world.heightmap.shape
+                # Relative Feuchtigkeit
+                if rho_max > 0:
+                    relative_humidity = humidity / rho_max
+
+                    # Niederschlag bei Übersättigung (> 1.0)
+                    if relative_humidity > 1.0:
+                        excess_moisture = humidity - rho_max
+                        condensation_precip[y, x] = excess_moisture * 0.8  # 80% fällt als Regen
+
+        return condensation_precip
+
+    def trigger_precipitation_events(self, humid_map, temp_map, oro_precip, condensation_precip):
+        """
+        Funktionsweise: Kombiniert alle Niederschlags-Komponenten zu finalem precip_map
+        Aufgabe: Finale Niederschlags-Berechnung
+        Parameter: humid_map, temp_map, oro_precip, condensation_precip - Alle Niederschlags-Inputs
+        Returns: numpy.ndarray - Finaler Niederschlag in gH2O/m²
+        """
+        # Kombiniere orographischen und Kondensations-Niederschlag
+        total_precip = oro_precip + condensation_precip
+
+        # Minimum/Maximum Limits
+        total_precip = np.maximum(0, total_precip)  # Kein negativer Niederschlag
+        total_precip = np.minimum(200, total_precip)  # Maximum 200 gH2O/m²
+
+        return total_precip
+
+class WeatherSystemGenerator(BaseGenerator):
+    """
+    Funktionsweise: Hauptklasse für dynamisches Wetter- und Feuchtigkeitssystem mit BaseGenerator-API
+    Aufgabe: Koordiniert Temperatur, Wind, Niederschlag und Luftfeuchtigkeit mit einheitlicher API
+    """
+
+    def __init__(self, map_seed=42):
+        """
+        Funktionsweise: Initialisiert Weather-System mit BaseGenerator und Sub-Komponenten
+        Aufgabe: Setup aller Weather-Systeme und Noise-Generator
+        Parameter: map_seed (int) - Globaler Seed für reproduzierbare Weather-Patterns
+        """
+        super().__init__(map_seed)
+        self.noise_generator = OpenSimplex(seed=map_seed)
+
+        # Standard-Parameter (werden durch _load_default_parameters überschrieben)
+        self.air_temp_entry = 15.0
+        self.solar_power = 20.0
+        self.altitude_cooling = 6.0
+        self.thermic_effect = 1.0
+        self.wind_speed_factor = 1.0
+        self.terrain_factor = 1.0
+
+    def _load_default_parameters(self):
+        """
+        Funktionsweise: Lädt WEATHER-Parameter aus value_default.py
+        Aufgabe: Standard-Parameter für Weather-Generierung
+        Returns: dict - Alle Standard-Parameter für Weather
+        """
+        from gui.config.value_default import WEATHER
+
+        return {
+            'air_temp_entry': WEATHER.AIR_TEMP_ENTRY["default"],
+            'solar_power': WEATHER.SOLAR_POWER["default"],
+            'altitude_cooling': WEATHER.ALTITUDE_COOLING["default"],
+            'thermic_effect': WEATHER.THERMIC_EFFECT["default"],
+            'wind_speed_factor': WEATHER.WIND_SPEED_FACTOR["default"],
+            'terrain_factor': WEATHER.TERRAIN_FACTOR["default"]
+        }
+
+    def _get_dependencies(self, data_manager):
+        """
+        Funktionsweise: Holt heightmap, shademap und erstellt initiale soil_moist_map aus DataManager
+        Aufgabe: Dependency-Resolution für Weather-Generierung
+        Parameter: data_manager - DataManager-Instanz
+        Returns: dict - Benötigte Terrain-Daten
+        """
+        if not data_manager:
+            raise Exception("DataManager required for Weather generation")
+
+        # TerrainData-Objekt holen
+        terrain_data = data_manager.get_terrain_data("complete")
+        if terrain_data is None:
+            # Fallback: Einzelne Arrays holen
+            heightmap = data_manager.get_terrain_data("heightmap")
+            shademap = data_manager.get_terrain_data("shadowmap")
+
+            if heightmap is None:
+                raise Exception("Heightmap dependency not available in DataManager")
+            if shademap is None:
+                raise Exception("Shadowmap dependency not available in DataManager")
+        else:
+            heightmap = terrain_data.heightmap
+            shademap = terrain_data.shadowmap
+
+            if heightmap is None:
+                raise Exception("Heightmap not available in TerrainData")
+            if shademap is None:
+                raise Exception("Shadowmap not available in TerrainData")
+
+        # Initiale soil_moist_map erstellen (alles trocken)
+        soil_moist_map = np.zeros_like(heightmap, dtype=np.float32)
+
+        self.logger.debug(f"Dependencies loaded - heightmap: {heightmap.shape}, shademap: {shademap.shape}")
+
+        return {
+            'heightmap': heightmap,
+            'shademap': shademap,
+            'soil_moist_map': soil_moist_map
+        }
+
+    def _execute_generation(self, lod, dependencies, parameters):
+        """
+        Funktionsweise: Führt Weather-Generierung mit Progress-Updates aus
+        Aufgabe: Kernlogik der Weather-Generierung mit allen 4 Hauptschritten
+        Parameter: lod, dependencies, parameters
+        Returns: WeatherData-Objekt mit allen Weather-Outputs
+        """
+        heightmap = dependencies['heightmap']
+        shademap = dependencies['shademap']
+        soil_moist_map = dependencies['soil_moist_map']
+
+        # Parameter aktualisieren
+        self.air_temp_entry = parameters['air_temp_entry']
+        self.solar_power = parameters['solar_power']
+        self.altitude_cooling = parameters['altitude_cooling']
+        self.thermic_effect = parameters['thermic_effect']
+        self.wind_speed_factor = parameters['wind_speed_factor']
+        self.terrain_factor = parameters['terrain_factor']
+
+        # LOD-Größe bestimmen
+        target_size = self._get_lod_size(lod, heightmap.shape[0])
+
+        # Heightmap auf Zielgröße interpolieren falls nötig
+        if heightmap.shape[0] != target_size:
+            heightmap = self._interpolate_array(heightmap, target_size)
+            soil_moist_map = self._interpolate_array(soil_moist_map, target_size)
+
+        # Shademap IMMER auf Zielgröße interpolieren (kommt von LOD64)
+        if shademap.shape[0] != target_size:
+            shademap = self._interpolate_array(shademap, target_size)
+
+        # Slopemap aus Heightmap ableiten
+        slopemap = self._calculate_slopes(heightmap)
+
+        # Schritt 1: Temperature Calculation (20% - 25%)
+        self._update_progress("Temperature", 20, "Calculating temperature field...")
+        temp_map = self._calculate_temperature(heightmap, shademap, target_size)
+
+        # Schritt 2: Wind Field Simulation (25% - 55%)
+        self._update_progress("Wind Field", 25, "Simulating pressure gradients...")
+        wind_map = self._simulate_wind_field(heightmap, slopemap, temp_map, shademap, target_size)
+
+        # Schritt 3: Humidity Management (55% - 80%)
+        self._update_progress("Humidity", 55, "Calculating evaporation and moisture transport...")
+        humid_map = self._calculate_humidity(soil_moist_map, temp_map, wind_map)
+
+        # Schritt 4: Precipitation Calculation (80% - 95%)
+        self._update_progress("Precipitation", 80, "Calculating precipitation patterns...")
+        precip_map = self._calculate_precipitation(humid_map, temp_map, wind_map, heightmap, slopemap)
+
+        # WeatherData-Objekt erstellen
+        weather_data = WeatherData()
+        weather_data.wind_map = wind_map
+        weather_data.temp_map = temp_map
+        weather_data.precip_map = precip_map
+        weather_data.humid_map = humid_map
+        weather_data.lod_level = lod
+        weather_data.actual_size = target_size
+        weather_data.parameters = parameters.copy()
+
+        self.logger.debug(f"Weather generation complete - LOD: {lod}, size: {target_size}")
+
+        return weather_data
+
+    def _save_to_data_manager(self, data_manager, result, parameters):
+        """
+        Funktionsweise: Speichert Weather-Ergebnisse im DataManager
+        Aufgabe: Automatische Speicherung aller Weather-Outputs mit Parameter-Tracking
+        Parameter: data_manager, result (WeatherData), parameters
+        """
+        if isinstance(result, WeatherData):
+            # WeatherData-Objekt in einzelne Arrays aufteilen für DataManager
+            data_manager.set_weather_data("wind_map", result.wind_map, parameters)
+            data_manager.set_weather_data("temp_map", result.temp_map, parameters)
+            data_manager.set_weather_data("precip_map", result.precip_map, parameters)
+            data_manager.set_weather_data("humid_map", result.humid_map, parameters)
+
+            self.logger.debug("WeatherData object saved to DataManager")
+        else:
+            # Fallback für Legacy-Format (Tuple)
+            if hasattr(result, '__len__') and len(result) == 4:
+                wind_map, temp_map, precip_map, humid_map = result
+                data_manager.set_weather_data("wind_map", wind_map, parameters)
+                data_manager.set_weather_data("temp_map", temp_map, parameters)
+                data_manager.set_weather_data("precip_map", precip_map, parameters)
+                data_manager.set_weather_data("humid_map", humid_map, parameters)
+                self.logger.debug("Legacy weather data saved to DataManager")
+
+    def update_seed(self, new_seed):
+        """
+        Funktionsweise: Aktualisiert Seed für alle Weather-Komponenten
+        Aufgabe: Seed-Update mit Re-Initialisierung des Noise-Generators
+        Parameter: new_seed (int) - Neuer Seed
+        """
+        if new_seed != self.map_seed:
+            super().update_seed(new_seed)
+            # Noise-Generator mit neuem Seed re-initialisieren
+            self.noise_generator = OpenSimplex(seed=new_seed)
+
+    def _get_lod_size(self, lod, original_size):
+        """
+        Funktionsweise: Bestimmt Zielgröße basierend auf LOD-Level
+        Aufgabe: LOD-System für Weather mit gleicher Logik wie Terrain
+        """
+        lod_sizes = {"LOD64": 64, "LOD128": 128, "LOD256": 256}
+
+        if lod == "FINAL":
+            return original_size
+        else:
+            return lod_sizes.get(lod, 64)
+
+    def _interpolate_array(self, array, target_size):
+        """
+        Funktionsweise: Interpoliert 2D-Array auf neue Größe mittels bilinearer Interpolation
+        Aufgabe: LOD-Upscaling für Heightmap, Shademap, etc.
+        """
+        if len(array.shape) == 2:
+            # 2D Array (heightmap, temp_map, etc.)
+            return self._interpolate_2d(array, target_size)
+        elif len(array.shape) == 3 and array.shape[2] == 2:
+            # 3D Array mit 2 Kanälen (wind_map)
+            result = np.zeros((target_size, target_size, 2), dtype=array.dtype)
+            result[:, :, 0] = self._interpolate_2d(array[:, :, 0], target_size)
+            result[:, :, 1] = self._interpolate_2d(array[:, :, 1], target_size)
+            return result
+        else:
+            raise ValueError(f"Unsupported array shape for interpolation: {array.shape}")
+
+    def _interpolate_2d(self, array, target_size):
+        """
+        Funktionsweise: Bilineare Interpolation für 2D-Arrays
+        Aufgabe: Smooth Upscaling ohne Artefakte
+        """
+        old_size = array.shape[0]
+        if old_size == target_size:
+            return array.copy()
+
+        scale_factor = (old_size - 1) / (target_size - 1)
+        interpolated = np.zeros((target_size, target_size), dtype=array.dtype)
+
+        for new_y in range(target_size):
+            for new_x in range(target_size):
+                old_x = new_x * scale_factor
+                old_y = new_y * scale_factor
+
+                x0, y0 = int(old_x), int(old_y)
+                x1, y1 = min(x0 + 1, old_size - 1), min(y0 + 1, old_size - 1)
+
+                fx, fy = old_x - x0, old_y - y0
+
+                # Bilineare Interpolation
+                h00, h10 = array[y0, x0], array[y0, x1]
+                h01, h11 = array[y1, x0], array[y1, x1]
+
+                h0 = h00 * (1 - fx) + h10 * fx
+                h1 = h01 * (1 - fx) + h11 * fx
+
+                interpolated[new_y, new_x] = h0 * (1 - fy) + h1 * fy
+
+        return interpolated
+
+    def _calculate_temperature(self, heightmap, shademap, target_size):
+        """
+        Funktionsweise: Berechnet Temperaturfeld mit allen Einflüssen und LOD-Unterstützung
+        Aufgabe: Integriert Altitude, Solar und Latitude-Effekte plus Noise
+        """
+        # Noise-Variation an Kartengrenze
+        height, width = heightmap.shape
+        noise_variation = np.zeros((height, width), dtype=np.float32)
+
+        # Progress-Update für Temperature Sub-Steps
+        self._update_progress("Temperature", 21, "Generating atmospheric noise variation...")
+
+        for y in range(height):
+            for x in range(width):
+                # Stärkere Variation an Kartenrändern
+                edge_factor = self._calculate_edge_factor(x, y, width, height)
+                noise_val = self.noise_generator.noise2(x / width * 3, y / height * 3)
+                noise_variation[y, x] = noise_val * edge_factor * 5.0
+
+        self._update_progress("Temperature", 23, "Calculating altitude and solar effects...")
+
+        # Temperatur-Calculator verwenden
+        temp_calc = TemperatureCalculator(self.air_temp_entry, self.solar_power, self.altitude_cooling)
+        temp_map = temp_calc.calculate_base_temperature(heightmap, shademap, noise_variation)
+
+        return temp_map
+
+    def _simulate_wind_field(self, heightmap, slopemap, temp_map, shademap, target_size):
+        """
+        Funktionsweise: Simuliert Windfeld mit Druckgradienten und Terrain-Interaktion
+        Aufgabe: Erstellt realistisches Windfeld mit thermischen Effekten
+        """
+        # Wind-Simulator verwenden
+        wind_sim = WindFieldSimulator(self.wind_speed_factor, self.terrain_factor, self.thermic_effect)
+
+        # Druckfeld generieren
+        self._update_progress("Wind Field", 30, "Generating pressure gradients...")
+        pressure_field = wind_sim.simulate_pressure_gradients(heightmap.shape, self.noise_generator)
+
+        # Terrain-Ablenkung anwenden
+        self._update_progress("Wind Field", 40, "Applying terrain deflection...")
+        wind_field = wind_sim.apply_terrain_deflection(pressure_field, slopemap, heightmap)
+
+        # Thermische Effekte hinzufügen
+        self._update_progress("Wind Field", 50, "Calculating thermal effects...")
+        wind_field = wind_sim.calculate_thermal_effects(wind_field, temp_map, shademap)
+
+        return wind_field
+
+    def _calculate_humidity(self, soil_moist_map, temp_map, wind_field):
+        """
+        Funktionsweise: Berechnet Luftfeuchtigkeit durch Evaporation und Transport
+        Aufgabe: Erstellt realistische Feuchtigkeits-Verteilung
+        """
+        moisture_manager = AtmosphericMoistureManager()
+
+        # Evaporation von Bodenfeuchtigkeit
+        self._update_progress("Humidity", 60, "Calculating evaporation from soil...")
+        evaporation_map = moisture_manager.calculate_evaporation(soil_moist_map, temp_map, wind_field)
+
+        # Initiale Feuchtigkeit basierend auf Evaporation
+        humid_map = evaporation_map * 2.0  # Startfeuchtigkeit
+
+        # Feuchtigkeits-Transport (mehrere Iterationen für Stabilität)
+        self._update_progress("Humidity", 65, "Transporting moisture (iteration 1/3)...")
+        for i in range(3):
+            humid_map = moisture_manager.transport_moisture(humid_map, wind_field, dt=0.5)
+            if i < 2:  # Nur für erste 2 Iterationen Progress-Update
+                self._update_progress("Humidity", 65 + (i + 1) * 3, f"Transporting moisture (iteration {i + 2}/3)...")
+
+        # Diffusion für natürliche Verteilung
+        self._update_progress("Humidity", 75, "Applying humidity diffusion...")
+        humid_map = moisture_manager.apply_humidity_diffusion(humid_map, iterations=2)
+
+        return humid_map
+
+    def _calculate_precipitation(self, humid_map, temp_map, wind_field, heightmap, slopemap):
+        """
+        Funktionsweise: Berechnet Niederschlag durch Kondensation und orographische Effekte
+        Aufgabe: Erstellt Niederschlags-Verteilung
+        """
+        precip_system = PrecipitationSystem()
+
+        # Orographischer Niederschlag
+        self._update_progress("Precipitation", 85, "Calculating orographic precipitation...")
+        oro_precip = precip_system.calculate_orographic_precipitation(
+            humid_map, wind_field, heightmap, slopemap
         )
 
-        # Transportiere Feuchtigkeit bergabwärts
-        for y, x in zip(height_order[0], height_order[1]):
-            if flow_direction[y, x] == -1:  # Rand
-                continue
+        # Kondensations-Niederschlag
+        self._update_progress("Precipitation", 90, "Calculating condensation precipitation...")
+        condensation_precip = precip_system.simulate_moisture_transport(humid_map, temp_map)
 
-            current_moisture = moisture_transport[y, x]
-            if current_moisture <= 0.01:
-                continue
+        # Finale Niederschlags-Berechnung
+        self._update_progress("Precipitation", 93, "Combining precipitation sources...")
+        precip_map = precip_system.trigger_precipitation_events(
+            humid_map, temp_map, oro_precip, condensation_precip
+        )
 
-            # Finde Ziel-Pixel
-            direction = flow_direction[y, x]
-            dy, dx = directions[direction]
-            target_y, target_x = y + dy, x + dx
+        return precip_map
 
-            if 0 <= target_y < height and 0 <= target_x < width:
-                # Transport-Effizienz basierend auf Flow-Stärke
-                transport_rate = min(0.8, flow_accumulation[y, x] / flow_accumulation.max() * 0.5 + 0.1)
-
-                transported_moisture = current_moisture * transport_rate
-                moisture_transport[target_y, target_x] += transported_moisture
-                moisture_transport[y, x] -= transported_moisture
-
-        return moisture_transport
-
-    def get_final_soil_moisture(self):
-        """Gibt finale Bodenfeuchtigkeit zurück (separiert von direktem Regen)"""
-        if hasattr(self, 'final_soil_moisture'):
-            return self.final_soil_moisture
-        return np.zeros_like(self.world.heightmap)
-
-    def set_soil_moisture(self, moisture_map):
-        """Setzt finale Bodenfeuchtigkeit"""
-        self.final_soil_moisture = moisture_map
-
-    def create_water_map(self) -> np.ndarray:
-        """Erstellt binäre Wasser-Karte"""
-        if not hasattr(self.world, 'water_network'):
-            return np.zeros_like(self.world.heightmap)
-
-        water_map = np.zeros_like(self.world.heightmap)
-        for water_type in ['streams', 'rivers', 'major_rivers', 'lakes']:
-            if water_type in self.world.water_network:
-                water_map = np.maximum(water_map, self.world.water_network[water_type])
-
-        return (water_map > 0).astype(float)
-
-
-class TemperatureGenerator:
-    """Temperaturkarten-Generator basierend auf Höhe, Breitengrad und Sonneneinstrahlung"""
-
-    def __init__(self, world):
-        self.world = world
-
-    def generate_temperature_map(self, use_air_temperature=True):
+    def _calculate_slopes(self, heightmap):
         """
-        Generiert Temperaturkarte basierend auf:
-        - Lufttemperatur (falls verfügbar aus RainGenerator)
-        - Höhe und Position
-        - Sonneneinstrahlung (Hillshade)
+        Funktionsweise: Berechnet Slope-Map aus Heightmap (dz/dx, dz/dy)
+        Aufgabe: Ableitung der Slopes für Wind-Terrain-Interaktion
         """
-        heightmap = self.world.heightmap
         height, width = heightmap.shape
+        slopemap = np.zeros((height, width, 2), dtype=np.float32)
 
-        # Prüfe ob Lufttemperatur verfügbar ist
-        if (use_air_temperature and hasattr(self.world, 'rain_generator') and
-                hasattr(self.world.rain_generator, 'air_temperature')):
-            # Verwende die transportierte Lufttemperatur als Basis
-            temperature_map = self.world.rain_generator.air_temperature.copy()
-            # Normalisiere auf [0,1] Bereich
-            temp_min, temp_max = temperature_map.min(), temperature_map.max()
-            temperature_map = (temperature_map - temp_min) / (temp_max - temp_min + 1e-8)
+        for y in range(height):
+            for x in range(width):
+                # dz/dx berechnen
+                if x > 0 and x < width - 1:
+                    dz_dx = (heightmap[y, x + 1] - heightmap[y, x - 1]) * 0.5
+                elif x == 0:
+                    dz_dx = heightmap[y, x + 1] - heightmap[y, x]
+                else:  # x == width - 1
+                    dz_dx = heightmap[y, x] - heightmap[y, x - 1]
+
+                # dz/dy berechnen
+                if y > 0 and y < height - 1:
+                    dz_dy = (heightmap[y + 1, x] - heightmap[y - 1, x]) * 0.5
+                elif y == 0:
+                    dz_dy = heightmap[y + 1, x] - heightmap[y, x]
+                else:  # y == height - 1
+                    dz_dy = heightmap[y, x] - heightmap[y - 1, x]
+
+                slopemap[y, x, 0] = dz_dx
+                slopemap[y, x, 1] = dz_dy
+
+        return slopemap
+
+    def _calculate_edge_factor(self, x, y, width, height):
+        """
+        Funktionsweise: Berechnet Edge-Faktor für stärkere Noise-Variation an Kartenrändern
+        Aufgabe: Verstärkt atmosphärische Variationen an Map-Grenzen
+        """
+        # Distanz zu nächstem Rand
+        dist_to_edge = min(x, y, width - 1 - x, height - 1 - y)
+        max_dist = min(width, height) // 4
+
+        if dist_to_edge < max_dist:
+            edge_factor = 1.0 + (max_dist - dist_to_edge) / max_dist
         else:
-            # Fallback: Berechne wie vorher
-            temperature_map = np.zeros((height, width))
+            edge_factor = 1.0
 
-            # Berechne Hillshade
-            hillshade = calculate_hillshade(heightmap)
+        return edge_factor
+
+    # ===== LEGACY-KOMPATIBILITÄT =====
+    # Alle alten Methoden bleiben für Rückwärts-Kompatibilität erhalten
+
+    def generate_weather_system(self, heightmap, shade_map, soil_moist_map, air_temp_entry, solar_power,
+                                altitude_cooling, thermic_effect, wind_speed_factor, terrain_factor,
+                                flow_direction=None, flow_accumulation=None, map_seed=None):
+        """
+        Funktionsweise: Legacy-Methode für direkte Weather-Generierung (KOMPATIBILITÄT)
+        Aufgabe: Erhält bestehende API für Rückwärts-Kompatibilität
+        """
+        # Konvertiert alte API zur neuen API
+        dependencies = {
+            'heightmap': heightmap,
+            'shademap': shade_map,
+            'soil_moist_map': soil_moist_map
+        }
+        parameters = {
+            'air_temp_entry': air_temp_entry,
+            'solar_power': solar_power,
+            'altitude_cooling': altitude_cooling,
+            'thermic_effect': thermic_effect,
+            'wind_speed_factor': wind_speed_factor,
+            'terrain_factor': terrain_factor
+        }
+
+        # Seed aktualisieren falls nötig
+        if map_seed is not None:
+            self.update_seed(map_seed)
+
+        weather_data = self._execute_generation("LOD64", dependencies, parameters)
+
+        # Legacy-Format zurückgeben (Tuple)
+        return weather_data.wind_map, weather_data.temp_map, weather_data.precip_map, weather_data.humid_map
+
+    def update_weather_cycle(self, current_weather, heightmap, shade_map, soil_moist_map, time_step=1.0):
+        """
+        Funktionsweise: Legacy-Methode für Weather-Updates
+        Aufgabe: Erhält bestehende API für zeitliche Entwicklung
+        """
+        wind_map, temp_map, precip_map, humid_map = current_weather
+
+        # Slopemap berechnen
+        slopemap = self._calculate_slopes(heightmap)
+
+        # Feuchtigkeits-Update durch Transport
+        moisture_manager = AtmosphericMoistureManager()
+        humid_map = moisture_manager.transport_moisture(humid_map, wind_map, dt=time_step)
+
+        # Evaporation hinzufügen
+        evaporation = moisture_manager.calculate_evaporation(soil_moist_map, temp_map, wind_map)
+        humid_map += evaporation * time_step
+
+        # Neue Niederschlags-Berechnung
+        precip_system = PrecipitationSystem()
+        new_precip = precip_system.simulate_moisture_transport(humid_map, temp_map)
+
+        # Feuchtigkeit durch Niederschlag reduzieren
+        humid_map -= new_precip * 0.8
+        humid_map = np.maximum(0, humid_map)  # Negative Feuchtigkeit verhindern
+
+        return wind_map, temp_map, new_precip, humid_map
+
+    def integrate_atmospheric_effects(self, weather_data, flow_direction=None, flow_accumulation=None):
+        """
+        Funktionsweise: Legacy-Methode für Wasserfluss-Integration
+        Aufgabe: Erweiterte Wetter-Wasser-Interaktion
+        """
+        wind_map, temp_map, precip_map, humid_map = weather_data
+
+        if flow_direction is not None and flow_accumulation is not None:
+            # Flussnähe erhöht lokale Feuchtigkeit
+            height, width = humid_map.shape
 
             for y in range(height):
                 for x in range(width):
-                    elevation = heightmap[y, x] / self.world.scale
+                    if x < flow_accumulation.shape[1] and y < flow_accumulation.shape[0]:
+                        flow_value = flow_accumulation[y, x]
 
-                    # Nord-Süd Gradient korrigiert (y=0 ist Norden, y=height ist Süden)
-                    latitude_factor = (height-y) / height  # 0.0 = Nord (kalt), 1.0 = Süd (warm)
-                    base_temp = latitude_factor * 0.15  # 15% Anteil
+                        if flow_value > 0:
+                            # Erhöhte Feuchtigkeit nahe Flüssen
+                            humidity_boost = min(10.0, flow_value * 0.1)
+                            humid_map[y, x] += humidity_boost
 
-                    # Höhen-Abkühlung
-                    elevation_factor = (1.0 - elevation) * 0.45  # 45% Anteil
+                            # Leichte Temperatur-Modifikation durch Wasser
+                            temp_mod = -flow_value * 0.01  # Kühlung durch Wasser
+                            temp_map[y, x] += temp_mod
 
-                    # Sonneneinstrahlung (Hillshade)
-                    solar_factor = hillshade[y, x] * 0.4  # 40% Anteil
+        return wind_map, temp_map, precip_map, humid_map
 
-                    temperature = base_temp + elevation_factor + solar_factor
-                    temperature_map[y, x] = np.clip(temperature, 0.0, 1.0)
+    def get_weather_statistics(self, weather_data):
+        """
+        Funktionsweise: Legacy-Methode für Weather-Statistiken
+        Aufgabe: Analyse-Funktionen für Weather-System-Debugging
+        """
+        if isinstance(weather_data, WeatherData):
+            wind_map = weather_data.wind_map
+            temp_map = weather_data.temp_map
+            precip_map = weather_data.precip_map
+            humid_map = weather_data.humid_map
+        else:
+            wind_map, temp_map, precip_map, humid_map = weather_data
 
-        temperature_map = self.smooth_temperature_map(temperature_map)
-        return temperature_map
+        # Wind-Geschwindigkeiten berechnen
+        wind_speeds = np.sqrt(wind_map[:, :, 0] ** 2 + wind_map[:, :, 1] ** 2)
 
-    def smooth_temperature_map(self, temp_map: np.ndarray, sigma: float = 1.5) -> np.ndarray:
-        """Glättet die Temperaturkarte mit gaußschem Filter"""
-        smoothed = gaussian_filter(temp_map, sigma=sigma)
-        return np.clip(smoothed, 0.0, 1.0)
+        stats = {
+            'temperature': {
+                'min': float(np.min(temp_map)),
+                'max': float(np.max(temp_map)),
+                'mean': float(np.mean(temp_map)),
+                'std': float(np.std(temp_map))
+            },
+            'precipitation': {
+                'min': float(np.min(precip_map)),
+                'max': float(np.max(precip_map)),
+                'mean': float(np.mean(precip_map)),
+                'total': float(np.sum(precip_map))
+            },
+            'humidity': {
+                'min': float(np.min(humid_map)),
+                'max': float(np.max(humid_map)),
+                'mean': float(np.mean(humid_map))
+            },
+            'wind': {
+                'min_speed': float(np.min(wind_speeds)),
+                'max_speed': float(np.max(wind_speeds)),
+                'mean_speed': float(np.mean(wind_speeds)),
+                'dominant_direction': self._calculate_dominant_wind_direction(wind_map)
+            }
+        }
+
+        return stats
+
+    def _calculate_dominant_wind_direction(self, wind_map):
+        """
+        Funktionsweise: Berechnet dominante Windrichtung über gesamte Map
+        Aufgabe: Analyse der Haupt-Windrichtung für Statistiken
+        """
+        # Durchschnittliche Windkomponenten
+        avg_wind_x = np.mean(wind_map[:, :, 0])
+        avg_wind_y = np.mean(wind_map[:, :, 1])
+
+        # Winkel berechnen (in Grad)
+        angle_rad = np.arctan2(avg_wind_y, avg_wind_x)
+        angle_deg = np.degrees(angle_rad)
+
+        # Auf [0, 360] normalisieren
+        if angle_deg < 0:
+            angle_deg += 360
+
+        # Himmelsrichtung bestimmen
+        directions = ['East', 'Northeast', 'North', 'Northwest',
+                      'West', 'Southwest', 'South', 'Southeast']
+        direction_index = int((angle_deg + 22.5) // 45) % 8
+
+        return {
+            'angle_degrees': float(angle_deg),
+            'direction': directions[direction_index]
+        }

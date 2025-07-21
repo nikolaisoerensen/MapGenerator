@@ -1,555 +1,491 @@
-#!/usr/bin/env python3
 """
-Path: MapGenerator/gui/tabs/terrain_py.py
-__init__.py existiert in "tabs"
+Path: gui/tabs/terrain_tab.py
 
-World Generator GUI - Terrain Tab (Vollständig Refactored)
-Tab 1: Terrain/Heightmap Parameter
-Alle Verbesserungen aus Schritt 1-3 implementiert
+Funktionsweise: Terrain-Editor mit erweiteter Core-Integration
+- Erbt von BaseMapTab für gemeinsame Features
+- Direkte Integration mit core/terrain_generator.py (alle neuen Parameter)
+- Spezialisierte Widgets: TerrainParameterPanel, TerrainStatisticsWidget
+- Live 2D/3D Preview über map_display_2d/3d.py erweitert
+- Real-time Terrain-Statistics (Höhenverteilung, Steigungen, Verschattung)
+- Output: heightmap, slopemap, shademap für nachfolgende Generatoren
 """
 
-import sys
+from PyQt5.QtWidgets import *
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
 import numpy as np
-import matplotlib.pyplot as plt
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
-                             QVBoxLayout, QLabel, QSpinBox, QPushButton,
-                             QFrame, QGridLayout, QSpacerItem, QSizePolicy, QCheckBox, QGroupBox)
-from PyQt5.QtCore import Qt
+import logging
 
-# Schritt 1: Neue gemeinsame Widgets
-from gui.widgets.parameter_slider import ParameterSlider
-from gui.widgets.navigation_mixin import NavigationMixin, TabNavigationHelper
-from gui.widgets.map_canvas import MapCanvas
-from gui.utils.error_handler import ErrorHandler, safe_execute, TabErrorContext
-from gui.utils.performance_utils import debounced_method, performance_tracked
-try:
-    from gui.managers.parameter_manager import WorldParameterManager
-except ImportError:
-    from gui.world_state import WorldState as WorldParameterManager
+from .base_tab import BaseMapTab
+from gui.config.value_default import TERRAIN, get_parameter_config, validate_parameter_set
+from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton
+from core.terrain_generator import BaseTerrainGenerator, SimplexNoiseGenerator, ShadowCalculator
 
-
-class TerrainMapCanvas(MapCanvas):
+def get_terrain_error_decorators():
     """
-    Funktionsweise: Terrain Map Canvas mit Performance-Optimierung
-    - Erbt von OptimizedMapCanvas für automatisches Debouncing
-    - Implementiert Heightmap-spezifische Visualisierung
-    - Seed-basierte reproduzierbare Generierung
+    Funktionsweise: Lazy Loading von Terrain Tab Error Decorators
+    Aufgabe: Lädt Memory-Critical, Parameter und GPU-Shader Decorators
+    Return: Tuple von Decorator-Funktionen
+    """
+    try:
+        from gui.error_handler import memory_critical_handler, parameter_handler, gpu_shader_handler
+        return memory_critical_handler, parameter_handler, gpu_shader_handler
+    except ImportError:
+        def noop_decorator(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+        return noop_decorator, noop_decorator, noop_decorator
+
+memory_critical_handler, parameter_handler, gpu_shader_handler = get_terrain_error_decorators()
+
+class TerrainTab(BaseMapTab):
+    """
+    Funktionsweise: Hauptklasse für Terrain-Generation mit allen neuen Core-Features
+    Aufgabe: Koordiniert UI, Parameter-Management und Core-Generator Integration
+    Output: heightmap, slopemap, shademap für alle nachfolgenden Generatoren
+    """
+
+    def __init__(self, data_manager, navigation_manager, shader_manager):
+        super().__init__(data_manager, navigation_manager, shader_manager)
+        self.logger = logging.getLogger(__name__)
+
+        # Core-Generator Instanzen
+        self.terrain_generator = BaseTerrainGenerator()
+        self.noise_generator = SimplexNoiseGenerator()
+        self.shadow_calculator = ShadowCalculator()
+
+        # Parameter-Tracking für Cache-Validation
+        self.current_parameters = {}
+
+        # Setup UI
+        self.setup_terrain_ui()
+        self.setup_parameter_validation()
+
+        # Initial Parameter Load
+        self.load_default_parameters()
+
+    def setup_terrain_ui(self):
+        """
+        Funktionsweise: Erstellt spezialisierte UI für Terrain-Generator
+        Aufgabe: Parameter-Slider, Preview-Canvas, Statistics-Widget
+        """
+        # Parameter Panel erstellen
+        self.parameter_panel = self.create_terrain_parameter_panel()
+        self.control_panel.addWidget(self.parameter_panel)
+
+        # Statistics Widget
+        self.statistics_widget = TerrainStatisticsWidget()
+        self.control_panel.addWidget(self.statistics_widget)
+
+        # Visualization Controls
+        self.visualization_controls = self.create_visualization_controls()
+        self.control_panel.addWidget(self.visualization_controls)
+
+        # Status und Navigation (von BaseMapTab)
+        self.setup_input_status()
+        self.setup_navigation()
+
+    def create_terrain_parameter_panel(self) -> QGroupBox:
+        """
+        Funktionsweise: Erstellt Parameter-Panel mit allen Terrain-Parametern
+        Aufgabe: Slider für alle neuen Core-Parameter (amplitude, map_seed, etc.)
+        Return: QGroupBox mit allen Parameter-Slidern
+        """
+        panel = QGroupBox("Terrain Parameters")
+        layout = QVBoxLayout()
+
+        # Dictionary für alle Parameter-Slider
+        self.parameter_sliders = {}
+
+        # Alle Terrain-Parameter aus value_default.py
+        terrain_params = [
+            "size", "amplitude", "octaves", "frequency",
+            "persistence", "lacunarity", "redistribute_power", "map_seed"
+        ]
+
+        for param_name in terrain_params:
+            param_config = get_parameter_config("terrain", param_name)
+
+            # Parameter-Slider mit Konfiguration erstellen
+            slider = ParameterSlider(
+                label=param_name.replace("_", " ").title(),
+                min_val=param_config["min"],
+                max_val=param_config["max"],
+                default_val=param_config["default"],
+                step=param_config.get("step", 1),
+                suffix=param_config.get("suffix", "")
+            )
+
+            # Signal-Verbindung für Auto-Update
+            slider.valueChanged.connect(self.on_parameter_changed)
+
+            self.parameter_sliders[param_name] = slider
+            layout.addWidget(slider)
+
+        panel.setLayout(layout)
+        return panel
+
+    def create_visualization_controls(self) -> QGroupBox:
+        """
+        Funktionsweise: Erstellt Controls für Visualization-Modi
+        Aufgabe: Switcher zwischen heightmap, slopemap, shademap Darstellung
+        Return: QGroupBox mit Visualization-Controls
+        """
+        panel = QGroupBox("Visualization")
+        layout = QVBoxLayout()
+
+        # Radio Buttons für verschiedene Darstellungsarten
+        self.display_mode = QButtonGroup()
+
+        self.heightmap_radio = QRadioButton("Heightmap")
+        self.heightmap_radio.setChecked(True)
+        self.heightmap_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.heightmap_radio, 0)
+        layout.addWidget(self.heightmap_radio)
+
+        self.slopemap_radio = QRadioButton("Slope Map")
+        self.slopemap_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.slopemap_radio, 1)
+        layout.addWidget(self.slopemap_radio)
+
+        self.shademap_radio = QRadioButton("Shadow Map")
+        self.shademap_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.shademap_radio, 2)
+        layout.addWidget(self.shademap_radio)
+
+        # Shadow Angle Slider (für Shademap)
+        self.shadow_angle_slider = ParameterSlider(
+            label="Shadow Angle",
+            min_val=0,
+            max_val=5,
+            default_val=2,
+            step=1,
+            suffix=""
+        )
+        self.shadow_angle_slider.valueChanged.connect(self.update_shadow_display)
+        self.shadow_angle_slider.setEnabled(False)  # Initial disabled
+        layout.addWidget(self.shadow_angle_slider)
+
+        panel.setLayout(layout)
+        return panel
+
+    def setup_parameter_validation(self):
+        """
+        Funktionsweise: Setup für Parameter-Validation und Cross-Parameter Constraints
+        Aufgabe: Verbindet Validation-System mit Parameter-Änderungen
+        """
+        # Timer für Debounced Validation
+        self.validation_timer = QTimer()
+        self.validation_timer.setSingleShot(True)
+        self.validation_timer.timeout.connect(self.validate_current_parameters)
+
+        # Validation Status Widget
+        self.validation_status = StatusIndicator("Parameter Validation")
+        self.control_panel.addWidget(self.validation_status)
+
+    def load_default_parameters(self):
+        """
+        Funktionsweise: Lädt Default-Parameter in alle Slider
+        Aufgabe: Initialisiert UI mit Standard-Werten aus value_default.py
+        """
+        for param_name, slider in self.parameter_sliders.items():
+            param_config = get_parameter_config("terrain", param_name)
+            slider.setValue(param_config["default"])
+
+        # Initial Parameter-Set speichern
+        self.current_parameters = self.get_current_parameters()
+
+    def get_current_parameters(self) -> dict:
+        """
+        Funktionsweise: Sammelt aktuelle Parameter-Werte von allen Slidern
+        Return: dict mit allen aktuellen Parameter-Werten
+        """
+        parameters = {}
+        for param_name, slider in self.parameter_sliders.items():
+            parameters[param_name] = slider.getValue()
+        return parameters
+
+    @pyqtSlot()
+    def on_parameter_changed(self):
+        """
+        Funktionsweise: Slot für Parameter-Änderungen mit Debouncing
+        Aufgabe: Triggert Validation und Auto-Generation nach kurzer Verzögerung
+        """
+        # Parameter aktualisieren
+        self.current_parameters = self.get_current_parameters()
+
+        # Debounced Validation starten
+        self.validation_timer.start(500)  # 500ms Delay
+
+        # Auto-Simulation triggern (wenn aktiviert)
+        if self.auto_simulation_enabled:
+            self.auto_simulation_timer.start(1000)  # 1s Delay für Generation
+
+    @parameter_handler
+    def validate_current_parameters(self):
+        """
+        Funktionsweise: Validiert aktuelle Parameter auf Constraints und Performance
+        Aufgabe: Prüft Cross-Parameter Validation und zeigt Warnings/Errors
+        Besonderheit: Parameter Handler schützt vor Validation-Fehlern
+        """
+        # Import hier um Circular Dependencies zu vermeiden
+        try:
+            from gui.config.value_default import validate_parameter_set
+            is_valid, warnings, errors = validate_parameter_set("terrain", self.current_parameters)
+        except ImportError:
+            # Fallback bei fehlendem Config-Modul
+            is_valid, warnings, errors = True, [], []
+
+        if errors:
+            self.validation_status.set_error(f"Errors: {'; '.join(errors)}")
+        elif warnings:
+            self.validation_status.set_warning(f"Warnings: {'; '.join(warnings)}")
+        else:
+            self.validation_status.set_success("Parameters valid")
+
+    @memory_critical_handler("terrain_generation")
+    def generate_terrain(self):
+        """
+        Funktionsweise: Hauptmethode für Terrain-Generation mit Core-Integration
+        Aufgabe: Ruft alle Core-Generatoren auf und speichert Results im DataManager
+        Besonderheit: Memory-Critical Handler schützt vor Memory-Errors bei großen Arrays
+        """
+        try:
+            self.logger.info("Starting terrain generation...")
+
+            # Timing für Performance-Messung starten
+            self.start_generation_timing()
+
+            # Parameter für Core-Generator vorbereiten
+            params = self.current_parameters.copy()
+            map_size = int(params.get("size", 512))  # Fallback für size
+
+            # LOD-Level vom DataManager übernehmen
+            current_map_size = self.data_manager.get_current_map_size()
+            if current_map_size != map_size:
+                params["size"] = current_map_size
+                self.logger.info(f"Using LOD map size: {current_map_size}")
+
+            # 1. Heightmap Generation
+            heightmap = self.terrain_generator.generate_heightmap(
+                map_size=params["size"],
+                amplitude=params.get("amplitude", 100.0),
+                octaves=int(params.get("octaves", 6)),
+                frequency=params.get("frequency", 0.01),
+                persistence=params.get("persistence", 0.5),
+                lacunarity=params.get("lacunarity", 2.0),
+                redistribute_power=params.get("redistribute_power", 1.0),
+                map_seed=int(params.get("map_seed", 42))
+            )
+
+            # 2. Slope Calculation
+            slopemap = self.terrain_generator.calculate_slopes(heightmap)
+
+            # 3. Shadow Calculation (6 Sonnenwinkel)
+            shademap = self.shadow_calculator.calculate_shadows_multi_angle(
+                heightmap=heightmap,
+                sun_angles=6
+            )
+
+            # Results im DataManager speichern
+            self.data_manager.set_terrain_data("heightmap", heightmap, params)
+            self.data_manager.set_terrain_data("slopemap", slopemap, params)
+            self.data_manager.set_terrain_data("shademap", shademap, params)
+
+            # Display aktualisieren
+            self.update_terrain_display()
+
+            # Statistics aktualisieren
+            self.statistics_widget.update_statistics(heightmap, slopemap, shademap)
+
+            # Timing beenden
+            self.end_generation_timing(True)
+
+            self.logger.info("Terrain generation completed successfully")
+
+        except Exception as e:
+            self.handle_generation_error(e)
+            self.end_generation_timing(False, str(e))
+            raise  # Re-raise für Error Handler
+
+    @gpu_shader_handler("terrain_display")
+    def update_terrain_display(self):
+        """
+        Funktionsweise: Aktualisiert Display basierend auf aktuellem Visualization-Mode
+        Aufgabe: Zeigt heightmap, slopemap oder shademap je nach Selection
+        Besonderheit: GPU-Shader Handler schützt vor OpenGL/Display-Fehlern
+        """
+        current_mode = self.display_mode.checkedId()
+
+        if current_mode == 0:  # Heightmap
+            heightmap = self.data_manager.get_terrain_data("heightmap")
+            if heightmap is not None:
+                self.map_display.display_heightmap(heightmap)
+
+        elif current_mode == 1:  # Slopemap
+            slopemap = self.data_manager.get_terrain_data("slopemap")
+            if slopemap is not None:
+                self.map_display.display_slopemap(slopemap)
+
+        elif current_mode == 2:  # Shademap
+            shademap = self.data_manager.get_terrain_data("shademap")
+            if shademap is not None:
+                angle_index = int(self.shadow_angle_slider.getValue())
+                self.map_display.display_shademap(shademap, angle_index)
+
+    @pyqtSlot()
+    def update_display_mode(self):
+        """
+        Funktionsweise: Slot für Visualization-Mode Änderungen
+        Aufgabe: Aktiviert/Deaktiviert Shadow-Angle Slider, aktualisiert Display
+        """
+        current_mode = self.display_mode.checkedId()
+
+        # Shadow Angle Slider nur bei Shademap aktivieren
+        self.shadow_angle_slider.setEnabled(current_mode == 2)
+
+        # Display aktualisieren
+        self.update_terrain_display()
+
+    @pyqtSlot()
+    def update_shadow_display(self):
+        """
+        Funktionsweise: Aktualisiert Shademap-Display bei Angle-Änderung
+        Aufgabe: Zeigt spezifischen Sonnenwinkel der 6-Winkel Shademap
+        """
+        if self.display_mode.checkedId() == 2:  # Nur bei Shademap-Mode
+            self.update_terrain_display()
+
+
+class TerrainStatisticsWidget(QGroupBox):
+    """
+    Funktionsweise: Widget für Real-time Terrain-Statistiken
+    Aufgabe: Zeigt Höhenverteilung, Steigungsstatistiken, Verschattungsinfo
     """
 
     def __init__(self):
-        super().__init__('terrain_map', title='Heightmap Preview')
+        super().__init__("Terrain Statistics")
+        self.setup_ui()
 
-    @performance_tracked("Terrain_Rendering")
-    @safe_execute('handle_map_rendering_error')
-    def _render_map(self, size, height, octaves, frequency, persistence, lacunarity, redistribute_power, seed=42):
+    def setup_ui(self):
         """
-        Funktionsweise: Rendert Terrain-Heightmap mit Error Handling
-        - Verwendet TabErrorContext für robuste Fehlerbehandlung
-        - Performance-optimiert für verschiedene Terrain-Größen
-        - Reproduzierbare Ergebnisse durch Seed
+        Funktionsweise: Erstellt UI für Statistik-Anzeige
         """
-        with TabErrorContext('Terrain', 'Heightmap Rendering'):
-            self.clear_and_setup()
-
-            try:
-                # Farbintensität basierend auf Höhen-Parameter
-                intensity = (height / 400.0) * 0.5 + 0.3  # 0.3 bis 0.8
-                color_value = plt.cm.terrain(intensity)
-                self.ax.set_facecolor(color_value)
-
-                # Optimierte Noise-Visualisierung basierend auf Größe
-                grid_size = min(max(size // 8, 25), 100)  # Adaptive Auflösung
-                x = np.linspace(0, 100, grid_size)
-                y = np.linspace(0, 100, grid_size)
-                X, Y = np.meshgrid(x, y)
-
-                # Reproduzierbarer Pseudo-Noise mit Seed
-                np.random.seed(seed)
-
-                # Multi-Oktaven Noise-Simulation
-                Z = self._generate_heightmap_noise(X, Y, octaves, frequency, persistence, lacunarity)
-
-                # Redistribution für realistische Höhenverteilung
-                Z = self._apply_height_redistribution(Z, redistribute_power)
-
-                # Höhen-Konturen zeichnen
-                contour_levels = min(octaves * 2, 15)  # Adaptive Kontur-Anzahl
-                contours = self.ax.contour(X, Y, Z, levels=contour_levels,
-                                           alpha=0.7, colors='darkgreen', linewidths=0.8)
-
-                # Höhenlinien-Labels bei hoher Detailstufe
-                if size >= 256 and octaves >= 4:
-                    self.ax.clabel(contours, inline=True, fontsize=8, fmt='%1.1f')
-
-                # Titel mit aktuellen Parametern und Statistiken
-                terrain_stats = self._calculate_terrain_stats(Z, height)
-                title = f'Heightmap Preview (Size: {size}x{size}, Seed: {seed})\n{terrain_stats}'
-                self.set_title(title)
-
-            except Exception as e:
-                self.error_handler.logger.error(f"Heightmap-Generierung fehlgeschlagen: {e}")
-                # Fallback: Einfache Darstellung
-                self.ax.set_facecolor('lightgreen')
-                self.ax.text(0.5, 0.5, 'Heightmap\n(Vereinfachte Ansicht)',
-                             transform=self.ax.transAxes, ha='center', va='center')
-
-            self.draw()
-
-    def _generate_heightmap_noise(self, X, Y, octaves, frequency, persistence, lacunarity):
-        """
-        Funktionsweise: Generiert multi-oktaven Perlin-ähnlichen Noise
-        - Simuliert realistische Terrain-Features
-        - Berücksichtigt alle Noise-Parameter
-        """
-        Z = np.zeros_like(X)
-        amplitude = 1.0
-        freq = frequency
-
-        for octave in range(int(octaves)):
-            # Oktaven-basierter Noise
-            noise_layer = (np.sin(X * freq * 10) * np.cos(Y * freq * 10) +
-                           np.sin(X * freq * 15 + 1.5) * np.cos(Y * freq * 12 + 2.1))
-
-            Z += noise_layer * amplitude
-
-            # Frequency und Amplitude für nächste Oktave
-            amplitude *= persistence
-            freq *= lacunarity
-
-            # Kleine Zufallsverschiebung für mehr Variation
-            freq += np.random.uniform(-0.001, 0.001)
-
-        return Z
-
-    def _apply_height_redistribution(self, Z, power):
-        """
-        Funktionsweise: Wendet Höhen-Redistribution an
-        - Macht flache Bereiche flacher, steile Bereiche steiler
-        - Simuliert realistische Terrain-Verteilung
-        """
-        # Normalisierung auf 0-1
-        Z_norm = (Z - Z.min()) / (Z.max() - Z.min()) if Z.max() != Z.min() else Z
-
-        # Power-Redistribution
-        Z_redistributed = Z_norm ** power
-
-        # Zurück-Skalierung
-        return Z_redistributed * (Z.max() - Z.min()) + Z.min()
-
-    def _calculate_terrain_stats(self, Z, max_height):
-        """
-        Funktionsweise: Berechnet Terrain-Statistiken für Info-Anzeige
-        Returns:
-            str: Formatierte Statistik-Info
-        """
-        try:
-            elevation_range = Z.max() - Z.min()
-            avg_elevation = Z.mean()
-            steep_areas = np.sum(np.abs(np.gradient(Z)[0]) > 0.1) / Z.size * 100
-
-            return f"Höhenspanne: {elevation_range:.2f} | Steile Bereiche: {steep_areas:.1f}%"
-        except:
-            return "Höhenprofil: Standard"
-
-
-class TerrainControlPanel(QWidget, NavigationMixin):
-    """
-    Funktionsweise: Terrain Control Panel mit allen Verbesserungen
-    - Neue ParameterSlider (Schritt 1)
-    - WorldParameterManager Integration (Schritt 2)
-    - Performance-Optimierung mit Debouncing (Schritt 3)
-    - Seed-Management und Terrain-Validierung
-    """
-
-    def __init__(self, map_canvas):
-        super().__init__()
-        self.map_canvas = map_canvas
-        self.error_handler = ErrorHandler()
-
-        # Verwende neuen WorldParameterManager
-        self.world_manager = WorldParameterManager()
-        self.terrain_manager = self.world_manager.terrain
-
-        self.init_ui()
-
-    @safe_execute('handle_parameter_error')
-    def init_ui(self):
         layout = QVBoxLayout()
 
-        # Titel
-        title = QLabel("Simplex Höhenprofil")
-        title.setStyleSheet("font-size: 16px; font-weight: bold; margin: 10px;")
-        layout.addWidget(title)
+        # Statistics Labels
+        self.height_stats = QLabel("Height: -")
+        self.slope_stats = QLabel("Slope: -")
+        self.shadow_stats = QLabel("Shadow: -")
 
-        # Seed Management
-        self.setup_seed_controls(layout)
-
-        # Auto-Simulation Control
-        self.setup_simulation_controls(layout)
-
-        # Parameter Gruppen
-        self.setup_basic_parameters(layout)
-        self.setup_noise_parameters(layout)
-
-        # Spacer
-        layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
-
-        # Navigation mit Mixin (Terrain ist erster Tab)
-        self.setup_navigation(layout, show_prev=True, show_next=True,
-                              prev_text="Hauptmenü", next_text="Weiter")
+        layout.addWidget(self.height_stats)
+        layout.addWidget(self.slope_stats)
+        layout.addWidget(self.shadow_stats)
 
         self.setLayout(layout)
 
-        # Initial preview
-        self.update_preview()
-
-    def setup_seed_controls(self, layout):
-        """Erstellt Seed-Management Controls"""
-        seed_layout = QGridLayout()
-        seed_label = QLabel("Terrain Seed:")
-
-        params = self.terrain_manager.get_parameters()
-
-        self.seed_input = QSpinBox()
-        self.seed_input.setMinimum(0)
-        self.seed_input.setMaximum(999999)
-        self.seed_input.setValue(params.get('seed', 42))
-        self.seed_input.valueChanged.connect(self.on_parameter_changed)
-
-        self.random_seed_btn = QPushButton("Zufällig")
-        self.random_seed_btn.setStyleSheet(
-            "QPushButton { background-color: #9b59b6; color: white; font-weight: bold; padding: 8px; }")
-        self.random_seed_btn.clicked.connect(self.randomize_seed)
-
-        seed_widget = QWidget()
-        seed_layout.addWidget(seed_label, 0, 0)
-        seed_layout.addWidget(self.seed_input, 0, 1)
-        seed_layout.addWidget(self.random_seed_btn, 0, 2)
-        seed_widget.setLayout(seed_layout)
-        layout.addWidget(seed_widget)
-
-    def setup_simulation_controls(self, layout):
-        """Erstellt Auto-Simulation Controls"""
-        sim_control_layout = QHBoxLayout()
-
-        self.auto_simulate_checkbox = QCheckBox("Automat. Simulieren")
-        self.auto_simulate_checkbox.setChecked(self.world_manager.ui_state.get_auto_simulate())
-        self.auto_simulate_checkbox.stateChanged.connect(self.on_auto_simulate_changed)
-
-        self.simulate_now_btn = QPushButton("Jetzt Simulieren")
-        self.simulate_now_btn.setStyleSheet(
-            "QPushButton { background-color: #FF9800; color: white; font-weight: bold; padding: 8px; }")
-        self.simulate_now_btn.clicked.connect(self.simulate_now)
-        self.simulate_now_btn.setEnabled(not self.world_manager.ui_state.get_auto_simulate())
-
-        sim_control_widget = QWidget()
-        sim_control_layout.addWidget(self.auto_simulate_checkbox)
-        sim_control_layout.addWidget(self.simulate_now_btn)
-        sim_control_widget.setLayout(sim_control_layout)
-        layout.addWidget(sim_control_widget)
-
-    def setup_basic_parameters(self, layout):
-        """Erstellt grundlegende Terrain-Parameter"""
-        basic_group = QGroupBox("Basis-Parameter")
-        basic_layout = QVBoxLayout()
-
-        params = self.terrain_manager.get_parameters()
-
-        # Verwende neue ParameterSlider-Klasse
-        self.size_slider = ParameterSlider("Kartengröße", 64, 1024, params['size'])
-        self.height_slider = ParameterSlider("Max. Höhe", 0, 400, params['height'], suffix="m")
-
-        basic_sliders = [self.size_slider, self.height_slider]
-
-        for slider in basic_sliders:
-            basic_layout.addWidget(slider)
-            slider.valueChanged.connect(self.on_parameter_changed)
-
-        basic_group.setLayout(basic_layout)
-        layout.addWidget(basic_group)
-
-    def setup_noise_parameters(self, layout):
-        """Erstellt Noise-spezifische Parameter"""
-        noise_group = QGroupBox("Noise-Parameter")
-        noise_layout = QVBoxLayout()
-
-        params = self.terrain_manager.get_parameters()
-
-        self.octaves_slider = ParameterSlider("Oktaven", 1, 8, params['octaves'])
-        self.frequency_slider = ParameterSlider("Grundfrequenz", 0.001, 0.050,
-                                                params['frequency'], decimals=3)
-        self.persistence_slider = ParameterSlider("Persistence", 0.1, 1.0,
-                                                  params['persistence'], decimals=2)
-        self.lacunarity_slider = ParameterSlider("Lacunarity", 1.0, 4.0,
-                                                 params['lacunarity'], decimals=1)
-        self.redistribute_slider = ParameterSlider("Höhen-Redistribution", 0.5, 3.0,
-                                                   params['redistribute_power'], decimals=1)
-
-        noise_sliders = [self.octaves_slider, self.frequency_slider, self.persistence_slider,
-                         self.lacunarity_slider, self.redistribute_slider]
-
-        for slider in noise_sliders:
-            noise_layout.addWidget(slider)
-            slider.valueChanged.connect(self.on_parameter_changed)
-
-        noise_group.setLayout(noise_layout)
-        layout.addWidget(noise_group)
-
-    @safe_execute('handle_parameter_error')
-    def on_auto_simulate_changed(self, state):
-        """Auto-Simulation Checkbox geändert"""
-        is_checked = state == 2
-        self.world_manager.ui_state.set_auto_simulate(is_checked)
-
-        if is_checked:
-            self.error_handler.logger.info("Terrain Auto-Simulation aktiviert")
-            self.simulate_now_btn.setEnabled(False)
-            self.update_preview()
-        else:
-            self.error_handler.logger.info("Terrain Auto-Simulation deaktiviert")
-            self.simulate_now_btn.setEnabled(True)
-
-    @debounced_method(200)  # Kurzes Debouncing für Terrain
-    def on_parameter_changed(self):
-        """Parameter wurden geändert - mit Debouncing"""
-        if self.auto_simulate_checkbox.isChecked():
-            self.update_preview()
-
-    @safe_execute('handle_parameter_error')
-    def simulate_now(self):
-        """Manuelle Simulation"""
-        self.error_handler.logger.info("Terrain Simulation gestartet!")
-        self.update_preview()
-
-    @safe_execute('handle_parameter_error')
-    def randomize_seed(self):
+    def update_statistics(self, heightmap: np.ndarray, slopemap: np.ndarray, shademap: np.ndarray):
         """
-        Funktionsweise: Generiert zufälligen Seed mit Auto-Update
-        - Verwendet TerrainParameterManager für Seed-Generierung
-        - Triggert Update falls Auto-Simulation aktiviert
+        Funktionsweise: Berechnet und zeigt aktuelle Terrain-Statistiken
+        Parameter: heightmap, slopemap, shademap (numpy arrays)
         """
-        new_seed = self.terrain_manager.randomize_seed()
-        self.seed_input.setValue(new_seed)
+        # Height Statistics
+        height_min = np.min(heightmap)
+        height_max = np.max(heightmap)
+        height_mean = np.mean(heightmap)
 
-        if self.auto_simulate_checkbox.isChecked():
-            self.update_preview()
-        else:
-            self.error_handler.logger.info(f"Neuer Seed: {new_seed} - Klicken Sie 'Jetzt Simulieren'")
+        # Slope Statistics (Convert to degrees)
+        slope_degrees = np.arctan(np.sqrt(slopemap[:,:,0]**2 + slopemap[:,:,1]**2)) * 180 / np.pi
+        slope_max = np.max(slope_degrees)
+        slope_mean = np.mean(slope_degrees)
 
-    @performance_tracked("Terrain_Preview_Update")
-    @safe_execute('handle_map_rendering_error')
-    def update_preview(self):
-        """
-        Funktionsweise: Aktualisiert die Terrain-Kartenvorschau
-        - Performance-optimiert mit Tracking
-        - Verwendet optimierte Map Canvas
-        - Robuste Parameter-Validierung
-        """
-        with TabErrorContext('Terrain', 'Preview Update'):
-            params = self.get_parameters()
+        # Shadow Statistics (Average über alle 6 Winkel)
+        shadow_mean = np.mean(shademap)
+        shadow_min = np.min(shademap)
 
-            # Validiere und speichere Parameter
-            self.terrain_manager.set_parameters(params)
-
-            # Aktualisiere Karte (mit automatischem Debouncing)
-            self.map_canvas.update_map(**params)
-
-    def get_parameters(self):
-        """
-        Funktionsweise: Sammelt alle Terrain Parameter
-        - Verwendet neue ParameterSlider.get_value() Methode
-        - Robuste Parameter-Sammlung mit Fallback
-        """
-        try:
-            return {
-                'size': self.size_slider.get_value(),
-                'height': self.height_slider.get_value(),
-                'octaves': self.octaves_slider.get_value(),
-                'frequency': self.frequency_slider.get_value(),
-                'persistence': self.persistence_slider.get_value(),
-                'lacunarity': self.lacunarity_slider.get_value(),
-                'redistribute_power': self.redistribute_slider.get_value(),
-                'seed': self.seed_input.value()
-            }
-        except Exception as e:
-            self.error_handler.handle_parameter_error('Terrain', 'parameter_collection', e)
-            return self.terrain_manager.get_parameters()
-
-    def reset_to_defaults(self):
-        """
-        Funktionsweise: Setzt alle Parameter auf Standardwerte zurück
-        - Verwendet centralized DefaultConfig
-        - Aktualisiert UI-Elemente
-        """
-        try:
-            self.terrain_manager.reset_to_defaults()
-            default_params = self.terrain_manager.get_parameters()
-
-            # UI-Slider auf Standardwerte setzen
-            self.size_slider.set_value(default_params['size'])
-            self.height_slider.set_value(default_params['height'])
-            self.octaves_slider.set_value(default_params['octaves'])
-            self.frequency_slider.set_value(default_params['frequency'])
-            self.persistence_slider.set_value(default_params['persistence'])
-            self.lacunarity_slider.set_value(default_params['lacunarity'])
-            self.redistribute_slider.set_value(default_params['redistribute_power'])
-            self.seed_input.setValue(default_params['seed'])
-
-            self.update_preview()
-            self.error_handler.logger.info("Terrain auf Standardwerte zurückgesetzt")
-
-        except Exception as e:
-            self.error_handler.handle_parameter_error('Terrain', 'reset_defaults', e)
-
-    # Navigation Methoden (von NavigationMixin erforderlich)
-    def next_menu(self):
-        """Wechselt zum nächsten Tab (Geology)"""
-        try:
-            params = self.get_parameters()
-            self.terrain_manager.set_parameters(params)
-            self.error_handler.logger.info("Terrain Parameter gespeichert")
-
-            next_tab = TabNavigationHelper.get_next_tab('TerrainWindow')
-            if next_tab:
-                self.navigate_to_tab(next_tab[0], next_tab[1])
-        except Exception as e:
-            self.error_handler.handle_tab_navigation_error('Terrain', 'Geology', e)
-
-    def prev_menu(self):
-        """Geht zurück zum Hauptmenü (Terrain ist erster Tab)"""
-        try:
-            params = self.get_parameters()
-            self.terrain_manager.set_parameters(params)
-
-            # Direkte Navigation zum Hauptmenü
-            from gui.main_menu import MainMenuWindow
-
-            # Speichere Geometrie
-            current_geometry = self.window().geometry()
-
-            # Erstelle Hauptmenü
-            self.main_menu = MainMenuWindow()
-            self.main_menu.setGeometry(current_geometry)
-            self.main_menu.show()
-
-            # Schließe aktuelles Fenster
-            self.window().close()
-
-        except Exception as e:
-            print(f"Fehler beim Wechsel zum Hauptmenü: {e}")
-            # Fallback: Einfach schließen
-            self.window().close()
-
-    def restart_generation(self):
-        """
-        Funktionsweise: Überschreibt NavigationMixin Methode
-        - Setzt Parameter zurück statt Tab-Wechsel
-        - Bleibt auf Terrain Tab
-        """
-        self.error_handler.logger.info("Terrain neu gestartet")
-        self.reset_to_defaults()
-
-    @safe_execute('handle_parameter_error')
-    def quick_generate(self):
-        """Schnellgenerierung mit Terrain-Statistiken"""
-        params = self.get_parameters()
-        self.terrain_manager.set_parameters(params)
-        heightmap_params = self.terrain_manager.get_heightmap_params()
-        self.error_handler.logger.info(f"Terrain Schnellgenerierung: {heightmap_params}")
+        # Update Labels
+        self.height_stats.setText(f"Height: {height_min:.1f}m - {height_max:.1f}m (μ={height_mean:.1f}m)")
+        self.slope_stats.setText(f"Slope: 0° - {slope_max:.1f}° (μ={slope_mean:.1f}°)")
+        self.shadow_stats.setText(f"Shadow: {shadow_min:.2f} - 1.00 (μ={shadow_mean:.2f})")
 
 
-class TerrainWindow(QMainWindow):
+# Integration in BaseMapTab erweitern
+class BaseMapTab(QWidget):
     """
-    Funktionsweise: Hauptfenster für Terrain-Tab
-    - Verwendet optimierte Komponenten
-    - Erweiterte Styling für erste Tab-Erfahrung
+    Basis-Klasse erweitert für alle neuen Features
+    Muss hier definiert werden um Circular Import zu vermeiden
     """
 
-    def __init__(self):
+    def __init__(self, data_manager, navigation_manager, shader_manager):
         super().__init__()
-        self.error_handler = ErrorHandler()
-        self.init_ui()
 
-    @safe_execute('handle_worldstate_error')
-    def init_ui(self):
-        self.setWindowTitle("World Generator - Terrain Setup")
-        self.setGeometry(100, 100, 1500, 1000)
-        self.setMinimumSize(1500, 1000)
+        self.data_manager = data_manager
+        self.navigation_manager = navigation_manager
+        self.shader_manager = shader_manager
 
-        # Central Widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        # Auto-Simulation Setup
+        self.auto_simulation_enabled = False
+        self.auto_simulation_timer = QTimer()
+        self.auto_simulation_timer.setSingleShot(True)
+        self.auto_simulation_timer.timeout.connect(self.generate_terrain)
 
-        # Main Layout
-        main_layout = QHBoxLayout()
+        # UI Setup (70/30 Layout)
+        self.setup_common_ui()
+        self.setup_auto_simulation()
 
-        # Linke Seite - Optimierte Karte (70%)
-        self.map_canvas = TerrainMapCanvas()
-        main_layout.addWidget(self.map_canvas, 7)
+    def setup_common_ui(self):
+        """70/30 Layout Setup"""
+        layout = QHBoxLayout()
 
-        # Trennlinie
-        separator = QFrame()
-        separator.setFrameShape(QFrame.VLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        main_layout.addWidget(separator)
+        # Canvas (70%)
+        self.canvas_container = QFrame()
+        self.canvas_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        # Rechte Seite - Controls (30%)
-        self.control_panel = TerrainControlPanel(self.map_canvas)
-        self.control_panel.setMaximumWidth(350)
-        main_layout.addWidget(self.control_panel, 3)
+        # Control Panel (30%)
+        self.control_panel = QVBoxLayout()
+        control_widget = QFrame()
+        control_widget.setLayout(self.control_panel)
+        control_widget.setMaximumWidth(400)
 
-        central_widget.setLayout(main_layout)
+        # Splitter für resizable Layout
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self.canvas_container)
+        splitter.addWidget(control_widget)
+        splitter.setSizes([700, 300])  # 70/30 initial ratio
 
-        # Erweiterte Styling für Terrain
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f0f0f0;
-            }
-            QLabel {
-                color: #333;
-            }
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #cccccc;
-                border-radius: 5px;
-                margin-top: 1ex;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-            /* Spezielle Styles für Terrain Parameter */
-            QGroupBox[title="Basis-Parameter"] {
-                border-color: #27ae60;
-            }
-            QGroupBox[title="Noise-Parameter"] {
-                border-color: #8e44ad;
-            }
-            /* Slider Styling */
-            QSlider::groove:horizontal {
-                border: 1px solid #999999;
-                height: 8px;
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #B1B1B1, stop:1 #c4c4c4);
-                margin: 2px 0;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #b4b4b4, stop:1 #8f8f8f);
-                border: 1px solid #5c5c5c;
-                width: 18px;
-                margin: -2px 0;
-                border-radius: 3px;
-            }
-        """)
+        layout.addWidget(splitter)
+        self.setLayout(layout)
 
-    def resizeEvent(self, event):
-        """Behält Proportionen beim Resize bei"""
-        super().resizeEvent(event)
+        # Map Display wird von Sub-Classes erstellt
+        from gui.widgets.map_display_2d import MapDisplay2D
+        self.map_display = MapDisplay2D()
 
-    def closeEvent(self, event):
-        """Cleanup beim Schließen"""
-        if hasattr(self, 'map_canvas'):
-            self.map_canvas.cleanup()
-        super().closeEvent(event)
+        canvas_layout = QVBoxLayout()
+        canvas_layout.addWidget(self.map_display)
+        self.canvas_container.setLayout(canvas_layout)
+
+    def setup_auto_simulation(self):
+        """Auto-Simulation Controls Setup"""
+        auto_panel = QGroupBox("Auto Simulation")
+        layout = QVBoxLayout()
+
+        self.auto_simulation_checkbox = QCheckBox("Auto Update")
+        self.auto_simulation_checkbox.toggled.connect(self.toggle_auto_simulation)
+        layout.addWidget(self.auto_simulation_checkbox)
+
+        self.manual_generate_button = BaseButton("Generate Manually")
+        self.manual_generate_button.clicked.connect(self.generate_terrain)
+        layout.addWidget(self.manual_generate_button)
+
+        auto_panel.setLayout(layout)
+        self.control_panel.addWidget(auto_panel)
+
+    @pyqtSlot(bool)
+    def toggle_auto_simulation(self, enabled: bool):
+        """Toggle Auto-Simulation on/off"""
+        self.auto_simulation_enabled = enabled
+
+    def generate_terrain(self):
+        """Placeholder - wird von Sub-Classes überschrieben"""
+        pass

@@ -1,209 +1,297 @@
-#!/usr/bin/env python3
 """
-Path: MapGenerator/gui/main_menu.py
-__init__.py existiert in "gui"
+Path: gui/main_menu.py
 
-World Generator - Hauptmenü
-Entry Point für die Anwendung
+Funktionsweise: Einfaches Hauptmenü mit 4 Buttons
+- Map-Editor Button öffnet Loading Tab Dialog
+- Laden und Settings zeigen Placeholder-Nachrichten
+- Beenden schließt Anwendung direkt
+- gui_default.py enthält alle Styling-Werte wie Größen, Farben etc.
 """
 
-import sys
-import subprocess
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QLabel, QPushButton, QSpacerItem,
-                             QSizePolicy, QFrame)
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QPalette, QColor
+from PyQt5.QtWidgets import *
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
+import logging
 
+from gui.widgets.widgets import BaseButton, GradientBackgroundWidget
+from gui.config.gui_default import WindowSettings, LayoutSettings
+
+def get_error_decorators():
+    """
+    Funktionsweise: Lazy Loading von Error Handler Decorators mit Fallback
+    Aufgabe: Lädt Error Handler nur wenn verfügbar, sonst No-op Decorators
+    Return: Tuple von Decorator-Funktionen (initialization_handler, ui_navigation_handler)
+    """
+    try:
+        from gui.error_handler import initialization_handler, ui_navigation_handler
+        return initialization_handler, ui_navigation_handler
+    except ImportError:
+        # Graceful Fallback - No-op Decorators wenn Error Handler nicht verfügbar
+        def noop_decorator(*args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+        return noop_decorator, noop_decorator
+
+# Decorators global laden
+initialization_handler, ui_navigation_handler = get_error_decorators()
 
 class MainMenuWindow(QMainWindow):
-    """Hauptmenü der World Generator Anwendung"""
+    """
+    Funktionsweise: Einfaches Hauptmenü-Fenster als Entry-Point der Anwendung
+    Aufgabe: 4 Buttons für Navigation - Map-Editor, Laden, Settings, Beenden
+    Kommunikation: Öffnet Loading Tab Dialog für Map-Editor
+    """
 
     def __init__(self):
         super().__init__()
-        self.init_ui()
+        self.logger = logging.getLogger(__name__)
 
-    def init_ui(self):
-        self.setWindowTitle("World Generator")
-        self.setGeometry(200, 200, 1500, 1000)
-        self.setMinimumSize(1500, 1000)
+        # DataManager für alle Tabs erstellen
+        from gui.managers.data_manager import DataManager
+        self.data_manager = DataManager()
+        self.logger.info("DataManager created")
 
-        # Central Widget
-        central_widget = QWidget()
+        # Window Setup
+        self.setup_window()
+
+        # UI Setup
+        self.setup_ui()
+
+        self.logger.info("Main Menu initialized")
+
+    def setup_window(self):
+        """
+        Funktionsweise: Konfiguriert Hauptfenster-Eigenschaften mit gui_default
+        Aufgabe: Größe, Position, Titel aus WindowSettings
+        """
+        # Window Properties
+        self.setWindowTitle("Map Generator - Main Menu")
+
+        # Window Size aus gui_default.py
+        main_menu_settings = WindowSettings.MAIN_MENU
+        width = main_menu_settings.get("width", 800)
+        height = main_menu_settings.get("height", 600)
+        min_width = main_menu_settings.get("min_width", 600)
+        min_height = main_menu_settings.get("min_height", 400)
+
+        self.resize(width, height)
+        self.setMinimumSize(min_width, min_height)
+
+        # Center Window
+        self.center_window()
+
+        # Window Flags
+        self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint)
+
+    def center_window(self):
+        """
+        Funktionsweise: Zentriert Fenster auf dem Bildschirm
+        Aufgabe: Berechnet Bildschirmmitte und positioniert Fenster dort
+        """
+        screen = QApplication.desktop().screenGeometry()
+        window = self.geometry()
+        x = (screen.width() - window.width()) // 2
+        y = (screen.height() - window.height()) // 2
+        self.move(x, y)
+
+    def setup_ui(self):
+        """
+        Funktionsweise: Erstellt einfache UI für Hauptmenü
+        Aufgabe: Gradient-Background, Titel, 4 Buttons
+        """
+        # Central Widget mit Gradient Background
+        central_widget = GradientBackgroundWidget()
         self.setCentralWidget(central_widget)
 
         # Main Layout
         main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(LayoutSettings.MARGIN * 3, LayoutSettings.MARGIN * 3,
+                                       LayoutSettings.MARGIN * 3, LayoutSettings.MARGIN * 3)
+        main_layout.setSpacing(LayoutSettings.MARGIN * 2)
 
-        # Titel
-        title_label = QLabel("World Generator")
-        title_label.setAlignment(Qt.AlignCenter)
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 36px;
-                font-weight: bold;
-                color: #2c3e50;
-                margin: 30px;
-            }
-        """)
+        # Logo/Title Section
+        title_section = self.create_title_section()
+        main_layout.addWidget(title_section)
 
-        # Untertitel
-        subtitle_label = QLabel("Erstelle deine eigene Fantasywelt")
-        subtitle_label.setAlignment(Qt.AlignCenter)
-        subtitle_label.setStyleSheet("""
-            QLabel {
-                font-size: 16px;
-                color: #7f8c8d;
-                margin-bottom: 40px;
-            }
-        """)
+        # Button Section
+        button_section = self.create_button_section()
+        main_layout.addWidget(button_section)
 
-        # Button Container
-        button_container = QWidget()
-        button_layout = QVBoxLayout()
-        button_container.setMaximumWidth(300)
-        button_container.setStyleSheet("""
-            QWidget {
-                background-color: #ecf0f1;
-                border-radius: 10px;
-                padding: 20px;
-            }
-        """)
-
-        # Buttons
-        self.new_map_btn = QPushButton("Neue Karte")
-        self.new_map_btn.setStyleSheet(self.get_button_style("#27ae60"))
-        self.new_map_btn.clicked.connect(self.new_map)
-
-        self.load_game_btn = QPushButton("Spiel laden")
-        self.load_game_btn.setStyleSheet(self.get_button_style("#95a5a6"))
-        self.load_game_btn.clicked.connect(self.load_game)
-        self.load_game_btn.setEnabled(False)  # Nicht funktionierend
-
-        self.settings_btn = QPushButton("Einstellungen")
-        self.settings_btn.setStyleSheet(self.get_button_style("#95a5a6"))
-        self.settings_btn.clicked.connect(self.settings)
-        self.settings_btn.setEnabled(False)  # Nicht funktionierend
-
-
-        self.exit_btn = QPushButton("Verlassen")
-        self.exit_btn.setStyleSheet(self.get_button_style("#e74c3c"))
-        self.exit_btn.clicked.connect(self.exit_app)
-
-        # Buttons zu Layout hinzufügen
-        button_layout.addWidget(self.new_map_btn)
-        button_layout.addWidget(self.load_game_btn)
-        button_layout.addWidget(self.settings_btn)
-        button_layout.addWidget(self.exit_btn)
-        button_container.setLayout(button_layout)
-
-        # Spacer für zentrierte Ausrichtung
-        top_spacer = QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding)
-        bottom_spacer = QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding)
-
-        # Layout zusammensetzen
-        main_layout.addItem(top_spacer)
-        main_layout.addWidget(title_label)
-        main_layout.addWidget(subtitle_label)
-
-        # Button Container zentrieren
-        button_container_layout = QHBoxLayout()
-        button_container_layout.addItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        button_container_layout.addWidget(button_container)
-        button_container_layout.addItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
-
-        main_layout.addLayout(button_container_layout)
-        main_layout.addItem(bottom_spacer)
+        # Spacer für bessere Verteilung
+        main_layout.addStretch()
 
         central_widget.setLayout(main_layout)
 
-        # Hintergrund-Styling
-        self.setStyleSheet("""
-            QMainWindow {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #bdc3c7, stop:1 #ecf0f1);
+    def create_title_section(self) -> QWidget:
+        """
+        Funktionsweise: Erstellt Title/Logo Sektion
+        Return: QWidget mit Logo und Titel
+        """
+        section = QWidget()
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignCenter)
+
+        # Application Title
+        title_label = QLabel("MAP GENERATOR")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 48px;
+                font-weight: bold;
+                color: #2c3e50;
+                margin-bottom: 10px;
             }
         """)
+        layout.addWidget(title_label)
 
-    def get_button_style(self, color):
-        """Einheitlicher Button-Style"""
-        return f"""
-            QPushButton {{
-                background-color: {color};
-                color: white;
-                border: none;
-                padding: 15px;
-                font-size: 14px;
-                font-weight: bold;
-                border-radius: 8px;
-                margin: 5px;
-            }}
-            QPushButton:hover {{
-                background-color: {self.darken_color(color)};
-            }}
-            QPushButton:pressed {{
-                background-color: {self.darken_color(color, 0.2)};
-            }}
-            QPushButton:disabled {{
-                background-color: #bdc3c7;
-                color: #7f8c8d;
-            }}
+        # Subtitle
+        subtitle_label = QLabel("Professional Terrain & World Generation Suite")
+        subtitle_label.setAlignment(Qt.AlignCenter)
+        subtitle_label.setStyleSheet("""
+            QLabel {
+                font-size: 18px;
+                color: #34495e;
+                font-style: italic;
+            }
+        """)
+        layout.addWidget(subtitle_label)
+
+        section.setLayout(layout)
+        return section
+
+    def create_button_section(self) -> QWidget:
         """
+        Funktionsweise: Erstellt Button-Sektion mit 4 Hauptbuttons
+        Return: QWidget mit allen Hauptmenü-Buttons (Styling aus gui_default)
+        """
+        section = QWidget()
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignCenter)
+        layout.setSpacing(LayoutSettings.PADDING)
 
-    def darken_color(self, hex_color, factor=0.1):
-        """Verdunkelt eine Hex-Farbe"""
-        # Vereinfachte Verdunkelung - für Produktionscode würde man QColor verwenden
-        return hex_color.replace('#', '#AA')  # Placeholder
+        # Button Container für maximale Breite
+        button_container = QWidget()
+        button_container.setMaximumWidth(300)
+        button_layout = QVBoxLayout()
+        button_layout.setSpacing(LayoutSettings.PADDING)
 
-    def new_map(self):
-        """Startet den Terrain Editor"""
-        print("Starte Terrain Editor...")
+        # Map-Editor Button (funktional)
+        self.map_editor_button = BaseButton("Map-Editor", "primary")
+        self.map_editor_button.setMinimumHeight(
+            LayoutSettings.BUTTON_HEIGHT + 15)  # Etwas höher für Hauptbutton
+        self.map_editor_button.clicked.connect(self.start_map_editor)
+        button_layout.addWidget(self.map_editor_button)
 
-        # Zeige Loading-Feedback
-        self.setEnabled(False)
-        self.setWindowTitle("World Generator - Lade Terrain Editor...")
+        # Load Button (placeholder)
+        self.load_button = BaseButton("Laden", "secondary")
+        self.load_button.setMinimumHeight(LayoutSettings.BUTTON_HEIGHT + 10)
+        self.load_button.clicked.connect(self.show_placeholder_message)
+        button_layout.addWidget(self.load_button)
 
-        # Verarbeite Events damit UI responsive bleibt
-        from PyQt5.QtWidgets import QApplication
-        QApplication.processEvents()
+        # Settings Button (placeholder)
+        self.settings_button = BaseButton("Settings", "secondary")
+        self.settings_button.setMinimumHeight(LayoutSettings.BUTTON_HEIGHT + 10)
+        self.settings_button.clicked.connect(self.show_placeholder_message)
+        button_layout.addWidget(self.settings_button)
 
+        # Exit Button
+        self.exit_button = BaseButton("Beenden", "danger")
+        self.exit_button.setMinimumHeight(LayoutSettings.BUTTON_HEIGHT + 10)
+        self.exit_button.clicked.connect(self.exit_application)
+        button_layout.addWidget(self.exit_button)
+
+        button_container.setLayout(button_layout)
+
+        # Container in Section Layout
+        container_layout = QHBoxLayout()
+        container_layout.addStretch()
+        container_layout.addWidget(button_container)
+        container_layout.addStretch()
+
+        layout.addLayout(container_layout)
+        section.setLayout(layout)
+        return section
+
+    #@ui_navigation_handler
+    def start_map_editor(self):
+        """
+        Funktionsweise: Öffnet Loading Tab Dialog für Map-Editor
+        Aufgabe: Loading Tab als Dialog starten, kein weiterer Setup
+        """
         try:
-            # Pre-importiere matplotlib um Cache zu nutzen
-            import matplotlib
-            matplotlib.use('Qt5Agg')  # Backend früh setzen
+            self.logger.info("Starting Map Editor...")
 
-            from gui.tabs.terrain_tab import TerrainWindow
-            from gui.world_state import WorldState
+            # Loading Tab als Dialog starten
+            from gui.tabs.loading_tab import LoadingTab
+            loading_dialog = LoadingTab(data_manager=self.data_manager, parent=self)
+            loading_dialog.exec_()
 
-            world_state = WorldState()
-            world_state.set_window_geometry(self.geometry())
+            self.logger.info("Loading Tab completed")
 
-            self.terrain_window = TerrainWindow()
-
-            # Übernehme Größe und zeige
-            self.terrain_window.setGeometry(self.geometry())
-            self.terrain_window.show()
-            self.close()
+        except ImportError as e:
+            self.show_error_message("Import Error", f"Could not load Loading Tab:\n{str(e)}")
+            self.logger.error(f"Loading Tab import failed: {e}")
 
         except Exception as e:
-            self.setEnabled(True)
-            self.setWindowTitle("World Generator")
-            print(f"Fehler beim Starten des Terrain Editors: {e}")
-            import traceback
-            traceback.print_exc()
+            self.show_error_message("Error", f"Failed to start Map Editor:\n{str(e)}")
+            self.logger.error(f"Map Editor startup failed: {e}")
 
-    def load_game(self):
-        """Lädt ein gespeichertes Spiel (nicht implementiert)"""
-        print("Spiel laden - nicht implementiert")
+    def show_placeholder_message(self):
+        """
+        Funktionsweise: Zeigt Placeholder-Message für nicht implementierte Features
+        Aufgabe: User-freundliche Info für Laden/Settings Buttons
+        """
+        sender = self.sender()
+        button_text = sender.text() if sender else "Feature"
 
-    def settings(self):
-        """Öffnet die Einstellungen (nicht implementiert)"""
-        print("Einstellungen - nicht implementiert")
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle(f"{button_text} - In Development")
+        msg_box.setText(f"{button_text} ist noch nicht implementiert.")
 
-    def exit_app(self):
-        """Beendet die Anwendung"""
+        feature_info = {
+            "Laden": "Hier können Sie gespeicherte Welten laden.\nFormate: JSON, PNG-Sets",
+            "Settings": "Hier können Sie Anwendungseinstellungen ändern.\nSprache, Performance, Pfade"
+        }
+
+        info_text = feature_info.get(button_text,
+                                     "Diese Funktion wird in einer zukünftigen Version verfügbar sein.")
+        msg_box.setInformativeText(info_text)
+
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec_()
+
+        self.logger.info(f"Placeholder message shown for '{button_text}'")
+
+    def exit_application(self):
+        """
+        Funktionsweise: Beendet Anwendung direkt ohne Bestätigung
+        Aufgabe: Einfaches QApplication.quit()
+        """
+        self.logger.info("Application exit initiated")
         QApplication.quit()
 
-    def resizeEvent(self, event):
-        """Behält Proportionen beim Resize bei"""
-        super().resizeEvent(event)
+    def show_error_message(self, title: str, message: str):
+        """
+        Funktionsweise: Zeigt standardisierte Error-Message
+        Parameter: title (str), message (str) - Titel und Nachricht des Fehlers
+        Aufgabe: Einheitliche Error-Darstellung
+        """
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(message)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec_()
+
+    def closeEvent(self, event):
+        """
+        Funktionsweise: Beendet Anwendung bei X-Button Klick
+        Aufgabe: Direkte Beendigung ohne Bestätigung
+        Parameter: event (QCloseEvent)
+        """
+        self.exit_application()
+        event.accept()

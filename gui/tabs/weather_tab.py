@@ -1,594 +1,919 @@
-#!/usr/bin/env python3
 """
-Path: MapGenerator/gui/tabs/weather_tab.py
-__init__.py existiert in "tabs"
+Path: gui/tabs/weather_tab.py
 
-World Generator GUI - Weather Tab (Vollständig Refactored)
-Tab 4: Temperatur und Regensystem
-Alle Verbesserungen aus Schritt 1-3 implementiert
+Funktionsweise: Wetter-System mit 3D Wind-Visualization und vollständiger Core-Integration
+- Climate-Modeling basierend auf Terrain (Orographic Effects)
+- 3D Wind-Vector Display über Heightmap
+- Live Climate-Classification Display
+- Temperature/Precipitation Field Generation mit atmosphärischen Effekten
+- GPU-Shader Integration für Berg-Wind-Simulation
+- Input: heightmap, shade_map, soil_moist_map
+- Output: wind_map, temp_map, precip_map, humid_map
 """
 
-import sys
+from PyQt5.QtWidgets import *
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
 import numpy as np
-import matplotlib.pyplot as plt
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
-                             QVBoxLayout, QLabel, QPushButton,
-                             QFrame, QSpacerItem, QSizePolicy,
-                             QCheckBox, QGroupBox)
-from PyQt5.QtCore import Qt
+import logging
 
-from gui.widgets.parameter_slider import ParameterSlider
-from gui.widgets.navigation_mixin import NavigationMixin, TabNavigationHelper
-from gui.utils.error_handler import ErrorHandler, safe_execute, TabErrorContext
-from gui.widgets.map_canvas import MultiPlotCanvas
-from gui.utils.performance_utils import debounced_method, performance_tracked
-try:
-    from gui.managers.parameter_manager import WorldParameterManager
-except ImportError:
-    from gui.world_state import WorldState as WorldParameterManager
+from .base_tab import BaseMapTab
+from gui.config.value_default import WEATHER, get_parameter_config, validate_parameter_set, VALIDATION_RULES
+from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, MultiDependencyStatusWidget
+from core.weather_generator import (
+    WeatherSystemGenerator, TemperatureCalculator, WindFieldSimulator,
+    PrecipitationSystem, AtmosphericMoistureManager
+)
 
-class WeatherMapCanvas(MultiPlotCanvas):
+def get_weather_error_decorators():
     """
-    Funktionsweise: Weather Map Canvas mit Multi-Plot Optimierung
-    - Erbt von OptimizedMultiPlotCanvas für 2 Subplots
-    - Performance-optimiert für komplexe Wetter-Visualisierung
-    - Intelligente Colorbar-Verwaltung
+    Funktionsweise: Lazy Loading von Weather Tab Error Decorators
+    Aufgabe: Lädt Core-Generation, GPU-Shader und Dependency Decorators
+    Return: Tuple von Decorator-Funktionen
     """
+    try:
+        from gui.error_handler import core_generation_handler, gpu_shader_handler, dependency_handler
+        return core_generation_handler, gpu_shader_handler, dependency_handler
+    except ImportError:
+        def noop_decorator(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+        return noop_decorator, noop_decorator, noop_decorator
 
-    def __init__(self):
-        super().__init__('weather_maps', subplot_config=(1, 2),
-                         figsize=(14, 6), titles=['Temperatur', 'Niederschlag'])
-        self.temp_ax = None
-        self.rain_ax = None
+core_generation_handler, gpu_shader_handler, dependency_handler = get_weather_error_decorators()
 
-    def setup_axes(self):
-        """Überschreibt setup_axes für Weather-spezifische Konfiguration"""
-        super().setup_axes()
-        if len(self.axes) >= 2:
-            self.temp_ax = self.axes[0]
-            self.rain_ax = self.axes[1]
-
-            # Spezielle Konfiguration für Wetter-Achsen
-            for ax in self.axes:
-                ax.set_xlim(0, 100)
-                ax.set_ylim(0, 100)
-                ax.set_xlabel('X (West ← → Ost)')
-                ax.set_ylabel('Y (Süd ← → Nord)')
-                ax.set_aspect('equal')
-                ax.grid(True, alpha=0.3)
-
-    @performance_tracked("Weather_Rendering")
-    def _render_map(self, max_humidity, rain_amount, evaporation,
-                     wind_speed, wind_terrain_influence, avg_temperature):
-        """
-        Funktionsweise: Rendert beide Wetter-Karten mit Error Handling
-        - Temperatur- und Niederschlagskarte parallel
-        - Robuste Fehlerbehandlung für komplexe Berechnungen
-        """
-        with TabErrorContext('Weather', 'Dual Map Rendering'):
-            self.clear_and_setup()
-
-            if not self.temp_ax or not self.rain_ax:
-                self.error_handler.logger.error("Weather axes nicht korrekt initialisiert")
-                return
-
-            # Koordinaten-Mesh generieren
-            x = np.linspace(0, 100, 50)
-            y = np.linspace(0, 100, 50)
-            X, Y = np.meshgrid(x, y)
-
-            # === TEMPERATUR-KARTE ===
-            self._render_temperature_map(X, Y, avg_temperature, wind_speed, wind_terrain_influence)
-
-            # === NIEDERSCHLAGS-KARTE ===
-            self._render_precipitation_map(X, Y, max_humidity, rain_amount, evaporation,
-                                           wind_speed, wind_terrain_influence)
-
-            # Layout optimieren
-            self.figure.tight_layout()
-            self.draw()
-
-    def _render_temperature_map(self, X, Y, avg_temperature, wind_speed, wind_terrain_influence):
-        """
-        Funktionsweise: Rendert Temperatur-Karte
-        - Nord-Süd Temperaturgradient
-        - Höhen- und Wind-Einflüsse
-        """
-        try:
-            # Basis-Temperatur mit Nord-Süd Gradient
-            base_temp = avg_temperature / 30.0  # Normalisiert auf 0-1
-            lat_gradient = np.linspace(0.3, 1.0, 50)  # Kälter im Norden
-            temp_map = np.zeros_like(X)
-
-            for i in range(50):
-                temp_map[i, :] = base_temp * lat_gradient[i]
-
-            # Höhenbasierte Abkühlung (simuliert)
-            height_effect = np.sin(X * 0.1) * np.cos(Y * 0.1) * 0.3
-            temp_map -= height_effect
-
-            # Wind-Einfluss auf Temperatur
-            wind_effect = np.sin(X * 0.05 + wind_speed * 0.1) * wind_terrain_influence * 0.02
-            temp_map += wind_effect
-
-            # Temperatur-Plot mit robuster Colorbar
-            temp_contour = self.temp_ax.contourf(X, Y, temp_map, levels=15, cmap='RdYlBu_r', alpha=0.8)
-            self.temp_ax.contour(X, Y, temp_map, levels=10, colors='black', alpha=0.4, linewidths=0.5)
-
-            # Temperatur-spezifische Labels
-            temp_range = f"{avg_temperature - 15:.0f}°C bis {avg_temperature + 15:.0f}°C"
-            self.temp_ax.set_title(f'Temperatur ({temp_range})')
-
-            # Colorbar mit Fehlerbehandlung
-            try:
-                cbar = self.figure.colorbar(temp_contour, ax=self.temp_ax, fraction=0.046, pad=0.04)
-                cbar.set_label('Relative Temperatur', rotation=270, labelpad=15)
-            except Exception as cb_error:
-                self.error_handler.logger.warning(f"Temperatur Colorbar Fehler: {cb_error}")
-
-        except Exception as e:
-            self.error_handler.logger.error(f"Temperatur-Rendering Fehler: {e}")
-            self.temp_ax.text(0.5, 0.5, 'Temperatur\n(Rendering-Fehler)',
-                              transform=self.temp_ax.transAxes, ha='center', va='center')
-
-    def _render_precipitation_map(self, X, Y, max_humidity, rain_amount, evaporation,
-                                  wind_speed, wind_terrain_influence):
-        """
-        Funktionsweise: Rendert Niederschlags-Karte
-        - Orographische Niederschläge
-        - Wind-Transport und Verdunstung
-        - Wind-Vektoren
-        """
-        try:
-            # Orographische Niederschläge (Windrichtung West-Ost)
-            oro_rain = np.zeros_like(X)
-
-            for i in range(50):
-                # Feuchte Luft von Westen
-                moisture = max_humidity * (1.0 - i / 50.0 * 0.7) / 100.0
-
-                # Terrain-Einfluss (Steigungsregen)
-                terrain_lift = np.sin(Y[:, i] * 0.08) * wind_terrain_influence / 10.0
-                oro_rain[:, i] = moisture * (0.5 + terrain_lift) * rain_amount / 100.0
-
-            # Wind-Transport
-            wind_transport = np.sin(X * 0.03 + wind_speed * 0.05) * np.cos(Y * 0.04)
-            oro_rain += wind_transport * rain_amount * 0.003
-
-            # Verdunstungs-Einfluss
-            evap_effect = np.sin(X * 0.15) * np.cos(Y * 0.15) * evaporation / 10.0
-            oro_rain -= evap_effect * 0.02
-            oro_rain = np.clip(oro_rain, 0, None)
-
-            # Niederschlag-Plot
-            rain_contour = self.rain_ax.contourf(X, Y, oro_rain, levels=15, cmap='Blues', alpha=0.8)
-            self.rain_ax.contour(X, Y, oro_rain, levels=8, colors='darkblue', alpha=0.6, linewidths=0.5)
-
-            # Windvektoren hinzufügen
-            self._add_wind_vectors(wind_speed, wind_terrain_influence)
-
-            # Niederschlag-spezifische Labels
-            climate = self._get_climate_info(max_humidity, rain_amount)
-            self.rain_ax.set_title(f'Niederschlag ({climate})')
-
-            # Colorbar mit Fehlerbehandlung
-            try:
-                cbar = self.figure.colorbar(rain_contour, ax=self.rain_ax, fraction=0.046, pad=0.04)
-                cbar.set_label('Niederschlag (rel.)', rotation=270, labelpad=15)
-            except Exception as cb_error:
-                self.error_handler.logger.warning(f"Niederschlag Colorbar Fehler: {cb_error}")
-
-        except Exception as e:
-            self.error_handler.logger.error(f"Niederschlag-Rendering Fehler: {e}")
-            self.rain_ax.text(0.5, 0.5, 'Niederschlag\n(Rendering-Fehler)',
-                              transform=self.rain_ax.transAxes, ha='center', va='center')
-
-    def _add_wind_vectors(self, wind_speed, wind_terrain_influence):
-        """Fügt Wind-Vektoren zur Niederschlagskarte hinzu"""
-        try:
-            step = 8
-            X_wind = np.arange(0, 100, step)
-            Y_wind = np.arange(0, 100, step)
-            X_wind, Y_wind = np.meshgrid(X_wind, Y_wind)
-
-            # Wind-Richtung und -Stärke
-            wind_x = np.cos(wind_speed * 0.1) * wind_speed / 100.0
-            wind_y = np.sin(wind_speed * 0.1) * wind_speed / 200.0
-
-            U_wind = np.full_like(X_wind, wind_x)
-            V_wind = np.full_like(Y_wind, wind_y)
-
-            self.rain_ax.quiver(X_wind, Y_wind, U_wind, V_wind,
-                                alpha=0.7, color='darkgreen', scale=0.1, width=0.003)
-        except Exception as e:
-            self.error_handler.logger.warning(f"Wind-Vektoren Fehler: {e}")
-
-    def _get_climate_info(self, max_humidity, rain_amount):
-        """Gibt Klima-Information basierend auf Parametern zurück"""
-        if max_humidity > 80 and rain_amount > 7:
-            return "Sehr feucht"
-        elif max_humidity > 60 and rain_amount > 5:
-            return "Gemäßigt"
-        elif max_humidity < 40 or rain_amount < 3:
-            return "Trocken"
-        else:
-            return "Moderat"
-
-
-class WeatherControlPanel(QWidget, NavigationMixin):
+class WeatherTab(BaseMapTab):
     """
-    Funktionsweise: Weather Control Panel mit allen Verbesserungen
-    - Neue ParameterSlider (Schritt 1)
-    - WorldParameterManager Integration (Schritt 2)
-    - Performance-Optimierung mit Debouncing (Schritt 3)
-    - Klima-Klassifizierung und intelligente Validierung
+    Funktionsweise: Hauptklasse für dynamisches Wetter- und Feuchtigkeitssystem
+    Aufgabe: Koordiniert alle Weather-Core-Module und GPU-Shader Integration
+    Input: heightmap, shade_map, soil_moist_map für orographic effects
+    Output: wind_map, temp_map, precip_map, humid_map für nachfolgende Generatoren
     """
 
-    def __init__(self, map_canvas):
-        super().__init__()
-        self.map_canvas = map_canvas
-        self.error_handler = ErrorHandler()
+    def __init__(self, data_manager, navigation_manager, shader_manager):
+        super().__init__(data_manager, navigation_manager, shader_manager)
+        self.logger = logging.getLogger(__name__)
 
-        # Verwende neuen WorldParameterManager
-        self.world_manager = WorldParameterManager()
-        self.weather_manager = self.world_manager.weather
+        # Core-Generator Instanzen
+        self.weather_system = WeatherSystemGenerator()
+        self.temperature_calculator = TemperatureCalculator()
+        self.wind_simulator = WindFieldSimulator()
+        self.precipitation_system = PrecipitationSystem()
+        self.moisture_manager = AtmosphericMoistureManager()
 
-        self.init_ui()
+        # Parameter und State
+        self.current_parameters = {}
+        self.weather_simulation_active = False
 
-    def init_ui(self):
+        # Setup UI
+        self.setup_weather_ui()
+        self.setup_dependency_checking()
+        self.setup_shader_integration()
+
+        # Initial Load
+        self.load_default_parameters()
+        self.check_input_dependencies()
+
+    def setup_weather_ui(self):
+        """
+        Funktionsweise: Erstellt komplette UI für Weather-System
+        Aufgabe: Parameter, Climate-Preview, 3D-Wind-Visualization, Performance-Monitor
+        """
+        # Parameter Panel
+        self.parameter_panel = self.create_weather_parameter_panel()
+        self.control_panel.addWidget(self.parameter_panel)
+
+        # Climate Statistics
+        self.climate_stats = ClimateStatisticsWidget()
+        self.control_panel.addWidget(self.climate_stats)
+
+        # Visualization Controls
+        self.visualization_controls = self.create_weather_visualization_controls()
+        self.control_panel.addWidget(self.visualization_controls)
+
+        # Weather Shader Performance
+        self.shader_performance = WeatherShaderPerformanceWidget(self.shader_manager)
+        self.control_panel.addWidget(self.shader_performance)
+
+        # Dependencies und Navigation
+        self.setup_input_status()
+        self.setup_navigation()
+
+    def create_weather_parameter_panel(self) -> QGroupBox:
+        """
+        Funktionsweise: Erstellt Parameter-Panel mit allen Weather-Parametern
+        Aufgabe: Alle 6 Parameter aus value_default.WEATHER strukturiert
+        Return: QGroupBox mit Parameter-Slidern
+        """
+        panel = QGroupBox("Weather Parameters")
         layout = QVBoxLayout()
 
-        # Titel
-        title = QLabel("Temperatur & Regen")
-        title.setStyleSheet("font-size: 16px; font-weight: bold; margin: 10px;")
-        layout.addWidget(title)
+        self.parameter_sliders = {}
 
-        # Auto-Simulation Control
-        self.setup_simulation_controls(layout)
-
-        # Parameter Gruppen
-        self.setup_precipitation_parameters(layout)
-        self.setup_wind_parameters(layout)
-        self.setup_temperature_parameters(layout)
-
-        # Klima-Information
-        self.setup_climate_info(layout)
-
-        # Spacer
-        layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
-
-        # Navigation mit Mixin
-        self.setup_navigation(layout, show_prev=True, show_next=True,
-                              prev_text="Zurück", next_text="Weiter")
-
-        self.setLayout(layout)
-
-        # Initial preview
-        self.update_preview()
-
-    def setup_simulation_controls(self, layout):
-        """Erstellt Auto-Simulation Controls"""
-        sim_control_layout = QHBoxLayout()
-
-        self.auto_simulate_checkbox = QCheckBox("Automat. Simulieren")
-        self.auto_simulate_checkbox.setChecked(self.world_manager.ui_state.get_auto_simulate())
-        self.auto_simulate_checkbox.stateChanged.connect(self.on_auto_simulate_changed)
-
-        self.simulate_now_btn = QPushButton("Jetzt Simulieren")
-        self.simulate_now_btn.setStyleSheet(
-            "QPushButton { background-color: #FF9800; color: white; font-weight: bold; padding: 8px; }")
-        self.simulate_now_btn.clicked.connect(self.simulate_now)
-        self.simulate_now_btn.setEnabled(not self.world_manager.ui_state.get_auto_simulate())
-
-        sim_control_widget = QWidget()
-        sim_control_layout.addWidget(self.auto_simulate_checkbox)
-        sim_control_layout.addWidget(self.simulate_now_btn)
-        sim_control_widget.setLayout(sim_control_layout)
-        layout.addWidget(sim_control_widget)
-
-    def setup_precipitation_parameters(self, layout):
-        """Erstellt Niederschlag-Parameter"""
-        rain_group = QGroupBox("Niederschlagssystem")
-        rain_layout = QVBoxLayout()
-
-        params = self.weather_manager.get_parameters()
-
-        self.max_humidity_slider = ParameterSlider("Max. Luftfeuchtigkeit", 30, 100,
-                                                   params['max_humidity'], suffix="%")
-        self.rain_amount_slider = ParameterSlider("Regenmenge", 1.0, 10.0,
-                                                  params['rain_amount'], decimals=1)
-        self.evaporation_slider = ParameterSlider("Verdunstung", 0.0, 5.0,
-                                                  params['evaporation'], decimals=1)
-
-        rain_sliders = [self.max_humidity_slider, self.rain_amount_slider, self.evaporation_slider]
-
-        for slider in rain_sliders:
-            rain_layout.addWidget(slider)
-            slider.valueChanged.connect(self.on_parameter_changed)
-
-        rain_group.setLayout(rain_layout)
-        layout.addWidget(rain_group)
-
-    def setup_wind_parameters(self, layout):
-        """Erstellt Wind-Parameter"""
-        wind_group = QGroupBox("Windsystem")
-        wind_layout = QVBoxLayout()
-
-        params = self.weather_manager.get_parameters()
-
-        self.wind_speed_slider = ParameterSlider("Windgeschwindigkeit", 0.0, 20.0,
-                                                 params['wind_speed'], decimals=1, suffix="m/s")
-        self.wind_terrain_slider = ParameterSlider("Wind-Terrain Einfluss", 0.0, 10.0,
-                                                   params['wind_terrain_influence'], decimals=1)
-
-        wind_sliders = [self.wind_speed_slider, self.wind_terrain_slider]
-
-        for slider in wind_sliders:
-            wind_layout.addWidget(slider)
-            slider.valueChanged.connect(self.on_parameter_changed)
-
-        wind_group.setLayout(wind_layout)
-        layout.addWidget(wind_group)
-
-    def setup_temperature_parameters(self, layout):
-        """Erstellt Temperatur-Parameter"""
-        temp_group = QGroupBox("Temperatursystem")
+        # Temperature Parameters
+        temp_group = QGroupBox("Temperature System")
         temp_layout = QVBoxLayout()
 
-        params = self.weather_manager.get_parameters()
+        temp_params = ["air_temp_entry", "solar_power", "altitude_cooling"]
+        for param_name in temp_params:
+            param_config = get_parameter_config("weather", param_name)
 
-        self.avg_temperature_slider = ParameterSlider("Durchschnittstemperatur", -10, 40,
-                                                      params['avg_temperature'], suffix="°C")
+            slider = ParameterSlider(
+                label=param_name.replace("_", " ").title(),
+                min_val=param_config["min"],
+                max_val=param_config["max"],
+                default_val=param_config["default"],
+                step=param_config.get("step", 1),
+                suffix=param_config.get("suffix", "")
+            )
 
-        temp_layout.addWidget(self.avg_temperature_slider)
-        self.avg_temperature_slider.valueChanged.connect(self.on_parameter_changed)
+            slider.valueChanged.connect(self.on_parameter_changed)
+            self.parameter_sliders[param_name] = slider
+            temp_layout.addWidget(slider)
 
         temp_group.setLayout(temp_layout)
         layout.addWidget(temp_group)
 
-    def setup_climate_info(self, layout):
-        """Erstellt Klima-Informations-Panel"""
-        climate_group = QGroupBox("Klima-Klassifikation")
-        climate_layout = QVBoxLayout()
+        # Wind System Parameters
+        wind_group = QGroupBox("Wind System")
+        wind_layout = QVBoxLayout()
 
-        self.climate_label = QLabel("Gemäßigt")
-        self.climate_label.setStyleSheet("""
-            QLabel {
-                background-color: #e8f4f8;
-                border: 2px solid #3498db;
-                border-radius: 8px;
-                padding: 10px;
-                font-size: 12px;
-                font-weight: bold;
-                color: #2c3e50;
-            }
-        """)
-        self.climate_label.setAlignment(Qt.AlignCenter)
+        wind_params = ["thermic_effect", "wind_speed_factor", "terrain_factor"]
+        for param_name in wind_params:
+            param_config = get_parameter_config("weather", param_name)
 
-        climate_layout.addWidget(self.climate_label)
-        climate_group.setLayout(climate_layout)
-        layout.addWidget(climate_group)
+            slider = ParameterSlider(
+                label=param_name.replace("_", " ").title(),
+                min_val=param_config["min"],
+                max_val=param_config["max"],
+                default_val=param_config["default"],
+                step=param_config.get("step", 0.1),
+                suffix=param_config.get("suffix", "")
+            )
 
-    def on_auto_simulate_changed(self, state):
-        """Auto-Simulation Checkbox geändert"""
-        is_checked = state == 2
-        self.world_manager.ui_state.set_auto_simulate(is_checked)
+            slider.valueChanged.connect(self.on_parameter_changed)
+            self.parameter_sliders[param_name] = slider
+            wind_layout.addWidget(slider)
 
-        if is_checked:
-            self.error_handler.logger.info("Weather Auto-Simulation aktiviert")
-            self.simulate_now_btn.setEnabled(False)
-            self.update_preview()
-        else:
-            self.error_handler.logger.info("Weather Auto-Simulation deaktiviert")
-            self.simulate_now_btn.setEnabled(True)
+        wind_group.setLayout(wind_layout)
+        layout.addWidget(wind_group)
 
-    @debounced_method(300)  # Längeres Debouncing für komplexe Weather-Berechnungen
+        panel.setLayout(layout)
+        return panel
+
+    def create_weather_visualization_controls(self) -> QGroupBox:
+        """
+        Funktionsweise: Erstellt Controls für Weather-Visualization
+        Aufgabe: Switcher zwischen allen 4 Weather-Output-Maps mit 3D-Features
+        Return: QGroupBox mit Visualization-Controls
+        """
+        panel = QGroupBox("Weather Visualization")
+        layout = QVBoxLayout()
+
+        # Display Mode Selection
+        self.display_mode = QButtonGroup()
+
+        self.temperature_radio = QRadioButton("Temperature Map")
+        self.temperature_radio.setChecked(True)
+        self.temperature_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.temperature_radio, 0)
+        layout.addWidget(self.temperature_radio)
+
+        self.precipitation_radio = QRadioButton("Precipitation Map")
+        self.precipitation_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.precipitation_radio, 1)
+        layout.addWidget(self.precipitation_radio)
+
+        self.humidity_radio = QRadioButton("Humidity Map")
+        self.humidity_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.humidity_radio, 2)
+        layout.addWidget(self.humidity_radio)
+
+        self.wind_field_radio = QRadioButton("Wind Field")
+        self.wind_field_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.wind_field_radio, 3)
+        layout.addWidget(self.wind_field_radio)
+
+        # 3D Wind Visualization Controls
+        wind_3d_group = QGroupBox("3D Wind Visualization")
+        wind_3d_layout = QVBoxLayout()
+
+        self.wind_vectors_3d_cb = QCheckBox("3D Wind Vectors")
+        self.wind_vectors_3d_cb.toggled.connect(self.toggle_3d_wind_vectors)
+        wind_3d_layout.addWidget(self.wind_vectors_3d_cb)
+
+        # Wind Vector Density Slider
+        self.wind_density_slider = ParameterSlider(
+            label="Vector Density",
+            min_val=1,
+            max_val=20,
+            default_val=5,
+            step=1,
+            suffix=" vectors/area"
+        )
+        self.wind_density_slider.valueChanged.connect(self.update_wind_vector_density)
+        wind_3d_layout.addWidget(self.wind_density_slider)
+
+        # Wind Vector Scale Slider
+        self.wind_scale_slider = ParameterSlider(
+            label="Vector Scale",
+            min_val=0.1,
+            max_val=5.0,
+            default_val=1.0,
+            step=0.1,
+            suffix="x"
+        )
+        self.wind_scale_slider.valueChanged.connect(self.update_wind_vector_scale)
+        wind_3d_layout.addWidget(self.wind_scale_slider)
+
+        wind_3d_group.setLayout(wind_3d_layout)
+        layout.addWidget(wind_3d_group)
+
+        # Terrain and Overlay Controls
+        overlay_group = QGroupBox("Overlays")
+        overlay_layout = QVBoxLayout()
+
+        self.terrain_3d_cb = QCheckBox("Show 3D Terrain")
+        self.terrain_3d_cb.toggled.connect(self.toggle_3d_terrain)
+        overlay_layout.addWidget(self.terrain_3d_cb)
+
+        self.contour_lines_cb = QCheckBox("Show Contour Lines")
+        self.contour_lines_cb.toggled.connect(self.toggle_contour_lines)
+        overlay_layout.addWidget(self.contour_lines_cb)
+
+        self.orographic_effects_cb = QCheckBox("Highlight Orographic Effects")
+        self.orographic_effects_cb.toggled.connect(self.toggle_orographic_effects)
+        overlay_layout.addWidget(self.orographic_effects_cb)
+
+        overlay_group.setLayout(overlay_layout)
+        layout.addWidget(overlay_group)
+
+        panel.setLayout(layout)
+        return panel
+
+    def setup_dependency_checking(self):
+        """
+        Funktionsweise: Setup für Input-Dependency Checking
+        Aufgabe: Überwacht Required Dependencies für Weather-System
+        """
+        # Required Dependencies für Weather-System
+        self.required_dependencies = VALIDATION_RULES.DEPENDENCIES["weather"]
+
+        # Dependency Status Widget
+        self.dependency_status = MultiDependencyStatusWidget(
+            self.required_dependencies, "Weather Dependencies"
+        )
+        self.control_panel.addWidget(self.dependency_status)
+
+        # Data Manager Signals
+        self.data_manager.data_updated.connect(self.on_data_updated)
+
+    def setup_shader_integration(self):
+        """
+        Funktionsweise: Setup für GPU-Shader Integration
+        Aufgabe: Konfiguriert alle 8 Weather-Shader für Berg-Wind-Simulation
+        """
+        # Shader Performance Monitoring
+        self.shader_performance_timer = QTimer()
+        self.shader_performance_timer.timeout.connect(self.monitor_shader_performance)
+
+        # GPU Verfügbarkeit prüfen
+        self.gpu_available = self.shader_manager.check_gpu_support()
+        if not self.gpu_available:
+            self.logger.warning("GPU not available - using CPU fallback for weather simulation")
+
+        # Weather-Shader laden
+        self.weather_shaders_loaded = False
+        if self.gpu_available:
+            self.load_weather_shaders()
+
+    def load_weather_shaders(self):
+        """
+        Funktionsweise: Lädt alle 8 Weather-Shader für Berg-Wind-Simulation
+        Aufgabe: Initialisiert GPU-Compute-Pipeline für Weather-System
+        """
+        try:
+            # Alle 8 Weather-Shader aus Core-Dokumentation
+            shader_names = [
+                "temperatureCalculation",
+                "windFieldGeneration",
+                "thermalConvection",
+                "moistureTransport",
+                "precipitationCalculation",
+                "orographicEffects",
+                "weatherIntegration",
+                "boundaryConditions"
+            ]
+
+            for shader_name in shader_names:
+                success = self.shader_manager.load_weather_shader(shader_name)
+                if not success:
+                    self.logger.warning(f"Failed to load {shader_name} shader")
+
+            self.weather_shaders_loaded = True
+            self.logger.info("Weather shaders loaded successfully")
+
+        except Exception as e:
+            self.logger.error(f"Failed to load weather shaders: {e}")
+            self.weather_shaders_loaded = False
+
+    def load_default_parameters(self):
+        """Lädt Default-Parameter"""
+        for param_name, slider in self.parameter_sliders.items():
+            param_config = get_parameter_config("weather", param_name)
+            slider.setValue(param_config["default"])
+
+        self.current_parameters = self.get_current_parameters()
+
+    def get_current_parameters(self) -> dict:
+        """Sammelt aktuelle Parameter für Core-Generator"""
+        parameters = {}
+        for param_name, slider in self.parameter_sliders.items():
+            parameters[param_name] = slider.getValue()
+        return parameters
+
+    @pyqtSlot()
     def on_parameter_changed(self):
-        """Parameter wurden geändert - mit Debouncing"""
-        if self.auto_simulate_checkbox.isChecked():
-            self.update_preview()
+        """Slot für Parameter-Änderungen"""
+        self.current_parameters = self.get_current_parameters()
 
-        # Aktualisiere Klima-Klassifikation sofort (ohne Debouncing)
-        self.update_climate_classification()
+        # Climate Statistics Preview aktualisieren
+        self.climate_stats.update_parameter_preview(self.current_parameters)
 
-    def simulate_now(self):
-        """Manuelle Simulation"""
-        self.error_handler.logger.info("Weather Simulation gestartet!")
-        self.update_preview()
+        # Auto-Simulation triggern
+        if self.auto_simulation_enabled and not self.weather_simulation_active:
+            self.auto_simulation_timer.start(1200)  # 1.2s für Weather-Berechnung
 
-    @performance_tracked("Weather_Preview_Update")
-    def update_preview(self):
+    @pyqtSlot(str, str)
+    def on_data_updated(self, generator_type: str, data_key: str):
+        """Slot für Data-Updates von anderen Generatoren"""
+        if data_key in self.required_dependencies:
+            self.check_input_dependencies()
+
+    def check_input_dependencies(self):
         """
-        Funktionsweise: Aktualisiert die Wetter-Kartenvorschau
-        - Performance-optimiert für Dual-Map Rendering
-        - Validiert komplexe Wetter-Parameter
+        Funktionsweise: Prüft alle Required Dependencies für Weather-System
+        Aufgabe: Aktiviert/Deaktiviert Generation basierend auf verfügbaren Inputs
         """
-        with TabErrorContext('Weather', 'Preview Update'):
-            params = self.get_parameters()
+        is_complete, missing = self.data_manager.check_dependencies("weather", self.required_dependencies)
 
-            # Validiere und speichere Parameter
-            self.weather_manager.set_parameters(params)
+        self.dependency_status.update_dependency_status(is_complete, missing)
+        self.manual_generate_button.setEnabled(is_complete)
 
-            # Aktualisiere Klima-Klassifikation
-            self.update_climate_classification()
+        return is_complete
 
-            # Aktualisiere Karten (mit automatischem Debouncing)
-            self.map_canvas.update_map(**params)
-
-    def update_climate_classification(self):
+    @core_generation_handler("weather")
+    def generate_weather_system(self):
         """
-        Funktionsweise: Aktualisiert Klima-Klassifikation in Echtzeit
-        - Basiert auf aktuellen Parametern
-        - Visuelles Feedback für User
+        Funktionsweise: Hauptmethode für komplette Weather-System Generation
+        Aufgabe: Koordiniert alle Weather-Core-Module und GPU-Shader
         """
         try:
-            params = self.get_parameters()
-            self.weather_manager.set_parameters(params)
+            # Dependencies prüfen
+            if not self.check_input_dependencies():
+                self.logger.warning("Cannot generate weather system - missing dependencies")
+                return
 
-            # Hole Klima-Klassifikation vom Manager
-            climate = self.weather_manager.get_climate_classification()
+            self.weather_simulation_active = True
+            self.logger.info("Starting weather system generation...")
 
-            # Aktualisiere Label mit passender Farbe
-            climate_colors = {
-                "Tropisch": "#e74c3c",
-                "Gemäßigt": "#27ae60",
-                "Kalt": "#3498db",
-                "Trocken": "#f39c12"
-            }
+            # Timing für Performance-Messung starten
+            self.start_generation_timing()
 
-            color = climate_colors.get(climate, "#95a5a6")
-            self.climate_label.setText(f"🌡️ {climate}")
-            self.climate_label.setStyleSheet(f"""
-                QLabel {{
-                    background-color: {color}20;
-                    border: 2px solid {color};
-                    border-radius: 8px;
-                    padding: 10px;
-                    font-size: 12px;
-                    font-weight: bold;
-                    color: #2c3e50;
-                }}
-            """)
+            # Input-Daten sammeln
+            inputs = self.collect_input_data()
+            params = self.current_parameters.copy()
+
+            # Map seed für reproduzierbare Wettersimulation
+            heightmap = inputs["heightmap"]
+            params["map_seed"] = hash(str(heightmap[10, 10] + heightmap[20, 20])) % 1000000
+
+            # GPU-Performance Monitoring starten
+            if self.gpu_available and self.weather_shaders_loaded:
+                self.shader_performance_timer.start(500)
+
+            # 1. Temperature Calculation (Altitude + Solar + Latitude)
+            self.logger.info("Step 1: Temperature Calculation")
+            temp_map = self.temperature_calculator.calculate_altitude_cooling(
+                heightmap=inputs["heightmap"],
+                air_temp_entry=params["air_temp_entry"],
+                altitude_cooling=params["altitude_cooling"]
+            )
+
+            temp_map = self.temperature_calculator.apply_solar_heating(
+                temp_map=temp_map,
+                shade_map=inputs["shade_map"],
+                solar_power=params["solar_power"]
+            )
+
+            temp_map = self.temperature_calculator.add_latitude_gradient(
+                temp_map=temp_map,
+                map_size=heightmap.shape[0]
+            )
+
+            # 2. Wind Field Simulation (Pressure Gradients + Terrain Effects)
+            self.logger.info("Step 2: Wind Field Simulation")
+            wind_map = self.wind_simulator.simulate_pressure_gradients(
+                heightmap=inputs["heightmap"],
+                temp_map=temp_map,
+                wind_speed_factor=params["wind_speed_factor"],
+                map_seed=params["map_seed"]
+            )
+
+            wind_map = self.wind_simulator.apply_terrain_deflection(
+                wind_map=wind_map,
+                heightmap=inputs["heightmap"],
+                terrain_factor=params["terrain_factor"]
+            )
+
+            wind_map = self.wind_simulator.calculate_thermal_effects(
+                wind_map=wind_map,
+                temp_map=temp_map,
+                shade_map=inputs["shade_map"],
+                thermic_effect=params["thermic_effect"]
+            )
+
+            # 3. Atmospheric Moisture Management (Evaporation + Transport)
+            self.logger.info("Step 3: Atmospheric Moisture Management")
+            humid_map = self.moisture_manager.calculate_evaporation(
+                soil_moist_map=inputs["soil_moist_map"],
+                temp_map=temp_map,
+                wind_map=wind_map
+            )
+
+            humid_map = self.moisture_manager.transport_moisture(
+                humid_map=humid_map,
+                wind_map=wind_map,
+                temp_map=temp_map
+            )
+
+            humid_map = self.moisture_manager.apply_humidity_diffusion(
+                humid_map=humid_map,
+                terrain_factor=params["terrain_factor"]
+            )
+
+            # 4. Precipitation System (Orographic + Condensation)
+            self.logger.info("Step 4: Precipitation System")
+            precip_map = self.precipitation_system.calculate_orographic_precipitation(
+                heightmap=inputs["heightmap"],
+                wind_map=wind_map,
+                humid_map=humid_map,
+                temp_map=temp_map
+            )
+
+            precip_map = self.precipitation_system.simulate_moisture_transport(
+                precip_map=precip_map,
+                wind_map=wind_map,
+                humid_map=humid_map
+            )
+
+            precip_map = self.precipitation_system.trigger_precipitation_events(
+                precip_map=precip_map,
+                temp_map=temp_map,
+                humid_map=humid_map
+            )
+
+            # 5. Weather System Integration (Feedback Loops)
+            self.logger.info("Step 5: Weather System Integration")
+            integrated_results = self.weather_system.integrate_atmospheric_effects(
+                temp_map=temp_map,
+                wind_map=wind_map,
+                humid_map=humid_map,
+                precip_map=precip_map,
+                heightmap=inputs["heightmap"]
+            )
+
+            # Results im DataManager speichern
+            self.save_weather_results(integrated_results, params)
+
+            # Display und Statistics aktualisieren
+            self.update_weather_display()
+            self.climate_stats.update_generation_statistics(integrated_results)
+            self.shader_performance.update_shader_statistics()
+
+            # Timing beenden
+            self.end_generation_timing(True)
+
+            self.logger.info("Weather system generation completed successfully")
 
         except Exception as e:
-            self.error_handler.logger.warning(f"Klima-Klassifikation Update Fehler: {e}")
+            self.handle_generation_error(e)
+            self.end_generation_timing(False, str(e))
+            raise  # Re-raise für Error Handler
 
-    def get_parameters(self):
+
+        finally:
+            self.weather_simulation_active = False
+            if self.gpu_available:
+                self.shader_performance_timer.stop()
+
+    def collect_input_data(self) -> dict:
         """
-        Funktionsweise: Sammelt alle Weather Parameter
-        - Verwendet neue ParameterSlider API
-        - Robuste Parameter-Sammlung
+        Funktionsweise: Sammelt alle Required Input-Daten von DataManager
+        Return: dict mit allen benötigten Arrays für Weather-Generation
         """
-        try:
-            return {
-                'max_humidity': self.max_humidity_slider.get_value(),
-                'rain_amount': self.rain_amount_slider.get_value(),
-                'evaporation': self.evaporation_slider.get_value(),
-                'wind_speed': self.wind_speed_slider.get_value(),
-                'wind_terrain_influence': self.wind_terrain_slider.get_value(),
-                'avg_temperature': self.avg_temperature_slider.get_value()
-            }
-        except Exception as e:
-            self.error_handler.handle_parameter_error('Weather', 'parameter_collection', e)
-            return self.weather_manager.get_parameters()
+        inputs = {}
 
-    # Navigation Methoden (von NavigationMixin erforderlich)
-    def next_menu(self):
-        """Wechselt zum nächsten Tab (Water)"""
-        try:
-            params = self.get_parameters()
-            self.weather_manager.set_parameters(params)
-            self.error_handler.logger.info("Weather Parameter gespeichert")
+        # Terrain Inputs
+        inputs["heightmap"] = self.data_manager.get_terrain_data("heightmap")
+        inputs["shade_map"] = self.data_manager.get_terrain_data("shademap")
 
-            next_tab = TabNavigationHelper.get_next_tab('WeatherWindow')
-            if next_tab:
-                self.navigate_to_tab(next_tab[0], next_tab[1])
-        except Exception as e:
-            self.error_handler.handle_tab_navigation_error('Weather', 'Water', e)
+        # Water Input (kann None sein - dann Fallback)
+        inputs["soil_moist_map"] = self.data_manager.get_water_data("soil_moist_map")
 
-    def prev_menu(self):
-        """Wechselt zum vorherigen Tab (Settlement)"""
-        try:
-            params = self.get_parameters()
-            self.weather_manager.set_parameters(params)
+        # Validation für Required Inputs
+        required_inputs = ["heightmap", "shade_map"]
+        for key in required_inputs:
+            if inputs[key] is None:
+                raise ValueError(f"Required input '{key}' not available")
 
-            prev_tab = TabNavigationHelper.get_prev_tab('WeatherWindow')
-            if prev_tab:
-                self.navigate_to_tab(prev_tab[0], prev_tab[1])
-        except Exception as e:
-            self.error_handler.handle_tab_navigation_error('Weather', 'Settlement', e)
+        # Fallback für soil_moist_map wenn nicht verfügbar
+        if inputs["soil_moist_map"] is None:
+            self.logger.warning("Soil moisture map not available - using uniform base moisture")
+            inputs["soil_moist_map"] = np.full_like(inputs["heightmap"], 0.3)  # 30% base moisture
 
-    def quick_generate(self):
-        """Schnellgenerierung mit Klima-Info"""
-        params = self.get_parameters()
-        self.weather_manager.set_parameters(params)
-        climate = self.weather_manager.get_climate_classification()
-        self.error_handler.logger.info(f"Weather Schnellgenerierung: {climate} - {params}")
+        return inputs
+
+    def save_weather_results(self, results: dict, params: dict):
+        """
+        Funktionsweise: Speichert alle Weather-System Results im DataManager
+        Parameter: results (dict mit allen Weather-Maps), params (dict)
+        """
+        # Weather Results speichern
+        self.data_manager.set_weather_data("temp_map", results["temp_map"], params)
+        self.data_manager.set_weather_data("wind_map", results["wind_map"], params)
+        self.data_manager.set_weather_data("humid_map", results["humid_map"], params)
+        self.data_manager.set_weather_data("precip_map", results["precip_map"], params)
+
+    @gpu_shader_handler("weather_display")
+    def update_weather_display(self):
+        """
+        Funktionsweise: Aktualisiert Display basierend auf aktuellem Visualization-Mode
+        Aufgabe: Zeigt verschiedene Weather-Maps mit 3D-Overlays
+        """
+        current_mode = self.display_mode.checkedId()
+
+        if current_mode == 0:  # Temperature Map
+            temp_map = self.data_manager.get_weather_data("temp_map")
+            if temp_map is not None:
+                self.map_display.display_temperature_map(temp_map)
+
+        elif current_mode == 1:  # Precipitation Map
+            precip_map = self.data_manager.get_weather_data("precip_map")
+            if precip_map is not None:
+                self.map_display.display_precipitation_map(precip_map)
+
+        elif current_mode == 2:  # Humidity Map
+            humid_map = self.data_manager.get_weather_data("humid_map")
+            if humid_map is not None:
+                self.map_display.display_humidity_map(humid_map)
+
+        elif current_mode == 3:  # Wind Field
+            wind_map = self.data_manager.get_weather_data("wind_map")
+            if wind_map is not None:
+                self.map_display.display_wind_field(wind_map)
+
+        # Overlays anwenden
+        self.apply_weather_overlays()
+
+    def apply_weather_overlays(self):
+        """
+        Funktionsweise: Wendet alle aktivierten Weather-Overlays an
+        Aufgabe: 3D Terrain, Contours, Orographic Effects, 3D Wind Vectors
+        """
+        # 3D Terrain Overlay
+        if self.terrain_3d_cb.isChecked():
+            heightmap = self.data_manager.get_terrain_data("heightmap")
+            if heightmap is not None:
+                self.map_display.overlay_3d_terrain(heightmap)
+
+        # Contour Lines
+        if self.contour_lines_cb.isChecked():
+            heightmap = self.data_manager.get_terrain_data("heightmap")
+            if heightmap is not None:
+                self.map_display.overlay_elevation_contours(heightmap)
+
+        # Orographic Effects Highlighting
+        if self.orographic_effects_cb.isChecked():
+            heightmap = self.data_manager.get_terrain_data("heightmap")
+            wind_map = self.data_manager.get_weather_data("wind_map")
+            if heightmap is not None and wind_map is not None:
+                self.map_display.highlight_orographic_effects(heightmap, wind_map)
+
+        # 3D Wind Vectors
+        if self.wind_vectors_3d_cb.isChecked():
+            wind_map = self.data_manager.get_weather_data("wind_map")
+            heightmap = self.data_manager.get_terrain_data("heightmap")
+            if wind_map is not None and heightmap is not None:
+                density = int(self.wind_density_slider.getValue())
+                scale = self.wind_scale_slider.getValue()
+                self.map_display.overlay_3d_wind_vectors(wind_map, heightmap, density, scale)
+
+    @pyqtSlot()
+    def update_display_mode(self):
+        """Slot für Visualization-Mode Änderungen"""
+        self.update_weather_display()
+
+    @pyqtSlot(bool)
+    def toggle_3d_terrain(self, enabled: bool):
+        """Toggle für 3D Terrain Overlay"""
+        self.update_weather_display()
+
+    @pyqtSlot(bool)
+    def toggle_contour_lines(self, enabled: bool):
+        """Toggle für Contour Lines Overlay"""
+        self.update_weather_display()
+
+    @pyqtSlot(bool)
+    def toggle_orographic_effects(self, enabled: bool):
+        """Toggle für Orographic Effects Highlighting"""
+        self.update_weather_display()
+
+    @pyqtSlot(bool)
+    def toggle_3d_wind_vectors(self, enabled: bool):
+        """Toggle für 3D Wind Vectors"""
+        self.update_weather_display()
+
+    @pyqtSlot(float)
+    def update_wind_vector_density(self, density: float):
+        """Update Wind Vector Density"""
+        if self.wind_vectors_3d_cb.isChecked():
+            self.update_weather_display()
+
+    @pyqtSlot(float)
+    def update_wind_vector_scale(self, scale: float):
+        """Update Wind Vector Scale"""
+        if self.wind_vectors_3d_cb.isChecked():
+            self.update_weather_display()
+
+    @pyqtSlot()
+    def monitor_shader_performance(self):
+        """
+        Funktionsweise: Überwacht GPU-Shader Performance während Weather-Generation
+        Aufgabe: Updated Shader-Performance Widget mit aktuellen Metriken
+        """
+        if self.weather_simulation_active and self.gpu_available:
+            performance_metrics = self.shader_manager.get_weather_shader_performance()
+            self.shader_performance.update_performance_metrics(performance_metrics)
+
+    # Override BaseMapTab method
+    def generate_terrain(self):
+        """Override für Weather-spezifische Generation"""
+        self.generate_weather_system()
 
 
-class WeatherWindow(QMainWindow):
+class ClimateStatisticsWidget(QGroupBox):
     """
-    Funktionsweise: Hauptfenster für Weather-Tab
-    - Verwendet optimierte Multi-Plot Canvas
-    - Erweiterte Fenster-Konfiguration für Dual-Maps
+    Funktionsweise: Widget für Climate-Statistiken und Parameter-Preview
+    Aufgabe: Zeigt Weather-Parameter, Climate-Classification, Generation-Results
     """
 
     def __init__(self):
-        super().__init__()
-        self.error_handler = ErrorHandler()
-        self.init_ui()
+        super().__init__("Climate Statistics")
+        self.setup_ui()
 
-    def init_ui(self):
-        self.setWindowTitle("World Generator - Temperatur & Niederschlag")
-        self.setGeometry(100, 100, 1500, 1000)
-        self.setMinimumSize(1500, 1000)
+    def setup_ui(self):
+        """Erstellt UI für Climate-Statistiken"""
+        layout = QVBoxLayout()
 
-        # Central Widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        # Parameter Preview
+        preview_group = QGroupBox("Climate Parameters")
+        preview_layout = QVBoxLayout()
 
-        # Main Layout
-        main_layout = QHBoxLayout()
+        self.base_temp_label = QLabel("Base Temperature: 15°C")
+        self.solar_power_label = QLabel("Solar Power: 20°C")
+        self.altitude_cooling_label = QLabel("Altitude Cooling: 6°C/100m")
+        self.wind_factor_label = QLabel("Wind Factor: 1.0")
 
-        # Linke Seite - Optimierte Multi-Plot Karte (75%)
-        self.map_canvas = WeatherMapCanvas()
-        main_layout.addWidget(self.map_canvas, 7)
+        preview_layout.addWidget(self.base_temp_label)
+        preview_layout.addWidget(self.solar_power_label)
+        preview_layout.addWidget(self.altitude_cooling_label)
+        preview_layout.addWidget(self.wind_factor_label)
 
-        # Trennlinie
-        separator = QFrame()
-        separator.setFrameShape(QFrame.VLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        main_layout.addWidget(separator)
+        preview_group.setLayout(preview_layout)
+        layout.addWidget(preview_group)
 
-        # Rechte Seite - Controls (25%)
-        self.control_panel = WeatherControlPanel(self.map_canvas)
-        self.control_panel.setMaximumWidth(350)
-        main_layout.addWidget(self.control_panel, 3)
+        # Climate Classification Preview
+        classification_group = QGroupBox("Climate Classification")
+        classification_layout = QVBoxLayout()
 
-        central_widget.setLayout(main_layout)
+        self.climate_type_label = QLabel("Dominant Climate: Not calculated")
+        self.temp_range_label = QLabel("Temperature Range: -")
+        self.precip_total_label = QLabel("Total Precipitation: -")
 
-        # Erweiterte Styling für Weather
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f0f0f0;
-            }
-            QLabel {
-                color: #333;
-            }
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #cccccc;
-                border-radius: 5px;
-                margin-top: 1ex;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-            /* Spezielle Styles für Weather Parameter */
-            QGroupBox[title="Niederschlagssystem"] {
-                border-color: #3498db;
-            }
-            QGroupBox[title="Windsystem"] {
-                border-color: #27ae60;
-            }
-            QGroupBox[title="Temperatursystem"] {
-                border-color: #e74c3c;
-            }
-            QGroupBox[title="Klima-Klassifikation"] {
-                border-color: #9b59b6;
-                background-color: #f8f9fa;
-            }
-        """)
+        classification_layout.addWidget(self.climate_type_label)
+        classification_layout.addWidget(self.temp_range_label)
+        classification_layout.addWidget(self.precip_total_label)
 
-    def resizeEvent(self, event):
-        """Behält Proportionen beim Resize bei"""
-        super().resizeEvent(event)
+        classification_group.setLayout(classification_layout)
+        layout.addWidget(classification_group)
 
-    def closeEvent(self, event):
-        """Cleanup beim Schließen"""
-        if hasattr(self, 'map_canvas'):
-            self.map_canvas.cleanup()
-        super().closeEvent(event)
+        # Generation Results
+        results_group = QGroupBox("Generation Results")
+        results_layout = QVBoxLayout()
+
+        self.orographic_effect_label = QLabel("Orographic Effect: -")
+        self.wind_strength_label = QLabel("Avg Wind Strength: -")
+        self.humidity_level_label = QLabel("Avg Humidity: -")
+
+        results_layout.addWidget(self.orographic_effect_label)
+        results_layout.addWidget(self.wind_strength_label)
+        results_layout.addWidget(self.humidity_level_label)
+
+        results_group.setLayout(results_layout)
+        layout.addWidget(results_group)
+
+        self.setLayout(layout)
+
+    def update_parameter_preview(self, parameters: dict):
+        """Aktualisiert Parameter-Preview"""
+        base_temp = parameters.get("air_temp_entry", 15)
+        solar = parameters.get("solar_power", 20)
+        altitude = parameters.get("altitude_cooling", 6)
+        wind = parameters.get("wind_speed_factor", 1.0)
+
+        self.base_temp_label.setText(f"Base Temperature: {base_temp}°C")
+        self.solar_power_label.setText(f"Solar Power: {solar}°C")
+        self.altitude_cooling_label.setText(f"Altitude Cooling: {altitude}°C/100m")
+        self.wind_factor_label.setText(f"Wind Factor: {wind:.1f}")
+
+    def update_generation_statistics(self, results: dict):
+        """
+        Funktionsweise: Aktualisiert Statistiken nach Weather-Generation
+        Parameter: results (dict mit weather maps)
+        """
+        temp_map = results.get("temp_map")
+        wind_map = results.get("wind_map")
+        humid_map = results.get("humid_map")
+        precip_map = results.get("precip_map")
+
+        if temp_map is not None:
+            temp_min, temp_max = np.min(temp_map), np.max(temp_map)
+            self.temp_range_label.setText(f"Temperature Range: {temp_min:.1f}°C - {temp_max:.1f}°C")
+
+            # Climate Classification basierend auf Temperature
+            avg_temp = np.mean(temp_map)
+            if avg_temp < 0:
+                climate_type = "Arctic"
+            elif avg_temp < 10:
+                climate_type = "Subarctic"
+            elif avg_temp < 20:
+                climate_type = "Temperate"
+            else:
+                climate_type = "Subtropical"
+
+            self.climate_type_label.setText(f"Dominant Climate: {climate_type}")
+
+        if precip_map is not None:
+            total_precip = np.sum(precip_map)
+            self.precip_total_label.setText(f"Total Precipitation: {total_precip:.1f} gH2O/m²")
+
+        if wind_map is not None:
+            # Wind strength berechnen (Magnitude der Vektoren)
+            if len(wind_map.shape) == 3:  # Wind vectors [x, y, z]
+                wind_strength = np.sqrt(wind_map[:, :, 0] ** 2 + wind_map[:, :, 1] ** 2)
+                avg_wind = np.mean(wind_strength)
+                self.wind_strength_label.setText(f"Avg Wind Strength: {avg_wind:.2f} m/s")
+
+        if humid_map is not None:
+            avg_humidity = np.mean(humid_map)
+            self.humidity_level_label.setText(f"Avg Humidity: {avg_humidity:.1f} gH2O/m³")
+
+        # Orographic Effect berechnen (vereinfacht)
+        if temp_map is not None and wind_map is not None:
+            # Gradient der Temperatur als Proxy für orographic effects
+            temp_grad = np.gradient(temp_map)
+            orographic_strength = np.mean(np.sqrt(temp_grad[0] ** 2 + temp_grad[1] ** 2))
+            self.orographic_effect_label.setText(f"Orographic Effect: {orographic_strength:.3f}°C/pixel")
+
+
+class WeatherShaderPerformanceWidget(QGroupBox):
+    """
+    Funktionsweise: Widget für Weather-Shader Performance Monitoring
+    Aufgabe: Zeigt Performance-Metriken aller 8 Weather-Shader
+    """
+
+    def __init__(self, shader_manager):
+        super().__init__("Weather Shader Performance")
+        self.shader_manager = shader_manager
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Erstellt UI für Shader-Performance Display"""
+        layout = QVBoxLayout()
+
+        # GPU Status
+        self.gpu_status = StatusIndicator("GPU Status")
+        if self.shader_manager.check_gpu_support():
+            self.gpu_status.set_success("GPU Available")
+        else:
+            self.gpu_status.set_warning("Using CPU Fallback")
+        layout.addWidget(self.gpu_status)
+
+        # Shader Loading Status
+        self.shader_loading_status = StatusIndicator("Weather Shaders")
+        self.shader_loading_status.set_unknown()
+        layout.addWidget(self.shader_loading_status)
+
+        # Performance Metrics
+        metrics_group = QGroupBox("Performance Metrics")
+        metrics_layout = QVBoxLayout()
+
+        self.total_frame_time_label = QLabel("Total Frame Time: - ms")
+        self.gpu_memory_usage_label = QLabel("GPU Memory: - MB")
+        self.active_shaders_label = QLabel("Active Shaders: 0/8")
+
+        metrics_layout.addWidget(self.total_frame_time_label)
+        metrics_layout.addWidget(self.gpu_memory_usage_label)
+        metrics_layout.addWidget(self.active_shaders_label)
+
+        metrics_group.setLayout(metrics_layout)
+        layout.addWidget(metrics_group)
+
+        # Individual Shader Performance
+        shader_group = QGroupBox("Individual Shader Performance")
+        shader_layout = QVBoxLayout()
+
+        # Top 3 Performance-kritische Shader anzeigen
+        self.temp_calc_perf = QLabel("Temperature Calc: - ms")
+        self.wind_sim_perf = QLabel("Wind Simulation: - ms")
+        self.precip_calc_perf = QLabel("Precipitation Calc: - ms")
+
+        shader_layout.addWidget(self.temp_calc_perf)
+        shader_layout.addWidget(self.wind_sim_perf)
+        shader_layout.addWidget(self.precip_calc_perf)
+
+        shader_group.setLayout(shader_layout)
+        layout.addWidget(shader_group)
+
+        # Performance Rating
+        self.performance_rating = QProgressBar()
+        self.performance_rating.setRange(0, 100)
+        self.performance_rating.setValue(100)
+        layout.addWidget(QLabel("Overall Performance:"))
+        layout.addWidget(self.performance_rating)
+
+        self.setLayout(layout)
+
+    def update_performance_metrics(self, metrics: dict):
+        """
+        Funktionsweise: Aktualisiert Performance-Metrics von Shader-Manager
+        Parameter: metrics (dict mit performance data)
+        """
+        # Total Frame Time
+        total_time = metrics.get("total_frame_time_ms", 0)
+        self.total_frame_time_label.setText(f"Total Frame Time: {total_time:.1f} ms")
+
+        # GPU Memory
+        gpu_memory = metrics.get("gpu_memory_mb", 0)
+        self.gpu_memory_usage_label.setText(f"GPU Memory: {gpu_memory:.0f} MB")
+
+        # Active Shaders
+        active_shaders = metrics.get("active_weather_shaders", 0)
+        self.active_shaders_label.setText(f"Active Shaders: {active_shaders}/8")
+
+        # Individual Shader Performance
+        shader_times = metrics.get("individual_shader_times", {})
+        temp_time = shader_times.get("temperatureCalculation", 0)
+        wind_time = shader_times.get("windFieldGeneration", 0)
+        precip_time = shader_times.get("precipitationCalculation", 0)
+
+        self.temp_calc_perf.setText(f"Temperature Calc: {temp_time:.2f} ms")
+        self.wind_sim_perf.setText(f"Wind Simulation: {wind_time:.2f} ms")
+        self.precip_calc_perf.setText(f"Precipitation Calc: {precip_time:.2f} ms")
+
+        # Performance Rating (basierend auf Frame Time)
+        # Target: 60fps = 16.67ms per frame für Real-time
+        # Weather ist nicht real-time, aber < 100ms ist gut
+        if total_time < 50:
+            performance_pct = 100
+            color = "#27ae60"  # Green
+        elif total_time < 100:
+            performance_pct = 80
+            color = "#f39c12"  # Orange
+        elif total_time < 200:
+            performance_pct = 60
+            color = "#e67e22"  # Dark Orange
+        else:
+            performance_pct = 40
+            color = "#e74c3c"  # Red
+
+        self.performance_rating.setValue(performance_pct)
+        self.performance_rating.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; }}")
+
+    def update_shader_statistics(self):
+        """
+        Funktionsweise: Aktualisiert Shader-Loading Status
+        Wird nach erfolgreicher Generation aufgerufen
+        """
+        if self.shader_manager.check_gpu_support():
+            weather_shaders_count = self.shader_manager.get_loaded_weather_shaders_count()
+            if weather_shaders_count >= 8:
+                self.shader_loading_status.set_success(f"All {weather_shaders_count}/8 shaders loaded")
+            elif weather_shaders_count > 0:
+                self.shader_loading_status.set_warning(f"Partial loading: {weather_shaders_count}/8 shaders")
+            else:
+                self.shader_loading_status.set_error("No weather shaders loaded")
+        else:
+            self.shader_loading_status.set_warning("CPU fallback active")

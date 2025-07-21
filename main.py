@@ -10,19 +10,17 @@ import os
 from PyQt5.QtWidgets import QApplication
 
 # Füge das Projektverzeichnis zum Python-Pfad hinzu
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+#sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from gui.main_menu import MainMenuWindow
 
 def main():
-    # NUR EINE QApplication für das gesamte Programm
     app = QApplication(sys.argv)
-    app.setApplicationName("World Generator")
-    app.setApplicationVersion("1.0")
 
-    # Starte Hauptmenü
-    main_window = MainMenuWindow()
-    main_window.show()
+    app.setQuitOnLastWindowClosed(False)
+
+    window = MainMenuWindow()
+    window.show()
 
     sys.exit(app.exec_())
 

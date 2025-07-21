@@ -1,712 +1,751 @@
-#!/usr/bin/env python3
 """
-Path: MapGenerator/gui/tabs/biome_tab.py
-__init__.py existiert in "tabs"
+Path: gui/tabs/biome_tab.py
 
-World Generator GUI - Biome Tab (Vollständig Refactored)
-Tab 6: Biome Klassifizierung und finale Weltansicht
-Alle Verbesserungen aus Schritt 1-3 implementiert - FINALE VERSION
+Funktionsweise: Finale Biome-Klassifizierung mit vollständiger Core-Integration
+- Input: heightmap, slopemap, temp_map, soil_moist_map, water_biomes_map
+- Whittaker-Biome Classification mit 15 Base-Biomes + 11 Super-Biomes
+- 2x2 Supersampling mit diskretisierter Zufalls-Rotation
+- Integration aller Systeme in finale Welt-Darstellung
+- Export-Funktionalität für komplette Welt
+- Gauß-basierte Klassifikation mit konfigurierbaren Gewichtungen
 """
 
-import sys
+from PyQt5.QtWidgets import *
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
-                             QVBoxLayout, QLabel, QPushButton,
-                             QFrame, QSpacerItem, QSizePolicy,
-                             QCheckBox, QGroupBox, QTextEdit)
-from matplotlib.colors import ListedColormap
-from gui.widgets.navigation_mixin import NavigationMixin, TabNavigationHelper
-from gui.utils.error_handler import ErrorHandler, safe_execute, TabErrorContext
-from gui.widgets.map_canvas import MapCanvas
-from gui.utils.performance_utils import performance_tracked
-try:
-    from gui.managers.parameter_manager import WorldParameterManager
-except ImportError:
-    from gui.world_state import WorldState as WorldParameterManager
+import logging
+
+from .base_tab import BaseMapTab
+from gui.config.value_default import BIOME, get_parameter_config, validate_parameter_set, VALIDATION_RULES
+from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, WorldExportWidget, WorldStatisticsWidget, \
+    MultiDependencyStatusWidget, BiomeLegendDialog
+from core.biome_generator import (
+    BiomeClassificationSystem, BaseBiomeClassifier, SuperBiomeOverrideSystem,
+    SupersamplingManager, ProximityBiomeCalculator
+)
 
 
-class BiomeMapCanvas(MapCanvas):
+class BiomeTab(BaseMapTab):
     """
-    Funktionsweise: Finale Biome Map Canvas mit allen Weltdaten
-    - Kombiniert alle vorherigen Tab-Parameter für finale Welt-Visualisierung
-    - Performance-optimiert für komplexe Multi-Layer Rendering
-    - Intelligente Biome-Klassifizierung basierend auf allen Parametern
+    Funktionsweise: Hauptklasse für finale Biome-Classification mit allen Features
+    Aufgabe: Koordiniert Base-Biomes, Super-Biomes, Supersampling und Export
+    Input: Alle Generator-Outputs für vollständige Welt-Integration
+    Output: biome_map, biome_map_super, super_biome_mask für finale Darstellung
+    """
+
+    def __init__(self, data_manager, navigation_manager, shader_manager):
+        super().__init__(data_manager, navigation_manager, shader_manager)
+        self.logger = logging.getLogger(__name__)
+
+        # Core-Generator Instanzen
+        self.biome_classification = BiomeClassificationSystem()
+        self.base_classifier = BaseBiomeClassifier()
+        self.super_biome_system = SuperBiomeOverrideSystem()
+        self.supersampling_manager = SupersamplingManager()
+        self.proximity_calculator = ProximityBiomeCalculator()
+
+        # Parameter und State
+        self.current_parameters = {}
+        self.biome_generation_complete = False
+
+        # Setup UI
+        self.setup_biome_ui()
+        self.setup_dependency_checking()
+
+        # Initial Load
+        self.load_default_parameters()
+        self.check_input_dependencies()
+
+    def setup_biome_ui(self):
+        """
+        Funktionsweise: Erstellt komplette UI für Biome-System
+        Aufgabe: Parameter, Biome-Preview, World-Overview, Export-Controls
+        """
+        # Parameter Panel
+        self.parameter_panel = self.create_biome_parameter_panel()
+        self.control_panel.addWidget(self.parameter_panel)
+
+        # Biome Classification Widget
+        self.biome_classification_widget = BiomeClassificationWidget()
+        self.control_panel.addWidget(self.biome_classification_widget)
+
+        # Visualization Controls
+        self.visualization_controls = self.create_biome_visualization_controls()
+        self.control_panel.addWidget(self.visualization_controls)
+
+        # World Statistics
+        self.world_stats = WorldStatisticsWidget()
+        self.control_panel.addWidget(self.world_stats)
+
+        # Export Controls
+        self.export_controls = WorldExportWidget()
+        self.export_controls.export_requested.connect(self.export_world_data)
+        self.control_panel.addWidget(self.export_controls)
+
+        # Dependencies und Navigation
+        self.setup_input_status()
+        self.setup_navigation()
+
+    def create_biome_parameter_panel(self) -> QGroupBox:
+        """
+        Funktionsweise: Erstellt Parameter-Panel mit allen Biome-Parametern
+        Aufgabe: Alle 8 Parameter aus value_default.BIOME
+        Return: QGroupBox mit strukturierten Parameter-Slidern
+        """
+        panel = QGroupBox("Biome Parameters")
+        layout = QVBoxLayout()
+
+        self.parameter_sliders = {}
+
+        # Climate Weighting Parameters
+        climate_group = QGroupBox("Climate Weighting")
+        climate_layout = QVBoxLayout()
+
+        climate_params = ["biome_wetness_factor", "biome_temp_factor"]
+        for param_name in climate_params:
+            param_config = get_parameter_config("biome", param_name)
+
+            slider = ParameterSlider(
+                label=param_name.replace("_", " ").title(),
+                min_val=param_config["min"],
+                max_val=param_config["max"],
+                default_val=param_config["default"],
+                step=param_config.get("step", 0.1),
+                suffix=param_config.get("suffix", "")
+            )
+
+            slider.valueChanged.connect(self.on_parameter_changed)
+            self.parameter_sliders[param_name] = slider
+            climate_layout.addWidget(slider)
+
+        climate_group.setLayout(climate_layout)
+        layout.addWidget(climate_group)
+
+        # Sea Level and Bank Parameters
+        water_group = QGroupBox("Water Features")
+        water_layout = QVBoxLayout()
+
+        water_params = ["sea_level", "bank_width"]
+        for param_name in water_params:
+            param_config = get_parameter_config("biome", param_name)
+
+            slider = ParameterSlider(
+                label=param_name.replace("_", " ").title(),
+                min_val=param_config["min"],
+                max_val=param_config["max"],
+                default_val=param_config["default"],
+                step=param_config.get("step", 1),
+                suffix=param_config.get("suffix", "")
+            )
+
+            slider.valueChanged.connect(self.on_parameter_changed)
+            self.parameter_sliders[param_name] = slider
+            water_layout.addWidget(slider)
+
+        water_group.setLayout(water_layout)
+        layout.addWidget(water_group)
+
+        # Elevation Zones
+        elevation_group = QGroupBox("Elevation Zones")
+        elevation_layout = QVBoxLayout()
+
+        elevation_params = ["alpine_level", "snow_level", "cliff_slope"]
+        for param_name in elevation_params:
+            param_config = get_parameter_config("biome", param_name)
+
+            slider = ParameterSlider(
+                label=param_name.replace("_", " ").title(),
+                min_val=param_config["min"],
+                max_val=param_config["max"],
+                default_val=param_config["default"],
+                step=param_config.get("step", 1),
+                suffix=param_config.get("suffix", "")
+            )
+
+            slider.valueChanged.connect(self.on_parameter_changed)
+            self.parameter_sliders[param_name] = slider
+            elevation_layout.addWidget(slider)
+
+        elevation_group.setLayout(elevation_layout)
+        layout.addWidget(elevation_group)
+
+        # Edge Softness (Global Super-Biome Control)
+        softness_group = QGroupBox("Transition Softness")
+        softness_layout = QVBoxLayout()
+
+        param_config = get_parameter_config("biome", "edge_softness")
+        slider = ParameterSlider(
+            label="Edge Softness (Global)",
+            min_val=param_config["min"],
+            max_val=param_config["max"],
+            default_val=param_config["default"],
+            step=param_config.get("step", 0.1),
+            suffix=param_config.get("suffix", "")
+        )
+
+        slider.valueChanged.connect(self.on_parameter_changed)
+        self.parameter_sliders["edge_softness"] = slider
+        softness_layout.addWidget(slider)
+
+        softness_group.setLayout(softness_layout)
+        layout.addWidget(softness_group)
+
+        panel.setLayout(layout)
+        return panel
+
+    def create_biome_visualization_controls(self) -> QGroupBox:
+        """
+        Funktionsweise: Erstellt Controls für Biome-Visualization
+        Aufgabe: Switcher zwischen biome_map, biome_map_super, super_biome_mask
+        Return: QGroupBox mit Visualization-Controls
+        """
+        panel = QGroupBox("Biome Visualization")
+        layout = QVBoxLayout()
+
+        # Display Mode Selection
+        self.display_mode = QButtonGroup()
+
+        self.base_biomes_radio = QRadioButton("Base Biomes")
+        self.base_biomes_radio.setChecked(True)
+        self.base_biomes_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.base_biomes_radio, 0)
+        layout.addWidget(self.base_biomes_radio)
+
+        self.super_biomes_radio = QRadioButton("Super Biomes (2x2 Supersampled)")
+        self.super_biomes_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.super_biomes_radio, 1)
+        layout.addWidget(self.super_biomes_radio)
+
+        self.override_mask_radio = QRadioButton("Super-Biome Override Mask")
+        self.override_mask_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.override_mask_radio, 2)
+        layout.addWidget(self.override_mask_radio)
+
+        # Overlay Controls
+        overlay_group = QGroupBox("Overlays")
+        overlay_layout = QVBoxLayout()
+
+        self.settlements_overlay = QCheckBox("Show Settlements")
+        self.settlements_overlay.toggled.connect(self.toggle_settlements_overlay)
+        overlay_layout.addWidget(self.settlements_overlay)
+
+        self.rivers_overlay = QCheckBox("Show Rivers")
+        self.rivers_overlay.toggled.connect(self.toggle_rivers_overlay)
+        overlay_layout.addWidget(self.rivers_overlay)
+
+        self.elevation_contours = QCheckBox("Show Elevation Contours")
+        self.elevation_contours.toggled.connect(self.toggle_elevation_contours)
+        overlay_layout.addWidget(self.elevation_contours)
+
+        overlay_group.setLayout(overlay_layout)
+        layout.addWidget(overlay_group)
+
+        # Biome Legend Toggle
+        self.show_legend_button = BaseButton("Show Biome Legend")
+        self.show_legend_button.clicked.connect(self.show_biome_legend)
+        layout.addWidget(self.show_legend_button)
+
+        panel.setLayout(layout)
+        return panel
+
+    def setup_dependency_checking(self):
+        """
+        Funktionsweise: Setup für Input-Dependency Checking
+        Aufgabe: Überwacht alle Required Dependencies für Biome-System
+        """
+        # Required Dependencies für Biome-System
+        self.required_dependencies = VALIDATION_RULES.DEPENDENCIES["biome"]
+
+        # Dependency Status Widget
+        self.dependency_status = MultiDependencyStatusWidget(self.required_dependencies)
+        self.control_panel.addWidget(self.dependency_status)
+
+        # Data Manager Signals
+        self.data_manager.data_updated.connect(self.on_data_updated)
+
+    def load_default_parameters(self):
+        """Lädt Default-Parameter"""
+        for param_name, slider in self.parameter_sliders.items():
+            param_config = get_parameter_config("biome", param_name)
+            slider.setValue(param_config["default"])
+
+        self.current_parameters = self.get_current_parameters()
+
+    def get_current_parameters(self) -> dict:
+        """Sammelt aktuelle Parameter für Core-Generator"""
+        parameters = {}
+        for param_name, slider in self.parameter_sliders.items():
+            parameters[param_name] = slider.getValue()
+        return parameters
+
+    @pyqtSlot()
+    def on_parameter_changed(self):
+        """Slot für Parameter-Änderungen"""
+        self.current_parameters = self.get_current_parameters()
+
+        # Parameter Validation
+        is_valid, warnings, errors = validate_parameter_set("biome", self.current_parameters)
+
+        if errors:
+            self.biome_classification_widget.show_validation_errors(errors)
+        elif warnings:
+            self.biome_classification_widget.show_validation_warnings(warnings)
+        else:
+            self.biome_classification_widget.clear_validation_messages()
+
+        # Biome Classification Preview aktualisieren
+        self.biome_classification_widget.update_parameter_preview(self.current_parameters)
+
+        # Auto-Simulation triggern
+        if self.auto_simulation_enabled:
+            self.auto_simulation_timer.start(1000)
+
+    @pyqtSlot(str, str)
+    def on_data_updated(self, generator_type: str, data_key: str):
+        """Slot für Data-Updates von anderen Generatoren"""
+        if data_key in self.required_dependencies:
+            self.check_input_dependencies()
+
+    def check_input_dependencies(self):
+        """
+        Funktionsweise: Prüft alle Required Dependencies für Biome-System
+        Aufgabe: Aktiviert/Deaktiviert Generation basierend auf verfügbaren Inputs
+        """
+        is_complete, missing = self.data_manager.check_dependencies("biome", self.required_dependencies)
+
+        self.dependency_status.update_dependency_status(is_complete, missing)
+        self.manual_generate_button.setEnabled(is_complete)
+
+        # Export nur aktivieren wenn Biome-Generation complete
+        self.export_controls.setEnabled(is_complete and self.biome_generation_complete)
+
+        return is_complete
+
+    @pyqtSlot()
+    def generate_biome_system(self):
+        """
+        Funktionsweise: Hauptmethode für komplette Biome-System Generation
+        Aufgabe: Koordiniert Base-Biomes, Super-Biomes und Supersampling
+        """
+        try:
+            # Dependencies prüfen
+            if not self.check_input_dependencies():
+                self.logger.warning("Cannot generate biome system - missing dependencies")
+                return
+
+            self.logger.info("Starting biome system generation...")
+
+            # Input-Daten sammeln
+            inputs = self.collect_input_data()
+            params = self.current_parameters.copy()
+
+            # Map seed für reproduzierbare Zufälligkeit
+            map_seed = self.data_manager.get_terrain_data("heightmap")
+            if map_seed is not None:
+                params["map_seed"] = hash(str(map_seed[0, 0])) % 1000000  # Seed aus Heightmap ableiten
+
+            # 1. Base-Biome Classification (15 Biome-Typen)
+            self.logger.info("Step 1: Base-Biome Classification")
+            biome_map = self.base_classifier.classify_biomes(
+                heightmap=inputs["heightmap"],
+                slopemap=inputs["slopemap"],
+                temp_map=inputs["temp_map"],
+                soil_moist_map=inputs["soil_moist_map"],
+                biome_wetness_factor=params["biome_wetness_factor"],
+                biome_temp_factor=params["biome_temp_factor"]
+            )
+
+            # 2. Super-Biome Override System (11 Super-Biome-Typen)
+            self.logger.info("Step 2: Super-Biome Override System")
+            super_biome_results = self.super_biome_system.apply_super_biomes(
+                base_biome_map=biome_map,
+                heightmap=inputs["heightmap"],
+                water_biomes_map=inputs["water_biomes_map"],
+                sea_level=params["sea_level"],
+                bank_width=params["bank_width"],
+                alpine_level=params["alpine_level"],
+                snow_level=params["snow_level"],
+                cliff_slope=params["cliff_slope"],
+                edge_softness=params["edge_softness"]
+            )
+
+            # 3. 2x2 Supersampling mit diskretisierter Rotation
+            self.logger.info("Step 3: 2x2 Supersampling with Rotation")
+            biome_map_super = self.supersampling_manager.apply_rotational_supersampling(
+                biome_map=biome_map,
+                super_biome_override=super_biome_results["override_map"],
+                super_biome_probabilities=super_biome_results["probability_map"],
+                map_seed=params["map_seed"],
+                edge_softness=params["edge_softness"]
+            )
+
+            # 4. Super-Biome Mask für Visualisierung
+            super_biome_mask = super_biome_results["mask"]
+
+            # Results im DataManager speichern
+            self.data_manager.set_biome_data("biome_map", biome_map, params)
+            self.data_manager.set_biome_data("biome_map_super", biome_map_super, params)
+            self.data_manager.set_biome_data("super_biome_mask", super_biome_mask, params)
+
+            # Display und Statistics aktualisieren
+            self.update_biome_display()
+            self.biome_classification_widget.update_classification_statistics(biome_map, super_biome_mask)
+            self.world_stats.update_world_statistics(inputs, biome_map, super_biome_mask)
+
+            # Generation Complete Flag setzen
+            self.biome_generation_complete = True
+            self.export_controls.setEnabled(True)
+
+            self.logger.info("Biome system generation completed successfully")
+
+        except Exception as e:
+            self.logger.error(f"Biome system generation failed: {e}")
+            self.dependency_status.set_error(f"Generation failed: {str(e)}")
+
+    def collect_input_data(self) -> dict:
+        """
+        Funktionsweise: Sammelt alle Required Input-Daten von DataManager
+        Return: dict mit allen benötigten Arrays für Biome-Generation
+        """
+        inputs = {}
+
+        # Terrain Inputs
+        inputs["heightmap"] = self.data_manager.get_terrain_data("heightmap")
+        inputs["slopemap"] = self.data_manager.get_terrain_data("slopemap")
+
+        # Weather Inputs
+        inputs["temp_map"] = self.data_manager.get_weather_data("temp_map")
+
+        # Water Inputs
+        inputs["soil_moist_map"] = self.data_manager.get_water_data("soil_moist_map")
+        inputs["water_biomes_map"] = self.data_manager.get_water_data("water_biomes_map")
+
+        # Validation
+        for key, data in inputs.items():
+            if data is None:
+                raise ValueError(f"Required input '{key}' not available")
+
+        return inputs
+
+    def update_biome_display(self):
+        """
+        Funktionsweise: Aktualisiert Display basierend auf aktuellem Visualization-Mode
+        Aufgabe: Zeigt biome_map, biome_map_super oder super_biome_mask mit Overlays
+        """
+        current_mode = self.display_mode.checkedId()
+
+        if current_mode == 0:  # Base Biomes
+            biome_map = self.data_manager.get_biome_data("biome_map")
+            if biome_map is not None:
+                self.map_display.display_base_biomes(biome_map)
+
+        elif current_mode == 1:  # Super Biomes (2x2 Supersampled)
+            biome_map_super = self.data_manager.get_biome_data("biome_map_super")
+            if biome_map_super is not None:
+                self.map_display.display_super_biomes(biome_map_super)
+
+        elif current_mode == 2:  # Super-Biome Override Mask
+            super_biome_mask = self.data_manager.get_biome_data("super_biome_mask")
+            if super_biome_mask is not None:
+                self.map_display.display_super_biome_mask(super_biome_mask)
+
+        # Overlays anwenden
+        self.apply_overlays()
+
+    def apply_overlays(self):
+        """
+        Funktionsweise: Wendet alle aktivierten Overlays auf Display an
+        Aufgabe: Settlements, Rivers, Elevation Contours basierend auf Checkboxes
+        """
+        # Settlements Overlay
+        if self.settlements_overlay.isChecked():
+            settlement_list = self.data_manager.get_settlement_data("settlement_list")
+            landmark_list = self.data_manager.get_settlement_data("landmark_list")
+            if settlement_list is not None:
+                self.map_display.overlay_settlements(settlement_list, landmark_list)
+
+        # Rivers Overlay
+        if self.rivers_overlay.isChecked():
+            flow_map = self.data_manager.get_water_data("flow_map")
+            if flow_map is not None:
+                self.map_display.overlay_river_network(flow_map)
+
+        # Elevation Contours Overlay
+        if self.elevation_contours.isChecked():
+            heightmap = self.data_manager.get_terrain_data("heightmap")
+            if heightmap is not None:
+                self.map_display.overlay_elevation_contours(heightmap)
+
+    @pyqtSlot()
+    def update_display_mode(self):
+        """Slot für Visualization-Mode Änderungen"""
+        self.update_biome_display()
+
+    @pyqtSlot(bool)
+    def toggle_settlements_overlay(self, enabled: bool):
+        """Toggle für Settlements Overlay"""
+        self.update_biome_display()
+
+    @pyqtSlot(bool)
+    def toggle_rivers_overlay(self, enabled: bool):
+        """Toggle für Rivers Overlay"""
+        self.update_biome_display()
+
+    @pyqtSlot(bool)
+    def toggle_elevation_contours(self, enabled: bool):
+        """Toggle für Elevation Contours Overlay"""
+        self.update_biome_display()
+
+    @pyqtSlot()
+    def show_biome_legend(self):
+        """
+        Funktionsweise: Zeigt Biome-Legend Dialog mit allen 26 Biome-Typen
+        Aufgabe: Übersichtliche Darstellung aller Base- und Super-Biomes
+        """
+        legend_dialog = BiomeLegendDialog(self)
+        legend_dialog.exec_()
+
+    @pyqtSlot(str, dict)
+    def export_world_data(self, export_format: str, export_options: dict):
+        """
+        Funktionsweise: Exportiert komplette Welt-Daten in verschiedene Formate
+        Parameter: export_format ("png", "json", "obj"), export_options (dict)
+        """
+        try:
+            self.logger.info(f"Starting world export in format: {export_format}")
+
+            # Alle verfügbaren Daten sammeln
+            world_data = self.collect_all_world_data()
+
+            if export_format == "png":
+                self.export_png_maps(world_data, export_options)
+            elif export_format == "json":
+                self.export_json_data(world_data, export_options)
+            elif export_format == "obj":
+                self.export_3d_terrain(world_data, export_options)
+
+            self.logger.info("World export completed successfully")
+
+        except Exception as e:
+            self.logger.error(f"World export failed: {e}")
+            QMessageBox.critical(self, "Export Error", f"Export failed: {str(e)}")
+
+    def collect_all_world_data(self) -> dict:
+        """
+        Funktionsweise: Sammelt alle verfügbaren Welt-Daten für Export
+        Return: dict mit allen Generator-Outputs
+        """
+        world_data = {
+            "terrain": {
+                "heightmap": self.data_manager.get_terrain_data("heightmap"),
+                "slopemap": self.data_manager.get_terrain_data("slopemap"),
+                "shademap": self.data_manager.get_terrain_data("shademap")
+            },
+            "geology": {
+                "rock_map": self.data_manager.get_geology_data("rock_map"),
+                "hardness_map": self.data_manager.get_geology_data("hardness_map")
+            },
+            "settlements": {
+                "settlement_list": self.data_manager.get_settlement_data("settlement_list"),
+                "landmark_list": self.data_manager.get_settlement_data("landmark_list"),
+                "civ_map": self.data_manager.get_settlement_data("civ_map")
+            },
+            "weather": {
+                "temp_map": self.data_manager.get_weather_data("temp_map"),
+                "precip_map": self.data_manager.get_weather_data("precip_map"),
+                "wind_map": self.data_manager.get_weather_data("wind_map")
+            },
+            "water": {
+                "water_map": self.data_manager.get_water_data("water_map"),
+                "flow_map": self.data_manager.get_water_data("flow_map"),
+                "soil_moist_map": self.data_manager.get_water_data("soil_moist_map")
+            },
+            "biomes": {
+                "biome_map": self.data_manager.get_biome_data("biome_map"),
+                "biome_map_super": self.data_manager.get_biome_data("biome_map_super"),
+                "super_biome_mask": self.data_manager.get_biome_data("super_biome_mask")
+            },
+            "parameters": {
+                "terrain": self.get_all_parameters("terrain"),
+                "geology": self.get_all_parameters("geology"),
+                "settlement": self.get_all_parameters("settlement"),
+                "weather": self.get_all_parameters("weather"),
+                "water": self.get_all_parameters("water"),
+                "biome": self.current_parameters
+            }
+        }
+
+        return world_data
+
+    def get_all_parameters(self, generator_type: str) -> dict:
+        """
+        Funktionsweise: Holt Parameter von anderen Tabs für Export
+        Parameter: generator_type (str)
+        Return: dict mit Parametern oder leerer dict
+        """
+        # Hier würde normalerweise auf andere Tabs zugegriffen werden
+        # Für jetzt leerer dict als Fallback
+        return {}
+
+    def export_png_maps(self, world_data: dict, options: dict):
+        """Exportiert alle Maps als PNG-Dateien"""
+        import os
+        from matplotlib import pyplot as plt
+
+        export_dir = options.get("export_directory", ".")
+
+        for category, maps in world_data.items():
+            if category == "parameters":
+                continue
+
+            category_dir = os.path.join(export_dir, category)
+            os.makedirs(category_dir, exist_ok=True)
+
+            for map_name, map_data in maps.items():
+                if map_data is not None and isinstance(map_data, np.ndarray):
+                    plt.figure(figsize=(10, 10))
+                    if len(map_data.shape) == 3:  # RGB Map
+                        plt.imshow(map_data)
+                    else:  # 2D Map
+                        plt.imshow(map_data, cmap='viridis')
+                    plt.title(f"{category.title()} - {map_name.replace('_', ' ').title()}")
+                    plt.colorbar()
+                    plt.savefig(os.path.join(category_dir, f"{map_name}.png"), dpi=300, bbox_inches='tight')
+                    plt.close()
+
+    def export_json_data(self, world_data: dict, options: dict):
+        """Exportiert alle Daten als JSON"""
+        import json
+        import os
+
+        export_file = options.get("export_file", "world_data.json")
+
+        # Numpy Arrays zu Listen konvertieren für JSON
+        json_data = {}
+        for category, data in world_data.items():
+            json_data[category] = {}
+            for key, value in data.items():
+                if isinstance(value, np.ndarray):
+                    json_data[category][key] = value.tolist()
+                else:
+                    json_data[category][key] = value
+
+        with open(export_file, 'w') as f:
+            json.dump(json_data, f, indent=2)
+
+    def export_3d_terrain(self, world_data: dict, options: dict):
+        """Exportiert 3D-Terrain als OBJ-Datei"""
+        heightmap = world_data["terrain"]["heightmap"]
+        if heightmap is None:
+            raise ValueError("Heightmap not available for 3D export")
+
+        export_file = options.get("export_file", "terrain.obj")
+
+        # Vereinfachte OBJ-Export Implementation
+        with open(export_file, 'w') as f:
+            f.write("# Generated by Map Generator\n")
+
+            # Vertices
+            height, width = heightmap.shape
+            for y in range(height):
+                for x in range(width):
+                    z = heightmap[y, x]
+                    f.write(f"v {x} {z} {y}\n")
+
+            # Faces (Triangles)
+            for y in range(height - 1):
+                for x in range(width - 1):
+                    # Indices (1-based for OBJ)
+                    v1 = y * width + x + 1
+                    v2 = y * width + (x + 1) + 1
+                    v3 = (y + 1) * width + x + 1
+                    v4 = (y + 1) * width + (x + 1) + 1
+
+                    # Two triangles per quad
+                    f.write(f"f {v1} {v2} {v3}\n")
+                    f.write(f"f {v2} {v4} {v3}\n")
+
+    # Override BaseMapTab method
+    def generate_terrain(self):
+        """Override für Biome-spezifische Generation"""
+        self.generate_biome_system()
+
+
+class BiomeClassificationWidget(QGroupBox):
+    """
+    Funktionsweise: Widget für Biome-Classification Status und Preview
+    Aufgabe: Zeigt Parameter-Preview, Validation-Messages, Biome-Verteilung
     """
 
     def __init__(self):
-        super().__init__('biome_final_map', title='Finale Biom-Karte', debounce_ms=500)
-        self.biome_definitions = self._init_biome_definitions()
+        super().__init__("Biome Classification")
+        self.setup_ui()
 
-    def _init_biome_definitions(self):
-        """
-        Funktionsweise: Definiert alle verfügbaren Biome mit Eigenschaften
-        Returns:
-            dict: Biome-Definitionen mit Farben und Klassifizierungs-Regeln
-        """
-        return {
-            0: {'name': 'Tiefsee', 'color': '#000080', 'min_height': 0.0, 'max_height': 0.10},
-            1: {'name': 'Ozean', 'color': '#1e40af', 'min_height': 0.10, 'max_height': 0.15},
-            2: {'name': 'Strand', 'color': '#fbbf24', 'min_height': 0.15, 'max_height': 0.25},
-            3: {'name': 'Sumpf', 'color': '#65a30d', 'min_height': 0.15, 'max_height': 0.35},
-            4: {'name': 'Grasland', 'color': '#84cc16', 'min_height': 0.25, 'max_height': 0.60},
-            5: {'name': 'Wald', 'color': '#166534', 'min_height': 0.30, 'max_height': 0.70},
-            6: {'name': 'Nadelwald', 'color': '#14532d', 'min_height': 0.40, 'max_height': 0.80},
-            7: {'name': 'Steppe', 'color': '#ca8a04', 'min_height': 0.35, 'max_height': 0.65},
-            8: {'name': 'Wüste', 'color': '#dc2626', 'min_height': 0.20, 'max_height': 0.60},
-            9: {'name': 'Tundra', 'color': '#94a3b8', 'min_height': 0.30, 'max_height': 0.75},
-            10: {'name': 'Alpin', 'color': '#e5e7eb', 'min_height': 0.75, 'max_height': 1.0},
-            11: {'name': 'Gletscher', 'color': '#f3f4f6', 'min_height': 0.85, 'max_height': 1.0}
-        }
-
-    @performance_tracked("Biome_Final_Rendering")
-    @safe_execute('handle_map_rendering_error')
-    def _render_map(self, world_manager):
-        """
-        Funktionsweise: Rendert finale Welt-Karte mit allen Layern
-        - Kombiniert alle Tab-Parameter für komplette Welt-Simulation
-        - Multi-Layer Rendering: Terrain -> Biome -> Water -> Settlements
-        """
-        with TabErrorContext('Biome', 'Final World Rendering'):
-            self.clear_and_setup()
-
-            # Sammle alle Parameter von allen Tabs
-            all_params = self._collect_all_parameters(world_manager)
-
-            # === LAYER 1: TERRAIN & HEIGHT ===
-            X, Y, height_field = self._generate_integrated_terrain(all_params)
-
-            # === LAYER 2: CLIMATE & WEATHER ===
-            temperature_field, precipitation_field = self._generate_climate_fields(X, Y, all_params)
-
-            # === LAYER 3: BIOME CLASSIFICATION ===
-            biome_map = self._classify_biomes(height_field, temperature_field, precipitation_field, all_params)
-
-            # === LAYER 4: WATER SYSTEMS ===
-            self._render_water_systems(X, Y, height_field, all_params)
-
-            # === LAYER 5: SETTLEMENTS & FEATURES ===
-            self._render_world_features(all_params)
-
-            # === BIOME MAP RENDERING ===
-            self._render_biome_map(X, Y, biome_map)
-
-            # === FINAL TOUCHES ===
-            self._add_world_statistics(all_params, biome_map)
-            self._add_comprehensive_legend()
-
-            self.set_title('Finale Welt: Alle Biome & Features integriert')
-            self.draw()
-
-    def _collect_all_parameters(self, world_manager):
-        """Sammelt Parameter von allen Tabs für integrierte Simulation"""
-        try:
-            return {
-                'terrain': world_manager.terrain.get_parameters(),
-                'geology': world_manager.geology.get_parameters(),
-                'settlement': world_manager.settlement.get_parameters(),
-                'weather': world_manager.weather.get_parameters(),
-                'water': world_manager.water.get_parameters()
-            }
-        except Exception as e:
-            self.error_handler.logger.warning(f"Parameter-Sammlung Fehler: {e}")
-            return {'terrain': {}, 'geology': {}, 'settlement': {}, 'weather': {}, 'water': {}}
-
-    def _generate_integrated_terrain(self, all_params):
-        """
-        Funktionsweise: Generiert integriertes Terrain basierend auf allen Parametern
-        - Berücksichtigt Geologie für Terrain-Modifikation
-        - Realistic Height Distribution
-        """
-        # Basis-Koordinaten
-        x = np.linspace(0, 100, 100)
-        y = np.linspace(0, 100, 100)
-        X, Y = np.meshgrid(x, y)
-
-        # Terrain-Parameter
-        terrain_params = all_params.get('terrain', {})
-        np.random.seed(terrain_params.get('seed', 42))
-
-        # Multi-Scale Terrain mit geologischen Einflüssen
-        base_terrain = (np.sin(X * 0.08) * np.cos(Y * 0.06) +
-                        np.sin(X * 0.12) * np.cos(Y * 0.10) * 0.5 +
-                        np.random.normal(0, 0.08, X.shape))
-
-        # Geologische Modifikation
-        geology_params = all_params.get('geology', {})
-        rock_hardness = np.mean(geology_params.get('hardness_values', [50])) / 100.0
-        ridge_effect = geology_params.get('ridge_warping', 0.25)
-
-        # Härtere Gesteine = steilere Berge
-        height_field = base_terrain * (0.8 + rock_hardness * 0.4)
-        height_field += np.sin(X * 0.05 + ridge_effect) * np.cos(Y * 0.05) * 0.2
-
-        # Normalisierung
-        height_field = (height_field + 2) / 4  # 0-1 Range
-
-        return X, Y, height_field
-
-    def _generate_climate_fields(self, X, Y, all_params):
-        """Generiert Temperatur- und Niederschlags-Felder"""
-        weather_params = all_params.get('weather', {})
-
-        # Temperatur: Nord-Süd Gradient + Höhen-Effekt
-        avg_temp = weather_params.get('avg_temperature', 15)
-        lat_gradient = np.linspace(0.2, 1.0, 100)  # Kälter im Norden
-        temperature_field = np.zeros_like(X)
-
-        for i in range(100):
-            temperature_field[i, :] = (avg_temp / 40.0) * lat_gradient[i]
-
-        # Niederschlag: West-Ost Gradient + Topographie
-        max_humidity = weather_params.get('max_humidity', 70) / 100.0
-        rain_amount = weather_params.get('rain_amount', 5.0) / 10.0
-
-        precipitation_field = np.zeros_like(X)
-        for j in range(100):
-            # Feuchte Luft von Westen
-            precipitation_field[:, j] = max_humidity * (1.0 - j / 100.0 * 0.8) * rain_amount
-
-        return temperature_field, precipitation_field
-
-    def _classify_biomes(self, height_field, temperature_field, precipitation_field, all_params):
-        """
-        Funktionsweise: Intelligente Biome-Klassifizierung
-        - Basiert auf Höhe, Temperatur, Niederschlag
-        - Berücksichtigt Wassersystem-Parameter
-        """
-        biome_map = np.zeros_like(height_field, dtype=int)
-        water_params = all_params.get('water', {})
-        sea_level = water_params.get('sea_level', 15) / 100.0
-
-        for i in range(100):
-            for j in range(100):
-                h = height_field[i, j]
-                t = temperature_field[i, j]
-                p = precipitation_field[i, j]
-
-                # Biome-Klassifizierungs-Logik
-                if h < sea_level * 0.5:  # Tiefsee
-                    biome_map[i, j] = 0
-                elif h < sea_level:  # Ozean
-                    biome_map[i, j] = 1
-                elif h < sea_level + 0.1 and i > 85:  # Strand (Küste)
-                    biome_map[i, j] = 2
-                elif h > 0.85:  # Hochgebirge
-                    if t < 0.3:
-                        biome_map[i, j] = 11  # Gletscher
-                    else:
-                        biome_map[i, j] = 10  # Alpin
-                elif h > 0.75:  # Gebirge
-                    if t < 0.4:
-                        biome_map[i, j] = 9  # Tundra
-                    else:
-                        biome_map[i, j] = 6  # Nadelwald
-                elif t < 0.25:  # Kalt
-                    biome_map[i, j] = 9  # Tundra
-                elif p < 0.25:  # Trocken
-                    if t > 0.6:
-                        biome_map[i, j] = 8  # Wüste
-                    else:
-                        biome_map[i, j] = 7  # Steppe
-                elif p > 0.8 and h < 0.4:  # Sehr feucht, niedrig
-                    biome_map[i, j] = 3  # Sumpf
-                elif p > 0.5 and t > 0.4:  # Feucht und warm
-                    biome_map[i, j] = 5  # Wald
-                elif p > 0.4 and h > 0.4:  # Mittel feucht, höher
-                    biome_map[i, j] = 6  # Nadelwald
-                else:  # Standard
-                    biome_map[i, j] = 4  # Grasland
-
-        return biome_map
-
-    def _render_biome_map(self, X, Y, biome_map):
-        """Rendert die finale Biome-Karte"""
-        try:
-            # Custom Colormap aus Biome-Definitionen
-            colors = [self.biome_definitions[i]['color'] for i in sorted(self.biome_definitions.keys())]
-            biome_cmap = ListedColormap(colors)
-
-            # Biome-Karte rendern
-            self.ax.imshow(biome_map, cmap=biome_cmap,
-                           vmin=0, vmax=len(self.biome_definitions) - 1,
-                           origin='lower', extent=[0, 100, 0, 100], alpha=0.85)
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Biome-Map Rendering Fehler: {e}")
-
-    def _render_water_systems(self, X, Y, height_field, all_params):
-        """Rendert integrierte Wassersysteme"""
-        try:
-            water_params = all_params.get('water', {})
-
-            # Flüsse (vereinfacht)
-            river_x = np.linspace(10, 90, 40)
-            river_y = 50 + np.sin(river_x * 0.12) * 15
-            water_speed = water_params.get('water_speed', 8.0)
-            river_width = max(2, water_speed / 4.0)
-
-            self.ax.plot(river_x, river_y, color='#1e40af',
-                         linewidth=river_width, alpha=0.9, zorder=10)
-
-            # Seen (basierend auf Topographie)
-            lake_fill = water_params.get('lake_fill', 40)
-            lake_positions = [(25, 75), (70, 60), (45, 30)]
-
-            for i, (lx, ly) in enumerate(lake_positions[:int(lake_fill / 30 + 1)]):
-                lake_size = lake_fill / 25.0
-                circle = plt.Circle((lx, ly), lake_size, color='#3b82f6',
-                                    alpha=0.9, zorder=10)
-                self.ax.add_patch(circle)
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Wassersystem Rendering Fehler: {e}")
-
-    def _render_world_features(self, all_params):
-        """Rendert Settlements und weitere Features"""
-        try:
-            settlement_params = all_params.get('settlement', {})
-
-            # Dörfer
-            villages = settlement_params.get('villages', 3)
-            village_positions = [(30, 65), (60, 40), (75, 75)]
-            for i in range(min(villages, len(village_positions))):
-                x, y = village_positions[i]
-                self.ax.plot(x, y, marker='s', color='#8b4513',
-                             markersize=8, alpha=0.9, zorder=15)
-                self.ax.text(x, y + 3, f'Dorf {i + 1}', ha='center', va='bottom',
-                             fontsize=8, weight='bold', zorder=16)
-
-            # Landmarks
-            landmarks = settlement_params.get('landmarks', 2)
-            landmark_positions = [(40, 80), (80, 30)]
-            for i in range(min(landmarks, len(landmark_positions))):
-                x, y = landmark_positions[i]
-                self.ax.plot(x, y, marker='^', color='#fbbf24',
-                             markersize=10, alpha=0.9, zorder=15)
-                self.ax.text(x, y + 4, f'Landmark {i + 1}', ha='center', va='bottom',
-                             fontsize=8, weight='bold', zorder=16)
-
-            # Straßen zwischen Settlements
-            connections = settlement_params.get('connections', 3)
-            for i in range(min(connections, 2)):
-                start_pos = village_positions[i] if i < len(village_positions) else (50, 50)
-                end_x, end_y = (100 if i % 2 == 0 else 0, start_pos[1])
-                self.ax.plot([start_pos[0], end_x], [start_pos[1], end_y],
-                             color='#7c2d12', linewidth=2, alpha=0.7, zorder=12)
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"World Features Rendering Fehler: {e}")
-
-    def _add_world_statistics(self, all_params, biome_map):
-        """Fügt Welt-Statistiken zur Karte hinzu"""
-        try:
-            # Biome-Verteilung berechnen
-            unique, counts = np.unique(biome_map, return_counts=True)
-            total_pixels = biome_map.size
-
-            # Top 3 Biome finden
-            top_biomes = []
-            for i in np.argsort(counts)[-3:]:
-                biome_id = unique[i]
-                percentage = (counts[i] / total_pixels) * 100
-                biome_name = self.biome_definitions.get(biome_id, {}).get('name', f'Biome {biome_id}')
-                top_biomes.append(f"{biome_name}: {percentage:.1f}%")
-
-            # Statistik-Text
-            stats_text = "WELT-ÜBERSICHT:\n" + "\n".join(reversed(top_biomes))
-
-            self.ax.text(2, 98, stats_text, fontsize=9,
-                         bbox=dict(boxstyle="round,pad=0.5", facecolor='white', alpha=0.9),
-                         verticalalignment='top', zorder=20)
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Welt-Statistik Fehler: {e}")
-
-    def _add_comprehensive_legend(self):
-        """Fügt umfassende Legende für finale Welt hinzu"""
-        try:
-            legend_elements = []
-
-            # Biome-Legende (Top 6 häufigste)
-            main_biomes = [1, 4, 5, 8, 9, 10]  # Ozean, Grasland, Wald, Wüste, Tundra, Alpin
-            for biome_id in main_biomes:
-                if biome_id in self.biome_definitions:
-                    biome = self.biome_definitions[biome_id]
-                    legend_elements.append(
-                        mpatches.Patch(color=biome['color'], label=biome['name'])
-                    )
-
-            # Features
-            legend_elements.extend([
-                plt.Line2D([0], [0], color='#1e40af', linewidth=3, label='Fluss'),
-                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#3b82f6',
-                           markersize=6, label='See'),
-                plt.Line2D([0], [0], marker='s', color='w', markerfacecolor='#8b4513',
-                           markersize=6, label='Dorf'),
-                plt.Line2D([0], [0], marker='^', color='w', markerfacecolor='#fbbf24',
-                           markersize=8, label='Landmark')
-            ])
-
-            self.ax.legend(handles=legend_elements, loc='center left',
-                           bbox_to_anchor=(1.02, 0.5), fontsize=8,
-                           framealpha=0.95, edgecolor='gray')
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Legend Fehler: {e}")
-
-
-class BiomeControlPanel(QWidget, NavigationMixin):
-    """
-    Funktionsweise: Finale Control Panel für Biome Tab
-    - Kein Parameter-Input (verwendet alle vorherigen Tab-Parameter)
-    - Zeigt Welt-Statistiken und Export-Optionen
-    - Finale Navigation (Fertigstellen/Exportieren)
-    """
-
-    def __init__(self, map_canvas):
-        super().__init__()
-        self.map_canvas = map_canvas
-        self.error_handler = ErrorHandler()
-
-        # Verwende WorldParameterManager für finale Zusammenfassung
-        self.world_manager = WorldParameterManager()
-
-        self.init_ui()
-
-    @safe_execute('handle_parameter_error')
-    def init_ui(self):
+    def setup_ui(self):
+        """Erstellt UI für Biome-Classification"""
         layout = QVBoxLayout()
 
-        # Titel
-        title = QLabel("Finale Welt-Generierung")
-        title.setStyleSheet("font-size: 16px; font-weight: bold; margin: 10px; color: #2563eb;")
-        layout.addWidget(title)
+        # Parameter Preview
+        self.parameter_preview = QLabel("Parameters: Default values")
+        layout.addWidget(self.parameter_preview)
 
-        # Welt-Zusammenfassung
-        self.setup_world_summary(layout)
+        # Validation Messages
+        self.validation_status = StatusIndicator("Parameter Validation")
+        self.validation_status.set_success("Parameters valid")
+        layout.addWidget(self.validation_status)
 
-        # Generierung Controls
-        self.setup_generation_controls(layout)
+        # Biome Distribution (wird nach Generation gefüllt)
+        self.biome_distribution = QLabel("Biome Distribution: Not generated")
+        layout.addWidget(self.biome_distribution)
 
-        # Export & Finalisierung
-        self.setup_export_controls(layout)
-
-        # Spacer
-        layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
-
-        # Finale Navigation (Zurück/Fertigstellen)
-        self.setup_navigation(layout, show_prev=True, show_next=True,
-                              prev_text="Zurück", next_text="Fertigstellen")
+        # Super-Biome Statistics
+        self.super_biome_stats = QLabel("Super-Biome Override: Not generated")
+        layout.addWidget(self.super_biome_stats)
 
         self.setLayout(layout)
 
-        # Initial world rendering
-        self.generate_final_world()
+    def update_parameter_preview(self, parameters: dict):
+        """Aktualisiert Parameter-Preview"""
+        preview_text = f"Wetness: {parameters.get('biome_wetness_factor', 1.0):.1f}, "
+        preview_text += f"Temp: {parameters.get('biome_temp_factor', 1.0):.1f}, "
+        preview_text += f"Softness: {parameters.get('edge_softness', 1.0):.1f}"
+        self.parameter_preview.setText(f"Parameters: {preview_text}")
 
-    def setup_world_summary(self, layout):
-        """Erstellt Welt-Zusammenfassungs-Panel"""
-        summary_group = QGroupBox("Welt-Zusammenfassung")
-        summary_layout = QVBoxLayout()
+    def show_validation_errors(self, errors: list):
+        """Zeigt Validation-Errors"""
+        self.validation_status.set_error(f"Errors: {'; '.join(errors)}")
 
-        self.summary_text = QTextEdit()
-        self.summary_text.setMaximumHeight(140)
-        self.summary_text.setReadOnly(True)
-        self.summary_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #f8fafc;
-                border: 2px solid #e2e8f0;
-                border-radius: 8px;
-                padding: 12px;
-                font-family: 'Segoe UI', monospace;
-                font-size: 11px;
-                line-height: 1.4;
-            }
-        """)
+    def show_validation_warnings(self, warnings: list):
+        """Zeigt Validation-Warnings"""
+        self.validation_status.set_warning(f"Warnings: {'; '.join(warnings)}")
 
-        self.update_world_summary()
+    def clear_validation_messages(self):
+        """Löscht Validation-Messages"""
+        self.validation_status.set_success("Parameters valid")
 
-        summary_layout.addWidget(self.summary_text)
-        summary_group.setLayout(summary_layout)
-        layout.addWidget(summary_group)
-
-    def setup_generation_controls(self, layout):
-        """Erstellt Generierungs-Control Panel"""
-        gen_group = QGroupBox("Welt-Generierung")
-        gen_layout = QVBoxLayout()
-
-        self.regenerate_btn = QPushButton("Welt Neu Generieren")
-        self.regenerate_btn.setStyleSheet(
-            "QPushButton { background-color: #059669; color: white; font-weight: bold; padding: 12px; }")
-        self.regenerate_btn.clicked.connect(self.generate_final_world)
-
-        self.randomize_all_btn = QPushButton("Alle Parameter Randomisieren")
-        self.randomize_all_btn.setStyleSheet(
-            "QPushButton { background-color: #7c3aed; color: white; font-weight: bold; padding: 12px; }")
-        self.randomize_all_btn.clicked.connect(self.randomize_all_parameters)
-
-        gen_layout.addWidget(self.regenerate_btn)
-        gen_layout.addWidget(self.randomize_all_btn)
-        gen_group.setLayout(gen_layout)
-        layout.addWidget(gen_group)
-
-    def setup_export_controls(self, layout):
-        """Erstellt Export-Control Panel"""
-        export_group = QGroupBox("Export & Speichern")
-        export_layout = QVBoxLayout()
-
-        self.export_image_btn = QPushButton("Als Bild Exportieren")
-        self.export_image_btn.setStyleSheet(
-            "QPushButton { background-color: #dc2626; color: white; font-weight: bold; padding: 10px; }")
-        self.export_image_btn.clicked.connect(self.export_world_image)
-
-        self.export_data_btn = QPushButton("Parameter Exportieren")
-        self.export_data_btn.setStyleSheet(
-            "QPushButton { background-color: #ea580c; color: white; font-weight: bold; padding: 10px; }")
-        self.export_data_btn.clicked.connect(self.export_world_data)
-
-        export_layout.addWidget(self.export_image_btn)
-        export_layout.addWidget(self.export_data_btn)
-        export_group.setLayout(export_layout)
-        layout.addWidget(export_group)
-
-    @performance_tracked("Final_World_Generation")
-    @safe_execute('handle_map_rendering_error')
-    def generate_final_world(self):
+    def update_classification_statistics(self, biome_map: np.ndarray, super_biome_mask: np.ndarray):
         """
-        Funktionsweise: Generiert finale Welt mit allen Tab-Parametern
-        - Sammelt alle Parameter von allen Tabs
-        - Triggert finale Welt-Visualisierung
+        Funktionsweise: Aktualisiert Biome-Statistiken nach Generation
+        Parameter: biome_map, super_biome_mask (numpy arrays)
         """
-        with TabErrorContext('Biome', 'Final World Generation'):
-            self.error_handler.logger.info("Generiere finale Welt...")
+        # Base-Biome Distribution
+        unique_biomes, counts = np.unique(biome_map, return_counts=True)
+        total_pixels = biome_map.shape[0] * biome_map.shape[1]
 
-            # Aktualisiere Zusammenfassung
-            self.update_world_summary()
+        most_common_biome_idx = np.argmax(counts)
+        most_common_biome = unique_biomes[most_common_biome_idx]
+        most_common_pct = (counts[most_common_biome_idx] / total_pixels) * 100
 
-            # Triggere finale Karten-Generierung
-            self.map_canvas.update_map(world_manager=self.world_manager)
+        self.biome_distribution.setText(
+            f"Biome Distribution: {len(unique_biomes)} types, "
+            f"most common: Biome #{most_common_biome} ({most_common_pct:.1f}%)"
+        )
 
-    def update_world_summary(self):
-        """Aktualisiert Welt-Zusammenfassung mit allen Parametern"""
-        try:
-            all_params = self.world_manager.export_all_parameters()
+        # Super-Biome Override Statistics
+        override_pixels = np.sum(super_biome_mask > 0)
+        override_pct = (override_pixels / total_pixels) * 100
 
-            # Formatierte Zusammenfassung erstellen
-            summary = "FINALE WELT-PARAMETER:\n\n"
-
-            # Terrain
-            terrain = all_params.get('terrain', {})
-            summary += f"TERRAIN: {terrain.get('size', 256)}x{terrain.get('size', 256)}, "
-            summary += f"Max.Höhe: {terrain.get('height', 100)}m, Seed: {terrain.get('seed', 42)}\n"
-
-            # Weather
-            weather = all_params.get('weather', {})
-            climate = self.world_manager.weather.get_climate_classification()
-            summary += f"KLIMA: {climate}, {weather.get('avg_temperature', 15)}°C, "
-            summary += f"Feuchtigkeit: {weather.get('max_humidity', 70)}%\n"
-
-            # Water
-            water = all_params.get('water', {})
-            water_coverage = self.world_manager.water.calculate_water_coverage()
-            summary += f"WASSER: {water_coverage:.1f}% Coverage, "
-            summary += f"Meereshöhe: {water.get('sea_level', 15)}%\n"
-
-            # Settlements
-            settlement = all_params.get('settlement', {})
-            total_settlements = self.world_manager.settlement.get_total_settlements()
-            summary += f"SIEDLUNGEN: {total_settlements} Total "
-            summary += f"({settlement.get('villages', 3)} Dörfer, {settlement.get('landmarks', 2)} Landmarks)\n"
-
-            # Geology
-            geology = all_params.get('geology', {})
-            rock_types = len(geology.get('rock_types', []))
-            summary += f"GEOLOGIE: {rock_types} Gesteinsarten\n\n"
-
-            summary += "Bereit für finale Generierung!"
-
-            self.summary_text.setPlainText(summary)
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Zusammenfassung Update Fehler: {e}")
-            self.summary_text.setPlainText("Welt-Parameter werden geladen...")
-
-    @safe_execute('handle_parameter_error')
-    def randomize_all_parameters(self):
-        """Randomisiert alle Parameter für zufällige Welt-Generierung"""
-        try:
-            self.error_handler.logger.info("Randomisiere alle Welt-Parameter...")
-
-            # Randomisiere Terrain Seed
-            self.world_manager.terrain.randomize_seed()
-
-            # TODO: Weitere Randomisierung für andere Parameter
-            # (würde in echter Implementation alle Parameter zufällig setzen)
-
-            self.generate_final_world()
-
-        except Exception as e:
-            self.error_handler.handle_parameter_error('Biome', 'randomize_all', e)
-
-    @safe_execute('handle_parameter_error')
-    def export_world_image(self):
-        """Exportiert finale Welt als Bild"""
-        self.error_handler.logger.info("Exportiere Welt als Bild...")
-        # TODO: Implementiere Bild-Export
-        self.error_handler.logger.info("Export-Feature: Implementierung ausstehend")
-
-    @safe_execute('handle_parameter_error')
-    def export_world_data(self):
-        """Exportiert alle Parameter als JSON/XML"""
-        self.error_handler.logger.info("Exportiere Welt-Parameter...")
-        all_params = self.world_manager.export_all_parameters()
-        self.error_handler.logger.info(f"Export-Daten: {len(str(all_params))} Zeichen")
-
-    # Navigation Methoden (von NavigationMixin erforderlich)
-    def next_menu(self):
-        """Finale Fertigstellung - Zurück zum Hauptmenü"""
-        try:
-            self.error_handler.logger.info("🎉 Welt-Generierung abgeschlossen!")
-
-            # Finale Statistiken loggen
-            all_params = self.world_manager.export_all_parameters()
-            climate = self.world_manager.weather.get_climate_classification()
-            water_coverage = self.world_manager.water.calculate_water_coverage()
-            settlements = self.world_manager.settlement.get_total_settlements()
-
-            self.error_handler.logger.info(
-                f"Finale Welt: {climate} Klima, {water_coverage:.1f}% Wasser, {settlements} Siedlungen")
-
-            # Zurück zum Hauptmenü
-            TabNavigationHelper.go_to_main_menu(self.window(), self.world_manager)
-
-        except Exception as e:
-            self.error_handler.handle_tab_navigation_error('Biome', 'MainMenu', e)
-
-    def prev_menu(self):
-        """Wechselt zum vorherigen Tab (Water)"""
-        try:
-            # Keine Parameter zu speichern (Biome verwendet alle vorherigen)
-            self.error_handler.logger.info("Zurück zum Water Tab")
-
-            prev_tab = TabNavigationHelper.get_prev_tab('BiomeWindow')
-            if prev_tab:
-                self.navigate_to_tab(prev_tab[0], prev_tab[1])
-        except Exception as e:
-            self.error_handler.handle_tab_navigation_error('Biome', 'Water', e)
-
-    @safe_execute('handle_parameter_error')
-    def quick_generate(self):
-        """Schnellgenerierung für finale Welt"""
-        self.error_handler.logger.info("Biome Schnellgenerierung - Finale Welt komplett!")
-        self.generate_final_world()
-
-
-class BiomeWindow(QMainWindow):
-    """
-    Funktionsweise: Hauptfenster für Biome-Tab (Finale Version)
-    - Verwendet optimierte Map Canvas für komplexe Multi-Layer Rendering
-    - Erweiterte Fenster-Konfiguration für finale Welt-Anzeige
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.error_handler = ErrorHandler()
-        self.init_ui()
-
-    @safe_execute('handle_worldstate_error')
-    def init_ui(self):
-        self.setWindowTitle("World Generator - Finale Biom-Klassifizierung")
-        self.setGeometry(100, 100, 1500, 1000)
-        self.setMinimumSize(1500, 1000)
-
-        # Central Widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-
-        # Main Layout
-        main_layout = QHBoxLayout()
-
-        # Linke Seite - Finale Welt-Karte (75%)
-        self.map_canvas = BiomeMapCanvas()
-        main_layout.addWidget(self.map_canvas, 7)
-
-        # Trennlinie
-        separator = QFrame()
-        separator.setFrameShape(QFrame.VLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        main_layout.addWidget(separator)
-
-        # Rechte Seite - Finale Controls (25%)
-        self.control_panel = BiomeControlPanel(self.map_canvas)
-        self.control_panel.setMaximumWidth(380)  # Etwas breiter für finale Controls
-        main_layout.addWidget(self.control_panel, 3)
-
-        central_widget.setLayout(main_layout)
-
-        # Finale Styling für Biome Tab
-        self.setStyleSheet("""
-            QMainWindow {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #f8fafc, stop:1 #e2e8f0);
-            }
-            QLabel {
-                color: #1e293b;
-            }
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #cbd5e1;
-                border-radius: 8px;
-                margin-top: 1ex;
-                padding-top: 12px;
-                background-color: rgba(255, 255, 255, 0.8);
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 8px 0 8px;
-                color: #334155;
-            }
-            /* Spezielle Styles für finale Biome Gruppen */
-            QGroupBox[title*="Welt-Zusammenfassung"] {
-                border-color: #3b82f6;
-                background-color: rgba(59, 130, 246, 0.05);
-            }
-            QGroupBox[title*="Welt-Generierung"] {
-                border-color: #059669;
-                background-color: rgba(5, 150, 105, 0.05);
-            }
-            QGroupBox[title*="Export"] {
-                border-color: #dc2626;
-                background-color: rgba(220, 38, 38, 0.05);
-            }
-            /* Button Hover-Effekte */
-            QPushButton:hover {
-                transform: translateY(-1px);
-                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
-            }
-            /* Finale Welt Titel-Style */
-            QLabel[text*="Finale Welt"] {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #3b82f6, stop:1 #8b5cf6);
-                color: white;
-                border-radius: 8px;
-                padding: 8px;
-            }
-        """)
-
-    def resizeEvent(self, event):
-        """Behält Proportionen beim Resize bei"""
-        super().resizeEvent(event)
-
-    def closeEvent(self, event):
-        """Cleanup beim Schließen"""
-        try:
-            if hasattr(self, 'map_canvas'):
-                self.map_canvas.cleanup()
-        except Exception as e:
-            print(f"Cleanup Fehler: {e}")
-        finally:
-            # Wichtig: Event an Parent weiterleiten
-            super().closeEvent(event)
+        self.super_biome_stats.setText(
+            f"Super-Biome Override: {override_pct:.1f}% of map overridden"
+        )

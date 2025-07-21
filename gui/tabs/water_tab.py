@@ -1,689 +1,816 @@
-#!/usr/bin/env python3
 """
-Path: MapGenerator/gui/tabs/water_tab.py
-__init__.py existiert in "tabs"
+Path: gui/tabs/water_tab.py
 
-World Generator GUI - Water Tab (Vollständig Refactored)
-Tab 5: Flüsse, Seen und Wasserflächen
-Alle Verbesserungen aus Schritt 1-3 implementiert
+Funktionsweise: Wassersystem mit River-Networks, Erosion und vollständiger Core-Integration
+- Input: heightmap, slopemap, hardness_map, rock_map, precip_map, temp_map, wind_map, humid_map
+- River-Generation durch Flow-Accumulation mit Jump Flooding Algorithm
+- Lake-Placement und Water-Table Simulation
+- Erosion-Simulation modifiziert Heightmap und Rock-Map mit Massenerhaltung
+- Alle 8 Shader für GPU-accelerated Hydrologie-Simulation
+- Output: 10 verschiedene Water-Maps + ocean_outflow
 """
 
-import sys
+from PyQt5.QtWidgets import *
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.patches import Circle
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
-                             QVBoxLayout, QLabel, QPushButton,
-                             QFrame, QSpacerItem, QSizePolicy,
-                             QCheckBox, QGroupBox)
-from PyQt5.QtCore import Qt
+import logging
 
-from gui.widgets.parameter_slider import ParameterSlider
-from gui.widgets.navigation_mixin import NavigationMixin, TabNavigationHelper
-from gui.utils.error_handler import ErrorHandler, safe_execute, TabErrorContext
-from gui.widgets.map_canvas import MapCanvas
-from gui.utils.performance_utils import debounced_method, performance_tracked
-try:
-    from gui.managers.parameter_manager import WorldParameterManager
-except ImportError:
-    from gui.world_state import WorldState as WorldParameterManager
+from .base_tab import BaseMapTab
+from gui.config.value_default import WATER, get_parameter_config, validate_parameter_set, VALIDATION_RULES
+from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton
+from core.water_generator import (
+    HydrologySystemGenerator, LakeDetectionSystem, FlowNetworkBuilder,
+    ManningFlowCalculator, ErosionSedimentationSystem, SoilMoistureCalculator,
+    EvaporationCalculator
+)
 
-
-class WaterMapCanvas(MapCanvas):
+def get_water_error_decorators():
     """
-    Funktionsweise: Water Map Canvas mit Performance-Optimierung
-    - Erbt von OptimizedMapCanvas für automatisches Debouncing
-    - Komplexe Wassersystem-Visualisierung
-    - Intelligente Erosions- und Sediment-Simulation
+    Funktionsweise: Lazy Loading von Water Tab Error Decorators
+    Aufgabe: Lädt Memory-Critical, GPU-Shader und Core-Generation Decorators
+    Return: Tuple von Decorator-Funktionen
     """
+    try:
+        from gui.error_handler import memory_critical_handler, gpu_shader_handler, core_generation_handler
+        return memory_critical_handler, gpu_shader_handler, core_generation_handler
+    except ImportError:
+        def noop_decorator(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+        return noop_decorator, noop_decorator, noop_decorator
 
-    def __init__(self):
-        super().__init__('water_map', title='Wassersystem')
+memory_critical_handler, gpu_shader_handler, core_generation_handler = get_water_error_decorators()
 
-    @performance_tracked("Water_Rendering")
-    def _render_map(self, lake_fill, sea_level, sediment_amount, water_speed, rock_dependency):
-        """
-        Funktionsweise: Rendert komplexes Wassersystem
-        - Terrain, Seen, Flüsse, Erosion in einem System
-        - Performance-optimiert für komplexe Berechnungen
-        """
-        with TabErrorContext('Water', 'Water System Rendering'):
-            self.clear_and_setup()
-
-            # Terrain Hintergrund generieren
-            X, Y, height_field = self._generate_terrain()
-
-            # === MEERESSPIEGEL ===
-            self._render_sea_level(X, Y, height_field, sea_level)
-
-            # === SEEN ===
-            self._render_lakes(X, Y, height_field, lake_fill, sea_level)
-
-            # === FLUSS-NETZWERK ===
-            self._render_river_network(water_speed, rock_dependency)
-
-            # === EROSIONS-VISUALISIERUNG ===
-            self._render_erosion_effects(sediment_amount, water_speed)
-
-            # === WASSERDATEN-INFO ===
-            self._add_water_info(lake_fill, sea_level, sediment_amount)
-
-            self.set_title('Wassersystem: Flüsse, Seen & Erosion')
-            self._add_water_legend()
-            self.draw()
-
-    def _generate_terrain(self):
-        """
-        Funktionsweise: Generiert Basis-Terrain für Wassersystem
-        Returns:
-            tuple: X, Y, height_field für weitere Berechnungen
-        """
-        x = np.linspace(0, 100, 80)
-        y = np.linspace(0, 100, 80)
-        X, Y = np.meshgrid(x, y)
-
-        # Simuliertes Höhenfeld mit realistischen Features
-        height_field = (np.sin(X * 0.08) * np.cos(Y * 0.06) +
-                        np.sin(X * 0.12) * np.cos(Y * 0.10) * 0.5 +
-                        np.random.normal(0, 0.05, X.shape))  # Weniger Rauschen
-        height_field = (height_field + 1.2) * 0.4  # Normalisierung auf 0-0.8
-
-        # Terrain-Konturen zeichnen
-        terrain_contour = self.ax.contourf(X, Y, height_field, levels=20,
-                                           cmap='terrain', alpha=0.6)
-        return X, Y, height_field
-
-    def _render_sea_level(self, X, Y, height_field, sea_level):
-        """Rendert Meeresspiegel und Ozeane"""
-        try:
-            sea_height = sea_level / 100.0
-            ocean_mask = height_field <= sea_height
-
-            if np.any(ocean_mask):
-                # Ozean in verschiedenen Blautönen je nach Tiefe
-                ocean_depth = sea_height - height_field
-                ocean_depth = np.where(ocean_mask, ocean_depth, 0)
-
-                # Tiefere Bereiche dunkler
-                self.ax.contourf(X, Y, ocean_depth, levels=10,
-                                 cmap='Blues', alpha=0.8, vmin=0, vmax=sea_height)
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Meeresspiegel-Rendering Fehler: {e}")
-
-    def _render_lakes(self, X, Y, height_field, lake_fill, sea_level):
-        """Rendert Seen in geeigneten Vertiefungen"""
-        try:
-            sea_height = sea_level / 100.0
-            lake_threshold = sea_height + (lake_fill / 100.0) * 0.3
-
-            # Potentielle Seen-Bereiche
-            potential_lakes = (height_field > sea_height) & (height_field < lake_threshold)
-
-            # Intelligente Seen-Platzierung basierend auf Topographie
-            lake_centers = self._find_lake_positions(height_field, potential_lakes, lake_fill)
-
-            for i, (lx, ly) in enumerate(lake_centers):
-                # Seen-Größe basierend auf lake_fill und lokaler Topographie
-                local_depression = 1.0 - height_field[int(ly * 0.8), int(lx * 0.8)]
-                lake_size = (lake_fill / 20.0) * (1 + local_depression)
-
-                circle = Circle((lx, ly), lake_size, color='#1e40af', alpha=0.9)
-                self.ax.add_patch(circle)
-
-                # Seen-Label
-                self.ax.text(lx, ly, f'S{i + 1}', ha='center', va='center',
-                             fontsize=8, color='white', weight='bold')
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Seen-Rendering Fehler: {e}")
-
-    def _find_lake_positions(self, height_field, potential_lakes, lake_fill):
-        """
-        Funktionsweise: Findet optimale Positionen für Seen
-        - Basiert auf Topographie und lake_fill Parameter
-        Returns:
-            list: Liste von (x, y) Positionen für Seen
-        """
-        lake_positions = []
-        max_lakes = min(int(lake_fill / 20) + 1, 5)  # 1-5 Seen basierend auf Parameter
-
-        # Vordefinierte gute Positionen, gefiltert nach Topographie
-        candidate_positions = [(25, 75), (70, 60), (45, 30), (80, 20), (15, 40)]
-
-        for pos in candidate_positions[:max_lakes]:
-            x, y = pos
-            # Prüfe ob Position für See geeignet ist
-            grid_x, grid_y = int(x * 0.8), int(y * 0.8)
-            if 0 <= grid_x < potential_lakes.shape[1] and 0 <= grid_y < potential_lakes.shape[0]:
-                if potential_lakes[grid_y, grid_x]:
-                    lake_positions.append(pos)
-
-        return lake_positions
-
-    def _render_river_network(self, water_speed, rock_dependency):
-        """Rendert komplexes Fluss-Netzwerk"""
-        try:
-            # Hauptfluss (West nach Ost) mit naturalistischer Kurve
-            main_river_x = np.linspace(5, 95, 60)
-            # Realistische Flussmäander
-            meander_amplitude = 15 + (water_speed / 10) * 5
-            main_river_y = (50 + np.sin(main_river_x * 0.08) * meander_amplitude +
-                            np.random.normal(0, 1, len(main_river_x)))
-
-            # Flussbreite basierend auf Wassergeschwindigkeit und Geologie
-            base_width = max(1, water_speed / 3.0)
-            geological_factor = 1 + (100 - rock_dependency) / 100.0  # Weichere Gesteine = breitere Flüsse
-            river_width = base_width * geological_factor
-
-            # Hauptfluss zeichnen
-            self.ax.plot(main_river_x, main_river_y, color='#1e40af',
-                         linewidth=river_width, alpha=0.9, label='Hauptfluss')
-
-            # Nebenflüsse mit intelligenter Platzierung
-            self._render_tributaries(main_river_x, main_river_y, river_width, rock_dependency)
-
-            # Fluss-Features (Wasserfälle, Stromschnellen)
-            if rock_dependency > 70:
-                self._add_river_features(main_river_x, main_river_y)
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Fluss-Rendering Fehler: {e}")
-
-    def _render_tributaries(self, main_river_x, main_river_y, main_width, rock_dependency):
-        """Rendert Nebenflüsse mit realistischer Geometrie"""
-        try:
-            tributary_count = 3 + int(rock_dependency / 30)  # Mehr Nebenflüsse bei weicheren Gesteinen
-
-            for i in range(min(tributary_count, 6)):  # Maximum 6 Nebenflüsse
-                # Zufällige Einmündung in Hauptfluss
-                confluence_idx = np.random.randint(10, len(main_river_x) - 10)
-                confluence_x = main_river_x[confluence_idx]
-                confluence_y = main_river_y[confluence_idx]
-
-                # Nebenfluss-Ursprung
-                if i % 2 == 0:  # Nord-Zuflüsse
-                    source_x = confluence_x + np.random.uniform(-20, 20)
-                    source_y = confluence_y + np.random.uniform(20, 40)
-                else:  # Süd-Zuflüsse
-                    source_x = confluence_x + np.random.uniform(-20, 20)
-                    source_y = confluence_y - np.random.uniform(20, 40)
-
-                # Nebenfluss-Verlauf
-                trib_length = 20 + np.random.randint(0, 20)
-                trib_x = np.linspace(source_x, confluence_x, trib_length)
-                trib_y = np.linspace(source_y, confluence_y, trib_length)
-
-                # Naturalistic Kurven
-                trib_y += np.sin(trib_x * 0.2 + i) * 3
-
-                # Nebenfluss-Breite (schmaler als Hauptfluss)
-                trib_width = main_width * (0.3 + np.random.uniform(0, 0.3))
-
-                self.ax.plot(trib_x, trib_y, color='#3b82f6',
-                             linewidth=trib_width, alpha=0.8)
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Nebenfluss-Rendering Fehler: {e}")
-
-    def _add_river_features(self, river_x, river_y):
-        """Fügt spezielle Fluss-Features hinzu"""
-        try:
-            # Wasserfälle bei steilen Stellen (simuliert)
-            for i in range(2):
-                fall_idx = np.random.randint(10, len(river_x) - 10)
-                fall_x, fall_y = river_x[fall_idx], river_y[fall_idx]
-
-                # Wasserfall-Symbol
-                self.ax.plot(fall_x, fall_y, marker='v', color='white',
-                             markersize=6, markeredgecolor='blue', markeredgewidth=2)
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Fluss-Features Fehler: {e}")
-
-    def _render_erosion_effects(self, sediment_amount, water_speed):
-        """Rendert Erosions- und Sediment-Effekte"""
-        try:
-            if sediment_amount > 30:
-                # Delta-Bildung am Meer
-                delta_positions = [(95, 45), (90, 55)]  # Flussmündungen
-
-                for dx, dy in delta_positions:
-                    delta_size = sediment_amount / 20.0
-                    delta = patches.FancyBboxPatch(
-                        (dx - delta_size / 2, dy - delta_size / 2),
-                        delta_size, delta_size,
-                        boxstyle="round,pad=0.3",
-                        facecolor='#fbbf24', alpha=0.7,
-                        edgecolor='#92400e'
-                    )
-                    self.ax.add_patch(delta)
-
-                    self.ax.text(dx, dy, 'Δ', ha='center', va='center',
-                                 fontsize=10, weight='bold', color='brown')
-
-            # Erosions-Linien entlang Flüsse bei hoher Wasserkraft
-            if water_speed > 10:
-                self._add_erosion_patterns()
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Erosions-Rendering Fehler: {e}")
-
-    def _add_erosion_patterns(self):
-        """Fügt Erosions-Muster hinzu"""
-        try:
-            # Seitenerosion entlang Hauptfluss
-            erosion_x = np.linspace(20, 80, 30)
-            erosion_y = 50 + np.sin(erosion_x * 0.1) * 12
-
-            # Erosions-Linien
-            for offset in [-3, 3]:
-                self.ax.plot(erosion_x, erosion_y + offset,
-                             color='#8B4513', linestyle=':', alpha=0.6, linewidth=1)
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Erosions-Muster Fehler: {e}")
-
-    def _add_water_info(self, lake_fill, sea_level, sediment_amount):
-        """Fügt Wasser-Informationen zur Karte hinzu"""
-        try:
-            # Wasser-Coverage Berechnung
-            water_coverage = min(sea_level * 0.5 + lake_fill * 0.1, 100)
-
-            # Info-Text in oberer linker Ecke
-            info_text = f"Wasser: {water_coverage:.0f}%\n Meereshöhe: {sea_level}%\nSediment: {sediment_amount}%"
-
-            self.ax.text(5, 95, info_text, fontsize=9,
-                         bbox=dict(boxstyle="round,pad=0.5", facecolor='lightblue', alpha=0.8),
-                         verticalalignment='top')
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Wasser-Info Fehler: {e}")
-
-    def _add_water_legend(self):
-        """Fügt professionelle Wasser-Legende hinzu"""
-        try:
-            legend_elements = [
-                plt.Line2D([0], [0], color='#1e40af', linewidth=3, label='Hauptfluss'),
-                plt.Line2D([0], [0], color='#3b82f6', linewidth=2, label='Nebenfluss'),
-                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#1e40af',
-                           markersize=8, label='See'),
-                plt.Rectangle((0, 0), 1, 1, facecolor='#1e3a8a', label='Ozean'),
-                plt.Rectangle((0, 0), 1, 1, facecolor='#fbbf24', alpha=0.6, label='Sediment/Delta')
-            ]
-
-            self.ax.legend(handles=legend_elements, loc='upper left', fontsize=8,
-                           framealpha=0.9, edgecolor='gray', bbox_to_anchor=(0, 0.85))
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Wasser-Legende Fehler: {e}")
-
-
-class WaterControlPanel(QWidget, NavigationMixin):
+class WaterTab(BaseMapTab):
     """
-    Funktionsweise: Water Control Panel mit allen Verbesserungen
-    - Neue ParameterSlider (Schritt 1)
-    - WorldParameterManager Integration (Schritt 2)
-    - Performance-Optimierung mit Debouncing (Schritt 3)
-    - Wasser-Coverage Berechnung und Validierung
+    Funktionsweise: Hauptklasse für komplettes Hydrologie-System
+    Aufgabe: Koordiniert alle Water-Core-Module und GPU-Shader Integration
+    Input: Alle Dependencies von terrain/geology/weather
+    Output: Komplettes Wassersystem mit Erosion und Sedimentation
     """
 
-    def __init__(self, map_canvas):
-        super().__init__()
-        self.map_canvas = map_canvas
-        self.error_handler = ErrorHandler()
+    def __init__(self, data_manager, navigation_manager, shader_manager):
+        super().__init__(data_manager, navigation_manager, shader_manager)
+        self.logger = logging.getLogger(__name__)
 
-        # Verwende neuen WorldParameterManager
-        self.world_manager = WorldParameterManager()
-        self.water_manager = self.world_manager.water
+        # Core-Generator Instanzen
+        self.hydrology_system = HydrologySystemGenerator()
+        self.lake_detection = LakeDetectionSystem()
+        self.flow_network = FlowNetworkBuilder()
+        self.manning_calculator = ManningFlowCalculator()
+        self.erosion_system = ErosionSedimentationSystem()
+        self.soil_moisture = SoilMoistureCalculator()
+        self.evaporation = EvaporationCalculator()
 
-        self.init_ui()
+        # Parameter und State
+        self.current_parameters = {}
+        self.generation_in_progress = False
 
-    def init_ui(self):
+        # Setup UI
+        self.setup_water_ui()
+        self.setup_dependency_checking()
+        self.setup_shader_integration()
+
+        # Initial Load
+        self.load_default_parameters()
+        self.check_input_dependencies()
+
+    def setup_water_ui(self):
+        """
+        Funktionsweise: Erstellt komplette UI für Water-System
+        Aufgabe: Parameter, Visualization, Statistics, Shader-Controls
+        """
+        # Parameter Panel
+        self.parameter_panel = self.create_water_parameter_panel()
+        self.control_panel.addWidget(self.parameter_panel)
+
+        # Hydrologie Statistics
+        self.hydrology_stats = HydrologyStatisticsWidget()
+        self.control_panel.addWidget(self.hydrology_stats)
+
+        # Visualization Controls
+        self.visualization_controls = self.create_water_visualization_controls()
+        self.control_panel.addWidget(self.visualization_controls)
+
+        # Shader Performance Panel
+        self.shader_controls = ShaderPerformancePanel(self.shader_manager)
+        self.control_panel.addWidget(self.shader_controls)
+
+        # Dependencies und Navigation
+        self.setup_input_status()
+        self.setup_navigation()
+
+    def create_water_parameter_panel(self) -> QGroupBox:
+        """
+        Funktionsweise: Erstellt Parameter-Panel mit allen Water-Parametern
+        Aufgabe: Alle 8 Parameter aus value_default.WATER
+        Return: QGroupBox mit strukturierten Parameter-Slidern
+        """
+        panel = QGroupBox("Hydrology Parameters")
         layout = QVBoxLayout()
 
-        # Titel
-        title = QLabel("Flüsse & Wasserflächen")
-        title.setStyleSheet("font-size: 16px; font-weight: bold; margin: 10px;")
-        layout.addWidget(title)
+        self.parameter_sliders = {}
 
-        # Auto-Simulation Control
-        self.setup_simulation_controls(layout)
+        # Lake Detection Parameters
+        lake_group = QGroupBox("Lake Detection")
+        lake_layout = QVBoxLayout()
 
-        # Parameter Gruppen
-        self.setup_water_body_parameters(layout)
-        self.setup_erosion_parameters(layout)
+        lake_params = ["lake_volume_threshold", "rain_threshold"]
+        for param_name in lake_params:
+            param_config = get_parameter_config("water", param_name)
 
-        # Wasser-Coverage Info
-        self.setup_water_coverage_info(layout)
+            slider = ParameterSlider(
+                label=param_name.replace("_", " ").title(),
+                min_val=param_config["min"],
+                max_val=param_config["max"],
+                default_val=param_config["default"],
+                step=param_config.get("step", 0.01),
+                suffix=param_config.get("suffix", "")
+            )
 
-        # Spacer
-        layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
-
-        # Navigation mit Mixin
-        self.setup_navigation(layout, show_prev=True, show_next=True,
-                              prev_text="Zurück", next_text="Weiter")
-
-        self.setLayout(layout)
-
-        # Initial preview
-        self.update_preview()
-
-    def setup_simulation_controls(self, layout):
-        """Erstellt Auto-Simulation Controls"""
-        sim_control_layout = QHBoxLayout()
-
-        self.auto_simulate_checkbox = QCheckBox("Automat. Simulieren")
-        self.auto_simulate_checkbox.setChecked(self.world_manager.ui_state.get_auto_simulate())
-        self.auto_simulate_checkbox.stateChanged.connect(self.on_auto_simulate_changed)
-
-        self.simulate_now_btn = QPushButton("Jetzt Simulieren")
-        self.simulate_now_btn.setStyleSheet(
-            "QPushButton { background-color: #FF9800; color: white; font-weight: bold; padding: 8px; }")
-        self.simulate_now_btn.clicked.connect(self.simulate_now)
-        self.simulate_now_btn.setEnabled(not self.world_manager.ui_state.get_auto_simulate())
-
-        sim_control_widget = QWidget()
-        sim_control_layout.addWidget(self.auto_simulate_checkbox)
-        sim_control_layout.addWidget(self.simulate_now_btn)
-        sim_control_widget.setLayout(sim_control_layout)
-        layout.addWidget(sim_control_widget)
-
-    def setup_water_body_parameters(self, layout):
-        """Erstellt Wasserkörper-Parameter"""
-        water_group = QGroupBox("Wasserkörper")
-        water_layout = QVBoxLayout()
-
-        params = self.water_manager.get_parameters()
-
-        self.lake_fill_slider = ParameterSlider("Seefüllung", 0, 100,
-                                                params['lake_fill'], suffix="%")
-        self.sea_level_slider = ParameterSlider("Meeresspiegel", 0, 50,
-                                                params['sea_level'], suffix="%")
-
-        water_sliders = [self.lake_fill_slider, self.sea_level_slider]
-
-        for slider in water_sliders:
-            water_layout.addWidget(slider)
             slider.valueChanged.connect(self.on_parameter_changed)
+            self.parameter_sliders[param_name] = slider
+            lake_layout.addWidget(slider)
 
-        water_group.setLayout(water_layout)
-        layout.addWidget(water_group)
+        lake_group.setLayout(lake_layout)
+        layout.addWidget(lake_group)
 
-    def setup_erosion_parameters(self, layout):
-        """Erstellt Tal-Erosion Parameter"""
-        erosion_group = QGroupBox("Tal-Erosion")
+        # Flow Calculation Parameters
+        flow_group = QGroupBox("Flow Dynamics")
+        flow_layout = QVBoxLayout()
+
+        flow_params = ["manning_coefficient", "diffusion_radius"]
+        for param_name in flow_params:
+            param_config = get_parameter_config("water", param_name)
+
+            slider = ParameterSlider(
+                label=param_name.replace("_", " ").title(),
+                min_val=param_config["min"],
+                max_val=param_config["max"],
+                default_val=param_config["default"],
+                step=param_config.get("step", 0.001),
+                suffix=param_config.get("suffix", "")
+            )
+
+            slider.valueChanged.connect(self.on_parameter_changed)
+            self.parameter_sliders[param_name] = slider
+            flow_layout.addWidget(slider)
+
+        flow_group.setLayout(flow_layout)
+        layout.addWidget(flow_group)
+
+        # Erosion/Sedimentation Parameters
+        erosion_group = QGroupBox("Erosion & Sedimentation")
         erosion_layout = QVBoxLayout()
 
-        params = self.water_manager.get_parameters()
+        erosion_params = ["erosion_strength", "sediment_capacity_factor", "settling_velocity"]
+        for param_name in erosion_params:
+            param_config = get_parameter_config("water", param_name)
 
-        self.sediment_slider = ParameterSlider("Sedimentmenge", 0, 100,
-                                               params['sediment_amount'], suffix="%")
-        self.water_speed_slider = ParameterSlider("Wassergeschwindigkeit", 1.0, 20.0,
-                                                  params['water_speed'], decimals=1, suffix="m/s")
-        self.rock_dependency_slider = ParameterSlider("Gesteinsabhängigkeit", 0, 100,
-                                                      params['rock_dependency'], suffix="%")
+            slider = ParameterSlider(
+                label=param_name.replace("_", " ").title(),
+                min_val=param_config["min"],
+                max_val=param_config["max"],
+                default_val=param_config["default"],
+                step=param_config.get("step", 0.01),
+                suffix=param_config.get("suffix", "")
+            )
 
-        erosion_sliders = [self.sediment_slider, self.water_speed_slider,
-                           self.rock_dependency_slider]
-
-        for slider in erosion_sliders:
-            erosion_layout.addWidget(slider)
             slider.valueChanged.connect(self.on_parameter_changed)
+            self.parameter_sliders[param_name] = slider
+            erosion_layout.addWidget(slider)
 
         erosion_group.setLayout(erosion_layout)
         layout.addWidget(erosion_group)
 
-    def setup_water_coverage_info(self, layout):
-        """Erstellt Wasser-Coverage Informations-Panel"""
-        coverage_group = QGroupBox("Wasser-Coverage")
-        coverage_layout = QVBoxLayout()
+        # Evaporation Parameters
+        evap_group = QGroupBox("Evaporation")
+        evap_layout = QVBoxLayout()
 
-        self.coverage_label = QLabel("Berechne...")
-        self.coverage_label.setStyleSheet("""
-            QLabel {
-                background-color: #e8f6ff;
-                border: 2px solid #1e40af;
-                border-radius: 8px;
-                padding: 10px;
-                font-size: 12px;
-                font-weight: bold;
-                color: #2c3e50;
-            }
-        """)
-        self.coverage_label.setAlignment(Qt.AlignCenter)
+        evap_param = "evaporation_base_rate"
+        param_config = get_parameter_config("water", evap_param)
 
-        coverage_layout.addWidget(self.coverage_label)
-        coverage_group.setLayout(coverage_layout)
-        layout.addWidget(coverage_group)
+        slider = ParameterSlider(
+            label=evap_param.replace("_", " ").title(),
+            min_val=param_config["min"],
+            max_val=param_config["max"],
+            default_val=param_config["default"],
+            step=param_config.get("step", 0.0001),
+            suffix=param_config.get("suffix", "")
+        )
 
-    @safe_execute('handle_parameter_error')
-    def on_auto_simulate_changed(self, state):
-        """Auto-Simulation Checkbox geändert"""
-        is_checked = state == 2
-        self.world_manager.ui_state.set_auto_simulate(is_checked)
+        slider.valueChanged.connect(self.on_parameter_changed)
+        self.parameter_sliders[evap_param] = slider
+        evap_layout.addWidget(slider)
 
-        if is_checked:
-            self.error_handler.logger.info("Water Auto-Simulation aktiviert")
-            self.simulate_now_btn.setEnabled(False)
-            self.update_preview()
-        else:
-            self.error_handler.logger.info("Water Auto-Simulation deaktiviert")
-            self.simulate_now_btn.setEnabled(True)
+        evap_group.setLayout(evap_layout)
+        layout.addWidget(evap_group)
 
-    @debounced_method(250)  # Debouncing für Water-Berechnungen
+        panel.setLayout(layout)
+        return panel
+
+    def create_water_visualization_controls(self) -> QGroupBox:
+        """
+        Funktionsweise: Erstellt Controls für Water-Visualization
+        Aufgabe: Switcher zwischen allen 11 Water-Output-Maps
+        Return: QGroupBox mit Visualization-Controls
+        """
+        panel = QGroupBox("Water Visualization")
+        layout = QVBoxLayout()
+
+        # Display Mode Selection
+        self.display_mode = QButtonGroup()
+
+        # Alle Water-Output-Maps als Radio-Buttons
+        water_outputs = [
+            ("Water Depth", "water_map"),
+            ("Flow Volume", "flow_map"),
+            ("Flow Speed", "flow_speed"),
+            ("Cross Section", "cross_section"),
+            ("Soil Moisture", "soil_moist_map"),
+            ("Erosion Rate", "erosion_map"),
+            ("Sedimentation", "sedimentation_map"),
+            ("Updated Rock Map", "rock_map_updated"),
+            ("Evaporation", "evaporation_map"),
+            ("Water Biomes", "water_biomes_map")
+        ]
+
+        for i, (display_name, data_key) in enumerate(water_outputs):
+            radio = QRadioButton(display_name)
+            radio.setProperty("data_key", data_key)
+            radio.toggled.connect(self.update_display_mode)
+            self.display_mode.addButton(radio, i)
+            layout.addWidget(radio)
+
+            if i == 0:  # Water Depth als Default
+                radio.setChecked(True)
+
+        # River Network Overlay
+        self.river_overlay_checkbox = QCheckBox("Show River Network")
+        self.river_overlay_checkbox.toggled.connect(self.toggle_river_overlay)
+        layout.addWidget(self.river_overlay_checkbox)
+
+        # 3D Terrain Overlay
+        self.terrain_3d_checkbox = QCheckBox("Show 3D Terrain")
+        self.terrain_3d_checkbox.toggled.connect(self.toggle_3d_terrain)
+        layout.addWidget(self.terrain_3d_checkbox)
+
+        # Ocean Outflow Display
+        self.ocean_outflow_label = QLabel("Ocean Outflow: - m³/s")
+        layout.addWidget(self.ocean_outflow_label)
+
+        panel.setLayout(layout)
+        return panel
+
+    def setup_dependency_checking(self):
+        """
+        Funktionsweise: Setup für komplexe Input-Dependency Checking
+        Aufgabe: Überwacht alle Required Dependencies (8 verschiedene Maps)
+        """
+        # Required Dependencies für Water-System
+        self.required_dependencies = VALIDATION_RULES.DEPENDENCIES["water"]
+
+        # Dependency Status Widget mit Details
+        self.dependency_status = MultiDependencyStatusWidget(self.required_dependencies)
+        self.control_panel.addWidget(self.dependency_status)
+
+        # Data Manager Signals
+        self.data_manager.data_updated.connect(self.on_data_updated)
+        self.data_manager.dependency_changed.connect(self.on_dependency_changed)
+
+    def setup_shader_integration(self):
+        """
+        Funktionsweise: Setup für GPU-Shader Integration
+        Aufgabe: Konfiguriert alle 8 Water-Shader für optimale Performance
+        """
+        # Shader Performance Monitoring
+        self.shader_performance_timer = QTimer()
+        self.shader_performance_timer.timeout.connect(self.monitor_shader_performance)
+
+        # GPU Fallback Detection
+        self.gpu_available = self.shader_manager.check_gpu_support()
+        if not self.gpu_available:
+            self.logger.warning("GPU not available - using CPU fallback")
+
+    def load_default_parameters(self):
+        """Lädt Default-Parameter"""
+        for param_name, slider in self.parameter_sliders.items():
+            param_config = get_parameter_config("water", param_name)
+            slider.setValue(param_config["default"])
+
+        self.current_parameters = self.get_current_parameters()
+
+    def get_current_parameters(self) -> dict:
+        """Sammelt aktuelle Parameter für Core-Generator"""
+        parameters = {}
+        for param_name, slider in self.parameter_sliders.items():
+            parameters[param_name] = slider.getValue()
+        return parameters
+
+    @pyqtSlot()
     def on_parameter_changed(self):
-        """Parameter wurden geändert - mit Debouncing"""
-        if self.auto_simulate_checkbox.isChecked():
-            self.update_preview()
+        """Slot für Parameter-Änderungen"""
+        self.current_parameters = self.get_current_parameters()
 
-        # Aktualisiere Water-Coverage sofort (ohne Debouncing)
-        self.update_water_coverage()
+        # Hydrologie Statistics Preview aktualisieren
+        self.hydrology_stats.update_parameter_preview(self.current_parameters)
 
-    @safe_execute('handle_parameter_error')
-    def simulate_now(self):
-        """Manuelle Simulation"""
-        self.error_handler.logger.info("Water Simulation gestartet!")
-        self.update_preview()
+        # Auto-Simulation triggern
+        if self.auto_simulation_enabled and not self.generation_in_progress:
+            self.auto_simulation_timer.start(1500)  # 1.5s für komplexe Berechnung
 
-    @performance_tracked("Water_Preview_Update")
-    @safe_execute('handle_map_rendering_error')
-    def update_preview(self):
+    @pyqtSlot(str, str)
+    def on_data_updated(self, generator_type: str, data_key: str):
+        """Slot für Data-Updates von anderen Generatoren"""
+        if data_key in self.required_dependencies:
+            self.check_input_dependencies()
+
+    @pyqtSlot(str, list)
+    def on_dependency_changed(self, generator_type: str, missing: list):
+        """Slot für Dependency-Änderungen"""
+        if generator_type == "water":
+            self.dependency_status.update_missing_dependencies(missing)
+
+    def check_input_dependencies(self):
         """
-        Funktionsweise: Aktualisiert die Wasser-Kartenvorschau
-        - Performance-optimiert für komplexe Wassersystem-Berechnungen
-        - Validiert Wasser-Parameter
+        Funktionsweise: Prüft alle Required Dependencies für Water-System
+        Aufgabe: Aktiviert/Deaktiviert Generation basierend auf verfügbaren Inputs
         """
-        with TabErrorContext('Water', 'Preview Update'):
-            params = self.get_parameters()
+        is_complete, missing = self.data_manager.check_dependencies("water", self.required_dependencies)
 
-            # Validiere und speichere Parameter
-            self.water_manager.set_parameters(params)
+        self.dependency_status.update_dependency_status(is_complete, missing)
+        self.manual_generate_button.setEnabled(is_complete)
 
-            # Aktualisiere Water-Coverage
-            self.update_water_coverage()
+        return is_complete
 
-            # Aktualisiere Karte (mit automatischem Debouncing)
-            self.map_canvas.update_map(**params)
-
-    def update_water_coverage(self):
+    @memory_critical_handler("water_generation")
+    def generate_water_system(self):
         """
-        Funktionsweise: Aktualisiert Water-Coverage Berechnung in Echtzeit
-        - Berechnet geschätzten Wasser-Anteil der Karte
-        - Visuelles Feedback für realistische Werte
-        """
-        try:
-            params = self.get_parameters()
-            self.water_manager.set_parameters(params)
-
-            # Hole Water-Coverage vom Manager
-            coverage = self.water_manager.calculate_water_coverage()
-
-            # Bewerte Coverage für Feedback
-            if coverage < 20:
-                coverage_type = "Trocken"
-                color = "#e67e22"
-            elif coverage < 40:
-                coverage_type = "Moderat"
-                color = "#f39c12"
-            elif coverage < 60:
-                coverage_type = "Ausgewogen"
-                color = "#3498db"
-            else:
-                coverage_type = "Sehr Feucht"
-                color = "#2980b9"
-
-            self.coverage_label.setText(f"{coverage_type}\n{coverage:.1f}% Wasser")
-            self.coverage_label.setStyleSheet(f"""
-                QLabel {{
-                    background-color: {color}20;
-                    border: 2px solid {color};
-                    border-radius: 8px;
-                    padding: 10px;
-                    font-size: 12px;
-                    font-weight: bold;
-                    color: #2c3e50;
-                }}
-            """)
-
-        except Exception as e:
-            self.error_handler.logger.warning(f"Water-Coverage Update Fehler: {e}")
-
-    def get_parameters(self):
-        """
-        Funktionsweise: Sammelt alle Water Parameter
-        - Verwendet neue ParameterSlider API
-        - Robuste Parameter-Sammlung
+        Funktionsweise: Hauptmethode für komplette Water-System Generation
+        Aufgabe: Koordiniert alle 7 Core-Module und 8 Shader für Hydrologie-Simulation
         """
         try:
-            return {
-                'lake_fill': self.lake_fill_slider.get_value(),
-                'sea_level': self.sea_level_slider.get_value(),
-                'sediment_amount': self.sediment_slider.get_value(),
-                'water_speed': self.water_speed_slider.get_value(),
-                'rock_dependency': self.rock_dependency_slider.get_value()
-            }
+            # Dependencies prüfen
+            if not self.check_input_dependencies():
+                self.logger.warning("Cannot generate water system - missing dependencies")
+                return
+
+            self.generation_in_progress = True
+            self.logger.info("Starting water system generation...")
+
+            # Timing für Performance-Messung starten
+            self.start_generation_timing()
+
+            # Alle Input-Daten sammeln
+            inputs = self.collect_input_data()
+            params = self.current_parameters.copy()
+
+            # GPU-Performance Monitoring starten
+            if self.gpu_available:
+                self.shader_performance_timer.start(1000)
+
+            # 1. Lake Detection (Jump Flooding Algorithm)
+            self.logger.info("Step 1: Lake Detection")
+            lake_map = self.lake_detection.detect_local_minima(
+                heightmap=inputs["heightmap"],
+                lake_volume_threshold=params["lake_volume_threshold"]
+            )
+
+            # 2. Flow Network Building (Steepest Descent + Upstream Accumulation)
+            self.logger.info("Step 2: Flow Network Building")
+            flow_data = self.flow_network.calculate_steepest_descent(
+                heightmap=inputs["heightmap"],
+                precipitation=inputs["precip_map"],
+                rain_threshold=params["rain_threshold"]
+            )
+
+            # 3. Manning Flow Calculation
+            self.logger.info("Step 3: Manning Flow Calculation")
+            flow_results = self.manning_calculator.solve_manning_equation(
+                flow_map=flow_data["flow_map"],
+                heightmap=inputs["heightmap"],
+                manning_coefficient=params["manning_coefficient"]
+            )
+
+            # 4. Soil Moisture Calculation (Gaussian Diffusion)
+            self.logger.info("Step 4: Soil Moisture Calculation")
+            soil_moisture_map = self.soil_moisture.apply_gaussian_diffusion(
+                water_map=flow_results["water_map"],
+                diffusion_radius=params["diffusion_radius"]
+            )
+
+            # 5. Erosion & Sedimentation System (Stream Power + Hjulström)
+            self.logger.info("Step 5: Erosion & Sedimentation")
+            erosion_results = self.erosion_system.calculate_stream_power(
+                flow_speed=flow_results["flow_speed"],
+                water_depth=flow_results["water_map"],
+                hardness_map=inputs["hardness_map"],
+                rock_map=inputs["rock_map"],
+                erosion_strength=params["erosion_strength"],
+                sediment_capacity_factor=params["sediment_capacity_factor"],
+                settling_velocity=params["settling_velocity"]
+            )
+
+            # 6. Evaporation Calculation (Atmospheric Conditions)
+            self.logger.info("Step 6: Evaporation Calculation")
+            evaporation_map = self.evaporation.calculate_atmospheric_evaporation(
+                water_map=flow_results["water_map"],
+                temp_map=inputs["temp_map"],
+                humid_map=inputs["humid_map"],
+                wind_map=inputs["wind_map"],
+                evaporation_base_rate=params["evaporation_base_rate"]
+            )
+
+            # 7. Water Biomes Classification
+            self.logger.info("Step 7: Water Biomes Classification")
+            water_biomes_map = self.flow_network.classify_water_bodies(
+                flow_map=flow_data["flow_map"],
+                lake_map=lake_map
+            )
+
+            # Alle Results im DataManager speichern
+            self.save_all_water_results(
+                flow_results, erosion_results, soil_moisture_map,
+                evaporation_map, water_biomes_map, params
+            )
+
+            # Display und Statistics aktualisieren
+            self.update_water_display()
+            self.hydrology_stats.update_generation_statistics(flow_results, erosion_results)
+
+            # Ocean Outflow anzeigen
+            ocean_outflow = flow_data.get("ocean_outflow", 0.0)
+            self.ocean_outflow_label.setText(f"Ocean Outflow: {ocean_outflow:.2f} m³/s")
+
+            # Timing beenden
+            self.end_generation_timing(True)
+
+            self.logger.info("Water system generation completed successfully")
+
+
         except Exception as e:
-            self.error_handler.handle_parameter_error('Water', 'parameter_collection', e)
-            return self.water_manager.get_parameters()
-
-    # Navigation Methoden (von NavigationMixin erforderlich)
-    def next_menu(self):
-        """Wechselt zum nächsten Tab (Biome)"""
-        try:
-            params = self.get_parameters()
-            self.water_manager.set_parameters(params)
-            self.error_handler.logger.info("Water Parameter gespeichert")
-
-            next_tab = TabNavigationHelper.get_next_tab('WaterWindow')
-            if next_tab:
-                self.navigate_to_tab(next_tab[0], next_tab[1])
-        except Exception as e:
-            self.error_handler.handle_tab_navigation_error('Water', 'Biome', e)
-
-    def prev_menu(self):
-        """Wechselt zum vorherigen Tab (Weather)"""
-        try:
-            params = self.get_parameters()
-            self.water_manager.set_parameters(params)
-
-            prev_tab = TabNavigationHelper.get_prev_tab('WaterWindow')
-            if prev_tab:
-                self.navigate_to_tab(prev_tab[0], prev_tab[1])
-        except Exception as e:
-            self.error_handler.handle_tab_navigation_error('Water', 'Weather', e)
-
-    @safe_execute('handle_parameter_error')
-    def quick_generate(self):
-        """Schnellgenerierung mit Water-Coverage Info"""
-        params = self.get_parameters()
-        self.water_manager.set_parameters(params)
-        coverage = self.water_manager.calculate_water_coverage()
-        self.error_handler.logger.info(f"Water Schnellgenerierung: {coverage:.1f}% Coverage - {params}")
+            self.handle_generation_error(e)
+            self.end_generation_timing(False, str(e))
+            raise  # Re-raise für Error Handler
 
 
-class WaterWindow(QMainWindow):
+        finally:
+            self.generation_in_progress = False
+            if self.gpu_available:
+                self.shader_performance_timer.stop()
+
+    def collect_input_data(self) -> dict:
+        """
+        Funktionsweise: Sammelt alle Required Input-Daten von DataManager
+        Return: dict mit allen benötigten Arrays für Water-Generation
+        """
+        inputs = {}
+
+        # Terrain Inputs
+        inputs["heightmap"] = self.data_manager.get_terrain_data("heightmap")
+        inputs["slopemap"] = self.data_manager.get_terrain_data("slopemap")
+
+        # Geology Inputs
+        inputs["hardness_map"] = self.data_manager.get_geology_data("hardness_map")
+        inputs["rock_map"] = self.data_manager.get_geology_data("rock_map")
+
+        # Weather Inputs
+        inputs["precip_map"] = self.data_manager.get_weather_data("precip_map")
+        inputs["temp_map"] = self.data_manager.get_weather_data("temp_map")
+        inputs["wind_map"] = self.data_manager.get_weather_data("wind_map")
+        inputs["humid_map"] = self.data_manager.get_weather_data("humid_map")
+
+        # Validation
+        for key, data in inputs.items():
+            if data is None:
+                raise ValueError(f"Required input '{key}' not available")
+
+        return inputs
+
+    def save_all_water_results(self, flow_results: dict, erosion_results: dict,
+                               soil_moisture_map: np.ndarray, evaporation_map: np.ndarray,
+                               water_biomes_map: np.ndarray, params: dict):
+        """
+        Funktionsweise: Speichert alle Water-System Results im DataManager
+        Parameter: Alle Result-Dictionaries und Arrays von Core-Generatoren
+        """
+        # Flow Results
+        self.data_manager.set_water_data("water_map", flow_results["water_map"], params)
+        self.data_manager.set_water_data("flow_map", flow_results["flow_map"], params)
+        self.data_manager.set_water_data("flow_speed", flow_results["flow_speed"], params)
+        self.data_manager.set_water_data("cross_section", flow_results["cross_section"], params)
+
+        # Erosion Results
+        self.data_manager.set_water_data("erosion_map", erosion_results["erosion_map"], params)
+        self.data_manager.set_water_data("sedimentation_map", erosion_results["sedimentation_map"], params)
+        self.data_manager.set_water_data("rock_map_updated", erosion_results["rock_map_updated"], params)
+
+        # Additional Results
+        self.data_manager.set_water_data("soil_moist_map", soil_moisture_map, params)
+        self.data_manager.set_water_data("evaporation_map", evaporation_map, params)
+        self.data_manager.set_water_data("water_biomes_map", water_biomes_map, params)
+
+        # Ocean Outflow (Scalar)
+        ocean_outflow = flow_results.get("ocean_outflow", 0.0)
+        self.data_manager.set_water_data("ocean_outflow", ocean_outflow, params)
+
+    @gpu_shader_handler("water_display")
+    def update_water_display(self):
+        """
+        Funktionsweise: Aktualisiert Display basierend auf aktuellem Visualization-Mode
+        Aufgabe: Zeigt ausgewählte Water-Map mit optionalen Overlays
+        """
+        current_mode = self.display_mode.checkedId()
+        current_radio = self.display_mode.button(current_mode)
+
+        if current_radio is None:
+            return
+
+        data_key = current_radio.property("data_key")
+        water_data = self.data_manager.get_water_data(data_key)
+
+        if water_data is None:
+            return
+
+        # Spezielle Behandlung für verschiedene Datentypen
+        if data_key == "water_map":
+            self.map_display.display_water_depth(water_data)
+        elif data_key == "flow_map":
+            self.map_display.display_flow_volume(water_data)
+        elif data_key == "flow_speed":
+            self.map_display.display_flow_speed(water_data)
+        elif data_key == "cross_section":
+            self.map_display.display_cross_section(water_data)
+        elif data_key == "soil_moist_map":
+            self.map_display.display_soil_moisture(water_data)
+        elif data_key == "erosion_map":
+            self.map_display.display_erosion_rate(water_data)
+        elif data_key == "sedimentation_map":
+            self.map_display.display_sedimentation_rate(water_data)
+        elif data_key == "rock_map_updated":
+            self.map_display.display_rock_map_rgb(water_data)
+        elif data_key == "evaporation_map":
+            self.map_display.display_evaporation_rate(water_data)
+        elif data_key == "water_biomes_map":
+            self.map_display.display_water_biomes(water_data)
+
+        # River Network Overlay
+        if self.river_overlay_checkbox.isChecked():
+            flow_map = self.data_manager.get_water_data("flow_map")
+            if flow_map is not None:
+                self.map_display.overlay_river_network(flow_map)
+
+        # 3D Terrain Overlay
+        if self.terrain_3d_checkbox.isChecked():
+            heightmap = self.data_manager.get_terrain_data("heightmap")
+            if heightmap is not None:
+                self.map_display.overlay_3d_terrain(heightmap)
+
+    @pyqtSlot()
+    def update_display_mode(self):
+        """Slot für Visualization-Mode Änderungen"""
+        self.update_water_display()
+
+    @pyqtSlot(bool)
+    def toggle_river_overlay(self, enabled: bool):
+        """Toggle für River Network Overlay"""
+        self.update_water_display()
+
+    @pyqtSlot(bool)
+    def toggle_3d_terrain(self, enabled: bool):
+        """Toggle für 3D Terrain Overlay"""
+        self.update_water_display()
+
+    @pyqtSlot()
+    def monitor_shader_performance(self):
+        """
+        Funktionsweise: Überwacht GPU-Shader Performance während Generation
+        Aufgabe: Updated Shader-Performance Panel mit aktuellen Metriken
+        """
+        if self.generation_in_progress and self.gpu_available:
+            performance_metrics = self.shader_manager.get_performance_metrics()
+            self.shader_controls.update_performance_display(performance_metrics)
+
+    # Override BaseMapTab method
+    def generate_terrain(self):
+        """Override für Water-spezifische Generation"""
+        self.generate_water_system()
+
+
+class HydrologyStatisticsWidget(QGroupBox):
     """
-    Funktionsweise: Hauptfenster für Water-Tab
-    - Verwendet optimierte Map Canvas
-    - Robuste Initialisierung für komplexes Wassersystem
+    Funktionsweise: Widget für umfassende Hydrologie-Statistiken
+    Aufgabe: Zeigt Parameter-Preview, Generation-Statistics, Performance-Metriken
     """
 
     def __init__(self):
-        super().__init__()
-        self.error_handler = ErrorHandler()
-        self.init_ui()
+        super().__init__("Hydrology Statistics")
+        self.setup_ui()
 
-    @safe_execute('handle_worldstate_error')
-    def init_ui(self):
-        self.setWindowTitle("World Generator - Flüsse & Wasserflächen")
-        self.setGeometry(100, 100, 1500, 1000)
-        self.setMinimumSize(1500, 1000)
+    def setup_ui(self):
+        """Erstellt UI für Hydrologie-Statistiken"""
+        layout = QVBoxLayout()
 
-        # Central Widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        # Parameter Preview
+        preview_group = QGroupBox("Parameter Preview")
+        preview_layout = QVBoxLayout()
 
-        # Main Layout
-        main_layout = QHBoxLayout()
+        self.lake_threshold_label = QLabel("Lake Threshold: 0.1m")
+        self.erosion_strength_label = QLabel("Erosion Strength: 1.0")
+        self.manning_coeff_label = QLabel("Manning Coefficient: 0.03")
 
-        # Linke Seite - Optimierte Karte (70%)
-        self.map_canvas = WaterMapCanvas()
-        main_layout.addWidget(self.map_canvas, 7)
+        preview_layout.addWidget(self.lake_threshold_label)
+        preview_layout.addWidget(self.erosion_strength_label)
+        preview_layout.addWidget(self.manning_coeff_label)
 
-        # Trennlinie
-        separator = QFrame()
-        separator.setFrameShape(QFrame.VLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        main_layout.addWidget(separator)
+        preview_group.setLayout(preview_layout)
+        layout.addWidget(preview_group)
 
-        # Rechte Seite - Controls (30%)
-        self.control_panel = WaterControlPanel(self.map_canvas)
-        self.control_panel.setMaximumWidth(350)
-        main_layout.addWidget(self.control_panel, 3)
+        # Generation Statistics
+        stats_group = QGroupBox("Generation Results")
+        stats_layout = QVBoxLayout()
 
-        central_widget.setLayout(main_layout)
+        self.water_coverage_label = QLabel("Water Coverage: -")
+        self.avg_flow_speed_label = QLabel("Avg Flow Speed: -")
+        self.total_erosion_label = QLabel("Total Erosion: -")
+        self.mass_conservation_label = QLabel("Mass Conservation: -")
 
-        # Styling für Water-spezifische Elemente
-        self.setStyleSheet("""
-                QMainWindow {
-                    background-color: #f0f0f0;
-                }
-                QLabel {
-                    color: #333;
-                }
-                QGroupBox {
-                    font-weight: bold;
-                    border: 2px solid #cccccc;
-                    border-radius: 5px;
-                    margin-top: 1ex;
-                    padding-top: 10px;
-                }
-                QGroupBox::title {
-                    subcontrol-origin: margin;
-                    left: 10px;
-                    padding: 0 5px 0 5px;
-                }
-                /* Spezielle Styles für Water Parameter */
-                QGroupBox[title="Wasserkörper"] {
-                    border-color: #1e40af;
-                }
-                QGroupBox[title="Tal-Erosion"] {
-                    border-color: #92400e;
-                }
-                QGroupBox[title="Wasser-Coverage"] {
-                    border-color: #3b82f6;
-                    background-color: #f8fafc;
-                }
-            """)
+        stats_layout.addWidget(self.water_coverage_label)
+        stats_layout.addWidget(self.avg_flow_speed_label)
+        stats_layout.addWidget(self.total_erosion_label)
+        stats_layout.addWidget(self.mass_conservation_label)
 
-    def resizeEvent(self, event):
-        """Behält Proportionen beim Resize bei"""
-        super().resizeEvent(event)
+        stats_group.setLayout(stats_layout)
+        layout.addWidget(stats_group)
 
-    def closeEvent(self, event):
-        """Cleanup beim Schließen"""
-        if hasattr(self, 'map_canvas'):
-            self.map_canvas.cleanup()
-        super().closeEvent(event)
+        self.setLayout(layout)
+
+    def update_parameter_preview(self, parameters: dict):
+        """Aktualisiert Parameter-Preview"""
+        self.lake_threshold_label.setText(f"Lake Threshold: {parameters.get('lake_volume_threshold', 0.1):.3f}m")
+        self.erosion_strength_label.setText(f"Erosion Strength: {parameters.get('erosion_strength', 1.0):.1f}")
+        self.manning_coeff_label.setText(f"Manning Coefficient: {parameters.get('manning_coefficient', 0.03):.3f}")
+
+    def update_generation_statistics(self, flow_results: dict, erosion_results: dict):
+        """
+        Funktionsweise: Aktualisiert Statistiken nach Generation
+        Parameter: flow_results, erosion_results (dict von Core-Generatoren)
+        """
+        # Water Coverage berechnen
+        water_map = flow_results.get("water_map")
+        if water_map is not None:
+            water_pixels = np.sum(water_map > 0.01)  # > 1cm Wassertiefe
+            total_pixels = water_map.shape[0] * water_map.shape[1]
+            water_coverage = (water_pixels / total_pixels) * 100
+            self.water_coverage_label.setText(f"Water Coverage: {water_coverage:.1f}%")
+
+        # Average Flow Speed
+        flow_speed = flow_results.get("flow_speed")
+        if flow_speed is not None:
+            avg_speed = np.mean(flow_speed[flow_speed > 0])
+            self.avg_flow_speed_label.setText(f"Avg Flow Speed: {avg_speed:.2f} m/s")
+
+        # Total Erosion
+        erosion_map = erosion_results.get("erosion_map")
+        if erosion_map is not None:
+            total_erosion = np.sum(erosion_map)
+            self.total_erosion_label.setText(f"Total Erosion: {total_erosion:.1f} m/Jahr")
+
+        # Mass Conservation Check
+        rock_map_updated = erosion_results.get("rock_map_updated")
+        if rock_map_updated is not None:
+            mass_sums = np.sum(rock_map_updated, axis=2)
+            mass_conserved = np.allclose(mass_sums, 255, atol=1)
+            status = "✓ Conserved" if mass_conserved else "✗ Violated"
+            self.mass_conservation_label.setText(f"Mass Conservation: {status}")
+
+
+class MultiDependencyStatusWidget(QGroupBox):
+    """
+    Funktionsweise: Widget für detaillierte Dependency-Status Anzeige
+    Aufgabe: Zeigt Status aller 8 Required Dependencies einzeln an
+    """
+
+    def __init__(self, required_dependencies: list):
+        super().__init__("Input Dependencies")
+        self.required_dependencies = required_dependencies
+        self.dependency_indicators = {}
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Erstellt UI für Dependency-Status"""
+        layout = QVBoxLayout()
+
+        # Status Indicator für jede Dependency
+        for dependency in self.required_dependencies:
+            indicator = StatusIndicator(dependency.replace("_", " ").title())
+            indicator.set_warning("Not available")
+            self.dependency_indicators[dependency] = indicator
+            layout.addWidget(indicator)
+
+        # Overall Status
+        self.overall_status = StatusIndicator("Overall Status")
+        self.overall_status.set_error("Dependencies missing")
+        layout.addWidget(self.overall_status)
+
+        self.setLayout(layout)
+
+    def update_dependency_status(self, is_complete: bool, missing: list):
+        """
+        Funktionsweise: Aktualisiert Status aller Dependencies
+        Parameter: is_complete (bool), missing (list of dependency names)
+        """
+        # Individual Dependencies aktualisieren
+        for dependency in self.required_dependencies:
+            indicator = self.dependency_indicators[dependency]
+            if dependency in missing:
+                indicator.set_warning("Missing")
+            else:
+                indicator.set_success("Available")
+
+        # Overall Status
+        if is_complete:
+            self.overall_status.set_success("All dependencies available")
+        else:
+            self.overall_status.set_error(f"Missing: {len(missing)} dependencies")
+
+    def update_missing_dependencies(self, missing: list):
+        """Update nur für fehlende Dependencies"""
+        self.update_dependency_status(len(missing) == 0, missing)
+
+    def set_error(self, message: str):
+        """Setzt Error-Status für Overall Status"""
+        self.overall_status.set_error(message)
+
+
+class ShaderPerformancePanel(QGroupBox):
+    """
+    Funktionsweise: Widget für GPU-Shader Performance Monitoring
+    Aufgabe: Zeigt Performance-Metriken aller 8 Water-Shader an
+    """
+
+    def __init__(self, shader_manager):
+        super().__init__("Shader Performance")
+        self.shader_manager = shader_manager
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Erstellt UI für Shader-Performance Display"""
+        layout = QVBoxLayout()
+
+        # GPU Status
+        self.gpu_status = StatusIndicator("GPU Status")
+        if self.shader_manager.check_gpu_support():
+            self.gpu_status.set_success("GPU Available")
+        else:
+            self.gpu_status.set_warning("Using CPU Fallback")
+        layout.addWidget(self.gpu_status)
+
+        # Performance Metrics
+        self.frame_time_label = QLabel("Frame Time: - ms")
+        self.memory_usage_label = QLabel("GPU Memory: - MB")
+        self.shader_count_label = QLabel("Active Shaders: 0/8")
+
+        layout.addWidget(self.frame_time_label)
+        layout.addWidget(self.memory_usage_label)
+        layout.addWidget(self.shader_count_label)
+
+        # Performance Progress Bar
+        self.performance_bar = QProgressBar()
+        self.performance_bar.setRange(0, 100)
+        self.performance_bar.setValue(100)
+        layout.addWidget(QLabel("Performance:"))
+        layout.addWidget(self.performance_bar)
+
+        self.setLayout(layout)
+
+    def update_performance_display(self, metrics: dict):
+        """
+        Funktionsweise: Aktualisiert Performance-Display mit aktuellen Metriken
+        Parameter: metrics (dict mit performance data vom shader_manager)
+        """
+        # Frame Time
+        frame_time = metrics.get("frame_time_ms", 0)
+        self.frame_time_label.setText(f"Frame Time: {frame_time:.1f} ms")
+
+        # GPU Memory Usage
+        memory_usage = metrics.get("gpu_memory_mb", 0)
+        self.memory_usage_label.setText(f"GPU Memory: {memory_usage:.0f} MB")
+
+        # Active Shaders
+        active_shaders = metrics.get("active_shaders", 0)
+        self.shader_count_label.setText(f"Active Shaders: {active_shaders}/8")
+
+        # Performance Percentage (basierend auf Frame Time)
+        performance_pct = max(0, min(100, 100 - (frame_time - 16)))  # 60fps = 16ms target
+        self.performance_bar.setValue(int(performance_pct))
+
+        # Performance Bar Color
+        if performance_pct >= 80:
+            self.performance_bar.setStyleSheet("QProgressBar::chunk { background-color: #27ae60; }")
+        elif performance_pct >= 50:
+            self.performance_bar.setStyleSheet("QProgressBar::chunk { background-color: #f39c12; }")
+        else:
+            self.performance_bar.setStyleSheet("QProgressBar::chunk { background-color: #e74c3c; }")

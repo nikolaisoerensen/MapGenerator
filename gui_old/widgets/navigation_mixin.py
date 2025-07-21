@@ -8,7 +8,7 @@ Eliminiert Code-Duplikation bei Navigation-Logik
 """
 
 from PyQt5.QtWidgets import QApplication, QVBoxLayout, QHBoxLayout, QWidget, QPushButton
-from PyQt5.QtCore import QRect
+from PyQt5.QtCore import QRect, Qt
 
 
 class NavigationMixin:
@@ -37,7 +37,7 @@ class NavigationMixin:
         """
         try:
             # Versuche NavigationWidget zu verwenden
-            from gui.navigation_widget import NavigationWidget
+            from gui_old.navigation_widget import NavigationWidget
             self.navigation = NavigationWidget(show_prev, show_next, prev_text, next_text)
             self.navigation.prev_clicked.connect(self.prev_menu)
             self.navigation.next_clicked.connect(self.next_menu)
@@ -116,28 +116,27 @@ class NavigationMixin:
             tab_class (str): Name der Tab-Klasse
         """
         try:
-            # Fenster-Geometrie speichern
-            if hasattr(self, 'world_state') and self.world_state:
-                self.world_state.set_window_geometry(self.window().geometry())
+            current_geometry = self.window().geometry()
 
-            # Dynamischer Import des Tab-Moduls
+            # Module importieren
             module = __import__(tab_module, fromlist=[tab_class])
-            tab_window_class = getattr(module, tab_class)
+            window_class = getattr(module, tab_class)
 
             # Neues Fenster erstellen
-            self.new_window = tab_window_class()
+            new_window = window_class()
 
-            # Geometrie wiederherstellen
-            if hasattr(self, 'world_state') and self.world_state and self.world_state.get_window_geometry():
-                self.new_window.setGeometry(self.world_state.get_window_geometry())
+            # WICHTIG: Window-Hierarchie umstellen
+            new_window.setAttribute(Qt.WA_QuitOnClose, True)  # Neues Haupt-Window
+            self.window().setAttribute(Qt.WA_QuitOnClose, False)  # Altes nicht mehr wichtig
 
-            self.new_window.show()
+            new_window.setGeometry(current_geometry)
+            new_window.show()
+
+            # Jetzt sicher schließen
             self.window().close()
 
         except Exception as e:
-            print(f"Fehler beim Tab-Wechsel zu {tab_class}: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Navigation Fehler: {e}")
 
     def restart_generation(self):
         """
@@ -146,8 +145,11 @@ class NavigationMixin:
         - Kann von Subklassen überschrieben werden
         """
         print("Wechsle zum Terrain Menü (Neustart)")
-        if hasattr(self, 'world_state') and self.world_state:
-            self.world_state.set_window_geometry(self.window().geometry())
+        try:
+            if hasattr(self, 'world_state') and self.world_state:
+                self.world_state.ui_state.set_window_geometry(self.window().geometry())
+        except:
+            pass  # Ignoriere Geometry-Fehler
 
         self.navigate_to_tab('gui.tabs.terrain_tab', 'TerrainWindow')
 
@@ -171,8 +173,13 @@ class NavigationMixin:
 
     # Diese Methoden müssen von jeder Tab-Klasse implementiert werden
     def next_menu(self):
-        """Muss in Subklasse implementiert werden"""
-        raise NotImplementedError("next_menu() muss implementiert werden")
+        """Einfacher nächster Tab"""
+        current_class = self.__class__.__name__
+
+        if current_class == 'TerrainWindow':
+            self.navigate_to_tab('gui.tabs.geology_tab', 'GeologyWindow')
+        elif current_class == 'GeologyWindow':
+            self.navigate_to_tab('gui.tabs.settlement_tab', 'SettlementWindow')
 
     def prev_menu(self):
         """Muss in Subklasse implementiert werden"""
@@ -239,7 +246,7 @@ class TabNavigationHelper:
             current_geometry = current_window.geometry()
 
             # Importiere und erstelle Hauptmenü
-            from gui.main_menu import MainMenuWindow
+            from gui_old.main_menu import MainMenuWindow
             main_menu = MainMenuWindow()
 
             # Setze Geometrie

@@ -23,7 +23,7 @@ class ParameterSlider(QWidget):
     # Signal wird ausgesendet wenn sich der Wert ändert
     valueChanged = pyqtSignal()
 
-    def __init__(self, label_text, min_val, max_val, default_val, decimals=0, suffix=""):
+    def __init__(self, label_text, min_val, max_val, default_val, decimals=0, suffix="", step=1):
         """
         Args:
             label_text (str): Anzeigename des Parameters
@@ -32,10 +32,20 @@ class ParameterSlider(QWidget):
             default_val: Startwert
             decimals (int): Anzahl Dezimalstellen (0 = Integer)
             suffix (str): Einheit/Suffix für SpinBox (z.B. "°C", "%")
+            step: Schrittweite (None = automatisch)
         """
         super().__init__()
         self.decimals = decimals
+        self.step = step
         self.suffix = suffix
+
+        if step in (None, 1):
+            if decimals > 0:
+                self.step = 0.1 if decimals == 1 else 0.01  # Decimal default
+            else:
+                self.step = 1  # Integer default
+        else:
+            self.step = step
         self.init_ui(label_text, min_val, max_val, default_val)
 
     def init_ui(self, label_text, min_val, max_val, default_val):
@@ -50,13 +60,31 @@ class ParameterSlider(QWidget):
         self.slider = QSlider(Qt.Horizontal)
         if self.decimals > 0:
             # Für Dezimalwerte: Slider-Werte mit 10^decimals multiplizieren
+            self.slider_scale = 10 ** self.decimals
             self.slider.setMinimum(int(min_val * (10 ** self.decimals)))
             self.slider.setMaximum(int(max_val * (10 ** self.decimals)))
             self.slider.setValue(int(default_val * (10 ** self.decimals)))
+            # Step für Decimal-Slider
+            step_scaled = int(self.step * self.slider_scale)
+            if step_scaled > 1:
+                self.slider.setSingleStep(step_scaled)
+                self.slider.setPageStep(step_scaled * 5)
         else:
-            self.slider.setMinimum(min_val)
-            self.slider.setMaximum(max_val)
-            self.slider.setValue(default_val)
+            # Integer-Slider mit Step
+            self.slider_scale = 1
+
+            # WICHTIG: Min/Max an Steps anpassen
+            adjusted_min = self._round_to_step(min_val, self.step)
+            adjusted_max = self._round_to_step(max_val, self.step)
+            adjusted_default = self._round_to_step(default_val, self.step)
+
+            # Slider arbeitet in Step-Einheiten
+            self.slider.setMinimum(int(adjusted_min // self.step))
+            self.slider.setMaximum(int(adjusted_max // self.step))
+            self.slider.setValue(int(adjusted_default // self.step))
+
+            self.slider.setSingleStep(1)  # 1 Step im Slider = 1 * self.step im Wert
+            self.slider.setPageStep(5)
 
         layout.addWidget(self.slider, 1, 0)
 
@@ -67,12 +95,18 @@ class ParameterSlider(QWidget):
             self.spinbox.setMaximum(max_val)
             self.spinbox.setValue(default_val)
             self.spinbox.setDecimals(self.decimals)
-            self.spinbox.setSingleStep(0.1 if self.decimals == 1 else 0.01)
+            self.spinbox.setSingleStep(self.step)
         else:
             self.spinbox = QSpinBox()
-            self.spinbox.setMinimum(min_val)
-            self.spinbox.setMaximum(max_val)
-            self.spinbox.setValue(default_val)
+            # Min/Max an Steps anpassen
+            adjusted_min = self._round_to_step(min_val, self.step)
+            adjusted_max = self._round_to_step(max_val, self.step)
+            adjusted_default = self._round_to_step(default_val, self.step)
+
+            self.spinbox.setMinimum(int(adjusted_min))
+            self.spinbox.setMaximum(int(adjusted_max))
+            self.spinbox.setValue(int(adjusted_default))
+            self.spinbox.setSingleStep(int(self.step))
 
         # Suffix hinzufügen wenn angegeben
         if self.suffix:
@@ -87,6 +121,12 @@ class ParameterSlider(QWidget):
 
         self.setLayout(layout)
 
+    def _round_to_step(self, value, step):
+        """Rundet Wert auf nächsten Step"""
+        if not step:
+            return value
+        return round(value / step) * step
+
     def on_slider_changed(self, value):
         """
         Funktionsweise: Wird aufgerufen wenn Slider bewegt wird
@@ -94,14 +134,15 @@ class ParameterSlider(QWidget):
         - Emittiert valueChanged Signal
         """
         if self.decimals > 0:
-            spinbox_value = value / (10 ** self.decimals)
-            self.spinbox.blockSignals(True)  # Verhindert Endlos-Loop
-            self.spinbox.setValue(spinbox_value)
-            self.spinbox.blockSignals(False)
+            # Decimal-Modus
+            spinbox_value = value / self.slider_scale
         else:
-            self.spinbox.blockSignals(True)
-            self.spinbox.setValue(value)
-            self.spinbox.blockSignals(False)
+            # Integer-Modus mit Steps
+            spinbox_value = value * self.step
+
+        self.spinbox.blockSignals(True)
+        self.spinbox.setValue(spinbox_value)
+        self.spinbox.blockSignals(False)
 
         self.valueChanged.emit()
 
@@ -111,15 +152,27 @@ class ParameterSlider(QWidget):
         - Konvertiert SpinBox-Wert zu Slider-Wert
         - Emittiert valueChanged Signal
         """
+        if self.spinbox.signalsBlocked():
+            return
+
         if self.decimals > 0:
-            slider_value = int(value * (10 ** self.decimals))
-            self.slider.blockSignals(True)  # Verhindert Endlos-Loop
-            self.slider.setValue(slider_value)
-            self.slider.blockSignals(False)
+            # Decimal-Modus
+            slider_value = int(value * self.slider_scale)
         else:
-            self.slider.blockSignals(True)
-            self.slider.setValue(value)
-            self.slider.blockSignals(False)
+            # Integer-Modus mit Steps
+            # Stelle sicher dass Wert an Step angepasst ist
+            rounded_value = self._round_to_step(value, self.step)
+            if rounded_value != value:
+                self.spinbox.blockSignals(True)
+                self.spinbox.setValue(int(rounded_value))
+                self.spinbox.blockSignals(False)
+                value = rounded_value
+
+            slider_value = int(value // self.step)
+
+        self.slider.blockSignals(True)
+        self.slider.setValue(slider_value)
+        self.slider.blockSignals(False)
 
         self.valueChanged.emit()
 
@@ -131,7 +184,10 @@ class ParameterSlider(QWidget):
         """
         if self.decimals > 0:
             return self.spinbox.value()
-        return self.slider.value()
+        else:
+            # Stelle sicher dass Wert an Step angepasst ist
+            value = self.spinbox.value()
+            return self._round_to_step(value, self.step)
 
     def set_value(self, value):
         """
@@ -144,11 +200,14 @@ class ParameterSlider(QWidget):
         self.spinbox.blockSignals(True)
 
         if self.decimals > 0:
-            self.slider.setValue(int(value * (10 ** self.decimals)))
+            # Decimal-Modus
+            self.slider.setValue(int(value * self.slider_scale))
             self.spinbox.setValue(value)
         else:
-            self.slider.setValue(value)
-            self.spinbox.setValue(value)
+            # Integer-Modus mit Steps
+            rounded_value = self._round_to_step(value, self.step)
+            self.slider.setValue(int(rounded_value // self.step))
+            self.spinbox.setValue(int(rounded_value))
 
         # Signale wieder aktivieren
         self.slider.blockSignals(False)

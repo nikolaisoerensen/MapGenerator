@@ -18,14 +18,14 @@ class DefaultConfig:
 
     # Terrain Parameter
     TERRAIN_DEFAULTS = {
-        'size': 256,
-        'height': 100,
-        'octaves': 6,
-        'frequency': 0.012,
-        'persistence': 0.5,
-        'lacunarity': 2.0,
-        'redistribute_power': 1.3,
-        'seed': 42
+        'size': 128,
+        'height': 200,
+        'octaves': 8,
+        'frequency': 0.037,
+        'persistence': 0.68,
+        'lacunarity': 2.3,
+        'redistribute_power': 2.5,
+        'seed': 542595
     }
 
     # Terrain Parameter Ranges (für Validierung)
@@ -140,23 +140,28 @@ class DefaultConfig:
         }
         return defaults_map.get(tab_name, {}).copy()
 
+    _RANGES_MAP = {
+        'terrain': None,
+        'geology': None,
+        'settlement': None,
+        'weather': None,
+        'water': None
+    }
+
     @classmethod
     def get_ranges_for_tab(cls, tab_name):
-        """
-        Funktionsweise: Gibt Parameter-Ranges für Validierung zurück
-        Args:
-            tab_name (str): Name des Tabs
-        Returns:
-            dict: Min/Max Ranges für Tab-Parameter
-        """
-        ranges_map = {
-            'terrain': cls.TERRAIN_RANGES,
-            'geology': cls.GEOLOGY_RANGES,
-            'settlement': cls.SETTLEMENT_RANGES,
-            'weather': cls.WEATHER_RANGES,
-            'water': cls.WATER_RANGES
-        }
-        return ranges_map.get(tab_name, {}).copy()
+        if cls._RANGES_MAP[tab_name] is None:
+            if tab_name == 'terrain':
+                cls._RANGES_MAP[tab_name] = cls.TERRAIN_RANGES
+            elif tab_name == 'geology':
+                cls._RANGES_MAP[tab_name] = cls.GEOLOGY_RANGES
+            elif tab_name == 'settlement':
+                cls._RANGES_MAP[tab_name] = cls.SETTLEMENT_RANGES
+            elif tab_name == 'water':
+                cls._RANGES_MAP[tab_name] = cls.WATER_RANGES
+            elif tab_name == 'weather':
+                cls._RANGES_MAP[tab_name] = cls.WEATHER_RANGES
+        return cls._RANGES_MAP[tab_name]
 
     @classmethod
     def validate_parameter(cls, tab_name, param_name, value):

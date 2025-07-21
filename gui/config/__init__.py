@@ -1,1 +1,2 @@
-# Config Package für World Generator
+def gui_default():
+    return None

@@ -11,7 +11,6 @@ import time
 import gc
 from functools import wraps
 from PyQt5.QtCore import QTimer, QObject, pyqtSignal, Qt
-from gui.utils.error_handler import ErrorHandler
 
 
 class DebounceTimer(QObject):
@@ -108,7 +107,6 @@ class MapRenderingOptimizer:
     """
 
     def __init__(self):
-        self.error_handler = ErrorHandler()
         self._figure_cache = {}
         self._last_cleanup = time.time()
         self.cleanup_interval = 300  # 5 Minuten
@@ -125,29 +123,22 @@ class MapRenderingOptimizer:
         Returns:
             matplotlib.figure.Figure: Optimierte Figure
         """
-        try:
-            # Cleanup alte Figures wenn nötig
-            self._cleanup_if_needed()
+        # Cleanup alte Figures wenn nötig
+        self._cleanup_if_needed()
 
-            # Prüfe Cache
-            if canvas_id in self._figure_cache:
-                figure = self._figure_cache[canvas_id]
-                # Prüfe ob Figure noch gültig und richtige Größe hat
-                if hasattr(figure, 'canvas') and figure.get_figwidth() == figsize[0]:
-                    figure.clear()  # Lösche Inhalte aber behalte Figure
-                    return figure
+        # Prüfe Cache
+        if canvas_id in self._figure_cache:
+            figure = self._figure_cache[canvas_id]
+            # Prüfe ob Figure noch gültig und richtige Größe hat
+            if hasattr(figure, 'canvas') and figure.get_figwidth() == figsize[0]:
+                figure.clear()  # Lösche Inhalte aber behalte Figure
+                return figure
 
-            # Erstelle neue Figure und cache sie
-            import matplotlib.pyplot as plt
-            figure = plt.figure(figsize=figsize, facecolor='white')
-            self._figure_cache[canvas_id] = figure
-            return figure
-
-        except Exception as e:
-            self.error_handler.logger.error(f"Figure-Optimierung fehlgeschlagen: {e}")
-            # Fallback zu normaler Figure
-            import matplotlib.pyplot as plt
-            return plt.figure(figsize=figsize, facecolor='white')
+        # Erstelle neue Figure und cache sie
+        import matplotlib.pyplot as plt
+        figure = plt.figure(figsize=figsize, facecolor='white')
+        self._figure_cache[canvas_id] = figure
+        return figure
 
     def cleanup_figure(self, canvas_id):
         """
@@ -156,14 +147,11 @@ class MapRenderingOptimizer:
             canvas_id (str): ID der zu löschenden Figure
         """
         if canvas_id in self._figure_cache:
-            try:
-                figure = self._figure_cache[canvas_id]
-                figure.clear()
-                import matplotlib.pyplot as plt
-                plt.close(figure)
-                del self._figure_cache[canvas_id]
-            except Exception as e:
-                self.error_handler.logger.warning(f"Figure cleanup Fehler: {e}")
+            figure = self._figure_cache[canvas_id]
+            figure.clear()
+            import matplotlib.pyplot as plt
+            plt.close(figure)
+            del self._figure_cache[canvas_id]
 
     def _cleanup_if_needed(self):
         """Automatische Bereinigung alter Figures"""
@@ -173,8 +161,6 @@ class MapRenderingOptimizer:
 
             # Garbage Collection erzwingen
             gc.collect()
-
-            self.error_handler.logger.debug(f"Figure Cache: {len(self._figure_cache)} Figures")
 
     def cleanup_all(self):
         """Räumt alle Figures auf"""
@@ -198,7 +184,6 @@ class PerformanceMonitor:
     """
 
     def __init__(self):
-        self.error_handler = ErrorHandler()
         self.render_times = {}
         self.performance_warnings = set()
 
@@ -218,18 +203,6 @@ class PerformanceMonitor:
             return 0
 
         elapsed = time.time() - self.render_times[operation_name]
-
-        # Performance-Warnung bei langsamen Operations
-        if elapsed > 2.0 and operation_name not in self.performance_warnings:
-            self.error_handler.logger.warning(
-                f"Langsame Operation: {operation_name} dauerte {elapsed:.2f}s"
-            )
-            self.performance_warnings.add(operation_name)
-        elif elapsed < 0.5:
-            # Entferne Warnung bei verbesserter Performance
-            self.performance_warnings.discard(operation_name)
-
-        self.error_handler.logger.debug(f"{operation_name}: {elapsed:.3f}s")
 
         del self.render_times[operation_name]
         return elapsed

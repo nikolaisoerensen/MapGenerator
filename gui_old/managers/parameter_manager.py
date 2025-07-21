@@ -7,8 +7,7 @@ Parameter Manager - Ersetzt monolithischen WorldState
 Spezialisierte Manager für verschiedene Parameter-Kategorien
 """
 
-from gui.config.default_config import DefaultConfig
-from gui.utils.error_handler import ErrorHandler, safe_execute
+from gui_old.config.default_config import DefaultConfig
 
 
 class BaseParameterManager:
@@ -21,16 +20,13 @@ class BaseParameterManager:
 
     def __init__(self, tab_name):
         self.tab_name = tab_name
-        self.error_handler = ErrorHandler()
         self._parameters = DefaultConfig.get_defaults_for_tab(tab_name)
         self._ranges = DefaultConfig.get_ranges_for_tab(tab_name)
 
-    @safe_execute('handle_parameter_error', fallback_return={})
     def get_parameters(self):
         """Gibt alle Parameter zurück"""
         return self._parameters.copy()
 
-    @safe_execute('handle_parameter_error')
     def set_parameters(self, params):
         """
         Funktionsweise: Setzt Parameter mit automatischer Validierung
@@ -42,15 +38,10 @@ class BaseParameterManager:
             self.tab_name, params
         )
 
-        if not is_valid:
-            for error_msg in error_messages:
-                self.error_handler.logger.warning(f"{self.tab_name}: {error_msg}")
-
         # Verwende korrigierte Parameter
         self._parameters.update(corrected_params)
         return is_valid
 
-    @safe_execute('handle_parameter_error')
     def set_parameter(self, param_name, value):
         """
         Funktionsweise: Setzt einzelnen Parameter mit Validierung
@@ -64,9 +55,6 @@ class BaseParameterManager:
             self.tab_name, param_name, value
         )
 
-        if not is_valid:
-            self.error_handler.logger.warning(f"{self.tab_name}: {error_msg}")
-
         self._parameters[param_name] = corrected_value
         return is_valid
 
@@ -74,7 +62,6 @@ class BaseParameterManager:
         """Gibt einzelnen Parameter zurück"""
         return self._parameters.get(param_name, default)
 
-    @safe_execute('handle_parameter_error')
     def reset_to_defaults(self):
         """Setzt alle Parameter auf Standard-Werte zurück"""
         self._parameters = DefaultConfig.get_defaults_for_tab(self.tab_name)
@@ -93,6 +80,7 @@ class TerrainParameterManager(BaseParameterManager):
 
     def __init__(self):
         super().__init__('terrain')
+        self._heightmap_cache = None
 
     def randomize_seed(self):
         """Generiert zufälligen Seed"""
@@ -228,11 +216,9 @@ class UIStateManager:
     """
 
     def __init__(self):
-        self.error_handler = ErrorHandler()
         self._ui_state = DefaultConfig.get_defaults_for_tab('ui')
         self._window_geometry = None
 
-    @safe_execute('handle_worldstate_error')
     def set_auto_simulate(self, enabled):
         """Setzt Auto-Simulation Status"""
         self._ui_state['auto_simulate'] = enabled
@@ -241,7 +227,6 @@ class UIStateManager:
         """Gibt Auto-Simulation Status zurück"""
         return self._ui_state.get('auto_simulate', False)
 
-    @safe_execute('handle_worldstate_error')
     def set_window_geometry(self, geometry):
         """Speichert Fenster-Geometrie"""
         self._window_geometry = geometry
