@@ -47,23 +47,23 @@ class ButtonSettings:
     Aufgabe: Konsistente Farbgebung und Hover-Effekte für alle Buttons
     """
     PRIMARY = {
-        "color": "#27ae60",
-        "hover": "#229954",
-        "font_size": 12,
+        "color": "#488852",
+        "hover": "#5e8964",
+        "font_size": 18,
         "font_weight": "bold"
     }
 
     SECONDARY = {
-        "color": "#3498db",
-        "hover": "#2980b9",
-        "font_size": 12,
+        "color": "#487188",
+        "hover": "#5e7a89",
+        "font_size": 18,
         "font_weight": "normal"
     }
 
     DANGER = {
-        "color": "#e74c3c",
-        "hover": "#c0392b",
-        "font_size": 12,
+        "color": "#884858",
+        "hover": "#895e69",
+        "font_size": 18,
         "font_weight": "bold"
     }
 
@@ -121,9 +121,22 @@ class LayoutSettings:
     """
     PADDING = 10
     MARGIN = 15
-    BUTTON_HEIGHT = 35
+    BUTTON_HEIGHT = 50
     SLIDER_HEIGHT = 25
     LABEL_HEIGHT = 20
 
     CONTROL_PANEL_WIDTH = 300
     STATUS_BAR_HEIGHT = 25
+
+class AppConstants:
+    """Application-wide timing and behavior constants"""
+    MEMORY_CHECK_INTERVAL_MS = 60000  # Memory monitoring interval
+    CLEANUP_DELAY_MS = 2000  # Cleanup protection delay
+
+# Application constants for timing and behavior
+class EditorConstants:
+    """MapEditor-specific constants for consistent behavior"""
+    STATUS_UPDATE_INTERVAL_MS = 5000     # Status bar update frequency
+    GENERATION_TIMEOUT_MS = 300000       # 5 minute timeout for generation
+    TAB_SWITCH_DELAY_MS = 100           # Delay for smooth tab transitions
+    ERROR_DISPLAY_DURATION_MS = 5000    # Error message display time

@@ -34,8 +34,8 @@ class BiomeTab(BaseMapTab):
     Output: biome_map, biome_map_super, super_biome_mask für finale Darstellung
     """
 
-    def __init__(self, data_manager, navigation_manager, shader_manager):
-        super().__init__(data_manager, navigation_manager, shader_manager)
+    def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
+        super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
         self.logger = logging.getLogger(__name__)
 
         # Core-Generator Instanzen
@@ -57,6 +57,49 @@ class BiomeTab(BaseMapTab):
         self.load_default_parameters()
         self.check_input_dependencies()
 
+    @memory_critical_handler("biome_generation")
+    def generate(self):
+        """
+        Funktionsweise: Hauptmethode für Biome-Generation mit Orchestrator Integration
+        Aufgabe: Startet Biome-Generation über GenerationOrchestrator mit Target-LOD
+        """
+        if not self.generation_orchestrator:
+            self.logger.error("No GenerationOrchestrator available")
+            self.handle_generation_error(Exception("GenerationOrchestrator not available"))
+            return
+
+        if self.generation_in_progress:
+            self.logger.info("Generation already in progress, ignoring request")
+            return
+
+        if not self.check_input_dependencies():
+            self.logger.warning("Cannot generate biome system - missing dependencies")
+            return
+
+        try:
+            self.logger.info(f"Starting biome generation with target LOD: {self.target_lod}")
+
+            self.start_generation_timing()
+            self.generation_in_progress = True
+
+            request_id = self.generation_orchestrator.request_generation(
+                generator_type="biome",
+                parameters=self.current_parameters.copy(),
+                target_lod=self.target_lod,
+                source_tab="biome",
+                priority=10
+            )
+
+            if request_id:
+                self.logger.info(f"Biome generation requested: {request_id}")
+            else:
+                raise Exception("Failed to request generation from orchestrator")
+
+        except Exception as e:
+            self.generation_in_progress = False
+            self.handle_generation_error(e)
+            raise
+
     def setup_biome_ui(self):
         """
         Funktionsweise: Erstellt komplette UI für Biome-System
@@ -64,28 +107,28 @@ class BiomeTab(BaseMapTab):
         """
         # Parameter Panel
         self.parameter_panel = self.create_biome_parameter_panel()
-        self.control_panel.addWidget(self.parameter_panel)
+        self.control_panel.layout().addWidget(self.parameter_panel)
 
         # Biome Classification Widget
         self.biome_classification_widget = BiomeClassificationWidget()
-        self.control_panel.addWidget(self.biome_classification_widget)
+        self.control_panel.layout().addWidget(self.biome_classification_widget)
 
         # Visualization Controls
         self.visualization_controls = self.create_biome_visualization_controls()
-        self.control_panel.addWidget(self.visualization_controls)
+        self.control_panel.layout().addWidget(self.visualization_controls)
 
         # World Statistics
         self.world_stats = WorldStatisticsWidget()
-        self.control_panel.addWidget(self.world_stats)
+        self.control_panel.layout().addWidget(self.world_stats)
 
         # Export Controls
         self.export_controls = WorldExportWidget()
         self.export_controls.export_requested.connect(self.export_world_data)
-        self.control_panel.addWidget(self.export_controls)
+        self.control_panel.layout().addWidget(self.export_controls)
 
         # Dependencies und Navigation
         self.setup_input_status()
-        self.setup_navigation()
+        self.setup_navigation_panel()
 
     def create_biome_parameter_panel(self) -> QGroupBox:
         """
@@ -259,7 +302,7 @@ class BiomeTab(BaseMapTab):
 
         # Dependency Status Widget
         self.dependency_status = MultiDependencyStatusWidget(self.required_dependencies)
-        self.control_panel.addWidget(self.dependency_status)
+        self.control_panel.layout().addWidget(self.dependency_status)
 
         # Data Manager Signals
         self.data_manager.data_updated.connect(self.on_data_updated)
@@ -321,87 +364,6 @@ class BiomeTab(BaseMapTab):
         self.export_controls.setEnabled(is_complete and self.biome_generation_complete)
 
         return is_complete
-
-    @pyqtSlot()
-    def generate_biome_system(self):
-        """
-        Funktionsweise: Hauptmethode für komplette Biome-System Generation
-        Aufgabe: Koordiniert Base-Biomes, Super-Biomes und Supersampling
-        """
-        try:
-            # Dependencies prüfen
-            if not self.check_input_dependencies():
-                self.logger.warning("Cannot generate biome system - missing dependencies")
-                return
-
-            self.logger.info("Starting biome system generation...")
-
-            # Input-Daten sammeln
-            inputs = self.collect_input_data()
-            params = self.current_parameters.copy()
-
-            # Map seed für reproduzierbare Zufälligkeit
-            map_seed = self.data_manager.get_terrain_data("heightmap")
-            if map_seed is not None:
-                params["map_seed"] = hash(str(map_seed[0, 0])) % 1000000  # Seed aus Heightmap ableiten
-
-            # 1. Base-Biome Classification (15 Biome-Typen)
-            self.logger.info("Step 1: Base-Biome Classification")
-            biome_map = self.base_classifier.classify_biomes(
-                heightmap=inputs["heightmap"],
-                slopemap=inputs["slopemap"],
-                temp_map=inputs["temp_map"],
-                soil_moist_map=inputs["soil_moist_map"],
-                biome_wetness_factor=params["biome_wetness_factor"],
-                biome_temp_factor=params["biome_temp_factor"]
-            )
-
-            # 2. Super-Biome Override System (11 Super-Biome-Typen)
-            self.logger.info("Step 2: Super-Biome Override System")
-            super_biome_results = self.super_biome_system.apply_super_biomes(
-                base_biome_map=biome_map,
-                heightmap=inputs["heightmap"],
-                water_biomes_map=inputs["water_biomes_map"],
-                sea_level=params["sea_level"],
-                bank_width=params["bank_width"],
-                alpine_level=params["alpine_level"],
-                snow_level=params["snow_level"],
-                cliff_slope=params["cliff_slope"],
-                edge_softness=params["edge_softness"]
-            )
-
-            # 3. 2x2 Supersampling mit diskretisierter Rotation
-            self.logger.info("Step 3: 2x2 Supersampling with Rotation")
-            biome_map_super = self.supersampling_manager.apply_rotational_supersampling(
-                biome_map=biome_map,
-                super_biome_override=super_biome_results["override_map"],
-                super_biome_probabilities=super_biome_results["probability_map"],
-                map_seed=params["map_seed"],
-                edge_softness=params["edge_softness"]
-            )
-
-            # 4. Super-Biome Mask für Visualisierung
-            super_biome_mask = super_biome_results["mask"]
-
-            # Results im DataManager speichern
-            self.data_manager.set_biome_data("biome_map", biome_map, params)
-            self.data_manager.set_biome_data("biome_map_super", biome_map_super, params)
-            self.data_manager.set_biome_data("super_biome_mask", super_biome_mask, params)
-
-            # Display und Statistics aktualisieren
-            self.update_biome_display()
-            self.biome_classification_widget.update_classification_statistics(biome_map, super_biome_mask)
-            self.world_stats.update_world_statistics(inputs, biome_map, super_biome_mask)
-
-            # Generation Complete Flag setzen
-            self.biome_generation_complete = True
-            self.export_controls.setEnabled(True)
-
-            self.logger.info("Biome system generation completed successfully")
-
-        except Exception as e:
-            self.logger.error(f"Biome system generation failed: {e}")
-            self.dependency_status.set_error(f"Generation failed: {str(e)}")
 
     def collect_input_data(self) -> dict:
         """
@@ -665,12 +627,6 @@ class BiomeTab(BaseMapTab):
                     # Two triangles per quad
                     f.write(f"f {v1} {v2} {v3}\n")
                     f.write(f"f {v2} {v4} {v3}\n")
-
-    # Override BaseMapTab method
-    def generate_terrain(self):
-        """Override für Biome-spezifische Generation"""
-        self.generate_biome_system()
-
 
 class BiomeClassificationWidget(QGroupBox):
     """

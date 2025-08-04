@@ -19,7 +19,7 @@ Kommunikationskanäle:
 """
 
 import numpy as np
-from PyQt5.QtOpenGL import QOpenGLContext, QOpenGLShaderProgram, QOpenGLShader
+from PyQt5.QtOpenGL import QGLContext
 from PyQt5.QtCore import QObject, pyqtSignal
 import OpenGL.GL as gl
 
@@ -73,7 +73,7 @@ class ShaderManager(QObject):
         Aufgabe: Erkennt OpenGL Compute Shader Support und setzt gpu_available Flag
         """
         try:
-            self.context = QOpenGLContext.currentContext()
+            self.context = QGLContext.currentContext()
             if self.context and self.context.isValid():
                 # Prüfe OpenGL Version für Compute Shader Support (4.3+)
                 version_string = gl.glGetString(gl.GL_VERSION).decode()

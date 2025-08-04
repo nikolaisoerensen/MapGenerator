@@ -60,7 +60,7 @@ class NavigationManager(QObject):
             "weather": ["terrain"],
             "water": ["terrain", "geology", "weather"],
             "biome": ["terrain", "weather", "water"],
-            "settlement": ["terrain"],
+            "settlement": ["terrain", "water", "biome"],
             "overview": ["terrain", "geology", "settlement", "weather", "water", "biome"]
         }
 
@@ -131,12 +131,12 @@ class NavigationManager(QObject):
         Parameter: tab_name (str) - Name des zu prüfenden Tabs
         """
         required_outputs = {
-            "terrain": ["heightmap", "slopemap", "shademap"],
+            "terrain": ["heightmap", "slopemap", "shadowmap"],
             "geology": ["rock_map", "hardness_map"],
-            "settlement": ["locations", "civ_map", "plots"],
             "weather": ["wind_map", "precip_map", "humid_map", "temp_map"],
             "water": ["water_map", "flow_map", "soil_moist_map", "water_biomes_map"],
-            "biome": ["biome_map", "biome_map_super", "super_biome_mask"]
+            "biome": ["biome_map", "super_biome_mask"],
+            "settlement": ["settlement_list", "landmark_list", "roadsite_list", "plot_map", "civ_map"]
         }
 
         outputs = required_outputs.get(tab_name, [])

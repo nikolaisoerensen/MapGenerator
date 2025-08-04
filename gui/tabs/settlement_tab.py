@@ -50,8 +50,8 @@ class SettlementTab(BaseMapTab):
     Output: settlement_list, landmark_list, roadsite_list, plot_map, civ_map
     """
 
-    def __init__(self, data_manager, navigation_manager, shader_manager):
-        super().__init__(data_manager, navigation_manager, shader_manager)
+    def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
+        super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
         self.logger = logging.getLogger(__name__)
 
         # Core-Generator Instanzen
@@ -73,6 +73,48 @@ class SettlementTab(BaseMapTab):
         self.load_default_parameters()
         self.check_input_dependencies()
 
+    def generate(self):
+        """
+        Funktionsweise: Hauptmethode für Settlement-Generation mit Orchestrator Integration
+        Aufgabe: Startet Settlement-Generation über GenerationOrchestrator mit Target-LOD
+        """
+        if not self.generation_orchestrator:
+            self.logger.error("No GenerationOrchestrator available")
+            self.handle_generation_error(Exception("GenerationOrchestrator not available"))
+            return
+
+        if self.generation_in_progress:
+            self.logger.info("Generation already in progress, ignoring request")
+            return
+
+        if not self.check_input_dependencies():
+            self.logger.warning("Cannot generate settlement system - missing dependencies")
+            return
+
+        try:
+            self.logger.info(f"Starting settlement generation with target LOD: {self.target_lod}")
+
+            self.start_generation_timing()
+            self.generation_in_progress = True
+
+            request_id = self.generation_orchestrator.request_generation(
+                generator_type="settlement",
+                parameters=self.current_parameters.copy(),
+                target_lod=self.target_lod,
+                source_tab="settlement",
+                priority=10
+            )
+
+            if request_id:
+                self.logger.info(f"Settlement generation requested: {request_id}")
+            else:
+                raise Exception("Failed to request generation from orchestrator")
+
+        except Exception as e:
+            self.generation_in_progress = False
+            self.handle_generation_error(e)
+            raise
+
     def setup_settlement_ui(self):
         """
         Funktionsweise: Erstellt komplette UI für Settlement-System
@@ -80,23 +122,23 @@ class SettlementTab(BaseMapTab):
         """
         # Parameter Panel
         self.parameter_panel = self.create_settlement_parameter_panel()
-        self.control_panel.addWidget(self.parameter_panel)
+        self.control_panel.layout().addWidget(self.parameter_panel)
 
         # Settlement Statistics
         self.settlement_stats = SettlementStatisticsWidget()
-        self.control_panel.addWidget(self.settlement_stats)
+        self.control_panel.layout().addWidget(self.settlement_stats)
 
         # Visualization Controls
         self.visualization_controls = self.create_settlement_visualization_controls()
-        self.control_panel.addWidget(self.visualization_controls)
+        self.control_panel.layout().addWidget(self.visualization_controls)
 
         # Civilization Influence Panel
         self.civ_influence_panel = CivilizationInfluenceWidget()
-        self.control_panel.addWidget(self.civ_influence_panel)
+        self.control_panel.layout().addWidget(self.civ_influence_panel)
 
         # Dependencies und Navigation
         self.setup_input_status()
-        self.setup_navigation()
+        self.setup_navigation_panel()
 
     def create_settlement_parameter_panel(self) -> QGroupBox:
         """
@@ -298,10 +340,90 @@ class SettlementTab(BaseMapTab):
         self.dependency_status = MultiDependencyStatusWidget(
             self.required_dependencies, "Settlement Dependencies"
         )
-        self.control_panel.addWidget(self.dependency_status)
+        self.control_panel.layout().addWidget(self.dependency_status)
 
         # Data Manager Signals
         self.data_manager.data_updated.connect(self.on_data_updated)
+
+    def setup_input_status(self):
+        """
+        Funktionsweise: Setup für Input-Status-Anzeige spezifisch für Settlement
+        Aufgabe: Erweitert die Dependency-Checking um Settlement-spezifische Status-Infos
+        """
+        # Input Status Panel für zusätzliche Settlement-spezifische Informationen
+        input_status_group = QGroupBox("Input Status")
+        input_layout = QVBoxLayout()
+
+        # Terrain Suitability Status
+        self.terrain_status = StatusIndicator("Terrain Quality")
+        self.terrain_status.set_unknown()
+        input_layout.addWidget(self.terrain_status)
+
+        # Water Proximity Status (optional)
+        self.water_status = StatusIndicator("Water Proximity")
+        self.water_status.set_unknown()
+        input_layout.addWidget(self.water_status)
+
+        # Settlement Placement Viability
+        self.placement_status = StatusIndicator("Placement Viability")
+        self.placement_status.set_unknown()
+        input_layout.addWidget(self.placement_status)
+
+        input_status_group.setLayout(input_layout)
+        self.control_panel.layout().addWidget(input_status_group)
+
+        # Update Status basierend auf verfügbaren Daten
+        self.update_input_status()
+
+    def update_input_status(self):
+        """
+        Funktionsweise: Aktualisiert Settlement-spezifische Input-Status
+        Aufgabe: Zeigt Qualität der Terrain-Daten für Settlement-Placement
+        """
+        try:
+            # Terrain Quality Check
+            heightmap = self.data_manager.get_terrain_data("heightmap")
+            slopemap = self.data_manager.get_terrain_data("slopemap")
+
+            if heightmap is not None and slopemap is not None:
+                # Analysiere Terrain-Qualität für Settlements
+                flat_areas = np.sum(slopemap[:, :, 0] ** 2 + slopemap[:, :, 1] ** 2 < 0.1) / heightmap.size
+                if flat_areas > 0.3:  # > 30% flache Bereiche
+                    self.terrain_status.set_success(f"Good ({flat_areas:.1%} suitable)")
+                elif flat_areas > 0.1:  # > 10% flache Bereiche
+                    self.terrain_status.set_warning(f"Limited ({flat_areas:.1%} suitable)")
+                else:
+                    self.terrain_status.set_error(f"Poor ({flat_areas:.1%} suitable)")
+            else:
+                self.terrain_status.set_error("Missing terrain data")
+
+            # Water Proximity Check
+            water_map = self.data_manager.get_water_data("water_map")
+            if water_map is not None:
+                water_coverage = np.sum(water_map > 0.01) / water_map.size
+                if water_coverage > 0.05:  # > 5% Wasser
+                    self.water_status.set_success(f"Available ({water_coverage:.1%})")
+                else:
+                    self.water_status.set_warning(f"Limited ({water_coverage:.1%})")
+            else:
+                self.water_status.set_warning("No water data - using defaults")
+
+            # Placement Viability (kombiniert)
+            if heightmap is not None and slopemap is not None:
+                if flat_areas > 0.2:
+                    self.placement_status.set_success("Excellent placement conditions")
+                elif flat_areas > 0.1:
+                    self.placement_status.set_warning("Moderate placement conditions")
+                else:
+                    self.placement_status.set_error("Difficult placement conditions")
+            else:
+                self.placement_status.set_error("Cannot assess - missing data")
+
+        except Exception as e:
+            self.logger.warning(f"Error updating input status: {e}")
+            self.terrain_status.set_error("Status check failed")
+            self.water_status.set_error("Status check failed")
+            self.placement_status.set_error("Status check failed")
 
     def load_default_parameters(self):
         """Lädt Default-Parameter"""
@@ -338,8 +460,9 @@ class SettlementTab(BaseMapTab):
         """Slot für Data-Updates von anderen Generatoren"""
         if data_key in self.required_dependencies:
             self.check_input_dependencies()
+            self.update_input_status()
 
-    @dependency_handler
+
     def check_input_dependencies(self):
         """
         Funktionsweise: Prüft alle Required Dependencies für Settlement-System
@@ -348,161 +471,9 @@ class SettlementTab(BaseMapTab):
         is_complete, missing = self.data_manager.check_dependencies("settlement", self.required_dependencies)
 
         self.dependency_status.update_dependency_status(is_complete, missing)
-        self.manual_generate_button.setEnabled(is_complete)
+        #self.manual_generate_button.setEnabled(is_complete)
 
         return is_complete
-
-    @core_generation_handler("settlement")
-    def generate_settlement_system(self):
-        """
-        Funktionsweise: Hauptmethode für komplette Settlement-System Generation
-        Aufgabe: Koordiniert alle Settlement-Core-Module
-        """
-        try:
-            # Dependencies prüfen
-            if not self.check_input_dependencies():
-                self.logger.warning("Cannot generate settlement system - missing dependencies")
-                return
-
-            self.logger.info("Starting settlement system generation...")
-
-            # Timing für Performance-Messung starten
-            self.start_generation_timing()
-
-            # Input-Daten sammeln
-            inputs = self.collect_input_data()
-            params = self.current_parameters.copy()
-
-            # Map seed für reproduzierbare Platzierung
-            heightmap = inputs["heightmap"]
-            params["map_seed"] = hash(str(heightmap[0, 0] + heightmap[-1, -1])) % 1000000
-
-            # 1. Terrain Suitability Analysis
-            self.logger.info("Step 1: Terrain Suitability Analysis")
-            suitability_map = self.terrain_analyzer.analyze_slope_suitability(
-                heightmap=inputs["heightmap"],
-                slopemap=inputs["slopemap"]
-            )
-
-            water_proximity = self.terrain_analyzer.calculate_water_proximity(
-                water_map=inputs["water_map"]
-            )
-
-            elevation_fitness = self.terrain_analyzer.evaluate_elevation_fitness(
-                heightmap=inputs["heightmap"]
-            )
-
-            # Kombinierte Suitability
-            combined_suitability = self.terrain_analyzer.combine_suitability_factors(
-                slope_suitability=suitability_map,
-                water_proximity=water_proximity,
-                elevation_fitness=elevation_fitness,
-                terrain_factor=params["terrain_factor_villages"]
-            )
-
-            # 2. Settlement Generation
-            self.logger.info("Step 2: Settlement Generation")
-            settlements = self.settlement_generator.generate_settlements(
-                suitability_map=combined_suitability,
-                num_settlements=int(params["settlements"]),
-                map_seed=params["map_seed"]
-            )
-
-            # 3. Landmark Placement
-            self.logger.info("Step 3: Landmark Placement")
-            landmarks = self.settlement_generator.place_landmarks(
-                heightmap=inputs["heightmap"],
-                settlements=settlements,
-                num_landmarks=int(params["landmarks"]),
-                wilderness_threshold=params["landmark_wilderness"],
-                map_seed=params["map_seed"]
-            )
-
-            # 4. Road Network Creation
-            self.logger.info("Step 4: Road Network Creation")
-            road_network = self.pathfinding_system.find_least_resistance_path(
-                settlements=settlements,
-                heightmap=inputs["heightmap"],
-                slopemap=inputs["slopemap"],
-                slope_distance_ratio=params["road_slope_to_distance_ratio"]
-            )
-
-            # Road Smoothing
-            smooth_roads = self.pathfinding_system.apply_spline_smoothing(road_network)
-
-            # 5. Roadsite Placement
-            self.logger.info("Step 5: Roadsite Placement")
-            roadsites = self.settlement_generator.place_roadsites(
-                road_network=smooth_roads,
-                num_roadsites=int(params["roadsites"]),
-                map_seed=params["map_seed"]
-            )
-
-            # 6. Civilization Influence Mapping
-            self.logger.info("Step 6: Civilization Influence Mapping")
-            civ_map = self.civ_influence_mapper.apply_settlement_influence(
-                settlements=settlements,
-                map_size=inputs["heightmap"].shape[0],
-                decay_factor=params["civ_influence_decay"]
-            )
-
-            civ_map = self.civ_influence_mapper.calculate_road_influence(
-                civ_map=civ_map,
-                road_network=smooth_roads,
-                decay_factor=params["civ_influence_decay"]
-            )
-
-            civ_map = self.civ_influence_mapper.add_landmark_influence(
-                civ_map=civ_map,
-                landmarks=landmarks,
-                roadsites=roadsites,
-                decay_factor=params["civ_influence_decay"]
-            )
-
-            # 7. Plot Node System
-            self.logger.info("Step 7: Plot Node System")
-            plotnodes = self.plotnode_system.generate_plot_nodes(
-                civ_map=civ_map,
-                num_nodes=int(params["plotnodes"]),
-                settlements=settlements,
-                map_seed=params["map_seed"]
-            )
-
-            triangulation = self.plotnode_system.create_delaunay_triangulation(plotnodes)
-
-            plot_map = self.plotnode_system.merge_to_plots(
-                plotnodes=plotnodes,
-                triangulation=triangulation,
-                civ_map=civ_map,
-                plot_size_threshold=params["plotsize"]
-            )
-
-            # Results im DataManager speichern
-            self.save_settlement_results(
-                settlements, landmarks, roadsites, plot_map, civ_map,
-                combined_suitability, smooth_roads, params
-            )
-
-            # Display und Statistics aktualisieren
-            self.update_settlement_display()
-            self.settlement_stats.update_generation_statistics(
-                settlements, landmarks, roadsites, plot_map, civ_map
-            )
-            self.civ_influence_panel.update_influence_statistics(civ_map)
-
-            # Generation Complete Flag setzen
-            self.settlement_generation_complete = True
-
-            # Timing beenden
-            self.end_generation_timing(True)
-
-            self.logger.info("Settlement system generation completed successfully")
-
-
-        except Exception as e:
-            self.handle_generation_error(e)
-            self.end_generation_timing(False, str(e))
-            raise
 
     def collect_input_data(self) -> dict:
         """
@@ -626,12 +597,6 @@ class SettlementTab(BaseMapTab):
     def toggle_3d_markers(self, enabled: bool):
         """Toggle für 3D Settlement Markers"""
         self.update_settlement_display()
-
-    # Override BaseMapTab method
-    def generate_terrain(self):
-        """Override für Settlement-spezifische Generation"""
-        self.generate_settlement_system()
-
 
 class SettlementStatisticsWidget(QGroupBox):
     """

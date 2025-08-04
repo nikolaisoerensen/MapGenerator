@@ -18,7 +18,8 @@ import logging
 
 from .base_tab import BaseMapTab
 from gui.config.value_default import WATER, get_parameter_config, validate_parameter_set, VALIDATION_RULES
-from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton
+from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, MultiDependencyStatusWidget
+
 from core.water_generator import (
     HydrologySystemGenerator, LakeDetectionSystem, FlowNetworkBuilder,
     ManningFlowCalculator, ErosionSedimentationSystem, SoilMoistureCalculator,
@@ -51,8 +52,8 @@ class WaterTab(BaseMapTab):
     Output: Komplettes Wassersystem mit Erosion und Sedimentation
     """
 
-    def __init__(self, data_manager, navigation_manager, shader_manager):
-        super().__init__(data_manager, navigation_manager, shader_manager)
+    def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
+        super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
         self.logger = logging.getLogger(__name__)
 
         # Core-Generator Instanzen
@@ -77,6 +78,48 @@ class WaterTab(BaseMapTab):
         self.load_default_parameters()
         self.check_input_dependencies()
 
+    def generate(self):
+        """
+        Funktionsweise: Hauptmethode für Water-Generation mit Orchestrator Integration
+        Aufgabe: Startet Water-Generation über GenerationOrchestrator mit Target-LOD
+        """
+        if not self.generation_orchestrator:
+            self.logger.error("No GenerationOrchestrator available")
+            self.handle_generation_error(Exception("GenerationOrchestrator not available"))
+            return
+
+        if self.generation_in_progress:
+            self.logger.info("Generation already in progress, ignoring request")
+            return
+
+        if not self.check_input_dependencies():
+            self.logger.warning("Cannot generate water system - missing dependencies")
+            return
+
+        try:
+            self.logger.info(f"Starting water generation with target LOD: {self.target_lod}")
+
+            self.start_generation_timing()
+            self.generation_in_progress = True
+
+            request_id = self.generation_orchestrator.request_generation(
+                generator_type="water",
+                parameters=self.current_parameters.copy(),
+                target_lod=self.target_lod,
+                source_tab="water",
+                priority=10
+            )
+
+            if request_id:
+                self.logger.info(f"Water generation requested: {request_id}")
+            else:
+                raise Exception("Failed to request generation from orchestrator")
+
+        except Exception as e:
+            self.generation_in_progress = False
+            self.handle_generation_error(e)
+            raise
+
     def setup_water_ui(self):
         """
         Funktionsweise: Erstellt komplette UI für Water-System
@@ -84,23 +127,23 @@ class WaterTab(BaseMapTab):
         """
         # Parameter Panel
         self.parameter_panel = self.create_water_parameter_panel()
-        self.control_panel.addWidget(self.parameter_panel)
+        self.control_panel.layout().addWidget(self.parameter_panel)
 
         # Hydrologie Statistics
         self.hydrology_stats = HydrologyStatisticsWidget()
-        self.control_panel.addWidget(self.hydrology_stats)
+        self.control_panel.layout().addWidget(self.hydrology_stats)
 
         # Visualization Controls
         self.visualization_controls = self.create_water_visualization_controls()
-        self.control_panel.addWidget(self.visualization_controls)
+        self.control_panel.layout().addWidget(self.visualization_controls)
 
         # Shader Performance Panel
         self.shader_controls = ShaderPerformancePanel(self.shader_manager)
-        self.control_panel.addWidget(self.shader_controls)
+        self.control_panel.layout().addWidget(self.shader_controls)
 
         # Dependencies und Navigation
-        self.setup_input_status()
-        self.setup_navigation()
+        #self.setup_input_status() #an AI: bitte so wie in anderen Tabs anpassen, hier noch nicht vorhanden
+        self.setup_navigation_panel()
 
     def create_water_parameter_panel(self) -> QGroupBox:
         """
@@ -237,15 +280,38 @@ class WaterTab(BaseMapTab):
             ("Water Biomes", "water_biomes_map")
         ]
 
+        print("DEBUG: About to create radio buttons loop")
         for i, (display_name, data_key) in enumerate(water_outputs):
+            print(f"DEBUG: Creating radio button {i}: {display_name}")
             radio = QRadioButton(display_name)
+            print(f"DEBUG: QRadioButton created for {display_name}")
+
             radio.setProperty("data_key", data_key)
-            radio.toggled.connect(self.update_display_mode)
+            print(f"DEBUG: Property set for {display_name}")
+
+            # WICHTIG: Signal NICHT sofort verbinden
+            # radio.toggled.connect(self.update_display_mode)
+
             self.display_mode.addButton(radio, i)
+            print(f"DEBUG: Button added to group for {display_name}")
+
             layout.addWidget(radio)
+            print(f"DEBUG: Radio button added to layout for {display_name}")
 
             if i == 0:  # Water Depth als Default
+                print(f"DEBUG: About to set checked for {display_name}")
                 radio.setChecked(True)
+                print(f"DEBUG: Default checked set for {display_name}")
+
+        print("DEBUG: Radio buttons loop completed")
+
+        # Signals NACH der kompletten UI-Erstellung verbinden
+        print("DEBUG: About to connect signals")
+        for i in range(len(water_outputs)):
+            button = self.display_mode.button(i)
+            if button:
+                button.toggled.connect(self.update_display_mode)
+        print("DEBUG: All signals connected")
 
         # River Network Overlay
         self.river_overlay_checkbox = QCheckBox("Show River Network")
@@ -274,7 +340,7 @@ class WaterTab(BaseMapTab):
 
         # Dependency Status Widget mit Details
         self.dependency_status = MultiDependencyStatusWidget(self.required_dependencies)
-        self.control_panel.addWidget(self.dependency_status)
+        self.control_panel.layout().addWidget(self.dependency_status)
 
         # Data Manager Signals
         self.data_manager.data_updated.connect(self.on_data_updated)
@@ -290,7 +356,8 @@ class WaterTab(BaseMapTab):
         self.shader_performance_timer.timeout.connect(self.monitor_shader_performance)
 
         # GPU Fallback Detection
-        self.gpu_available = self.shader_manager.check_gpu_support()
+        if self.shader_manager and self.shader_manager.check_gpu_support():
+            self.gpu_available = self.shader_manager.check_gpu_support()
         if not self.gpu_available:
             self.logger.warning("GPU not available - using CPU fallback")
 
@@ -344,122 +411,6 @@ class WaterTab(BaseMapTab):
         self.manual_generate_button.setEnabled(is_complete)
 
         return is_complete
-
-    @memory_critical_handler("water_generation")
-    def generate_water_system(self):
-        """
-        Funktionsweise: Hauptmethode für komplette Water-System Generation
-        Aufgabe: Koordiniert alle 7 Core-Module und 8 Shader für Hydrologie-Simulation
-        """
-        try:
-            # Dependencies prüfen
-            if not self.check_input_dependencies():
-                self.logger.warning("Cannot generate water system - missing dependencies")
-                return
-
-            self.generation_in_progress = True
-            self.logger.info("Starting water system generation...")
-
-            # Timing für Performance-Messung starten
-            self.start_generation_timing()
-
-            # Alle Input-Daten sammeln
-            inputs = self.collect_input_data()
-            params = self.current_parameters.copy()
-
-            # GPU-Performance Monitoring starten
-            if self.gpu_available:
-                self.shader_performance_timer.start(1000)
-
-            # 1. Lake Detection (Jump Flooding Algorithm)
-            self.logger.info("Step 1: Lake Detection")
-            lake_map = self.lake_detection.detect_local_minima(
-                heightmap=inputs["heightmap"],
-                lake_volume_threshold=params["lake_volume_threshold"]
-            )
-
-            # 2. Flow Network Building (Steepest Descent + Upstream Accumulation)
-            self.logger.info("Step 2: Flow Network Building")
-            flow_data = self.flow_network.calculate_steepest_descent(
-                heightmap=inputs["heightmap"],
-                precipitation=inputs["precip_map"],
-                rain_threshold=params["rain_threshold"]
-            )
-
-            # 3. Manning Flow Calculation
-            self.logger.info("Step 3: Manning Flow Calculation")
-            flow_results = self.manning_calculator.solve_manning_equation(
-                flow_map=flow_data["flow_map"],
-                heightmap=inputs["heightmap"],
-                manning_coefficient=params["manning_coefficient"]
-            )
-
-            # 4. Soil Moisture Calculation (Gaussian Diffusion)
-            self.logger.info("Step 4: Soil Moisture Calculation")
-            soil_moisture_map = self.soil_moisture.apply_gaussian_diffusion(
-                water_map=flow_results["water_map"],
-                diffusion_radius=params["diffusion_radius"]
-            )
-
-            # 5. Erosion & Sedimentation System (Stream Power + Hjulström)
-            self.logger.info("Step 5: Erosion & Sedimentation")
-            erosion_results = self.erosion_system.calculate_stream_power(
-                flow_speed=flow_results["flow_speed"],
-                water_depth=flow_results["water_map"],
-                hardness_map=inputs["hardness_map"],
-                rock_map=inputs["rock_map"],
-                erosion_strength=params["erosion_strength"],
-                sediment_capacity_factor=params["sediment_capacity_factor"],
-                settling_velocity=params["settling_velocity"]
-            )
-
-            # 6. Evaporation Calculation (Atmospheric Conditions)
-            self.logger.info("Step 6: Evaporation Calculation")
-            evaporation_map = self.evaporation.calculate_atmospheric_evaporation(
-                water_map=flow_results["water_map"],
-                temp_map=inputs["temp_map"],
-                humid_map=inputs["humid_map"],
-                wind_map=inputs["wind_map"],
-                evaporation_base_rate=params["evaporation_base_rate"]
-            )
-
-            # 7. Water Biomes Classification
-            self.logger.info("Step 7: Water Biomes Classification")
-            water_biomes_map = self.flow_network.classify_water_bodies(
-                flow_map=flow_data["flow_map"],
-                lake_map=lake_map
-            )
-
-            # Alle Results im DataManager speichern
-            self.save_all_water_results(
-                flow_results, erosion_results, soil_moisture_map,
-                evaporation_map, water_biomes_map, params
-            )
-
-            # Display und Statistics aktualisieren
-            self.update_water_display()
-            self.hydrology_stats.update_generation_statistics(flow_results, erosion_results)
-
-            # Ocean Outflow anzeigen
-            ocean_outflow = flow_data.get("ocean_outflow", 0.0)
-            self.ocean_outflow_label.setText(f"Ocean Outflow: {ocean_outflow:.2f} m³/s")
-
-            # Timing beenden
-            self.end_generation_timing(True)
-
-            self.logger.info("Water system generation completed successfully")
-
-
-        except Exception as e:
-            self.handle_generation_error(e)
-            self.end_generation_timing(False, str(e))
-            raise  # Re-raise für Error Handler
-
-
-        finally:
-            self.generation_in_progress = False
-            if self.gpu_available:
-                self.shader_performance_timer.stop()
 
     def collect_input_data(self) -> dict:
         """
@@ -516,7 +467,6 @@ class WaterTab(BaseMapTab):
         ocean_outflow = flow_results.get("ocean_outflow", 0.0)
         self.data_manager.set_water_data("ocean_outflow", ocean_outflow, params)
 
-    @gpu_shader_handler("water_display")
     def update_water_display(self):
         """
         Funktionsweise: Aktualisiert Display basierend auf aktuellem Visualization-Mode
@@ -592,11 +542,6 @@ class WaterTab(BaseMapTab):
         if self.generation_in_progress and self.gpu_available:
             performance_metrics = self.shader_manager.get_performance_metrics()
             self.shader_controls.update_performance_display(performance_metrics)
-
-    # Override BaseMapTab method
-    def generate_terrain(self):
-        """Override für Water-spezifische Generation"""
-        self.generate_water_system()
 
 
 class HydrologyStatisticsWidget(QGroupBox):
@@ -686,65 +631,6 @@ class HydrologyStatisticsWidget(QGroupBox):
             status = "✓ Conserved" if mass_conserved else "✗ Violated"
             self.mass_conservation_label.setText(f"Mass Conservation: {status}")
 
-
-class MultiDependencyStatusWidget(QGroupBox):
-    """
-    Funktionsweise: Widget für detaillierte Dependency-Status Anzeige
-    Aufgabe: Zeigt Status aller 8 Required Dependencies einzeln an
-    """
-
-    def __init__(self, required_dependencies: list):
-        super().__init__("Input Dependencies")
-        self.required_dependencies = required_dependencies
-        self.dependency_indicators = {}
-        self.setup_ui()
-
-    def setup_ui(self):
-        """Erstellt UI für Dependency-Status"""
-        layout = QVBoxLayout()
-
-        # Status Indicator für jede Dependency
-        for dependency in self.required_dependencies:
-            indicator = StatusIndicator(dependency.replace("_", " ").title())
-            indicator.set_warning("Not available")
-            self.dependency_indicators[dependency] = indicator
-            layout.addWidget(indicator)
-
-        # Overall Status
-        self.overall_status = StatusIndicator("Overall Status")
-        self.overall_status.set_error("Dependencies missing")
-        layout.addWidget(self.overall_status)
-
-        self.setLayout(layout)
-
-    def update_dependency_status(self, is_complete: bool, missing: list):
-        """
-        Funktionsweise: Aktualisiert Status aller Dependencies
-        Parameter: is_complete (bool), missing (list of dependency names)
-        """
-        # Individual Dependencies aktualisieren
-        for dependency in self.required_dependencies:
-            indicator = self.dependency_indicators[dependency]
-            if dependency in missing:
-                indicator.set_warning("Missing")
-            else:
-                indicator.set_success("Available")
-
-        # Overall Status
-        if is_complete:
-            self.overall_status.set_success("All dependencies available")
-        else:
-            self.overall_status.set_error(f"Missing: {len(missing)} dependencies")
-
-    def update_missing_dependencies(self, missing: list):
-        """Update nur für fehlende Dependencies"""
-        self.update_dependency_status(len(missing) == 0, missing)
-
-    def set_error(self, message: str):
-        """Setzt Error-Status für Overall Status"""
-        self.overall_status.set_error(message)
-
-
 class ShaderPerformancePanel(QGroupBox):
     """
     Funktionsweise: Widget für GPU-Shader Performance Monitoring
@@ -762,7 +648,7 @@ class ShaderPerformancePanel(QGroupBox):
 
         # GPU Status
         self.gpu_status = StatusIndicator("GPU Status")
-        if self.shader_manager.check_gpu_support():
+        if self.shader_manager and self.shader_manager.check_gpu_support():
             self.gpu_status.set_success("GPU Available")
         else:
             self.gpu_status.set_warning("Using CPU Fallback")

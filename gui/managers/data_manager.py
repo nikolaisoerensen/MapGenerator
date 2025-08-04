@@ -341,6 +341,29 @@ class DataManager(QObject):
     def get_biome_dependencies(self) -> List[str]:
         return list(self._biome_data.keys())
 
+    def has_data(self, data_key: str) -> bool:
+        """
+        Funktionsweise: Prüft ob spezifischer Daten-Key in irgendeinem Generator verfügbar ist
+        Parameter: data_key (str) - Name des zu prüfenden Daten-Keys
+        Return: bool - Daten verfügbar
+        Aufgabe: Universelle Verfügbarkeits-Prüfung für NavigationManager
+        """
+        # Prüfe alle Generator-Datenstrukturen
+        all_data_dicts = [
+            self._terrain_data,
+            self._geology_data,
+            self._settlement_data,
+            self._weather_data,
+            self._water_data,
+            self._biome_data
+        ]
+
+        for data_dict in all_data_dicts:
+            if data_key in data_dict and data_dict[data_key] is not None:
+                return True
+
+        return False
+
     # ===== DEPENDENCY CHECKING =====
     @memory_critical_handler("dependency_check")
     def check_dependencies(self, generator_type: str, required_dependencies: List[str]) -> Tuple[bool, List[str]]:

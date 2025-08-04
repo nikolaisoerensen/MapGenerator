@@ -11,11 +11,12 @@ Funktionsweise: Wetter-System mit 3D Wind-Visualization und vollständiger Core-
 - Output: wind_map, temp_map, precip_map, humid_map
 """
 
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
 import numpy as np
 import logging
+
+from PyQt5.QtCore import QTimer, pyqtSlot, QMetaObject, Q_ARG, Qt
+from PyQt5.QtWidgets import QGroupBox, QVBoxLayout, QButtonGroup, QRadioButton, QCheckBox, QLabel, QProgressBar, \
+    QHBoxLayout, QComboBox
 
 from .base_tab import BaseMapTab
 from gui.config.value_default import WEATHER, get_parameter_config, validate_parameter_set, VALIDATION_RULES
@@ -51,8 +52,8 @@ class WeatherTab(BaseMapTab):
     Output: wind_map, temp_map, precip_map, humid_map für nachfolgende Generatoren
     """
 
-    def __init__(self, data_manager, navigation_manager, shader_manager):
-        super().__init__(data_manager, navigation_manager, shader_manager)
+    def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
+        super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
         self.logger = logging.getLogger(__name__)
 
         # Core-Generator Instanzen
@@ -70,6 +71,7 @@ class WeatherTab(BaseMapTab):
         self.setup_weather_ui()
         self.setup_dependency_checking()
         self.setup_shader_integration()
+        self.setup_orchestrator_integration()
 
         # Initial Load
         self.load_default_parameters()
@@ -81,24 +83,34 @@ class WeatherTab(BaseMapTab):
         Aufgabe: Parameter, Climate-Preview, 3D-Wind-Visualization, Performance-Monitor
         """
         # Parameter Panel
+        self.logger.info("DEBUG: Creating parameter panel...")
         self.parameter_panel = self.create_weather_parameter_panel()
-        self.control_panel.addWidget(self.parameter_panel)
+        self.control_panel.layout().addWidget(self.parameter_panel)
+        self.logger.info("DEBUG: Parameter panel added successfully")
+
+        # LOD Control Panel
+        self.logger.info("DEBUG: Creating LOD control panel...")
+        self.lod_control_panel = self.create_lod_control_panel()
+        self.control_panel.layout().addWidget(self.lod_control_panel)
+        self.logger.info("DEBUG: LOD control panel added successfully")
 
         # Climate Statistics
+        self.logger.info("DEBUG: Creating climate stats...")
         self.climate_stats = ClimateStatisticsWidget()
-        self.control_panel.addWidget(self.climate_stats)
+        self.control_panel.layout().addWidget(self.climate_stats)
+        self.logger.info("DEBUG: Climate stats added successfully")
 
         # Visualization Controls
+        self.logger.info("DEBUG: Creating visualization controls...")
         self.visualization_controls = self.create_weather_visualization_controls()
-        self.control_panel.addWidget(self.visualization_controls)
+        self.control_panel.layout().addWidget(self.visualization_controls)
+        self.logger.info("DEBUG: Visualization controls added successfully")
 
         # Weather Shader Performance
+        self.logger.info("DEBUG: Creating shader performance widget...")
         self.shader_performance = WeatherShaderPerformanceWidget(self.shader_manager)
-        self.control_panel.addWidget(self.shader_performance)
-
-        # Dependencies und Navigation
-        self.setup_input_status()
-        self.setup_navigation()
+        self.control_panel.layout().addWidget(self.shader_performance)
+        self.logger.info("DEBUG: Shader performance widget added successfully")
 
     def create_weather_parameter_panel(self) -> QGroupBox:
         """
@@ -252,21 +264,46 @@ class WeatherTab(BaseMapTab):
         panel.setLayout(layout)
         return panel
 
+    def create_lod_control_panel(self) -> QGroupBox:
+        """Erstellt LOD-Control Panel für Weather Quality Selection"""
+        panel = QGroupBox("Quality / LOD Control")
+        layout = QVBoxLayout()
+
+        # Target-LOD Selection
+        target_layout = QHBoxLayout()
+        target_layout.addWidget(QLabel("Target Quality:"))
+
+        self.target_lod_combo = QComboBox()
+        self.target_lod_combo.addItems(["LOD64 (Fast Preview)", "LOD128 (Medium)", "LOD256 (High)", "FINAL (Best)"])
+        self.target_lod_combo.setCurrentIndex(3)
+        self.target_lod_combo.currentTextChanged.connect(self.on_target_lod_changed)
+        target_layout.addWidget(self.target_lod_combo)
+
+        layout.addLayout(target_layout)
+
+        # Generation Progress
+        self.generation_progress = QProgressBar()
+        self.generation_progress.setRange(0, 100)
+        self.generation_progress.setValue(0)
+        self.generation_progress.setTextVisible(True)
+        self.generation_progress.setFormat("Ready")
+        layout.addWidget(self.generation_progress)
+
+        panel.setLayout(layout)
+        return panel
+
     def setup_dependency_checking(self):
         """
         Funktionsweise: Setup für Input-Dependency Checking
         Aufgabe: Überwacht Required Dependencies für Weather-System
         """
-        # Required Dependencies für Weather-System
         self.required_dependencies = VALIDATION_RULES.DEPENDENCIES["weather"]
 
-        # Dependency Status Widget
         self.dependency_status = MultiDependencyStatusWidget(
             self.required_dependencies, "Weather Dependencies"
         )
-        self.control_panel.addWidget(self.dependency_status)
+        self.control_panel.layout().addWidget(self.dependency_status)
 
-        # Data Manager Signals
         self.data_manager.data_updated.connect(self.on_data_updated)
 
     def setup_shader_integration(self):
@@ -279,7 +316,11 @@ class WeatherTab(BaseMapTab):
         self.shader_performance_timer.timeout.connect(self.monitor_shader_performance)
 
         # GPU Verfügbarkeit prüfen
-        self.gpu_available = self.shader_manager.check_gpu_support()
+        if self.shader_manager:
+            self.gpu_available = self.shader_manager.check_gpu_support()
+        else:
+            self.gpu_available = False
+
         if not self.gpu_available:
             self.logger.warning("GPU not available - using CPU fallback for weather simulation")
 
@@ -353,160 +394,165 @@ class WeatherTab(BaseMapTab):
 
     def check_input_dependencies(self):
         """
-        Funktionsweise: Prüft alle Required Dependencies für Weather-System
-        Aufgabe: Aktiviert/Deaktiviert Generation basierend auf verfügbaren Inputs
+        Funktionsweise: Prüft ob alle Required Dependencies verfügbar sind
+        Aufgabe: Aktiviert/Deaktiviert Generation Button und zeigt Status
         """
         is_complete, missing = self.data_manager.check_dependencies("weather", self.required_dependencies)
 
         self.dependency_status.update_dependency_status(is_complete, missing)
-        self.manual_generate_button.setEnabled(is_complete)
+
+        # FIX: Nutze Public API für Button-Control statt direkten Zugriff
+        if hasattr(self, 'auto_simulation_panel') and self.auto_simulation_panel:
+            self.auto_simulation_panel.set_manual_button_enabled(is_complete)
 
         return is_complete
 
-    @core_generation_handler("weather")
-    def generate_weather_system(self):
+    def generate(self):
         """
-        Funktionsweise: Hauptmethode für komplette Weather-System Generation
-        Aufgabe: Koordiniert alle Weather-Core-Module und GPU-Shader
+        Funktionsweise: Hauptmethode für Weather-Generation mit Orchestrator Integration
+        Aufgabe: Startet Weather-Generation über GenerationOrchestrator mit Target-LOD
         """
+        if not self.generation_orchestrator:
+            self.logger.error("No GenerationOrchestrator available")
+            self.handle_generation_error(Exception("GenerationOrchestrator not available"))
+            return
+
+        if self.generation_in_progress:
+            self.logger.info("Generation already in progress, ignoring request")
+            return
+
+        if not self.check_input_dependencies():
+            self.logger.warning("Cannot generate weather system - missing dependencies")
+            return
+
         try:
-            # Dependencies prüfen
-            if not self.check_input_dependencies():
-                self.logger.warning("Cannot generate weather system - missing dependencies")
-                return
+            self.logger.info(f"Starting weather generation with target LOD: {self.target_lod}")
 
-            self.weather_simulation_active = True
-            self.logger.info("Starting weather system generation...")
-
-            # Timing für Performance-Messung starten
             self.start_generation_timing()
+            self.generation_in_progress = True
 
-            # Input-Daten sammeln
-            inputs = self.collect_input_data()
-            params = self.current_parameters.copy()
-
-            # Map seed für reproduzierbare Wettersimulation
-            heightmap = inputs["heightmap"]
-            params["map_seed"] = hash(str(heightmap[10, 10] + heightmap[20, 20])) % 1000000
-
-            # GPU-Performance Monitoring starten
-            if self.gpu_available and self.weather_shaders_loaded:
-                self.shader_performance_timer.start(500)
-
-            # 1. Temperature Calculation (Altitude + Solar + Latitude)
-            self.logger.info("Step 1: Temperature Calculation")
-            temp_map = self.temperature_calculator.calculate_altitude_cooling(
-                heightmap=inputs["heightmap"],
-                air_temp_entry=params["air_temp_entry"],
-                altitude_cooling=params["altitude_cooling"]
+            request_id = self.generation_orchestrator.request_generation(
+                generator_type="weather",
+                parameters=self.current_parameters.copy(),
+                target_lod=self.target_lod,
+                source_tab="weather",
+                priority=10
             )
 
-            temp_map = self.temperature_calculator.apply_solar_heating(
-                temp_map=temp_map,
-                shade_map=inputs["shade_map"],
-                solar_power=params["solar_power"]
-            )
-
-            temp_map = self.temperature_calculator.add_latitude_gradient(
-                temp_map=temp_map,
-                map_size=heightmap.shape[0]
-            )
-
-            # 2. Wind Field Simulation (Pressure Gradients + Terrain Effects)
-            self.logger.info("Step 2: Wind Field Simulation")
-            wind_map = self.wind_simulator.simulate_pressure_gradients(
-                heightmap=inputs["heightmap"],
-                temp_map=temp_map,
-                wind_speed_factor=params["wind_speed_factor"],
-                map_seed=params["map_seed"]
-            )
-
-            wind_map = self.wind_simulator.apply_terrain_deflection(
-                wind_map=wind_map,
-                heightmap=inputs["heightmap"],
-                terrain_factor=params["terrain_factor"]
-            )
-
-            wind_map = self.wind_simulator.calculate_thermal_effects(
-                wind_map=wind_map,
-                temp_map=temp_map,
-                shade_map=inputs["shade_map"],
-                thermic_effect=params["thermic_effect"]
-            )
-
-            # 3. Atmospheric Moisture Management (Evaporation + Transport)
-            self.logger.info("Step 3: Atmospheric Moisture Management")
-            humid_map = self.moisture_manager.calculate_evaporation(
-                soil_moist_map=inputs["soil_moist_map"],
-                temp_map=temp_map,
-                wind_map=wind_map
-            )
-
-            humid_map = self.moisture_manager.transport_moisture(
-                humid_map=humid_map,
-                wind_map=wind_map,
-                temp_map=temp_map
-            )
-
-            humid_map = self.moisture_manager.apply_humidity_diffusion(
-                humid_map=humid_map,
-                terrain_factor=params["terrain_factor"]
-            )
-
-            # 4. Precipitation System (Orographic + Condensation)
-            self.logger.info("Step 4: Precipitation System")
-            precip_map = self.precipitation_system.calculate_orographic_precipitation(
-                heightmap=inputs["heightmap"],
-                wind_map=wind_map,
-                humid_map=humid_map,
-                temp_map=temp_map
-            )
-
-            precip_map = self.precipitation_system.simulate_moisture_transport(
-                precip_map=precip_map,
-                wind_map=wind_map,
-                humid_map=humid_map
-            )
-
-            precip_map = self.precipitation_system.trigger_precipitation_events(
-                precip_map=precip_map,
-                temp_map=temp_map,
-                humid_map=humid_map
-            )
-
-            # 5. Weather System Integration (Feedback Loops)
-            self.logger.info("Step 5: Weather System Integration")
-            integrated_results = self.weather_system.integrate_atmospheric_effects(
-                temp_map=temp_map,
-                wind_map=wind_map,
-                humid_map=humid_map,
-                precip_map=precip_map,
-                heightmap=inputs["heightmap"]
-            )
-
-            # Results im DataManager speichern
-            self.save_weather_results(integrated_results, params)
-
-            # Display und Statistics aktualisieren
-            self.update_weather_display()
-            self.climate_stats.update_generation_statistics(integrated_results)
-            self.shader_performance.update_shader_statistics()
-
-            # Timing beenden
-            self.end_generation_timing(True)
-
-            self.logger.info("Weather system generation completed successfully")
+            if request_id:
+                self.logger.info(f"Weather generation requested: {request_id}")
+            else:
+                raise Exception("Failed to request generation from orchestrator")
 
         except Exception as e:
+            self.generation_in_progress = False
             self.handle_generation_error(e)
-            self.end_generation_timing(False, str(e))
-            raise  # Re-raise für Error Handler
+            raise
 
+    @pyqtSlot(str)
+    def on_target_lod_changed(self, combo_text: str):
+        """Slot für Target-LOD-Änderungen"""
+        if "LOD64" in combo_text:
+            self.target_lod = "LOD64"
+        elif "LOD128" in combo_text:
+            self.target_lod = "LOD128"
+        elif "LOD256" in combo_text:
+            self.target_lod = "LOD256"
+        elif "FINAL" in combo_text:
+            self.target_lod = "FINAL"
 
-        finally:
+        self.logger.info(f"Target LOD changed to: {self.target_lod}")
+
+    def setup_orchestrator_integration(self):
+        """Setup für GenerationOrchestrator Integration"""
+        if not self.generation_orchestrator:
+            self.logger.warning("No GenerationOrchestrator provided to WeatherTab")
+            return
+
+        if hasattr(self.generation_orchestrator, 'generation_started'):
+            self.generation_orchestrator.generation_started.connect(self.on_orchestrator_generation_started)
+        if hasattr(self.generation_orchestrator, 'generation_completed'):
+            self.generation_orchestrator.generation_completed.connect(self.on_orchestrator_generation_completed)
+        if hasattr(self.generation_orchestrator, 'generation_progress'):
+            self.generation_orchestrator.generation_progress.connect(self.on_orchestrator_generation_progress)
+
+    @pyqtSlot(str, str)
+    def on_orchestrator_generation_started(self, generator_type: str, lod_level: str):
+        """Handler für Generation-Start vom Orchestrator"""
+        if generator_type != "weather":
+            return
+
+        QMetaObject.invokeMethod(self, "_update_ui_generation_started",
+                                 Qt.QueuedConnection,
+                                 Q_ARG(str, lod_level))
+
+    @pyqtSlot(str)
+    def _update_ui_generation_started(self, lod_level: str):
+        """UI-Update für Generation-Start in Main-Thread"""
+        self.generation_progress.setValue(0)
+        self.generation_progress.setFormat(f"Generating {lod_level}...")
+
+        if self.gpu_available and self.weather_shaders_loaded:
+            self.shader_performance_timer.start(500)
+
+    @pyqtSlot(str, str, bool)
+    def on_orchestrator_generation_completed(self, generator_type: str, lod_level: str, success: bool):
+        """Handler für Generation-Completion vom Orchestrator"""
+        if generator_type != "weather":
+            return
+
+        QMetaObject.invokeMethod(self, "_update_ui_generation_completed",
+                                 Qt.QueuedConnection,
+                                 Q_ARG(str, lod_level),
+                                 Q_ARG(bool, success))
+
+    @pyqtSlot(str, bool)
+    def _update_ui_generation_completed(self, lod_level: str, success: bool):
+        """UI-Update für Generation-Completion in Main-Thread"""
+        if success:
+            self.available_lods.add(lod_level)
+            self.generation_progress.setValue(100)
+            self.generation_progress.setFormat(f"{lod_level} Complete")
+
+            self.update_weather_display()
+
+            integrated_results = {
+                "temp_map": self.data_manager.get_weather_data("temp_map"),
+                "wind_map": self.data_manager.get_weather_data("wind_map"),
+                "humid_map": self.data_manager.get_weather_data("humid_map"),
+                "precip_map": self.data_manager.get_weather_data("precip_map")
+            }
+            if any(integrated_results.values()):
+                self.climate_stats.update_generation_statistics(integrated_results)
+                self.shader_performance.update_shader_statistics()
+        else:
+            self.generation_progress.setFormat(f"{lod_level} Failed")
+
+        if lod_level == self.target_lod:
+            self.generation_in_progress = False
             self.weather_simulation_active = False
+            self.end_generation_timing(success)
+
             if self.gpu_available:
                 self.shader_performance_timer.stop()
+
+    @pyqtSlot(str, str, int, str)
+    def on_orchestrator_generation_progress(self, generator_type: str, lod_level: str, progress_percent: int,
+                                            detail: str):
+        """Handler für Generation-Progress vom Orchestrator"""
+        if generator_type != "weather":
+            return
+
+        QMetaObject.invokeMethod(self, "_update_ui_generation_progress",
+                                 Qt.QueuedConnection,
+                                 Q_ARG(str, lod_level),
+                                 Q_ARG(int, progress_percent))
+
+    @pyqtSlot(str, int)
+    def _update_ui_generation_progress(self, lod_level: str, progress_percent: int):
+        """UI-Update für Generation-Progress in Main-Thread"""
+        self.generation_progress.setValue(progress_percent)
+        self.generation_progress.setFormat(f"{lod_level} - {progress_percent}%")
 
     def collect_input_data(self) -> dict:
         """
@@ -546,7 +592,6 @@ class WeatherTab(BaseMapTab):
         self.data_manager.set_weather_data("humid_map", results["humid_map"], params)
         self.data_manager.set_weather_data("precip_map", results["precip_map"], params)
 
-    @gpu_shader_handler("weather_display")
     def update_weather_display(self):
         """
         Funktionsweise: Aktualisiert Display basierend auf aktuellem Visualization-Mode
@@ -656,12 +701,6 @@ class WeatherTab(BaseMapTab):
         if self.weather_simulation_active and self.gpu_available:
             performance_metrics = self.shader_manager.get_weather_shader_performance()
             self.shader_performance.update_performance_metrics(performance_metrics)
-
-    # Override BaseMapTab method
-    def generate_terrain(self):
-        """Override für Weather-spezifische Generation"""
-        self.generate_weather_system()
-
 
 class ClimateStatisticsWidget(QGroupBox):
     """
@@ -803,9 +842,8 @@ class WeatherShaderPerformanceWidget(QGroupBox):
         """Erstellt UI für Shader-Performance Display"""
         layout = QVBoxLayout()
 
-        # GPU Status
         self.gpu_status = StatusIndicator("GPU Status")
-        if self.shader_manager.check_gpu_support():
+        if self.shader_manager and self.shader_manager.check_gpu_support():  # ← Null-Check hinzufügen
             self.gpu_status.set_success("GPU Available")
         else:
             self.gpu_status.set_warning("Using CPU Fallback")

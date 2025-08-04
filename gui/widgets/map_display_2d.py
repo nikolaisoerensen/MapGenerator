@@ -1,27 +1,61 @@
-"""
-Path: gui/widgets/map_display_2d.py
-
-Funktionsweise: 2D Map-Rendering mit Matplotlib Integration
-- Heightmap-Visualization mit Contour-Lines
-- Multi-Layer Rendering (Terrain + Overlays)
-- Interactive Tools (Zoom, Pan, Measure)
-- Export-Quality Rendering für High-Resolution Output
-
-Kommunikationskanäle:
-- Input: numpy arrays von data_manager
-- Config: gui_default.CanvasSettings für Render-Parameter
-- Output: Interactive 2D-Display mit Tool-Integration
-"""
-
 import numpy as np
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QLabel
 from PyQt5.QtCore import pyqtSignal
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
-from gui.config.gui_default import CanvasSettings, ColorSchemes
+from gui.config.gui_default import CanvasSettings
 
+def _validate_input_data(data):
+    """
+    Funktionsweise: Überprüft ob die eingehenden Daten für die Darstellung geeignet sind
+    Aufgabe: Validierung von numpy-Arrays auf Typ, Dimensionen und numerische Werte
+    Parameter: data - Zu prüfende Daten
+    Rückgabe: bool - True wenn Daten valid sind, False sonst
+    """
+    if not isinstance(data, np.ndarray):
+        return False
+
+    if data.ndim != 2:
+        return False
+
+    if data.shape[0] < 10 or data.shape[1] < 10:
+        return False
+
+    if not np.issubdtype(data.dtype, np.number):
+        return False
+
+    if np.any(np.isnan(data)) or np.any(np.isinf(data)):
+        return False
+
+    return True
+
+def _calculate_contour_levels(heightmap):
+    """
+    Funktionsweise: Berechnet intelligente Contour-Level basierend auf maximaler Höhe
+    Aufgabe: Dynamische Höhenlinien-Abstände je nach Terrain-Höhe
+    Parameter: heightmap (numpy.ndarray) - Höhendaten
+    Rückgabe: numpy.ndarray - Array mit Contour-Levels
+    """
+    max_height = heightmap.max()
+    min_height = heightmap.min()
+
+    if max_height > 1000:
+        interval = 100  # Alle 100m bei hohen Bergen
+    elif max_height > 500:
+        interval = 50   # Alle 50m bei mittleren Höhen
+    else:
+        interval = 25   # Alle 25m bei niedrigen Höhen
+
+    # Start bei nächstem Intervall über min_height
+    start = np.ceil(min_height / interval) * interval
+    end = np.floor(max_height / interval) * interval
+
+    if start > end:
+        # Fallback wenn Bereich zu klein
+        return np.linspace(min_height, max_height, 5)
+
+    return np.arange(start, end + interval, interval)
 
 class MapDisplay2D(QWidget):
     """
@@ -47,6 +81,9 @@ class MapDisplay2D(QWidget):
         self.measure_mode = False
         self.measure_start = None
         self.measure_line = None
+        self.measure_texts = []  # Liste für Measure-Text-Labels
+        self.current_colorbar = None  # Referenz auf aktuelle Colorbar
+        self.zoom_limits = None  # Zoom-Grenzen basierend auf Daten
 
         self._setup_ui()
         self._setup_matplotlib()
@@ -125,8 +162,29 @@ class MapDisplay2D(QWidget):
         if data is None:
             return
 
+        # Datenvalidierung
+        if not _validate_input_data(data):
+            print(f"Warnung: Ungültige Daten für {layer_type} erhalten")
+            return
+
         self.current_data = data
         self.current_layer = layer_type
+
+        # Zoom-Grenzen basierend auf Daten setzen
+        self.zoom_limits = {
+            'x_min': 0, 'x_max': data.shape[1],
+            'y_min': 0, 'y_max': data.shape[0],
+            'min_zoom_range': min(data.shape) * 0.05,  # Minimum 5% der kleineren Dimension
+            'max_zoom_range': max(data.shape) * 1.0   # Maximum 100% der größeren Dimension
+        }
+
+        # Measure-Tools beim Layer-Wechsel zurücksetzen
+        self._reset_measure_tools()
+
+        # Alte Colorbar entfernen
+        if self.current_colorbar:
+            self.current_colorbar.remove()
+            self.current_colorbar = None
 
         self.ax.clear()
 
@@ -146,6 +204,23 @@ class MapDisplay2D(QWidget):
         self._apply_styling()
         self.canvas.draw()
 
+    def _reset_measure_tools(self):
+        """
+        Funktionsweise: Setzt alle Measure-Tools zurück
+        Aufgabe: Cleanup von Measure-Line, Text-Labels und Status-Variablen
+        """
+        if self.measure_line:
+            self.measure_line.remove()
+            self.measure_line = None
+
+        # Alle Measure-Texte entfernen
+        for text in self.measure_texts:
+            if text in self.ax.texts:
+                text.remove()
+        self.measure_texts.clear()
+
+        self.measure_start = None
+
     def _render_heightmap(self, heightmap):
         """
         Funktionsweise: Rendert Heightmap mit Terrain-Colormap und optionalen Contour-Lines
@@ -155,14 +230,14 @@ class MapDisplay2D(QWidget):
         im = self.ax.imshow(heightmap, cmap=self.heightmap_cmap, origin='lower', interpolation='bilinear')
 
         if self.contour_lines_enabled:
-            contour_levels = np.linspace(heightmap.min(), heightmap.max(), 10)
+            contour_levels = _calculate_contour_levels(heightmap)
             contours = self.ax.contour(heightmap, levels=contour_levels,
                                        colors=CanvasSettings.CANVAS_2D["contour_colors"],
                                        linewidths=0.5, alpha=0.7)
             self.ax.clabel(contours, inline=True, fontsize=8)
 
-        cbar = self.figure.colorbar(im, ax=self.ax)
-        cbar.set_label('Elevation (m)')
+        self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
+        self.current_colorbar.set_label('Elevation (m)')
 
     def _render_biome_map(self, biome_map):
         """
@@ -172,15 +247,15 @@ class MapDisplay2D(QWidget):
         """
         im = self.ax.imshow(biome_map, cmap=self.biome_cmap, origin='lower', interpolation='nearest')
 
-        cbar = self.figure.colorbar(im, ax=self.ax)
-        cbar.set_label('Biome Type')
+        self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
+        self.current_colorbar.set_label('Biome Type')
 
         # Biome-Namen als Colorbar-Labels
         biome_names = ['Ocean', 'Tundra', 'Taiga', 'Desert', 'Temperate', 'Tropical']
         unique_values = np.unique(biome_map)
         if len(unique_values) <= len(biome_names):
-            cbar.set_ticks(unique_values)
-            cbar.set_ticklabels([biome_names[int(val)] for val in unique_values])
+            self.current_colorbar.set_ticks(unique_values)
+            self.current_colorbar.set_ticklabels([biome_names[int(val)] for val in unique_values])
 
     def _render_water_map(self, water_map):
         """
@@ -190,8 +265,8 @@ class MapDisplay2D(QWidget):
         """
         im = self.ax.imshow(water_map, cmap=plt.cm.Blues, origin='lower', interpolation='bilinear')
 
-        cbar = self.figure.colorbar(im, ax=self.ax)
-        cbar.set_label('Water Depth (m)')
+        self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
+        self.current_colorbar.set_label('Water Depth (m)')
 
     def _render_temperature_map(self, temp_map):
         """
@@ -201,8 +276,8 @@ class MapDisplay2D(QWidget):
         """
         im = self.ax.imshow(temp_map, cmap=plt.cm.RdBu_r, origin='lower', interpolation='bilinear')
 
-        cbar = self.figure.colorbar(im, ax=self.ax)
-        cbar.set_label('Temperature (°C)')
+        self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
+        self.current_colorbar.set_label('Temperature (°C)')
 
     def _render_precipitation_map(self, precip_map):
         """
@@ -212,8 +287,8 @@ class MapDisplay2D(QWidget):
         """
         im = self.ax.imshow(precip_map, cmap=plt.cm.Greens, origin='lower', interpolation='bilinear')
 
-        cbar = self.figure.colorbar(im, ax=self.ax)
-        cbar.set_label('Precipitation (mm)')
+        self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
+        self.current_colorbar.set_label('Precipitation (mm)')
 
     def _render_generic_map(self, data):
         """
@@ -223,8 +298,8 @@ class MapDisplay2D(QWidget):
         """
         im = self.ax.imshow(data, cmap=plt.cm.viridis, origin='lower', interpolation='bilinear')
 
-        cbar = self.figure.colorbar(im, ax=self.ax)
-        cbar.set_label('Value')
+        self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
+        self.current_colorbar.set_label('Value')
 
     def _apply_styling(self):
         """
@@ -264,9 +339,8 @@ class MapDisplay2D(QWidget):
         Parameter: enabled (bool) - True wenn Measure-Modus aktiv sein soll
         """
         self.measure_mode = enabled
-        if not enabled and self.measure_line:
-            self.measure_line.remove()
-            self.measure_line = None
+        if not enabled:
+            self._reset_measure_tools()
             self.canvas.draw()
 
     def _on_mouse_press(self, event):
@@ -276,6 +350,10 @@ class MapDisplay2D(QWidget):
         Parameter: event - Matplotlib MouseEvent
         """
         if event.inaxes != self.ax:
+            return
+
+        # Error-Handling für ungültige Koordinaten
+        if event.xdata is None or event.ydata is None:
             return
 
         if self.measure_mode:
@@ -293,6 +371,10 @@ class MapDisplay2D(QWidget):
         if event.inaxes != self.ax:
             return
 
+        # Error-Handling für ungültige Koordinaten
+        if event.xdata is None or event.ydata is None:
+            return
+
         # Koordinaten-Update
         x, y = event.xdata, event.ydata
         self.coord_label.setText(f"Coordinates: ({x:.1f}, {y:.1f})")
@@ -308,8 +390,17 @@ class MapDisplay2D(QWidget):
 
             # Distanz berechnen
             distance = np.sqrt((x - start_x) ** 2 + (y - start_y) ** 2)
-            self.ax.text((start_x + x) / 2, (start_y + y) / 2, f'{distance:.1f}',
-                         bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+            # Alten Distanz-Text entfernen
+            for text in self.measure_texts:
+                if text in self.ax.texts:
+                    text.remove()
+            self.measure_texts.clear()
+
+            # Neuen Distanz-Text hinzufügen
+            text_obj = self.ax.text((start_x + x) / 2, (start_y + y) / 2, f'{distance:.1f}',
+                                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            self.measure_texts.append(text_obj)
 
             self.canvas.draw()
 
@@ -319,7 +410,14 @@ class MapDisplay2D(QWidget):
         Aufgabe: Finalisiert Measure-Operation
         Parameter: event - Matplotlib MouseEvent
         """
-        if self.measure_mode and self.measure_start and event.inaxes == self.ax:
+        if event.inaxes != self.ax:
+            return
+
+        # Error-Handling für ungültige Koordinaten
+        if event.xdata is None or event.ydata is None:
+            return
+
+        if self.measure_mode and self.measure_start:
             start_x, start_y = self.measure_start
             end_x, end_y = event.xdata, event.ydata
 
@@ -331,10 +429,17 @@ class MapDisplay2D(QWidget):
     def _on_mouse_scroll(self, event):
         """
         Funktionsweise: Handler für Mouse-Scroll Events für Zoom-Funktionalität
-        Aufgabe: Implementiert Zoom-in/Zoom-out mit Mausrad
+        Aufgabe: Implementiert Zoom-in/Zoom-out mit Mausrad und Zoom-Begrenzungen
         Parameter: event - Matplotlib ScrollEvent
         """
         if event.inaxes != self.ax:
+            return
+
+        # Error-Handling für ungültige Koordinaten
+        if event.xdata is None or event.ydata is None:
+            return
+
+        if self.zoom_limits is None:
             return
 
         # Zoom-Faktor
@@ -348,12 +453,41 @@ class MapDisplay2D(QWidget):
         x_center = event.xdata
         y_center = event.ydata
 
-        # Neue Limits berechnen
+        # Neue Ranges berechnen
         x_range = (xlim[1] - xlim[0]) / zoom_factor
         y_range = (ylim[1] - ylim[0]) / zoom_factor
 
+        # Zoom-Grenzen prüfen
+        min_range = self.zoom_limits['min_zoom_range']
+        max_range = self.zoom_limits['max_zoom_range']
+
+        if x_range < min_range or y_range < min_range:
+            return  # Zu weit hineingezoomt
+        if x_range > max_range or y_range > max_range:
+            return  # Zu weit herausgezoomt
+
+        # Neue Limits berechnen
         new_xlim = [x_center - x_range / 2, x_center + x_range / 2]
         new_ylim = [y_center - y_range / 2, y_center + y_range / 2]
+
+        # Limits innerhalb der Datengrenzen halten
+        if new_xlim[0] < self.zoom_limits['x_min']:
+            offset = self.zoom_limits['x_min'] - new_xlim[0]
+            new_xlim[0] += offset
+            new_xlim[1] += offset
+        if new_xlim[1] > self.zoom_limits['x_max']:
+            offset = new_xlim[1] - self.zoom_limits['x_max']
+            new_xlim[0] -= offset
+            new_xlim[1] -= offset
+
+        if new_ylim[0] < self.zoom_limits['y_min']:
+            offset = self.zoom_limits['y_min'] - new_ylim[0]
+            new_ylim[0] += offset
+            new_ylim[1] += offset
+        if new_ylim[1] > self.zoom_limits['y_max']:
+            offset = new_ylim[1] - self.zoom_limits['y_max']
+            new_ylim[0] -= offset
+            new_ylim[1] -= offset
 
         self.ax.set_xlim(new_xlim)
         self.ax.set_ylim(new_ylim)
@@ -363,27 +497,36 @@ class MapDisplay2D(QWidget):
         """
         Funktionsweise: Exportiert aktuelle Darstellung als hochauflösende PNG
         Aufgabe: Export-Quality Rendering für High-Resolution Output
+
+        TODO: Implementierung in zukünftigem Stadium
+        - File-Dialog für Speicherpfad
+        - Tatsächliches Speichern der Export-Figure
+        - Verschiedene Export-Formate (PNG, PDF, SVG)
+        - Export-Einstellungen (DPI, Größe)
         """
-        if self.current_data is None:
-            return
+        # Temporäre Deaktivierung - wird später implementiert
+        pass
 
-        # Temporäre Figure für High-Resolution Export
-        export_fig = Figure(figsize=(16, 12), dpi=300)
-        export_ax = export_fig.add_subplot(111)
-
-        # Aktuellen Content auf Export-Axes rendern
-        if self.current_layer == "heightmap":
-            export_ax.imshow(self.current_data, cmap=self.heightmap_cmap, origin='lower')
-        elif self.current_layer == "biome_map":
-            export_ax.imshow(self.current_data, cmap=self.biome_cmap, origin='lower')
-        else:
-            export_ax.imshow(self.current_data, cmap=plt.cm.viridis, origin='lower')
-
-        export_ax.set_title(f"Exported {self.current_layer}", fontsize=16)
-        export_fig.tight_layout()
-
-        # Export-Signal mit temporärer Figure
-        self.export_requested.emit("PNG")
+        # if self.current_data is None:
+        #     return
+        #
+        # # Temporäre Figure für High-Resolution Export
+        # export_fig = Figure(figsize=(16, 12), dpi=300)
+        # export_ax = export_fig.add_subplot(111)
+        #
+        # # Aktuellen Content auf Export-Axes rendern
+        # if self.current_layer == "heightmap":
+        #     export_ax.imshow(self.current_data, cmap=self.heightmap_cmap, origin='lower')
+        # elif self.current_layer == "biome_map":
+        #     export_ax.imshow(self.current_data, cmap=self.biome_cmap, origin='lower')
+        # else:
+        #     export_ax.imshow(self.current_data, cmap=plt.cm.viridis, origin='lower')
+        #
+        # export_ax.set_title(f"Exported {self.current_layer}", fontsize=16)
+        # export_fig.tight_layout()
+        #
+        # # Export-Signal mit temporärer Figure
+        # self.export_requested.emit("PNG")
 
     def reset_view(self):
         """

@@ -1,11 +1,10 @@
 """
 Path: gui/main_menu.py
 
-Funktionsweise: Einfaches Hauptmenü mit 4 Buttons
-- Map-Editor Button öffnet Loading Tab Dialog
-- Laden und Settings zeigen Placeholder-Nachrichten
-- Beenden schließt Anwendung direkt
-- gui_default.py enthält alle Styling-Werte wie Größen, Farben etc.
+Funktionsweise: Einfaches Hauptmenü mit 4 Buttons - GEÄNDERT für Signal-Navigation
+- Map-Editor Button sendet Signal statt direkte Loading-Erstellung
+- Manager von main.py übernehmen statt eigene Erstellung
+- Backward-Compatibility für direkten MainMenu-Start
 """
 
 from PyQt5.QtWidgets import *
@@ -42,17 +41,34 @@ class MainMenuWindow(QMainWindow):
     """
     Funktionsweise: Einfaches Hauptmenü-Fenster als Entry-Point der Anwendung
     Aufgabe: 4 Buttons für Navigation - Map-Editor, Laden, Settings, Beenden
-    Kommunikation: Öffnet Loading Tab Dialog für Map-Editor
+    Kommunikation: map_editor_requested Signal für Navigation zu main.py
     """
 
-    def __init__(self):
+    # NEUES SIGNAL FÜR MAIN.PY INTEGRATION
+    map_editor_requested = pyqtSignal()
+
+    def __init__(self, data_manager=None, navigation_manager=None):
+        """
+        Funktionsweise: Initialisiert MainMenu mit optionalen Manager-References
+        Aufgabe: UI Setup ohne eigene Manager-Erstellung (kommt von main.py)
+        Parameter: data_manager, navigation_manager von main.py (optional für Backward-Compatibility)
+        """
         super().__init__()
         self.logger = logging.getLogger(__name__)
 
-        # DataManager für alle Tabs erstellen
-        from gui.managers.data_manager import DataManager
-        self.data_manager = DataManager()
-        self.logger.info("DataManager created")
+        # Manager von main.py übernehmen oder erstellen (Backward-Compatibility)
+        if data_manager and navigation_manager:
+            self.data_manager = data_manager
+            self.navigation_manager = navigation_manager
+            self.logger.info("Using managers from main.py")
+        else:
+            # Fallback für direkten MainMenu-Start (Development)
+            from gui.managers.data_manager import DataManager
+            from gui.managers.navigation_manager import NavigationManager
+
+            self.data_manager = DataManager()
+            self.navigation_manager = NavigationManager(self)
+            self.logger.warning("Created own managers (fallback mode)")
 
         # Window Setup
         self.setup_window()
@@ -215,29 +231,20 @@ class MainMenuWindow(QMainWindow):
         section.setLayout(layout)
         return section
 
-    #@ui_navigation_handler
     def start_map_editor(self):
         """
-        Funktionsweise: Öffnet Loading Tab Dialog für Map-Editor
-        Aufgabe: Loading Tab als Dialog starten, kein weiterer Setup
+        Funktionsweise: Sendet Signal für Map-Editor Start (keine direkte Aktion)
+        Aufgabe: Informiert main.py über Map-Editor Request
         """
         try:
-            self.logger.info("Starting Map Editor...")
+            self.logger.info("Map Editor requested")
 
-            # Loading Tab als Dialog starten
-            from gui.tabs.loading_tab import LoadingTab
-            loading_dialog = LoadingTab(data_manager=self.data_manager, parent=self)
-            loading_dialog.exec_()
-
-            self.logger.info("Loading Tab completed")
-
-        except ImportError as e:
-            self.show_error_message("Import Error", f"Could not load Loading Tab:\n{str(e)}")
-            self.logger.error(f"Loading Tab import failed: {e}")
+            # Signal an main.py senden
+            self.map_editor_requested.emit()
 
         except Exception as e:
             self.show_error_message("Error", f"Failed to start Map Editor:\n{str(e)}")
-            self.logger.error(f"Map Editor startup failed: {e}")
+            self.logger.error(f"Map Editor request failed: {e}")
 
     def show_placeholder_message(self):
         """

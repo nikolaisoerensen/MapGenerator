@@ -29,7 +29,7 @@ SimplexNoiseGenerator
     Methoden: noise_2d(), multi_octave_noise(), ridge_noise()
 
 ShadowCalculator    
-    Funktionsweise: Berechnet Verschattung mit Raycasts für 6 verschiedene Sonnenwinkel
+    Funktionsweise: Berechnet Verschattung mit Raycasts für 7 verschiedene Sonnenwinkel
     Aufgabe: Erstellt shademap für Weather-System und visuelle Darstellung
     Methoden: calculate_shadows_multi_angle(), raycast_shadow(), combine_shadow_angles()
 """
@@ -280,7 +280,7 @@ class ShadowCalculator:
 
     def calculate_shadows_multi_angle(self, heightmap):
         """
-        Funktionsweise: Berechnet Verschattung für alle 6 Sonnenwinkel und kombiniert sie
+        Funktionsweise: Berechnet Verschattung für alle 7 Sonnenwinkel und kombiniert sie
         Aufgabe: Erstellt realistische Verschattung durch mehrere Sonnenwinkel
         Parameter: heightmap (numpy.ndarray) - Höhendaten
         Returns: numpy.ndarray - Kombinierte Verschattung (0=Schatten, 1=Vollsonne)

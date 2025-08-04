@@ -100,7 +100,7 @@ from pathlib import Path
 # =============================================================================
 
 # Hauptschalter - True = Error Handler aktiv, False = nur PyCharm
-ERROR_HANDLER_ENABLED = True
+ERROR_HANDLER_ENABLED = False
 
 # Ausgabe-Konfiguration
 ERROR_OUTPUT_CONSOLE = True  # Ausgabe in Konsole
