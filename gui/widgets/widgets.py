@@ -1282,3 +1282,23 @@ class NavigationPanel(QGroupBox):
     def jump_to_tab(self, tab_name: str):
         """Jump zu spezifischem Tab"""
         self.navigation_requested.emit(tab_name)
+
+
+class NoWheelParameterSlider(ParameterSlider):
+    """ParameterSlider die Mausrad-Events blockiert"""
+
+    def wheelEvent(self, event):
+        if not self.hasFocus():
+            event.ignore()
+        else:
+            super().wheelEvent(event)
+
+
+class NoWheelComboBox(QComboBox):
+    """QComboBox die Mausrad-Events blockiert"""
+
+    def wheelEvent(self, event):
+        if not self.hasFocus():
+            event.ignore()
+        else:
+            super().wheelEvent(event)

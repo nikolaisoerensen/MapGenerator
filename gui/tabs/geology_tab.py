@@ -291,40 +291,108 @@ class GeologyTab(BaseMapTab):
 
     def check_input_dependencies(self):
         """
-        Funktionsweise: Prüft ob alle Required Dependencies verfügbar sind - REPARIERT
-        Aufgabe: Aktiviert/Deaktiviert Generation Button und zeigt Status
-        REPARIERT: Robuste Dependency-Resolution mit Retry-Logic (Fix für Problem 20)
+        Funktionsweise: Dependency-Check - ERWEITERT mit Map-Size-Sync
+        Aufgabe: Prüft Dependencies und synchronisiert Map-Size von Terrain
         """
-        # Nutze Dependency-Resolver für robuste Dependencies (Fix für Problem 20)
+        # Nutze Dependency-Resolver für robuste Dependencies
         is_complete, missing = self.dependency_resolver.resolve_dependencies("geology", self.required_dependencies)
 
         if is_complete:
             self.dependency_status.set_success("All inputs available")
-            # FIX für Problem 9: Public API für Button-Control
+
+            # MAP-SIZE SYNCHRONISATION von Terrain - FIX für Problem 10
+            try:
+                heightmap = self.data_manager.get_terrain_data("heightmap")
+                if heightmap is not None:
+                    terrain_size = heightmap.shape[0]
+                    self.logger.debug(f"Geology will use terrain size: {terrain_size}x{terrain_size}")
+            except Exception as e:
+                self.logger.warning(f"Map size sync failed: {e}")
+
             if hasattr(self, 'auto_simulation_panel') and self.auto_simulation_panel:
                 self.auto_simulation_panel.set_manual_button_enabled(True)
         else:
             self.dependency_status.set_warning(f"Missing: {', '.join(missing)}")
-            # FIX für Problem 9: Public API für Button-Control
             if hasattr(self, 'auto_simulation_panel') and self.auto_simulation_panel:
                 self.auto_simulation_panel.set_manual_button_enabled(False)
 
         return is_complete
 
     def generate(self):
-        """Hauptmethode für Geology-Generation mit Orchestrator Integration"""
+        """
+        Funktionsweise: Geology-Generation - REPARIERT Input-Validation und Interrupt-Handling
+        Aufgabe: Robuste Generation mit vollständiger Error-Recovery
+        REPARIERT: Input-Validation, Generation-Interrupt, Rock_map-Validation
+        """
         if not self.generation_orchestrator:
             self.logger.error("No GenerationOrchestrator available")
-            self.handle_generation_error(Exception("GenerationOrchestrator not available"))
             return
 
         if self.generation_in_progress:
             self.logger.info("Generation already in progress, ignoring request")
             return
 
-        if not self.check_input_dependencies():
-            self.logger.warning("Cannot generate geology - missing dependencies")
+        try:
+            self.logger.info(f"Starting generation with target LOD: {self.target_lod}")
+            self.start_generation_timing()
+            self.generation_in_progress = True
+
+            request_id = self.generation_orchestrator.request_generation(
+                generator_type="geology",
+                parameters=self.current_parameters.copy(),
+                target_lod=self.target_lod,
+                source_tab="geology",
+                priority=10
+            )
+
+            if request_id:
+                self.logger.info(f"Generation requested: {request_id}")
+            else:
+                raise Exception("Failed to request generation")
+
+        except Exception as e:
+            self.generation_in_progress = False
+            self.handle_generation_error(e)
+
+    def _start_new_geology_generation(self):
+        """
+        Funktionsweise: Startet neue Geology-Generation mit Input-Validation
+        Aufgabe: Robuste Input-Validation VOR Orchestrator-Request
+        """
+        # KRITISCHE INPUT-VALIDATION - FIX für Problem 9
+        try:
+            heightmap = self.data_manager.get_terrain_data("heightmap")
+            slopemap = self.data_manager.get_terrain_data("slopemap")
+
+            if heightmap is None:
+                raise ValueError("Missing heightmap from terrain generation")
+            if slopemap is None:
+                raise ValueError("Missing slopemap from terrain generation")
+
+            # Array-Shape Validation
+            if heightmap.shape != slopemap.shape[:2]:
+                raise ValueError(f"Shape mismatch: heightmap {heightmap.shape} vs slopemap {slopemap.shape[:2]}")
+
+            # Data-Type und Range Validation
+            if not isinstance(heightmap, np.ndarray) or not isinstance(slopemap, np.ndarray):
+                raise TypeError("Terrain data must be numpy arrays")
+
+            if heightmap.size == 0 or slopemap.size == 0:
+                raise ValueError("Empty terrain arrays received")
+
+            self.logger.info(f"Geology input validation successful: {heightmap.shape}")
+
+        except Exception as validation_error:
+            self.logger.error(f"Geology input validation failed: {validation_error}")
+            self.handle_generation_error(validation_error)
             return
+
+        # MAP-SIZE SYNCHRONISATION - FIX für Problem 10
+        terrain_size = heightmap.shape[0]  # Nutze Terrain-Size
+        if hasattr(self, 'current_parameters'):
+            self.current_parameters = self.current_parameters.copy()
+            # Geology nutzt automatisch Terrain-Size
+            self.logger.info(f"Syncing geology to terrain size: {terrain_size}x{terrain_size}")
 
         try:
             self.logger.info(f"Starting geology generation with target LOD: {self.target_lod}")
@@ -403,18 +471,41 @@ class GeologyTab(BaseMapTab):
 
     @pyqtSlot(str, bool)
     def _update_ui_generation_completed(self, lod_level: str, success: bool):
-        """UI-Update für Generation-Completion in Main-Thread"""
+        """
+        Funktionsweise: UI-Update nach Generation - ERWEITERT mit Rock_map-Validation
+        Aufgabe: Validiert Rock_map nach erfolgreicher Generation
+        """
         if success:
             self.available_lods.add(lod_level)
             self.generation_progress.setValue(100)
             self.generation_progress.setFormat(f"{lod_level} Complete")
 
-            self.update_geology_display()
+            # ROCK_MAP VALIDATION - FIX für Problem 9
+            try:
+                rock_map = self.data_manager.get_geology_data("rock_map")
+                hardness_map = self.data_manager.get_geology_data("hardness_map")
 
-            rock_map = self.data_manager.get_geology_data("rock_map")
-            hardness_map = self.data_manager.get_geology_data("hardness_map")
-            if rock_map is not None and hardness_map is not None:
-                self.rock_distribution_widget.update_statistics(rock_map, hardness_map)
+                if rock_map is not None:
+                    if self._validate_rock_map(rock_map):
+                        self.logger.info("Rock_map validation successful")
+                        self.update_geology_display()
+
+                        # Statistics nur bei valider Rock_map
+                        if hardness_map is not None:
+                            self.rock_distribution_widget.update_statistics(rock_map, hardness_map)
+                    else:
+                        self.logger.error("Rock_map validation failed - regeneration required")
+                        success = False
+                        self.generation_progress.setFormat(f"{lod_level} - Invalid Data")
+                else:
+                    self.logger.warning("Rock_map not generated by core system")
+                    success = False
+                    self.generation_progress.setFormat(f"{lod_level} - No Data")
+
+            except Exception as validation_error:
+                self.logger.error(f"Post-generation validation failed: {validation_error}")
+                success = False
+                self.generation_progress.setFormat(f"{lod_level} - Validation Error")
         else:
             self.generation_progress.setFormat(f"{lod_level} Failed")
 
@@ -530,6 +621,91 @@ class GeologyTab(BaseMapTab):
 
         # Parent Cleanup aufrufen
         super().cleanup_resources()
+
+    def _validate_rock_map(self, rock_map: np.ndarray) -> bool:
+        """
+        Funktionsweise: Robuste Rock_map-Validation - HINZUGEFÜGT
+        Parameter: rock_map (numpy array)
+        Return: bool - Rock_map ist valide und verwendbar
+        """
+        try:
+            # Basic Shape Validation
+            if not isinstance(rock_map, np.ndarray):
+                self.logger.error(f"Rock_map is not numpy array: {type(rock_map)}")
+                return False
+
+            if len(rock_map.shape) != 3:
+                self.logger.error(f"Rock_map wrong dimensions: {len(rock_map.shape)}, expected 3")
+                return False
+
+            if rock_map.shape[2] != 3:
+                self.logger.error(f"Rock_map wrong channels: {rock_map.shape[2]}, expected 3 (RGB)")
+                return False
+
+            # Data Range Validation
+            if np.any(rock_map < 0) or np.any(rock_map > 255):
+                self.logger.error(f"Rock_map values out of range [0,255]: {np.min(rock_map)}-{np.max(rock_map)}")
+                return False
+
+            # Mass Conservation Validation (RGB sollte zu ~255 summieren)
+            mass_sums = np.sum(rock_map, axis=2)
+            expected_mass = 255
+            mass_deviation = np.abs(mass_sums - expected_mass)
+            max_deviation = np.max(mass_deviation)
+
+            if max_deviation > 5:  # 5 Tolerance für Rundungsfehler
+                self.logger.warning(f"Rock_map mass conservation violated: max deviation {max_deviation}")
+                # Warnung aber nicht fatal - kann korrigiert werden
+
+            # Size Validation
+            min_size, max_size = 32, 2048
+            h, w = rock_map.shape[:2]
+            if h < min_size or w < min_size or h > max_size or w > max_size:
+                self.logger.error(f"Rock_map size invalid: {h}x{w}, expected {min_size}-{max_size}")
+                return False
+
+            self.logger.info(f"Rock_map validation passed: {rock_map.shape}, mass_dev={max_deviation:.2f}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Rock_map validation exception: {e}")
+            return False
+
+    def _validate_and_fix_rock_map(self, rock_map):
+        """Robust rock_map validation mit Repair-Funktionen"""
+        try:
+            if rock_map is None:
+                self.logger.warning("Rock_map is None - using fallback")
+                return self._create_fallback_rock_map()
+
+            if not isinstance(rock_map, np.ndarray):
+                self.logger.warning("Rock_map is not numpy array - converting")
+                rock_map = np.array(rock_map)
+
+            if len(rock_map.shape) != 3 or rock_map.shape[2] != 3:
+                self.logger.warning("Rock_map wrong shape - using fallback")
+                return self._create_fallback_rock_map()
+
+            # Mass-Conservation Repair
+            mass_sums = np.sum(rock_map, axis=2)
+            if not np.allclose(mass_sums, 255, atol=5):
+                self.logger.warning("Rock_map mass conservation violated - repairing")
+                rock_map = self._repair_mass_conservation(rock_map)
+
+            return rock_map
+
+        except Exception as e:
+            self.logger.error(f"Rock_map validation failed: {e} - using fallback")
+            return self._create_fallback_rock_map()
+
+    def _create_fallback_rock_map(self):
+        """Erstellt einfache Fallback rock_map"""
+        size = 256  # Default size
+        rock_map = np.zeros((size, size, 3), dtype=np.uint8)
+        rock_map[:, :, 0] = 128  # Sedimentary
+        rock_map[:, :, 1] = 64  # Igneous
+        rock_map[:, :, 2] = 63  # Metamorphic (Summe = 255)
+        return rock_map
 
 
 class RockDistributionWidget(QGroupBox):

@@ -212,9 +212,9 @@ class TerrainTab(BaseMapTab):
 
     def set_parameters(self, parameters: dict):
         """
-        Funktionsweise: Setzt Parameter-Werte mit Synchronisation
+        Funktionsweise: Setzt Parameter-Werte - ERWEITERT für Map-Size-Sync
         Parameter: parameters (dict)
-        Aufgabe: External Parameter-Updates mit State-Synchronisation
+        Aufgabe: External Parameter-Updates mit Map-Size-Synchronisation
         """
         for param_name, value in parameters.items():
             if param_name in self.parameter_sliders:
@@ -223,6 +223,12 @@ class TerrainTab(BaseMapTab):
         # Parameter-State synchronisieren
         self.current_parameters = self.get_current_parameters()
         self.last_generated_parameters = self.current_parameters.copy()
+
+        # MAP-SIZE SYNCHRONISATION zu anderen Tabs
+        if "size" in parameters and self.data_manager:
+            size = int(parameters["size"])
+            self.data_manager.set_global_parameter("map_size", size)
+            self.logger.info(f"Map size synchronized: {size}")
 
     @pyqtSlot()
     def on_parameter_changed(self):
@@ -274,10 +280,9 @@ class TerrainTab(BaseMapTab):
 
     def generate(self):
         """
-        Funktionsweise: Hauptmethode für Terrain-Generation mit Orchestrator Integration - REFACTORED
-        Aufgabe: Startet Terrain-Generation über GenerationOrchestrator mit Target-LOD
-        Besonderheit: Memory-Critical Handler schützt vor Memory-Errors bei großen Arrays
-        REFACTORED: Standard-Orchestrator-Handler nutzen
+        Funktionsweise: Terrain-Generation - REPARIERT Generation-Interrupt
+        Aufgabe: Unterbricht laufende Generation, startet neue über Orchestrator
+        REPARIERT: Generation-Interrupt statt "already in progress" Skip
         """
         try:
             if not self.generation_orchestrator:
@@ -285,31 +290,19 @@ class TerrainTab(BaseMapTab):
                 self.handle_generation_error(Exception("GenerationOrchestrator not available"))
                 return
 
+            # LAUFENDE GENERATION UNTERBRECHEN statt skippen - FIX für Problem 8
             if self.generation_in_progress:
-                self.logger.info("Generation already in progress, ignoring request")
-                return
+                self.logger.info("Interrupting current terrain generation for new request")
+                try:
+                    self.generation_orchestrator.cancel_generation("terrain")
+                    # Kurz warten bis Cancellation verarbeitet
+                    QTimer.singleShot(100, lambda: self._start_new_generation())
+                    return
+                except Exception as cancel_error:
+                    self.logger.warning(f"Generation cancel failed: {cancel_error}, forcing new generation")
+                    self.generation_in_progress = False
 
-            self.logger.info(f"Starting terrain generation with target LOD: {self.target_lod}")
-
-            self.start_generation_timing()
-            self.generation_in_progress = True
-
-            params = self.current_parameters.copy()
-
-            request_id = self.generation_orchestrator.request_generation(
-                generator_type="terrain",
-                parameters=params,
-                target_lod=self.target_lod,
-                source_tab="terrain",
-                priority=10
-            )
-
-            if request_id:
-                self.logger.info(f"Terrain generation requested: {request_id}")
-                self.last_generated_parameters = params.copy()
-            else:
-                self.logger.error("Failed to request terrain generation")
-                self.handle_generation_error(Exception("Failed to request generation"))
+            self._start_new_generation()
 
         except Exception as e:
             self.handle_generation_error(e)
@@ -318,8 +311,8 @@ class TerrainTab(BaseMapTab):
 
     def create_visualization_controls(self):
         """
-        Funktionsweise: Erstellt Terrain-spezifische Visualization-Controls - ÜBERSCHRIEBEN
-        Aufgabe: Erweitert Base-Controls um Terrain-spezifische Modi
+        Funktionsweise: Erstellt Terrain-spezifische Visualization-Controls - REPARIERT
+        Aufgabe: Standard Height-Display + Terrain-Modi, sichert Standard-Height-Auswahl
         Return: QWidget mit erweiterten Visualization-Controls
         """
         widget = super().create_visualization_controls()
@@ -350,7 +343,45 @@ class TerrainTab(BaseMapTab):
         self.shadow_angle_slider.setVisible(False)
         layout.addWidget(self.shadow_angle_slider)
 
+        # SICHERSTELLEN: Height-Mode als Standard und Initial-Display
+        if hasattr(self, 'heightmap_radio'):
+            self.heightmap_radio.setChecked(True)
+            # Initial-Display nach kurzer Verzögerung
+            QTimer.singleShot(200, self.update_display_mode)
+
         return widget
+
+    def _start_new_generation(self):
+        """
+        Funktionsweise: Startet neue Generation nach Interrupt
+        Aufgabe: Trennt Generation-Start für saubere Interrupt-Handling
+        """
+        self.logger.info(f"Starting terrain generation with target LOD: {self.target_lod}")
+
+        self.start_generation_timing()
+        self.generation_in_progress = True
+
+        params = self.current_parameters.copy()
+
+        # MAP-SIZE SYNCHRONISATION - FIX für Problem 10
+        if self.data_manager and hasattr(self.data_manager, 'sync_map_size'):
+            self.data_manager.sync_map_size("terrain", params.get("size", 512))
+
+        request_id = self.generation_orchestrator.request_generation(
+            generator_type="terrain",
+            parameters=params,
+            target_lod=self.target_lod,
+            source_tab="terrain",
+            priority=10
+        )
+
+        if request_id:
+            self.logger.info(f"Terrain generation requested: {request_id}")
+            self.last_generated_parameters = params.copy()
+        else:
+            self.logger.error("Failed to request terrain generation")
+            self.handle_generation_error(Exception("Failed to request generation"))
+            self.generation_in_progress = False
 
     def update_display_mode(self):
         """
@@ -424,6 +455,17 @@ class TerrainTab(BaseMapTab):
             best_lod = self.get_best_available_lod()
             self.statistics_widget.update_statistics(heightmap, slopemap, shadowmap, best_lod)
 
+    def _safe_display_update(self):
+        """
+        Funktionsweise: Crash-sichere Display-Update - HINZUGEFÜGT
+        Aufgabe: Display-Update mit vollständigem Exception-Handling
+        """
+        try:
+            if hasattr(self, 'update_display_mode'):
+                self.update_display_mode()
+        except Exception as e:
+            self.logger.error(f"Safe display update failed: {e}")
+
     def get_best_available_lod(self) -> str:
         """
         Funktionsweise: Findet höchstes verfügbares LOD-Level
@@ -447,12 +489,20 @@ class TerrainTab(BaseMapTab):
 
     @pyqtSlot(str, bool)
     def _update_ui_generation_completed(self, lod_level: str, success: bool):
-        """UI-Update für Generation-Completion - TERRAIN-SPEZIFISCH"""
+        """UI-Update für Generation-Completion - ERWEITERT mit Display-Update"""
         super()._update_ui_generation_completed(lod_level, success)
 
         if success:
             try:
-                self.update_terrain_display()
+                # SICHERSTELLEN dass Height-Mode angezeigt wird - FIX für Problem 5
+                if hasattr(self, 'heightmap_radio') and self.heightmap_radio.isChecked():
+                    self.update_terrain_display()
+                else:
+                    # Force Height-Mode wenn nichts anderes ausgewählt
+                    if hasattr(self, 'heightmap_radio'):
+                        self.heightmap_radio.setChecked(True)
+                    self.update_terrain_display()
+
                 self.update_terrain_statistics()
             except Exception as e:
                 self.logger.error(f"Post-generation update failed: {e}")
@@ -472,6 +522,32 @@ class TerrainTab(BaseMapTab):
         """UI-Update für LOD-Progression-Completion - TERRAIN-SPEZIFISCH"""
         super()._update_ui_lod_progression_completed(final_lod)
         self.logger.info(f"Terrain LOD progression completed: {final_lod}")
+
+    def _validate_and_fix_slopemap(self, slopemap):
+        """Robust slopemap validation"""
+        try:
+            if slopemap is None:
+                return self._create_fallback_slopemap()
+
+            if not isinstance(slopemap, np.ndarray):
+                slopemap = np.array(slopemap)
+
+            # Shape validation
+            if len(slopemap.shape) < 2:
+                return self._create_fallback_slopemap()
+
+            # Ensure 3D shape (H, W, 2) for dx, dy
+            if len(slopemap.shape) == 2:
+                h, w = slopemap.shape
+                new_slopemap = np.zeros((h, w, 2))
+                new_slopemap[:, :, 0] = slopemap  # dx
+                slopemap = new_slopemap
+
+            return slopemap
+
+        except Exception as e:
+            self.logger.error(f"Slopemap validation failed: {e}")
+            return self._create_fallback_slopemap()
 
     def get_generation_status_summary(self) -> dict:
         """

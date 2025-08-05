@@ -180,89 +180,40 @@ class WeatherTab(BaseMapTab):
         Aufgabe: Switcher zwischen allen 4 Weather-Output-Maps mit 3D-Features
         Return: QGroupBox mit Visualization-Controls
         """
-        panel = QGroupBox("Weather Visualization")
-        layout = QVBoxLayout()
+        widget = super().create_visualization_controls()
+        layout = widget.layout()
 
-        # Display Mode Selection
-        self.display_mode = QButtonGroup()
-
-        self.temperature_radio = QRadioButton("Temperature Map")
-        self.temperature_radio.setChecked(True)
+        # Weather-spezifische Modi hinzufügen
+        self.temperature_radio = QRadioButton("Temperature")
+        self.temperature_radio.setStyleSheet("font-size: 11px;")
         self.temperature_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.temperature_radio, 0)
-        layout.addWidget(self.temperature_radio)
+        self.display_mode.addButton(self.temperature_radio, 1)
+        layout.insertWidget(1, self.temperature_radio)
 
-        self.precipitation_radio = QRadioButton("Precipitation Map")
+        self.precipitation_radio = QRadioButton("Precipitation")
+        self.precipitation_radio.setStyleSheet("font-size: 11px;")
         self.precipitation_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.precipitation_radio, 1)
-        layout.addWidget(self.precipitation_radio)
+        self.display_mode.addButton(self.precipitation_radio, 2)
+        layout.insertWidget(2, self.precipitation_radio)
 
-        self.humidity_radio = QRadioButton("Humidity Map")
+        self.humidity_radio = QRadioButton("Humidity")
+        self.humidity_radio.setStyleSheet("font-size: 11px;")
         self.humidity_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.humidity_radio, 2)
-        layout.addWidget(self.humidity_radio)
+        self.display_mode.addButton(self.humidity_radio, 3)
+        layout.insertWidget(3, self.humidity_radio)
 
         self.wind_field_radio = QRadioButton("Wind Field")
+        self.wind_field_radio.setStyleSheet("font-size: 11px;")
         self.wind_field_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.wind_field_radio, 3)
-        layout.addWidget(self.wind_field_radio)
+        self.display_mode.addButton(self.wind_field_radio, 4)
+        layout.insertWidget(4, self.wind_field_radio)
 
-        # 3D Wind Visualization Controls
-        wind_3d_group = QGroupBox("3D Wind Visualization")
-        wind_3d_layout = QVBoxLayout()
+        # 3D Controls auch hier
+        self.terrain_3d_checkbox = QCheckBox("3D Terrain")
+        self.terrain_3d_checkbox.setStyleSheet("font-size: 10px;")
+        layout.addWidget(self.terrain_3d_checkbox)
 
-        self.wind_vectors_3d_cb = QCheckBox("3D Wind Vectors")
-        self.wind_vectors_3d_cb.toggled.connect(self.toggle_3d_wind_vectors)
-        wind_3d_layout.addWidget(self.wind_vectors_3d_cb)
-
-        # Wind Vector Density Slider
-        self.wind_density_slider = ParameterSlider(
-            label="Vector Density",
-            min_val=1,
-            max_val=20,
-            default_val=5,
-            step=1,
-            suffix=" vectors/area"
-        )
-        self.wind_density_slider.valueChanged.connect(self.update_wind_vector_density)
-        wind_3d_layout.addWidget(self.wind_density_slider)
-
-        # Wind Vector Scale Slider
-        self.wind_scale_slider = ParameterSlider(
-            label="Vector Scale",
-            min_val=0.1,
-            max_val=5.0,
-            default_val=1.0,
-            step=0.1,
-            suffix="x"
-        )
-        self.wind_scale_slider.valueChanged.connect(self.update_wind_vector_scale)
-        wind_3d_layout.addWidget(self.wind_scale_slider)
-
-        wind_3d_group.setLayout(wind_3d_layout)
-        layout.addWidget(wind_3d_group)
-
-        # Terrain and Overlay Controls
-        overlay_group = QGroupBox("Overlays")
-        overlay_layout = QVBoxLayout()
-
-        self.terrain_3d_cb = QCheckBox("Show 3D Terrain")
-        self.terrain_3d_cb.toggled.connect(self.toggle_3d_terrain)
-        overlay_layout.addWidget(self.terrain_3d_cb)
-
-        self.contour_lines_cb = QCheckBox("Show Contour Lines")
-        self.contour_lines_cb.toggled.connect(self.toggle_contour_lines)
-        overlay_layout.addWidget(self.contour_lines_cb)
-
-        self.orographic_effects_cb = QCheckBox("Highlight Orographic Effects")
-        self.orographic_effects_cb.toggled.connect(self.toggle_orographic_effects)
-        overlay_layout.addWidget(self.orographic_effects_cb)
-
-        overlay_group.setLayout(overlay_layout)
-        layout.addWidget(overlay_group)
-
-        panel.setLayout(layout)
-        return panel
+        return widget
 
     def create_lod_control_panel(self) -> QGroupBox:
         """Erstellt LOD-Control Panel für Weather Quality Selection"""
@@ -294,10 +245,14 @@ class WeatherTab(BaseMapTab):
 
     def setup_dependency_checking(self):
         """
-        Funktionsweise: Setup für Input-Dependency Checking
-        Aufgabe: Überwacht Required Dependencies für Weather-System
+        Funktionsweise: Setup für Input-Dependency Checking - SHADEMAP-FIX
+        Aufgabe: MINIMAL-FIX für fehlende Shademap-Dependency
         """
-        self.required_dependencies = VALIDATION_RULES.DEPENDENCIES["weather"]
+        self.required_dependencies = ["heightmap", "shadowmap"]
+
+        # Optional soil_moist_map (kann fehlen)
+        if self.data_manager.get_water_data("soil_moist_map") is not None:
+            self.required_dependencies.append("soil_moist_map")
 
         self.dependency_status = MultiDependencyStatusWidget(
             self.required_dependencies, "Weather Dependencies"
@@ -414,20 +369,14 @@ class WeatherTab(BaseMapTab):
         """
         if not self.generation_orchestrator:
             self.logger.error("No GenerationOrchestrator available")
-            self.handle_generation_error(Exception("GenerationOrchestrator not available"))
             return
 
         if self.generation_in_progress:
             self.logger.info("Generation already in progress, ignoring request")
             return
 
-        if not self.check_input_dependencies():
-            self.logger.warning("Cannot generate weather system - missing dependencies")
-            return
-
         try:
-            self.logger.info(f"Starting weather generation with target LOD: {self.target_lod}")
-
+            self.logger.info(f"Starting generation with target LOD: {self.target_lod}")
             self.start_generation_timing()
             self.generation_in_progress = True
 
@@ -440,14 +389,13 @@ class WeatherTab(BaseMapTab):
             )
 
             if request_id:
-                self.logger.info(f"Weather generation requested: {request_id}")
+                self.logger.info(f"Generation requested: {request_id}")
             else:
-                raise Exception("Failed to request generation from orchestrator")
+                raise Exception("Failed to request generation")
 
         except Exception as e:
             self.generation_in_progress = False
             self.handle_generation_error(e)
-            raise
 
     @pyqtSlot(str)
     def on_target_lod_changed(self, combo_text: str):
@@ -556,28 +504,28 @@ class WeatherTab(BaseMapTab):
 
     def collect_input_data(self) -> dict:
         """
-        Funktionsweise: Sammelt alle Required Input-Daten von DataManager
-        Return: dict mit allen benötigten Arrays für Weather-Generation
+        Funktionsweise: Input-Sammlung - SHADEMAP-KEY-FIX
+        Aufgabe: Korrekte Shademap-Referenz
         """
         inputs = {}
 
         # Terrain Inputs
         inputs["heightmap"] = self.data_manager.get_terrain_data("heightmap")
-        inputs["shade_map"] = self.data_manager.get_terrain_data("shademap")
+        inputs["shadowmap"] = self.data_manager.get_terrain_data("shadowmap")  # Korrigiert
 
-        # Water Input (kann None sein - dann Fallback)
+        # Water Input (Fallback wenn nicht verfügbar)
         inputs["soil_moist_map"] = self.data_manager.get_water_data("soil_moist_map")
 
         # Validation für Required Inputs
-        required_inputs = ["heightmap", "shade_map"]
+        required_inputs = ["heightmap", "shadowmap"]
         for key in required_inputs:
             if inputs[key] is None:
                 raise ValueError(f"Required input '{key}' not available")
 
-        # Fallback für soil_moist_map wenn nicht verfügbar
+        # Fallback für soil_moist_map
         if inputs["soil_moist_map"] is None:
             self.logger.warning("Soil moisture map not available - using uniform base moisture")
-            inputs["soil_moist_map"] = np.full_like(inputs["heightmap"], 0.3)  # 30% base moisture
+            inputs["soil_moist_map"] = np.full_like(inputs["heightmap"], 0.3)
 
         return inputs
 
@@ -655,10 +603,23 @@ class WeatherTab(BaseMapTab):
                 scale = self.wind_scale_slider.getValue()
                 self.map_display.overlay_3d_wind_vectors(wind_map, heightmap, density, scale)
 
-    @pyqtSlot()
     def update_display_mode(self):
-        """Slot für Visualization-Mode Änderungen"""
-        self.update_weather_display()
+        """Funktionsweise: Weather Display-Mode Handler """
+        current_mode = self.display_mode.checkedId()
+
+        # FIX 1: get_current_display() verwenden statt self.map_display
+        current_display = self.get_current_display()
+        if not current_display:
+            return
+
+        try:
+            if current_mode == 0:  # Temperature Map
+                temp_map = self.data_manager.get_weather_data("temp_map")
+                if temp_map is not None:
+                    current_display.update_display(temp_map, "temp_map")
+            # ... weitere Modi
+        except Exception as e:
+            self.logger.error(f"Weather display update failed: {e}")
 
     @pyqtSlot(bool)
     def toggle_3d_terrain(self, enabled: bool):

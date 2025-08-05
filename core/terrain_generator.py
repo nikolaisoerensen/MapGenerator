@@ -264,6 +264,9 @@ class ShadowCalculator:
         Funktionsweise: Initialisiert Shadow-Calculator mit Standard-Sonnenwinkel-Konfiguration
         Aufgabe: Setup der 7 Sonnenwinkel für Tagesverlauf-Simulation
         """
+
+        self.shader_manager = None
+
         # 7 Sonnenwinkel für Tagesverlauf (in Grad)
         self.sun_angles = [
             (10, 75),  # Morgendämmerung
@@ -306,46 +309,49 @@ class ShadowCalculator:
         Parameter: shadow_resolution (int) - Feste Auflösung für Shadow-Berechnung (Standard: 64)
         Returns: numpy.ndarray - Shadow-Map in gleicher Auflösung wie heightmap
         """
-        original_size = heightmap.shape[0]
-
-        # Heightmap für Shadow-Berechnung auf niedrige Auflösung reduzieren
-        if original_size > shadow_resolution:
-            # Downscale heightmap für Shadow-Berechnung
-            scale_factor = (original_size - 1) / (shadow_resolution - 1)
-            shadow_heightmap = np.zeros((shadow_resolution, shadow_resolution), dtype=np.float32)
-
-            for y in range(shadow_resolution):
-                for x in range(shadow_resolution):
-                    # Position im Original-Heightmap
-                    orig_x = x * scale_factor
-                    orig_y = y * scale_factor
-
-                    # Bilineare Interpolation für Downscaling
-                    shadow_heightmap[y, x] = self._interpolate_height(heightmap, orig_x, orig_y)
+        if self.shader_manager and hasattr(self.shader_manager, 'gpu_available') and self.shader_manager.gpu_available:
+            return self._calculate_shadows_gpu(heightmap, lod_level, shadow_resolution)
         else:
-            shadow_heightmap = heightmap
 
-        # Passende Sonnenwinkel für LOD holen
-        sun_angles, sun_weights = self.get_sun_angles_for_lod(lod_level)
+            original_size = heightmap.shape[0]
 
-        # Shadow-Berechnung in niedriger Auflösung
-        low_res_shadows = np.zeros((shadow_heightmap.shape[0], shadow_heightmap.shape[1]), dtype=np.float32)
-        total_weight = sum(sun_weights)
+            # Heightmap für Shadow-Berechnung auf niedrige Auflösung reduzieren
+            if original_size > shadow_resolution:
+                # Downscale heightmap für Shadow-Berechnung
+                scale_factor = (original_size - 1) / (shadow_resolution - 1)
+                shadow_heightmap = np.zeros((shadow_resolution, shadow_resolution), dtype=np.float32)
 
-        for i, (elevation, azimuth) in enumerate(sun_angles):
-            shadow_map = self.raycast_shadow(shadow_heightmap, elevation, azimuth)
-            low_res_shadows += shadow_map * sun_weights[i]
+                for y in range(shadow_resolution):
+                    for x in range(shadow_resolution):
+                        # Position im Original-Heightmap
+                        orig_x = x * scale_factor
+                        orig_y = y * scale_factor
 
-        # Normalisierung
-        low_res_shadows /= total_weight
+                        # Bilineare Interpolation für Downscaling
+                        shadow_heightmap[y, x] = self._interpolate_height(heightmap, orig_x, orig_y)
+            else:
+                shadow_heightmap = heightmap
 
-        # Upscale auf Original-Größe falls nötig
-        if original_size > shadow_resolution:
-            final_shadows = self._upscale_shadows(low_res_shadows, original_size)
-        else:
-            final_shadows = low_res_shadows
+            # Passende Sonnenwinkel für LOD holen
+            sun_angles, sun_weights = self.get_sun_angles_for_lod(lod_level)
 
-        return final_shadows
+            # Shadow-Berechnung in niedriger Auflösung
+            low_res_shadows = np.zeros((shadow_heightmap.shape[0], shadow_heightmap.shape[1]), dtype=np.float32)
+            total_weight = sum(sun_weights)
+
+            for i, (elevation, azimuth) in enumerate(sun_angles):
+                shadow_map = self.raycast_shadow(shadow_heightmap, elevation, azimuth)
+                low_res_shadows += shadow_map * sun_weights[i]
+
+            # Normalisierung
+            low_res_shadows /= total_weight
+
+            # Upscale auf Original-Größe falls nötig
+            if original_size > shadow_resolution:
+                final_shadows = self._upscale_shadows(low_res_shadows, original_size)
+            else:
+                final_shadows = low_res_shadows
+            return final_shadows
 
     def get_sun_angles_for_lod(self, lod_level):
         """

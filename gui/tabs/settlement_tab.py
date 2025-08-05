@@ -138,7 +138,6 @@ class SettlementTab(BaseMapTab):
 
         # Dependencies und Navigation
         self.setup_input_status()
-        self.setup_navigation_panel()
 
     def create_settlement_parameter_panel(self) -> QGroupBox:
         """

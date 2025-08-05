@@ -2,7 +2,7 @@
 Path: gui/managers/navigation_manager.py
 
 Funktionsweise: Zentrale Tab-Navigation und Parameter-Persistierung
-- Tab-Reihenfolge: main_menu → loading → terrain → geology → settlement → weather → water → biome → overview
+- Tab-Reihenfolge: main_menu → loading → terrain ⇆ geology ⇆ weather ⇆ water ⇆ biome ⇆ settlement ⇆ overview
 - Automatische Parameter-Speicherung vor Tab-Wechsel
 - Window-Geometrie Persistierung
 - Graceful Cleanup und Resource-Management

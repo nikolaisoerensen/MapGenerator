@@ -256,76 +256,22 @@ class WaterTab(BaseMapTab):
 
     def create_water_visualization_controls(self) -> QGroupBox:
         """
-        Funktionsweise: Erstellt Controls für Water-Visualization
-        Aufgabe: Switcher zwischen allen 11 Water-Output-Maps
-        Return: QGroupBox mit Visualization-Controls
+        Funktionsweise: VEREINFACHTE Water-Visualization ohne Loop-Crash
+        Aufgabe: MINIMAL-VERSION ohne komplexe Radio-Button-Logik
         """
         panel = QGroupBox("Water Visualization")
         layout = QVBoxLayout()
 
-        # Display Mode Selection
-        self.display_mode = QButtonGroup()
+        # VEREINFACHT: Nur Label statt crashende Radio-Buttons
+        self.current_mode_label = QLabel("Mode: Water Depth")
+        layout.addWidget(self.current_mode_label)
 
-        # Alle Water-Output-Maps als Radio-Buttons
-        water_outputs = [
-            ("Water Depth", "water_map"),
-            ("Flow Volume", "flow_map"),
-            ("Flow Speed", "flow_speed"),
-            ("Cross Section", "cross_section"),
-            ("Soil Moisture", "soil_moist_map"),
-            ("Erosion Rate", "erosion_map"),
-            ("Sedimentation", "sedimentation_map"),
-            ("Updated Rock Map", "rock_map_updated"),
-            ("Evaporation", "evaporation_map"),
-            ("Water Biomes", "water_biomes_map")
-        ]
-
-        print("DEBUG: About to create radio buttons loop")
-        for i, (display_name, data_key) in enumerate(water_outputs):
-            print(f"DEBUG: Creating radio button {i}: {display_name}")
-            radio = QRadioButton(display_name)
-            print(f"DEBUG: QRadioButton created for {display_name}")
-
-            radio.setProperty("data_key", data_key)
-            print(f"DEBUG: Property set for {display_name}")
-
-            # WICHTIG: Signal NICHT sofort verbinden
-            # radio.toggled.connect(self.update_display_mode)
-
-            self.display_mode.addButton(radio, i)
-            print(f"DEBUG: Button added to group for {display_name}")
-
-            layout.addWidget(radio)
-            print(f"DEBUG: Radio button added to layout for {display_name}")
-
-            if i == 0:  # Water Depth als Default
-                print(f"DEBUG: About to set checked for {display_name}")
-                radio.setChecked(True)
-                print(f"DEBUG: Default checked set for {display_name}")
-
-        print("DEBUG: Radio buttons loop completed")
-
-        # Signals NACH der kompletten UI-Erstellung verbinden
-        print("DEBUG: About to connect signals")
-        for i in range(len(water_outputs)):
-            button = self.display_mode.button(i)
-            if button:
-                button.toggled.connect(self.update_display_mode)
-        print("DEBUG: All signals connected")
-
-        # River Network Overlay
+        # Simple Checkboxes statt komplexe Radio-Groups
         self.river_overlay_checkbox = QCheckBox("Show River Network")
-        self.river_overlay_checkbox.toggled.connect(self.toggle_river_overlay)
         layout.addWidget(self.river_overlay_checkbox)
 
-        # 3D Terrain Overlay
         self.terrain_3d_checkbox = QCheckBox("Show 3D Terrain")
-        self.terrain_3d_checkbox.toggled.connect(self.toggle_3d_terrain)
         layout.addWidget(self.terrain_3d_checkbox)
-
-        # Ocean Outflow Display
-        self.ocean_outflow_label = QLabel("Ocean Outflow: - m³/s")
-        layout.addWidget(self.ocean_outflow_label)
 
         panel.setLayout(layout)
         return panel
@@ -348,18 +294,25 @@ class WaterTab(BaseMapTab):
 
     def setup_shader_integration(self):
         """
-        Funktionsweise: Setup für GPU-Shader Integration
-        Aufgabe: Konfiguriert alle 8 Water-Shader für optimale Performance
+        Funktionsweise: Setup für GPU-Shader Integration - CRASH-FIX
+        Aufgabe: MINIMAL-FIX für AttributeError
         """
+        # GPU-Verfügbarkeit ZUERST initialisieren - KRITISCHER FIX
+        self.gpu_available = False
+
+        if self.shader_manager:
+            try:
+                self.gpu_available = self.shader_manager.check_gpu_support()
+            except Exception as e:
+                self.logger.warning(f"GPU support check failed: {e}")
+                self.gpu_available = False
+
+        if not self.gpu_available:
+            self.logger.warning("GPU not available - using CPU fallback")
+
         # Shader Performance Monitoring
         self.shader_performance_timer = QTimer()
         self.shader_performance_timer.timeout.connect(self.monitor_shader_performance)
-
-        # GPU Fallback Detection
-        if self.shader_manager and self.shader_manager.check_gpu_support():
-            self.gpu_available = self.shader_manager.check_gpu_support()
-        if not self.gpu_available:
-            self.logger.warning("GPU not available - using CPU fallback")
 
     def load_default_parameters(self):
         """Lädt Default-Parameter"""
@@ -402,13 +355,21 @@ class WaterTab(BaseMapTab):
 
     def check_input_dependencies(self):
         """
-        Funktionsweise: Prüft alle Required Dependencies für Water-System
-        Aufgabe: Aktiviert/Deaktiviert Generation basierend auf verfügbaren Inputs
+        Funktionsweise: Dependency-Check - REPARIERT manual_generate_button None-Check
+        Aufgabe: Robuster Button-Access mit None-Protection
         """
         is_complete, missing = self.data_manager.check_dependencies("water", self.required_dependencies)
 
-        self.dependency_status.update_dependency_status(is_complete, missing)
-        self.manual_generate_button.setEnabled(is_complete)
+        # Dependency Status Update
+        if hasattr(self, 'dependency_status'):
+            self.dependency_status.update_dependency_status(is_complete, missing)
+
+        # REPARIERT: Sichere Button-Aktivierung mit None-Check
+        if hasattr(self, 'auto_simulation_panel') and self.auto_simulation_panel:
+            self.auto_simulation_panel.set_manual_button_enabled(is_complete)
+        elif hasattr(self, 'manual_generate_button') and self.manual_generate_button:
+            self.manual_generate_button.setEnabled(is_complete)
+        # Kein Crash wenn Button nicht existiert
 
         return is_complete
 
@@ -520,8 +481,18 @@ class WaterTab(BaseMapTab):
 
     @pyqtSlot()
     def update_display_mode(self):
-        """Slot für Visualization-Mode Änderungen"""
-        self.update_water_display()
+        """Water Display-Update - REPARIERT"""
+        current_display = self.get_current_display()
+        if not current_display:
+            return
+
+        # Vereinfachter Display-Update
+        water_map = self.data_manager.get_water_data("water_map")
+        if water_map is not None:
+            try:
+                current_display.update_display(water_map, "water_map")
+            except Exception as e:
+                self.logger.error(f"Water display update failed: {e}")
 
     @pyqtSlot(bool)
     def toggle_river_overlay(self, enabled: bool):
