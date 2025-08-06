@@ -1,13 +1,12 @@
 """
 Path: gui/tabs/settlement_tab.py
 
-Funktionsweise: Settlement-Platzierung mit vollständiger Core-Integration und 3D-Visualization
-- Input: heightmap, slopemap, water_map von vorherigen Generatoren
-- Intelligent Settlement-Placement mit Terrain-Suitability Analysis
-- Road-Network mit Pathfinding und Spline-Interpolation
-- Plotnode-System mit Delaunay-Triangulation
-- 3D-Markers für Villages/Landmarks/Roadsites auf Terrain
-- Civilization-Map für späteres Biome-System
+Funktionsweise: Settlement-Editor mit terrain_tab-ähnlicher UI-Struktur und vollständiger Core-Integration
+- Erbt von BaseMapTab für gemeinsame Features (70/30 Layout, Navigation, etc.)
+- UI-Struktur: Generate Button → LOD/Status-Display → Parameter-Panel → Statistics → Navigation (fixiert unten)
+- GenerationOrchestrator Integration mit StandardOrchestratorHandler
+- Real-time Status-Display für alle calculate-Schritte mit Progress und Validity-State
+- Live Settlement-Preview und 3D-Visualization mit Terrain-Integration
 """
 
 from PyQt5.QtWidgets import *
@@ -19,10 +18,7 @@ import logging
 from .base_tab import BaseMapTab
 from gui.config.value_default import SETTLEMENT, get_parameter_config, validate_parameter_set, VALIDATION_RULES
 from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, MultiDependencyStatusWidget
-from core.settlement_generator import (
-    SettlementGenerator, TerrainSuitabilityAnalyzer, PathfindingSystem,
-    CivilizationInfluenceMapper, PlotNodeSystem
-)
+from gui.managers.orchestrator_manager import StandardOrchestratorHandler, OrchestratorRequestBuilder
 
 def get_settlement_error_decorators():
     """
@@ -44,22 +40,19 @@ core_generation_handler, dependency_handler, ui_navigation_handler = get_settlem
 
 class SettlementTab(BaseMapTab):
     """
-    Funktionsweise: Hauptklasse für intelligente Settlement-Platzierung und Civilization-Mapping
-    Aufgabe: Koordiniert alle Settlement-Core-Module und 3D-Visualization
+    Funktionsweise: Hauptklasse für intelligente Settlement-Platzierung mit BaseGenerator-Integration
+    Aufgabe: Koordiniert alle Settlement-Core-Module, 3D-Visualization und GenerationOrchestrator-Integration
     Input: heightmap, slopemap, water_map für Terrain-Suitability
-    Output: settlement_list, landmark_list, roadsite_list, plot_map, civ_map
+    Output: SettlementData mit allen Settlement-Komponenten
     """
 
     def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
         super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
         self.logger = logging.getLogger(__name__)
 
-        # Core-Generator Instanzen
-        self.settlement_generator = SettlementGenerator()
-        self.terrain_analyzer = TerrainSuitabilityAnalyzer()
-        self.pathfinding_system = PathfindingSystem()
-        self.civ_influence_mapper = CivilizationInfluenceMapper()
-        self.plotnode_system = PlotNodeSystem()
+        # GenerationOrchestrator Integration
+        self.orchestrator_handler = None
+        self.setup_orchestrator_integration()
 
         # Parameter und State
         self.current_parameters = {}
@@ -72,6 +65,29 @@ class SettlementTab(BaseMapTab):
         # Initial Load
         self.load_default_parameters()
         self.check_input_dependencies()
+
+    def setup_orchestrator_integration(self):
+        """
+        Funktionsweise: Setup für GenerationOrchestrator Integration mit StandardOrchestratorHandler
+        Aufgabe: Eliminiert Code-Duplikation durch wiederverwendbare Orchestrator-Integration
+        """
+        if self.generation_orchestrator:
+            # UI-Update-Methods für Settlement-spezifische Updates
+            ui_update_methods = {
+                'update_system_status': self.update_system_status_display,
+                'update_settlement_statistics': self.update_settlement_statistics,
+                'update_generation_progress': self.update_generation_progress
+            }
+
+            self.orchestrator_handler = StandardOrchestratorHandler(
+                self.generation_orchestrator,
+                ui_update_methods,
+                self.logger
+            )
+
+            # Signal-Connections für Settlement-Tab
+            self.orchestrator_handler.generation_completed.connect(self.on_settlement_generation_completed)
+            self.orchestrator_handler.lod_progression_completed.connect(self.on_lod_progression_completed)
 
     def generate(self):
         """
@@ -97,16 +113,20 @@ class SettlementTab(BaseMapTab):
             self.start_generation_timing()
             self.generation_in_progress = True
 
-            request_id = self.generation_orchestrator.request_generation(
-                generator_type="settlement",
+            # OrchestratorRequestBuilder für typ-sichere Request-Erstellung
+            request_builder = OrchestratorRequestBuilder()
+            request = request_builder.build_settlement_request(
                 parameters=self.current_parameters.copy(),
                 target_lod=self.target_lod,
                 source_tab="settlement",
                 priority=10
             )
 
+            request_id = self.generation_orchestrator.request_generation(request)
+
             if request_id:
                 self.logger.info(f"Settlement generation requested: {request_id}")
+                self.update_system_status_display("queued", "Settlement generation queued...")
             else:
                 raise Exception("Failed to request generation from orchestrator")
 
@@ -117,9 +137,18 @@ class SettlementTab(BaseMapTab):
 
     def setup_settlement_ui(self):
         """
-        Funktionsweise: Erstellt komplette UI für Settlement-System
-        Aufgabe: Parameter, Settlement-Preview, Road-Visualization, Plot-Statistics
+        Funktionsweise: Erstellt komplette UI für Settlement-System mit terrain_tab-ähnlicher Struktur
+        Aufgabe: Generate Button → System Status → Parameter → Statistics → Navigation (fixiert unten)
         """
+        # Generate Button (oben)
+        self.manual_generate_button = BaseButton("Generate Settlement System", "primary")
+        self.manual_generate_button.clicked.connect(self.generate)
+        self.control_panel.layout().addWidget(self.manual_generate_button)
+
+        # System Status Widget
+        self.system_status_widget = SettlementSystemStatusWidget()
+        self.control_panel.layout().addWidget(self.system_status_widget)
+
         # Parameter Panel
         self.parameter_panel = self.create_settlement_parameter_panel()
         self.control_panel.layout().addWidget(self.parameter_panel)
@@ -132,17 +161,13 @@ class SettlementTab(BaseMapTab):
         self.visualization_controls = self.create_settlement_visualization_controls()
         self.control_panel.layout().addWidget(self.visualization_controls)
 
-        # Civilization Influence Panel
-        self.civ_influence_panel = CivilizationInfluenceWidget()
-        self.control_panel.layout().addWidget(self.civ_influence_panel)
-
-        # Dependencies und Navigation
+        # Dependencies und Navigation (wird von base_tab hinzugefügt)
         self.setup_input_status()
 
     def create_settlement_parameter_panel(self) -> QGroupBox:
         """
         Funktionsweise: Erstellt Parameter-Panel mit allen Settlement-Parametern
-        Aufgabe: Alle 9 Parameter aus value_default.SETTLEMENT strukturiert
+        Aufgabe: Alle 9 Parameter aus value_default.SETTLEMENT strukturiert organisiert
         Return: QGroupBox mit Parameter-Slidern
         """
         panel = QGroupBox("Settlement Parameters")
@@ -374,6 +399,145 @@ class SettlementTab(BaseMapTab):
         # Update Status basierend auf verfügbaren Daten
         self.update_input_status()
 
+    def update_system_status_display(self, status: str, message: str = ""):
+        """
+        Funktionsweise: Aktualisiert System Status Display für alle Settlement-Schritte
+        Aufgabe: Zeigt Progress für alle 7 calculate-Phasen mit LOD-Info und Validity-State
+        Parameter: status (str), message (str) - Aktueller Status und Detail-Message
+        """
+        if hasattr(self, 'system_status_widget'):
+            self.system_status_widget.update_status(status, message)
+
+            # Settlement-spezifische Status-Updates
+            if status == "generating":
+                self.system_status_widget.update_step_progress(message)
+            elif status == "completed":
+                # Alle Schritte als completed markieren
+                steps = ["terrain_suitability", "settlements", "road_network", "roadsites",
+                        "civilization_mapping", "landmarks", "plots"]
+                for step in steps:
+                    self.system_status_widget.mark_step_completed(step)
+
+    def update_settlement_statistics(self):
+        """
+        Funktionsweise: Aktualisiert Settlement-Statistiken nach Generation
+        Aufgabe: Zeigt Generation-Results in Statistics-Widget
+        """
+        settlement_data = self.data_manager.get_settlement_data("settlement_data_complete")
+        if settlement_data and hasattr(self, 'settlement_stats'):
+            self.settlement_stats.update_generation_statistics(
+                settlement_data.settlement_list,
+                settlement_data.landmark_list,
+                settlement_data.roadsite_list,
+                settlement_data.plot_map,
+                settlement_data.civ_map
+            )
+
+    def update_generation_progress(self, progress: int, message: str):
+        """
+        Funktionsweise: Aktualisiert Progress Bar für Settlement-Generation
+        Aufgabe: Zeigt detaillierten Progress für alle calculate-Schritte
+        Parameter: progress (int), message (str) - Progress-Prozent und Detail-Message
+        """
+        if hasattr(self, 'system_status_widget'):
+            self.system_status_widget.update_progress(progress, message)
+
+    @pyqtSlot(str, dict)
+    def on_settlement_generation_completed(self, result_id: str, result_data: dict):
+        """
+        Funktionsweise: Slot für Settlement-Generation Completion
+        Aufgabe: Verarbeitet Settlement-Results und aktualisiert UI
+        Parameter: result_id (str), result_data (dict) - Result-ID und Settlement-Daten
+        """
+        try:
+            self.generation_in_progress = False
+            self.settlement_generation_complete = True
+
+            self.logger.info(f"Settlement generation completed: {result_id}")
+
+            # Settlement-Results verarbeiten
+            settlement_data = result_data.get("settlement_data")
+            if settlement_data:
+                # Statistics aktualisieren
+                self.update_settlement_statistics()
+
+                # Display aktualisieren
+                self.update_settlement_display()
+
+                # System Status als completed setzen
+                self.update_system_status_display("completed", "Settlement generation completed successfully")
+
+            self.end_generation_timing()
+
+        except Exception as e:
+            self.logger.error(f"Error processing settlement generation completion: {e}")
+            self.handle_generation_error(e)
+
+    @pyqtSlot(str, str)
+    def on_lod_progression_completed(self, result_id: str, lod_level: str):
+        """
+        Funktionsweise: Slot für LOD-Progression Updates
+        Aufgabe: Aktualisiert Display nach jedem LOD-Level
+        Parameter: result_id (str), lod_level (str) - Result-ID und erreichtes LOD-Level
+        """
+        try:
+            self.logger.info(f"Settlement LOD progression: {lod_level}")
+
+            # System Status mit LOD-Info aktualisieren
+            self.update_system_status_display("generating", f"Completed LOD {lod_level}")
+
+            # Display mit bestem verfügbarem LOD aktualisieren
+            self.update_settlement_display()
+
+        except Exception as e:
+            self.logger.error(f"Error processing LOD progression: {e}")
+
+    def load_default_parameters(self):
+        """Lädt Default-Parameter"""
+        for param_name, slider in self.parameter_sliders.items():
+            param_config = get_parameter_config("settlement", param_name)
+            slider.setValue(param_config["default"])
+
+        self.current_parameters = self.get_current_parameters()
+
+    def get_current_parameters(self) -> dict:
+        """Sammelt aktuelle Parameter für Core-Generator"""
+        parameters = {}
+        for param_name, slider in self.parameter_sliders.items():
+            parameters[param_name] = slider.getValue()
+        return parameters
+
+    @pyqtSlot()
+    def on_parameter_changed(self):
+        """Slot für Parameter-Änderungen"""
+        self.current_parameters = self.get_current_parameters()
+
+        # Settlement Statistics Preview aktualisieren
+        self.settlement_stats.update_parameter_preview(self.current_parameters)
+
+        # Auto-Simulation triggern
+        if self.auto_simulation_enabled:
+            self.auto_simulation_timer.start(1000)
+
+    @pyqtSlot(str, str)
+    def on_data_updated(self, generator_type: str, data_key: str):
+        """Slot für Data-Updates von anderen Generatoren"""
+        if data_key in self.required_dependencies:
+            self.check_input_dependencies()
+            self.update_input_status()
+
+    def check_input_dependencies(self):
+        """
+        Funktionsweise: Prüft alle Required Dependencies für Settlement-System
+        Aufgabe: Aktiviert/Deaktiviert Generation basierend auf verfügbaren Inputs
+        """
+        is_complete, missing = self.data_manager.check_dependencies("settlement", self.required_dependencies)
+
+        self.dependency_status.update_dependency_status(is_complete, missing)
+        self.manual_generate_button.setEnabled(is_complete)
+
+        return is_complete
+
     def update_input_status(self):
         """
         Funktionsweise: Aktualisiert Settlement-spezifische Input-Status
@@ -424,101 +588,6 @@ class SettlementTab(BaseMapTab):
             self.water_status.set_error("Status check failed")
             self.placement_status.set_error("Status check failed")
 
-    def load_default_parameters(self):
-        """Lädt Default-Parameter"""
-        for param_name, slider in self.parameter_sliders.items():
-            param_config = get_parameter_config("settlement", param_name)
-            slider.setValue(param_config["default"])
-
-        self.current_parameters = self.get_current_parameters()
-
-    def get_current_parameters(self) -> dict:
-        """Sammelt aktuelle Parameter für Core-Generator"""
-        parameters = {}
-        for param_name, slider in self.parameter_sliders.items():
-            parameters[param_name] = slider.getValue()
-        return parameters
-
-    @pyqtSlot()
-    def on_parameter_changed(self):
-        """Slot für Parameter-Änderungen"""
-        self.current_parameters = self.get_current_parameters()
-
-        # Settlement Statistics Preview aktualisieren
-        self.settlement_stats.update_parameter_preview(self.current_parameters)
-
-        # Civilization Influence Preview
-        self.civ_influence_panel.update_influence_preview(self.current_parameters)
-
-        # Auto-Simulation triggern
-        if self.auto_simulation_enabled:
-            self.auto_simulation_timer.start(1000)
-
-    @pyqtSlot(str, str)
-    def on_data_updated(self, generator_type: str, data_key: str):
-        """Slot für Data-Updates von anderen Generatoren"""
-        if data_key in self.required_dependencies:
-            self.check_input_dependencies()
-            self.update_input_status()
-
-
-    def check_input_dependencies(self):
-        """
-        Funktionsweise: Prüft alle Required Dependencies für Settlement-System
-        Aufgabe: Aktiviert/Deaktiviert Generation basierend auf verfügbaren Inputs
-        """
-        is_complete, missing = self.data_manager.check_dependencies("settlement", self.required_dependencies)
-
-        self.dependency_status.update_dependency_status(is_complete, missing)
-        #self.manual_generate_button.setEnabled(is_complete)
-
-        return is_complete
-
-    def collect_input_data(self) -> dict:
-        """
-        Funktionsweise: Sammelt alle Required Input-Daten von DataManager
-        Return: dict mit allen benötigten Arrays für Settlement-Generation
-        """
-        inputs = {}
-
-        # Terrain Inputs
-        inputs["heightmap"] = self.data_manager.get_terrain_data("heightmap")
-        inputs["slopemap"] = self.data_manager.get_terrain_data("slopemap")
-
-        # Water Input (optional - kann None sein)
-        inputs["water_map"] = self.data_manager.get_water_data("water_map")
-
-        # Validation (nur Terrain ist required)
-        required_inputs = ["heightmap", "slopemap"]
-        for key in required_inputs:
-            if inputs[key] is None:
-                raise ValueError(f"Required input '{key}' not available")
-
-        # Fallback für water_map wenn nicht verfügbar
-        if inputs["water_map"] is None:
-            self.logger.warning("Water map not available - using zero water proximity")
-            inputs["water_map"] = np.zeros_like(inputs["heightmap"])
-
-        return inputs
-
-    def save_settlement_results(self, settlements: list, landmarks: list, roadsites: list,
-                                plot_map: np.ndarray, civ_map: np.ndarray,
-                                suitability_map: np.ndarray, road_network: list, params: dict):
-        """
-        Funktionsweise: Speichert alle Settlement-System Results im DataManager
-        Parameter: Alle Result-Listen und Arrays von Core-Generatoren
-        """
-        # Settlement Results
-        self.data_manager.set_settlement_data("settlement_list", settlements, params)
-        self.data_manager.set_settlement_data("landmark_list", landmarks, params)
-        self.data_manager.set_settlement_data("roadsite_list", roadsites, params)
-        self.data_manager.set_settlement_data("plot_map", plot_map, params)
-        self.data_manager.set_settlement_data("civ_map", civ_map, params)
-
-        # Additional Internal Data für Visualization
-        self.data_manager.set_settlement_data("suitability_map", suitability_map, params)
-        self.data_manager.set_settlement_data("road_network", road_network, params)
-
     def update_settlement_display(self):
         """
         Funktionsweise: Aktualisiert Display basierend auf aktuellem Visualization-Mode
@@ -527,7 +596,7 @@ class SettlementTab(BaseMapTab):
         current_mode = self.display_mode.checkedId()
 
         if current_mode == 0:  # Terrain Suitability
-            suitability_map = self.data_manager.get_settlement_data("suitability_map")
+            suitability_map = self.data_manager.get_settlement_data("combined_suitability_map")
             if suitability_map is not None:
                 self.map_display.display_terrain_suitability(suitability_map)
 
@@ -547,9 +616,9 @@ class SettlementTab(BaseMapTab):
                 )
 
         elif current_mode == 2:  # Road Network
-            road_network = self.data_manager.get_settlement_data("road_network")
-            if road_network is not None:
-                self.map_display.display_road_network(road_network)
+            roads = self.data_manager.get_settlement_data("roads")
+            if roads is not None:
+                self.map_display.display_road_network(roads)
 
         elif current_mode == 3:  # Civilization Map
             civ_map = self.data_manager.get_settlement_data("civ_map")
@@ -596,6 +665,119 @@ class SettlementTab(BaseMapTab):
     def toggle_3d_markers(self, enabled: bool):
         """Toggle für 3D Settlement Markers"""
         self.update_settlement_display()
+
+
+class SettlementSystemStatusWidget(QGroupBox):
+    """
+    Funktionsweise: System Status Widget für alle Settlement-Berechnungsschritte
+    Aufgabe: Zeigt LOD-Level, Step-Status und Generation-Progress für alle 7 calculate-Phasen
+    """
+
+    def __init__(self):
+        super().__init__("Settlement System Status")
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Erstellt UI für Settlement System Status"""
+        layout = QVBoxLayout()
+
+        # LOD Level Display
+        lod_group = QGroupBox("LOD Level & Validity")
+        lod_layout = QVBoxLayout()
+
+        self.lod_level_label = QLabel("Current LOD: LOD64")
+        self.validity_state_label = QLabel("Validity: Unknown")
+
+        lod_layout.addWidget(self.lod_level_label)
+        lod_layout.addWidget(self.validity_state_label)
+
+        lod_group.setLayout(lod_layout)
+        layout.addWidget(lod_group)
+
+        # Step Status für alle 7 calculate-Phasen
+        steps_group = QGroupBox("Generation Steps")
+        steps_layout = QVBoxLayout()
+
+        self.step_indicators = {}
+        steps = [
+            ("terrain_suitability", "Terrain Suitability"),
+            ("settlements", "Settlement Placement"),
+            ("road_network", "Road Network"),
+            ("roadsites", "Roadsite Placement"),
+            ("civilization_mapping", "Civilization Mapping"),
+            ("landmarks", "Landmark Placement"),
+            ("plots", "Plot Generation")
+        ]
+
+        for step_key, step_name in steps:
+            indicator = StatusIndicator(step_name)
+            indicator.set_unknown()
+            self.step_indicators[step_key] = indicator
+            steps_layout.addWidget(indicator)
+
+        steps_group.setLayout(steps_layout)
+        layout.addWidget(steps_group)
+
+        # Progress Bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+
+        # Status Message
+        self.status_message_label = QLabel("Ready for generation")
+        layout.addWidget(self.status_message_label)
+
+        self.setLayout(layout)
+
+    def update_status(self, status: str, message: str = ""):
+        """
+        Funktionsweise: Aktualisiert System Status
+        Parameter: status (str), message (str) - Status und Message
+        """
+        self.status_message_label.setText(message or f"Status: {status}")
+
+        if status == "generating":
+            self.progress_bar.setVisible(True)
+        elif status in ["completed", "failed"]:
+            self.progress_bar.setVisible(False)
+
+    def update_step_progress(self, step_message: str):
+        """
+        Funktionsweise: Aktualisiert Schritt-Progress basierend auf Message
+        Parameter: step_message (str) - Detail-Message mit Schritt-Info
+        """
+        # Parse step aus message und aktualisiere entsprechenden Indicator
+        if "terrain suitability" in step_message.lower():
+            self.step_indicators["terrain_suitability"].set_generating()
+        elif "settlement placement" in step_message.lower():
+            self.step_indicators["settlements"].set_generating()
+        elif "road network" in step_message.lower():
+            self.step_indicators["road_network"].set_generating()
+        elif "roadsite" in step_message.lower():
+            self.step_indicators["roadsites"].set_generating()
+        elif "civilization" in step_message.lower():
+            self.step_indicators["civilization_mapping"].set_generating()
+        elif "landmark" in step_message.lower():
+            self.step_indicators["landmarks"].set_generating()
+        elif "plot" in step_message.lower():
+            self.step_indicators["plots"].set_generating()
+
+    def mark_step_completed(self, step_key: str):
+        """
+        Funktionsweise: Markiert einzelnen Schritt als completed
+        Parameter: step_key (str) - Schritt-Schlüssel
+        """
+        if step_key in self.step_indicators:
+            self.step_indicators[step_key].set_success("Completed")
+
+    def update_progress(self, progress: int, message: str):
+        """
+        Funktionsweise: Aktualisiert Progress Bar
+        Parameter: progress (int), message (str) - Progress-Prozent und Message
+        """
+        self.progress_bar.setValue(progress)
+        self.status_message_label.setText(message)
+
 
 class SettlementStatisticsWidget(QGroupBox):
     """
