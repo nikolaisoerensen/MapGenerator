@@ -1,17 +1,88 @@
 """
-Path: gui/managers/orchestrator_manager.py
+    Path: gui/managers/orchestrator_manager.py
 
-Funktionsweise: Vermeidet Code-Duplikation der Orchestrator-Integration zwischen allen Generator-Tabs
-Aufgabe: Standard-Orchestrator-Handler, Request-Building, Signal-Management für wiederverwendbare Integration
-Features: Standard-Handler, Request-Builder, Signal-Coordination, Error-Handling
-"""
+    Funktionsweise: Homogene Orchestrator-Integration für alle Generator-Tabs mit vereinheitlichter Signal-Architektur
+    Aufgabe: Standard-Orchestrator-Handler, Request-Building, Signal-Management für wiederverwendbare Integration zwischen allen Tabs
+    Features: Direkte Signal-Connections, Thread-safe UI-Updates, Request-Validation, einheitliche Tab-Integration
+
+    Komponenten:
+    StandardOrchestratorHandler:
+        Funktionsweise: Einheitliche Orchestrator-Integration für alle Generator-Tabs mit direkten Signals
+        Aufgabe: Eliminiert Code-Duplikation zwischen allen Generator-Tabs mit homogener Signal-Architektur
+        Konstruktor: StandardOrchestratorHandler(parent_tab, generator_type) - einheitlich für alle Tabs
+        Signal-Integration: Direkte Signals ohne komplexe UI-Method-Mappings
+        Direkte Signals:
+            - generation_completed(result_id: str, result_data: dict) - für alle Tab-Completion-Handlers
+            - lod_progression_completed(result_id: str, lod_level: str) - für LOD-Updates in allen Tabs
+            - generation_progress(progress: int, message: str) - für Progress-Updates in allen Tabs
+        Setup: setup_standard_handlers() verbindet alle Standard-Orchestrator-Signals automatisch
+        Connection-Management: cleanup_connections() für proper Disconnect bei Tab-Destruction
+
+    OrchestratorRequestBuilder:
+        Funktionsweise: Builder-Pattern für alle Generator-Types mit typ-sicherer Request-Erstellung
+        Aufgabe: Konsistente Request-Erstellung für alle 6 Standard-Generator-Types
+        Features: Generator-spezifische Builder mit Parameter-Validation und Default-Values
+        Request-Templates für alle Generator-Types:
+            - build_terrain_request(parameters, target_lod, source_tab) - Terrain-Generator
+            - build_geology_request(parameters, target_lod, source_tab) - Geology-Generator
+            - build_weather_request(parameters, target_lod, source_tab) - Weather-Generator
+            - build_water_request(parameters, target_lod, source_tab) - Water-Generator
+            - build_biome_request(parameters, target_lod, source_tab) - Biome-Generator
+            - build_settlement_request(parameters, target_lod, source_tab) - Settlement-Generator
+        Validation: Request-Completeness-Check, LOD-Validation, Priority-Range-Check, Parameter-Constraint-Validation
+        Batch-Operations: build_batch_request() für Multi-Generator-Requests
+
+    Homogene Tab-Integration:
+        Funktionsweise: Alle 6 Generator-Tabs nutzen identisches Integration-Pattern
+        Setup-Pattern für alle Tabs:
+            1. Konstruktor: StandardOrchestratorHandler(self, "generator_type")
+            2. Setup: self.orchestrator_handler.setup_standard_handlers()
+            3. Connections: Direkte Signal-Connections zu Tab-spezifischen Slots
+
+        Einheitliche Signal-Connections für alle Tabs:
+            self.orchestrator_handler.generation_completed.connect(self.on_[generator]_generation_completed)
+            self.orchestrator_handler.lod_progression_completed.connect(self.on_lod_progression_completed)
+            self.orchestrator_handler.generation_progress.connect(self.update_generation_progress)
+
+        Tab-spezifische Slot-Signatures (einheitlich für alle):
+            - on_[generator]_generation_completed(result_id: str, result_data: dict)
+            - on_lod_progression_completed(result_id: str, lod_level: str)
+            - update_generation_progress(progress: int, message: str)
+
+    Request-Erstellung für alle Generator-Types:
+        Funktionsweise: Einheitliches Request-Pattern für alle 6 Generator-Tabs
+        Pattern für alle Tabs:
+            1. Parameter sammeln: parameters = self.get_current_parameters()
+            2. Request bauen: request = OrchestratorRequestBuilder.build_[generator]_request(parameters, target_lod, source_tab)
+            3. Request senden: request_id = self.generation_orchestrator.request_generation(request)
+            4. Status updates über standardisierte Signals
+
+    Thread-Safety und Performance:
+        - Direkte Qt-Signal-Connections für Thread-safe UI-Updates ohne QMetaObject.invokeMethod()
+        - Vereinfachte Signal-Architektur eliminiert komplexe Method-Mapping-Overhead
+        - Automatic-Cleanup bei Tab-Destruction über proper Signal-Disconnection
+        - Memory-Leak-Prevention durch simplified Connection-Management
+
+    Vereinfachungen gegenüber vorheriger Version:
+        - Entfernt: Komplexe UI-Update-Method-Mappings (set_custom_ui_methods)
+        - Entfernt: OrchestratorIntegrationManager (zu komplex für homogene Tab-Integration)
+        - Entfernt: OrchestratorErrorHandler (wird vom Orchestrator selbst gehandhabt)
+        - Vereinfacht: Direkte Signal-Connections statt generischer generation_status_changed
+        - Standardisiert: Einheitlicher Konstruktor für alle Tabs ohne Generator-spezifische Parameter
+
+    Kommunikationskanäle:
+        - Input: Parameter von allen 6 Generator-Tabs über einheitliches Request-Pattern
+        - Output: Direkte Signals an Tab-spezifische Slots für UI-Updates
+        - Integration: Homogenes Setup-Pattern für terrain_tab, geology_tab, settlement_tab, weather_tab, water_tab, biome_tab
+        - Orchestrator: Einheitliche Request-Submission über OrchestratorRequestBuilder für alle Generator-Types
+    """
 
 import time
 import logging
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QMetaObject, Qt, Q_ARG
+from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
 
 
 @dataclass
@@ -31,14 +102,14 @@ class OrchestratorRequest:
 
 class StandardOrchestratorHandler(QObject):
     """
-    Funktionsweise: Wiederverwendbare Orchestrator-Integration für alle Generator-Tabs
-    Aufgabe: Eliminiert Code-Duplikation zwischen Generator-Tabs
-    Features: Standard-Signal-Handler, Thread-safe UI-Updates, Error-Recovery
+    Funktionsweise: Einheitliche Orchestrator-Integration für alle Generator-Tabs mit direkten Signals
+    Aufgabe: Eliminiert Code-Duplikation zwischen allen Generator-Tabs mit homogener Signal-Architektur
     """
 
-    # Signals für Handler-Communication
-    handler_error = pyqtSignal(str, str)  # (generator_type, error_message)
-    generation_status_changed = pyqtSignal(str, str, str)  # (generator_type, status, detail)
+    # Direkte Signals für alle Tabs (einheitliche Signatures)
+    generation_completed = pyqtSignal(str, dict)  # (result_id, result_data)
+    lod_progression_completed = pyqtSignal(str, str)  # (result_id, lod_level)
+    generation_progress = pyqtSignal(int, str)  # (progress, message)
 
     def __init__(self, parent_tab: QObject, generator_type: str):
         super().__init__()
@@ -50,17 +121,10 @@ class StandardOrchestratorHandler(QObject):
 
         self.logger = logging.getLogger(__name__)
 
-        # UI-Update-Method-Namen (können von Parent-Tab überschrieben werden)
-        self.ui_update_methods = {
-            'generation_started': '_update_ui_generation_started',
-            'generation_completed': '_update_ui_generation_completed',
-            'generation_progress': '_update_ui_generation_progress',
-            'lod_progression_completed': '_update_ui_lod_progression_completed'
-        }
-
-    def setup_standard_handlers(self):
+    def setup_standard_handlers(self) -> bool:
         """
-        Funktionsweise: Verbindet alle Standard-Orchestrator-Signals
+        Funktionsweise: Verbindet alle Standard-Orchestrator-Signals automatisch
+        Return: bool - Setup erfolgreich
         """
         if not self.orchestrator:
             self.logger.warning(f"No orchestrator available for {self.generator_type}")
@@ -68,14 +132,10 @@ class StandardOrchestratorHandler(QObject):
 
         # Standard-Signal-Verbindungen
         signal_mappings = [
-            ('generation_started', self._on_generation_started),
             ('generation_completed', self._on_generation_completed),
-            ('generation_progress', self._on_generation_progress)
+            ('generation_progress', self._on_generation_progress),
+            ('lod_progression_completed', self._on_lod_progression_completed)
         ]
-
-        # Optional: LOD-Progression (nicht alle Orchestrator haben das)
-        if hasattr(self.orchestrator, 'lod_progression_completed'):
-            signal_mappings.append(('lod_progression_completed', self._on_lod_progression_completed))
 
         # Verbindungen erstellen
         for signal_name, handler_method in signal_mappings:
@@ -89,105 +149,33 @@ class StandardOrchestratorHandler(QObject):
 
         return len(self.connected_signals) > 0
 
-    def set_custom_ui_methods(self, method_mapping: Dict[str, str]):
+    @pyqtSlot(str, dict)
+    def _on_generation_completed(self, result_id: str, result_data: dict):
         """
-        Funktionsweise: Erlaubt Custom UI-Update-Methods
-        Parameter: method_mapping {event_type: method_name}
+        Funktionsweise: Internal Handler für Generation-Completed
+        Emittiert: generation_completed Signal für Tab-Connections
         """
-        self.ui_update_methods.update(method_mapping)
+        generator_type = result_data.get('generator_type', '')
+        if generator_type == self.generator_type:
+            self.generation_completed.emit(result_id, result_data)
 
     @pyqtSlot(str, str)
-    def _on_generation_started(self, generator_type: str, lod_level: str):
+    def _on_lod_progression_completed(self, result_id: str, lod_level: str):
         """
-        Funktionsweise: Standard Generation-Started Handler
-        Parameter: generator_type, lod_level
+        Funktionsweise: Internal Handler für LOD-Progression
+        Emittiert: lod_progression_completed Signal für Tab-Connections
         """
-        if generator_type != self.generator_type:
-            return
+        # LOD-Progression ist immer relevant für den entsprechenden Generator-Type
+        self.lod_progression_completed.emit(result_id, lod_level)
 
-        self.generation_status_changed.emit(generator_type, "started", lod_level)
-
-        # Thread-safe UI-Update
-        method_name = self.ui_update_methods['generation_started']
-        if hasattr(self.parent_tab, method_name):
-            QMetaObject.invokeMethod(
-                self.parent_tab, method_name,
-                Qt.QueuedConnection,
-                Q_ARG(str, lod_level)
-            )
-        else:
-            self.logger.warning(f"UI update method {method_name} not found in parent tab")
-
-    @pyqtSlot(str, str, bool)
-    def _on_generation_completed(self, generator_type: str, lod_level: str, success: bool):
+    @pyqtSlot(int, str)
+    def _on_generation_progress(self, progress: int, message: str):
         """
-        Funktionsweise: Standard Generation-Completed Handler
-        Parameter: generator_type, lod_level, success
+        Funktionsweise: Internal Handler für Generation-Progress
+        Emittiert: generation_progress Signal für Tab-Connections
         """
-        if generator_type != self.generator_type:
-            return
-
-        status = "completed" if success else "failed"
-        self.generation_status_changed.emit(generator_type, status, lod_level)
-
-        # Thread-safe UI-Update
-        method_name = self.ui_update_methods['generation_completed']
-        if hasattr(self.parent_tab, method_name):
-            QMetaObject.invokeMethod(
-                self.parent_tab, method_name,
-                Qt.QueuedConnection,
-                Q_ARG(str, lod_level),
-                Q_ARG(bool, success)
-            )
-        else:
-            self.logger.warning(f"UI update method {method_name} not found in parent tab")
-
-    @pyqtSlot(str, str, int, str)
-    def _on_generation_progress(self, generator_type: str, lod_level: str,
-                                progress_percent: int, detail: str):
-        """
-        Funktionsweise: Standard Generation-Progress Handler
-        Parameter: generator_type, lod_level, progress_percent, detail
-        """
-        if generator_type != self.generator_type:
-            return
-
-        self.generation_status_changed.emit(generator_type, "progress", f"{progress_percent}%")
-
-        # Thread-safe UI-Update
-        method_name = self.ui_update_methods['generation_progress']
-        if hasattr(self.parent_tab, method_name):
-            QMetaObject.invokeMethod(
-                self.parent_tab, method_name,
-                Qt.QueuedConnection,
-                Q_ARG(str, lod_level),
-                Q_ARG(int, progress_percent),
-                Q_ARG(str, detail)
-            )
-        else:
-            self.logger.warning(f"UI update method {method_name} not found in parent tab")
-
-    @pyqtSlot(str, str)
-    def _on_lod_progression_completed(self, generator_type: str, final_lod: str):
-        """
-        Funktionsweise: Standard LOD-Progression Handler
-        Parameter: generator_type, final_lod
-        """
-        if generator_type != self.generator_type:
-            return
-
-        self.generation_status_changed.emit(generator_type, "lod_complete", final_lod)
-
-        # Thread-safe UI-Update
-        method_name = self.ui_update_methods['lod_progression_completed']
-        if hasattr(self.parent_tab, method_name):
-            QMetaObject.invokeMethod(
-                self.parent_tab, method_name,
-                Qt.QueuedConnection,
-                Q_ARG(str, final_lod)
-            )
-        else:
-            self.logger.warning(f"UI update method {method_name} not found in parent tab")
+        # Progress-Updates sind immer relevant
+        self.generation_progress.emit(progress, message)
 
     def cleanup_connections(self):
         """
@@ -206,53 +194,19 @@ class StandardOrchestratorHandler(QObject):
         self.connected_signals.clear()
         self.logger.debug(f"Disconnected {disconnected_count} orchestrator signals for {self.generator_type}")
 
-    def get_connection_status(self) -> Dict[str, bool]:
-        """
-        Funktionsweise: Gibt Status aller Signal-Verbindungen zurück
-        Return: dict {signal_name: is_connected}
-        """
-        status = {}
-        for signal_name, signal, connection in self.connected_signals:
-            try:
-                # Test connection by checking if signal exists
-                status[signal_name] = hasattr(self.orchestrator, signal_name)
-            except Exception:
-                status[signal_name] = False
-        return status
-
 
 class OrchestratorRequestBuilder:
     """
-    Funktionsweise: Builder-Pattern für Orchestrator-Requests
-    Aufgabe: Konsistente Request-Erstellung, Validation, Standard-Parameter
-    Features: Builder-Pattern, Validation, Default-Values, Request-Templates
+    Funktionsweise: Builder-Pattern für alle Generator-Types mit typ-sicherer Request-Erstellung
+    Aufgabe: Konsistente Request-Erstellung für alle 6 Standard-Generator-Types
     """
 
     @staticmethod
-    def build_standard_request(generator_type: str, parameters: Dict[str, Any],
-                               target_lod: str, source_tab: str, priority: int = 10) -> OrchestratorRequest:
-        """
-        Funktionsweise: Baut Standard-Orchestrator-Request
-        Parameter: generator_type, parameters, target_lod, source_tab, priority
-        Return: OrchestratorRequest
-        """
-        return OrchestratorRequest(
-            generator_type=generator_type,
-            parameters=parameters.copy(),  # Copy to prevent mutations
-            target_lod=target_lod,
-            source_tab=source_tab,
-            priority=priority
-        )
-
-    @staticmethod
     def build_terrain_request(parameters: Dict[str, Any], target_lod: str = "FINAL",
-                              source_tab: str = "terrain") -> OrchestratorRequest:
+                             source_tab: str = "terrain") -> OrchestratorRequest:
         """
-        Funktionsweise: Spezialisierter Terrain-Request
-        Parameter: parameters, target_lod, source_tab
-        Return: OrchestratorRequest
+        Funktionsweise: Terrain-Request mit Parameter-Validation
         """
-        # Terrain-spezifische Parameter-Validation
         validated_params = OrchestratorRequestBuilder._validate_terrain_parameters(parameters)
 
         return OrchestratorRequest(
@@ -265,11 +219,9 @@ class OrchestratorRequestBuilder:
 
     @staticmethod
     def build_geology_request(parameters: Dict[str, Any], target_lod: str = "FINAL",
-                              source_tab: str = "geology") -> OrchestratorRequest:
+                             source_tab: str = "geology") -> OrchestratorRequest:
         """
-        Funktionsweise: Spezialisierter Geology-Request
-        Parameter: parameters, target_lod, source_tab
-        Return: OrchestratorRequest
+        Funktionsweise: Geology-Request mit Parameter-Validation
         """
         validated_params = OrchestratorRequestBuilder._validate_geology_parameters(parameters)
 
@@ -282,11 +234,73 @@ class OrchestratorRequestBuilder:
         )
 
     @staticmethod
+    def build_weather_request(parameters: Dict[str, Any], target_lod: str = "FINAL",
+                             source_tab: str = "weather") -> OrchestratorRequest:
+        """
+        Funktionsweise: Weather-Request mit Parameter-Validation
+        """
+        validated_params = OrchestratorRequestBuilder._validate_weather_parameters(parameters)
+
+        return OrchestratorRequest(
+            generator_type="weather",
+            parameters=validated_params,
+            target_lod=target_lod,
+            source_tab=source_tab,
+            priority=7  # Medium priority
+        )
+
+    @staticmethod
+    def build_water_request(parameters: Dict[str, Any], target_lod: str = "FINAL",
+                           source_tab: str = "water") -> OrchestratorRequest:
+        """
+        Funktionsweise: Water-Request mit Parameter-Validation
+        """
+        validated_params = OrchestratorRequestBuilder._validate_water_parameters(parameters)
+
+        return OrchestratorRequest(
+            generator_type="water",
+            parameters=validated_params,
+            target_lod=target_lod,
+            source_tab=source_tab,
+            priority=6  # Medium priority
+        )
+
+    @staticmethod
+    def build_biome_request(parameters: Dict[str, Any], target_lod: str = "FINAL",
+                           source_tab: str = "biome") -> OrchestratorRequest:
+        """
+        Funktionsweise: Biome-Request mit Parameter-Validation
+        """
+        validated_params = OrchestratorRequestBuilder._validate_biome_parameters(parameters)
+
+        return OrchestratorRequest(
+            generator_type="biome",
+            parameters=validated_params,
+            target_lod=target_lod,
+            source_tab=source_tab,
+            priority=5  # Medium-low priority
+        )
+
+    @staticmethod
+    def build_settlement_request(parameters: Dict[str, Any], target_lod: str = "FINAL",
+                                source_tab: str = "settlement") -> OrchestratorRequest:
+        """
+        Funktionsweise: Settlement-Request mit Parameter-Validation
+        """
+        validated_params = OrchestratorRequestBuilder._validate_settlement_parameters(parameters)
+
+        return OrchestratorRequest(
+            generator_type="settlement",
+            parameters=validated_params,
+            target_lod=target_lod,
+            source_tab=source_tab,
+            priority=4  # Low priority (letzter in Chain)
+        )
+
+    @staticmethod
     def build_batch_request(requests: List[OrchestratorRequest]) -> Dict[str, Any]:
         """
         Funktionsweise: Erstellt Batch-Request für mehrere Generatoren
-        Parameter: requests
-        Return: Batch-Request dict
         """
         return {
             "batch_id": f"batch_{int(time.time())}",
@@ -307,8 +321,6 @@ class OrchestratorRequestBuilder:
     def validate_request(request: OrchestratorRequest) -> tuple[bool, List[str]]:
         """
         Funktionsweise: Validiert Orchestrator-Request
-        Parameter: request
-        Return: (is_valid, error_messages)
         """
         errors = []
 
@@ -335,14 +347,9 @@ class OrchestratorRequestBuilder:
 
     @staticmethod
     def _validate_terrain_parameters(parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Funktionsweise: Validiert und korrigiert Terrain-Parameter
-        Parameter: parameters
-        Return: Validierte Parameter
-        """
+        """Validiert und korrigiert Terrain-Parameter"""
         validated = parameters.copy()
 
-        # Required Terrain-Parameter mit Defaults
         defaults = {
             "size": 512,
             "amplitude": 100,
@@ -354,7 +361,6 @@ class OrchestratorRequestBuilder:
             "map_seed": 12345
         }
 
-        # Fehlende Parameter mit Defaults ergänzen
         for param, default_value in defaults.items():
             if param not in validated:
                 validated[param] = default_value
@@ -374,14 +380,9 @@ class OrchestratorRequestBuilder:
 
     @staticmethod
     def _validate_geology_parameters(parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Funktionsweise: Validiert und korrigiert Geology-Parameter
-        Parameter: parameters
-        Return: Validierte Parameter
-        """
+        """Validiert und korrigiert Geology-Parameter"""
         validated = parameters.copy()
 
-        # Required Geology-Parameter mit Defaults
         defaults = {
             "sedimentary_hardness": 30,
             "igneous_hardness": 80,
@@ -393,7 +394,6 @@ class OrchestratorRequestBuilder:
             "igneous_flowing": 0.6
         }
 
-        # Fehlende Parameter mit Defaults ergänzen
         for param, default_value in defaults.items():
             if param not in validated:
                 validated[param] = default_value
@@ -408,377 +408,107 @@ class OrchestratorRequestBuilder:
 
         return validated
 
+    @staticmethod
+    def _validate_weather_parameters(parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Validiert und korrigiert Weather-Parameter"""
+        validated = parameters.copy()
 
-class OrchestratorErrorHandler:
-    """
-    Funktionsweise: Error-Handling für Orchestrator-Integration
-    Aufgabe: Error-Recovery, Retry-Logic, Fallback-Strategies
-    Features: Automatic-Retry, Error-Classification, Recovery-Strategies
-    """
-
-    def __init__(self, max_retries: int = 3, retry_delay: float = 1.0):
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.error_counts = {}  # {generator_type: error_count}
-        self.last_errors = {}  # {generator_type: last_error_message}
-
-        self.logger = logging.getLogger(__name__)
-
-    def handle_generation_error(self, generator_type: str, error_message: str,
-                                request: OrchestratorRequest) -> Optional[OrchestratorRequest]:
-        """
-        Funktionsweise: Behandelt Generation-Error mit Retry-Logic
-        Parameter: generator_type, error_message, request
-        Return: Retry-Request oder None
-        """
-        # Error-Count tracking
-        self.error_counts[generator_type] = self.error_counts.get(generator_type, 0) + 1
-        self.last_errors[generator_type] = error_message
-
-        error_count = self.error_counts[generator_type]
-
-        # Error-Classification
-        error_type = self._classify_error(error_message)
-
-        self.logger.warning(f"Generation error for {generator_type} (attempt {error_count}): {error_message}")
-
-        # Retry-Logic basierend auf Error-Type
-        if error_type == "retryable" and error_count <= self.max_retries:
-            # Create retry request mit modifizierten Parametern
-            retry_request = self._create_retry_request(request, error_count)
-
-            self.logger.info(f"Scheduling retry {error_count}/{self.max_retries} for {generator_type}")
-            return retry_request
-
-        elif error_type == "parameter_error":
-            # Versuche Parameter-Korrektur
-            corrected_request = self._attempt_parameter_correction(request, error_message)
-            if corrected_request and error_count <= self.max_retries:
-                self.logger.info(f"Attempting parameter correction for {generator_type}")
-                return corrected_request
-
-        # Keine Retry-Möglichkeit
-        self.logger.error(f"Generation failed permanently for {generator_type}: {error_message}")
-        return None
-
-    def reset_error_count(self, generator_type: str):
-        """
-        Funktionsweise: Setzt Error-Count für Generator zurück
-        Parameter: generator_type
-        """
-        self.error_counts.pop(generator_type, None)
-        self.last_errors.pop(generator_type, None)
-
-    def get_error_summary(self) -> Dict[str, Any]:
-        """
-        Funktionsweise: Gibt Error-Summary für alle Generatoren zurück
-        Return: Error-Summary dict
-        """
-        return {
-            "error_counts": dict(self.error_counts),
-            "last_errors": dict(self.last_errors),
-            "total_errors": sum(self.error_counts.values())
+        defaults = {
+            "air_temp_entry": 15.0,
+            "solar_power": 1.0,
+            "altitude_cooling": 0.65,
+            "thermic_effect": 1.0,
+            "wind_speed_factor": 1.0,
+            "terrain_factor": 1.0
         }
 
-    def _classify_error(self, error_message: str) -> str:
-        """
-        Funktionsweise: Klassifiziert Error-Type für Retry-Strategy
-        Parameter: error_message
-        Return: Error-Type string
-        """
-        error_msg_lower = error_message.lower()
+        for param, default_value in defaults.items():
+            if param not in validated:
+                validated[param] = default_value
 
-        # Memory-Errors (meist retryable mit niedrigerem LOD)
-        if any(keyword in error_msg_lower for keyword in ["memory", "out of memory", "allocation"]):
-            return "memory_error"
+        return validated
 
-        # Parameter-Errors (korrigierbar)
-        if any(keyword in error_msg_lower for keyword in ["parameter", "invalid", "range", "constraint"]):
-            return "parameter_error"
+    @staticmethod
+    def _validate_water_parameters(parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Validiert und korrigiert Water-Parameter"""
+        validated = parameters.copy()
 
-        # Network/IO-Errors (retryable)
-        if any(keyword in error_msg_lower for keyword in ["timeout", "connection", "io", "file"]):
-            return "retryable"
-
-        # Critical-Errors (nicht retryable)
-        if any(keyword in error_msg_lower for keyword in ["critical", "fatal", "corrupted"]):
-            return "critical"
-
-        # Default: retryable
-        return "retryable"
-
-    def _create_retry_request(self, original_request: OrchestratorRequest,
-                              attempt_number: int) -> OrchestratorRequest:
-        """
-        Funktionsweise: Erstellt Retry-Request mit angepassten Parametern
-        Parameter: original_request, attempt_number
-        Return: Modified OrchestratorRequest
-        """
-        retry_request = OrchestratorRequest(
-            generator_type=original_request.generator_type,
-            parameters=original_request.parameters.copy(),
-            target_lod=original_request.target_lod,
-            source_tab=original_request.source_tab,
-            priority=max(1, original_request.priority - attempt_number)  # Lower priority for retries
-        )
-
-        # Bei Memory-Errors: LOD reduzieren
-        if attempt_number > 1:
-            lod_downgrade = {
-                "FINAL": "LOD256",
-                "LOD256": "LOD128",
-                "LOD128": "LOD64",
-                "LOD64": "LOD64"  # Minimum
-            }
-            retry_request.target_lod = lod_downgrade.get(retry_request.target_lod, "LOD64")
-
-        return retry_request
-
-    def _attempt_parameter_correction(self, request: OrchestratorRequest,
-                                      error_message: str) -> Optional[OrchestratorRequest]:
-        """
-        Funktionsweise: Versucht Parameter-Korrektur basierend auf Error-Message
-        Parameter: request, error_message
-        Return: Corrected request oder None
-        """
-        corrected_params = request.parameters.copy()
-        correction_made = False
-
-        # Size-Parameter-Korrektur
-        if "size" in error_message.lower():
-            if "too large" in error_message.lower():
-                current_size = corrected_params.get("size", 512)
-                corrected_params["size"] = max(64, current_size // 2)
-                correction_made = True
-            elif "too small" in error_message.lower():
-                current_size = corrected_params.get("size", 512)
-                corrected_params["size"] = min(2048, current_size * 2)
-                correction_made = True
-
-        # Octaves-Parameter-Korrektur
-        if "octaves" in error_message.lower():
-            corrected_params["octaves"] = min(6, corrected_params.get("octaves", 6))
-            correction_made = True
-
-        if correction_made:
-            return OrchestratorRequest(
-                generator_type=request.generator_type,
-                parameters=corrected_params,
-                target_lod=request.target_lod,
-                source_tab=request.source_tab,
-                priority=request.priority
-            )
-
-        return None
-
-
-class OrchestratorIntegrationManager:
-    """
-    Funktionsweise: High-Level Manager für komplette Orchestrator-Integration
-    Aufgabe: Koordiniert Handler, Request-Builder und Error-Handler für komplette Integration
-    Features: Multi-Tab-Management, Batch-Operations, Status-Monitoring
-    """
-
-    def __init__(self):
-        self.handlers = {}  # {generator_type: StandardOrchestratorHandler}
-        self.error_handler = OrchestratorErrorHandler()
-        self.request_queue = []  # Pending requests
-        self.active_generations = {}  # {generator_type: request}
-
-        self.logger = logging.getLogger(__name__)
-
-    def register_tab(self, tab_instance: QObject, generator_type: str) -> bool:
-        """
-        Funktionsweise: Registriert Tab für Orchestrator-Integration
-        Parameter: tab_instance, generator_type
-        Return: bool - Registration erfolgreich
-        """
-        try:
-            handler = StandardOrchestratorHandler(tab_instance, generator_type)
-
-            if handler.setup_standard_handlers():
-                self.handlers[generator_type] = handler
-                self.logger.info(f"Registered orchestrator handler for {generator_type}")
-                return True
-            else:
-                self.logger.error(f"Failed to setup handlers for {generator_type}")
-                return False
-
-        except Exception as e:
-            self.logger.error(f"Failed to register {generator_type}: {e}")
-            return False
-
-    def request_generation(self, generator_type: str, parameters: Dict[str, Any],
-                           target_lod: str = "FINAL", source_tab: str = None) -> bool:
-        """
-        Funktionsweise: Requests Generation über registrierten Handler
-        Parameter: generator_type, parameters, target_lod, source_tab
-        Return: bool - Request erfolgreich
-        """
-        if generator_type not in self.handlers:
-            self.logger.error(f"No handler registered for {generator_type}")
-            return False
-
-        # Request erstellen
-        if generator_type == "terrain":
-            request = OrchestratorRequestBuilder.build_terrain_request(
-                parameters, target_lod, source_tab or "terrain"
-            )
-        elif generator_type == "geology":
-            request = OrchestratorRequestBuilder.build_geology_request(
-                parameters, target_lod, source_tab or "geology"
-            )
-        else:
-            request = OrchestratorRequestBuilder.build_standard_request(
-                generator_type, parameters, target_lod, source_tab or generator_type
-            )
-
-        # Request validieren
-        is_valid, errors = OrchestratorRequestBuilder.validate_request(request)
-        if not is_valid:
-            self.logger.error(f"Invalid request for {generator_type}: {errors}")
-            return False
-
-        # Request an Orchestrator senden
-        handler = self.handlers[generator_type]
-        orchestrator = handler.orchestrator
-
-        if not orchestrator:
-            self.logger.error(f"No orchestrator available for {generator_type}")
-            return False
-
-        try:
-            request_id = orchestrator.request_generation(
-                generator_type=request.generator_type,
-                parameters=request.parameters,
-                target_lod=request.target_lod,
-                source_tab=request.source_tab,
-                priority=request.priority
-            )
-
-            if request_id:
-                self.active_generations[generator_type] = request
-                self.logger.info(f"Generation requested for {generator_type}: {request_id}")
-                return True
-            else:
-                self.logger.error(f"Orchestrator rejected request for {generator_type}")
-                return False
-
-        except Exception as e:
-            self.logger.error(f"Failed to request generation for {generator_type}: {e}")
-
-            # Error-Handler für Retry-Logic
-            retry_request = self.error_handler.handle_generation_error(
-                generator_type, str(e), request
-            )
-
-            if retry_request:
-                # Schedule retry
-                self.request_queue.append(retry_request)
-                self.logger.info(f"Scheduled retry for {generator_type}")
-
-            return False
-
-    def request_batch_generation(self, requests: List[Dict[str, Any]]) -> Dict[str, bool]:
-        """
-        Funktionsweise: Requests mehrere Generationen als Batch
-        Parameter: requests - List von {generator_type, parameters, target_lod}
-        Return: dict {generator_type: success}
-        """
-        results = {}
-
-        for request_data in requests:
-            generator_type = request_data["generator_type"]
-            parameters = request_data["parameters"]
-            target_lod = request_data.get("target_lod", "FINAL")
-            source_tab = request_data.get("source_tab")
-
-            success = self.request_generation(generator_type, parameters, target_lod, source_tab)
-            results[generator_type] = success
-
-        self.logger.info(f"Batch generation requested: {sum(results.values())}/{len(results)} successful")
-        return results
-
-    def get_generation_status(self) -> Dict[str, Any]:
-        """
-        Funktionsweise: Gibt Status aller aktiven Generationen zurück
-        Return: Status dict
-        """
-        status = {
-            "active_generations": list(self.active_generations.keys()),
-            "registered_handlers": list(self.handlers.keys()),
-            "pending_requests": len(self.request_queue),
-            "error_summary": self.error_handler.get_error_summary()
+        defaults = {
+            "lake_volume_threshold": 100,
+            "rain_threshold": 0.1,
+            "manning_coefficient": 0.03,
+            "erosion_strength": 1.0,
+            "sediment_capacity_factor": 1.0,
+            "evaporation_base_rate": 0.01,
+            "diffusion_radius": 3,
+            "settling_velocity": 0.1
         }
 
-        # Handler-Status
-        for generator_type, handler in self.handlers.items():
-            status[f"{generator_type}_connections"] = handler.get_connection_status()
+        for param, default_value in defaults.items():
+            if param not in validated:
+                validated[param] = default_value
 
-        return status
+        return validated
 
-    def cleanup_all_handlers(self):
-        """
-        Funktionsweise: Cleanup aller registrierten Handler
-        """
-        for generator_type, handler in self.handlers.items():
-            try:
-                handler.cleanup_connections()
-            except Exception as e:
-                self.logger.error(f"Failed to cleanup handler for {generator_type}: {e}")
+    @staticmethod
+    def _validate_biome_parameters(parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Validiert und korrigiert Biome-Parameter"""
+        validated = parameters.copy()
 
-        self.handlers.clear()
-        self.active_generations.clear()
-        self.request_queue.clear()
+        defaults = {
+            "biome_wetness_factor": 1.0,
+            "biome_temp_factor": 1.0,
+            "sea_level": 0.0,
+            "bank_width": 5,
+            "edge_softness": 1.0,
+            "alpine_level": 2000,
+            "snow_level": 2500,
+            "cliff_slope": 30
+        }
 
-        self.logger.info("All orchestrator handlers cleaned up")
+        for param, default_value in defaults.items():
+            if param not in validated:
+                validated[param] = default_value
+
+        return validated
+
+    @staticmethod
+    def _validate_settlement_parameters(parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Validiert und korrigiert Settlement-Parameter"""
+        validated = parameters.copy()
+
+        defaults = {
+            "settlements": 8,
+            "landmarks": 5,
+            "roadsites": 15,
+            "plotnodes": 200,
+            "civ_influence_decay": 0.8,
+            "terrain_factor_villages": 1.0,
+            "road_slope_to_distance_ratio": 1.0,
+            "landmark_wilderness": 0.2,
+            "plotsize": 100
+        }
+
+        for param, default_value in defaults.items():
+            if param not in validated:
+                validated[param] = default_value
+
+        return validated
 
 
-# Utility Functions für Orchestrator-Manager
+# Utility Functions für vereinfachte Tab-Integration
 
-def create_standard_orchestrator_integration() -> OrchestratorIntegrationManager:
+def setup_tab_orchestrator_integration(tab_instance: QObject, generator_type: str) -> StandardOrchestratorHandler:
     """
-    Funktionsweise: Factory für Standard-Orchestrator-Integration
-    Return: Konfigurierter OrchestratorIntegrationManager
-    """
-    return OrchestratorIntegrationManager()
-
-
-def setup_tab_orchestrator_integration(tab_instance: QObject, generator_type: str,
-                                       integration_manager: Optional[
-                                           OrchestratorIntegrationManager] = None) -> StandardOrchestratorHandler:
-    """
-    Funktionsweise: Setup für einzelnen Tab mit Orchestrator-Integration
-    Parameter: tab_instance, generator_type, integration_manager
+    Funktionsweise: Einheitliches Setup für alle Generator-Tabs
+    Parameter: tab_instance, generator_type
     Return: StandardOrchestratorHandler
     """
-    if integration_manager:
-        integration_manager.register_tab(tab_instance, generator_type)
-        return integration_manager.handlers.get(generator_type)
-    else:
-        # Standalone-Handler
-        handler = StandardOrchestratorHandler(tab_instance, generator_type)
-        handler.setup_standard_handlers()
+    handler = StandardOrchestratorHandler(tab_instance, generator_type)
+
+    if handler.setup_standard_handlers():
+        logging.getLogger(__name__).info(f"Orchestrator handler setup completed for {generator_type}")
         return handler
-
-
-def register_standard_map_generator_tabs(integration_manager: OrchestratorIntegrationManager,
-                                         tabs: Dict[str, QObject]) -> Dict[str, bool]:
-    """
-    Funktionsweise: Registriert alle Standard-Map-Generator-Tabs
-    Parameter: integration_manager, tabs {generator_type: tab_instance}
-    Return: dict {generator_type: registration_success}
-    """
-    results = {}
-
-    # Standard-Tab-Types
-    standard_generators = ["terrain", "geology", "water", "weather", "biome", "settlement"]
-
-    for generator_type in standard_generators:
-        if generator_type in tabs:
-            success = integration_manager.register_tab(tabs[generator_type], generator_type)
-            results[generator_type] = success
-        else:
-            results[generator_type] = False
-
-    return results
+    else:
+        logging.getLogger(__name__).error(f"Failed to setup orchestrator handler for {generator_type}")
+        return handler

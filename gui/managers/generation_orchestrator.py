@@ -1,27 +1,9 @@
 """
 Path: gui/managers/generation_orchestrator.py
 
-Funktionsweise: Zentrale Orchestrierung aller Generator-Berechnungen mit LOD-System und Dependency-Management
-- Verwaltet komplette Dependency-Chain: Terrain → Geology → Weather → Water → Biome → Settlement
-- LOD-Progression-System: LOD64 → LOD128 → LOD256 → LODFINAL mit Background-Threading
-- Intelligente Dependency-Queue verhindert Deadlocks und löst Dependencies automatisch auf
-- Cross-Generator Dependency-Tracking und automatische Neu-Berechnung
-- Threading-Koordination für parallele und sequenzielle Generation
-- Memory-Management und Performance-Optimierung für große Datenmengen
-- Thread-Status-Display für 8 Generator-Threads mit UI-Integration
-
-Kommunikation:
-- Input: Parameter-Änderungen von allen Tabs
-- Output: Signals für UI-Updates, Data-Manager Updates, Progress-Callbacks
-- Threading: Background-Threads für LOD-Enhancement ohne UI-Blocking
-- Dependencies: Koordiniert mit DataManager für Cross-Tab Data-Sharing
-
-Design-Pattern:
-- Observer-Pattern für Tab-Communication
-- Command-Pattern für Generation-Requests
-- Strategy-Pattern für verschiedene LOD-Levels
-- Factory-Pattern für Generator-Instanzen
-- Queue-Pattern für Dependency-Resolution
+Funktionsweise: Zentrale Orchestrierung aller Generator-Berechnungen mit homogener Signal-Architektur für alle Tabs
+Aufgabe: Koordiniert alle 6 Generatoren mit einheitlichen Signals, LOD-System, Dependency-Management und Threading
+Features: Tab-kompatible Signal-Signatures, Request-Processing, Background-Threading, Dependency-Resolution
 """
 
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, QMutex, QMutexLocker, QTimer
@@ -111,7 +93,7 @@ class ThreadState:
 
 class GenerationStateTracker:
     """
-    Funktionsweise: Trackt Status aller 8 Generator-Threads für UI-Display
+    Funktionsweise: Trackt Status aller 6 Generator-Threads für UI-Display
     Aufgabe: Zentrale Status-Verwaltung für Thread-Status-Display
     """
 
@@ -162,7 +144,7 @@ class GenerationStateTracker:
 
     def get_all_thread_status(self) -> List[Dict[str, Any]]:
         """
-        Funktionsweise: Gibt Status aller 8 Threads für UI-Display zurück
+        Funktionsweise: Gibt Status aller 6 Threads für UI-Display zurück
         Return: Liste von Thread-Status-Dicts für UI-Integration
         """
         status_list = []
@@ -279,24 +261,18 @@ class DependencyQueue:
 
 class GenerationOrchestrator(QObject):
     """
-    Funktionsweise: Zentrale Orchestrierung aller Map-Generation mit LOD-System und Dependencies
-    Aufgabe: Koordiniert alle Generatoren, Threading, Caching und Cross-Dependencies
-    Threading: Background-Threads für LOD-Enhancement, Main-Thread für UI-Updates
+    Funktionsweise: Zentrale Orchestrierung aller Map-Generation mit homogener Signal-Architektur für alle Tabs
+    Aufgabe: Koordiniert alle 6 Generatoren mit einheitlichen Signals für StandardOrchestratorHandler-Integration
     """
 
-    # Signals für Cross-Component Communication
-    generation_started = pyqtSignal(str, str)  # (generator_type, lod_level)
-    generation_completed = pyqtSignal(str, str, bool)  # (generator_type, lod_level, success)
-    generation_progress = pyqtSignal(str, str, int, str)  # (generator_type, lod_level, percent, detail)
+    # Homogene Signal-Architektur für alle Tabs (kompatibel mit StandardOrchestratorHandler)
+    generation_completed = pyqtSignal(str, dict)  # (result_id, result_data)
+    lod_progression_completed = pyqtSignal(str, str)  # (result_id, lod_level)
+    generation_progress = pyqtSignal(int, str)  # (progress, message)
 
-    lod_progression_started = pyqtSignal(str, str)  # (generator_type, target_lod)
-    lod_progression_completed = pyqtSignal(str, str)  # (generator_type, final_lod)
-
+    # Zusätzliche Signals für erweiterte Funktionalität
     dependency_invalidated = pyqtSignal(str, list)  # (generator_type, affected_generators)
     batch_generation_completed = pyqtSignal(bool, str)  # (success, summary_message)
-
-    # Signals für Queue-System
-    request_queued = pyqtSignal(str, str, str)  # (generator_type, lod_level, status)
     queue_status_changed = pyqtSignal(list)  # (thread_status_list)
 
     def __init__(self, data_manager):
@@ -366,6 +342,9 @@ class GenerationOrchestrator(QObject):
         self.state_tracker = GenerationStateTracker()
         self.processing_requests = set()
 
+        # Request-Tracking für result_id Management
+        self.active_request_mapping = {}  # request_id -> GenerationRequest
+
         # Performance-Monitoring
         self.generation_timings = {}
         self.memory_usage_tracking = {}
@@ -414,41 +393,53 @@ class GenerationOrchestrator(QObject):
         self.timeout_check_timer.start(30000)  # Alle 30 Sekunden
 
     @core_generation_handler("generation_request")
-    def request_generation(self, generator_type: str, parameters: Dict[str, Any],
-                          target_lod: str = "FINAL", source_tab: str = "unknown",
-                          priority: int = 0) -> str:
+    def request_generation(self, request) -> str:
         """
-        Funktionsweise: Haupteinstiegspunkt für alle Generation-Requests mit Dependency-Queue-Integration
-        Parameter: generator_type, parameters, target_lod, source_tab, priority
-        Return: request_id für Tracking
+        Funktionsweise: Einheitlicher Entry-Point für alle Generator-Requests von allen Tabs
+        Parameter: request - OrchestratorRequest von OrchestratorRequestBuilder
+        Return: request_id für Request-Tracking
         """
-        # Enum-Validation
-        try:
-            gen_type_enum = GeneratorType(generator_type)
-            target_lod_enum = LODLevel(target_lod)
-        except ValueError as e:
-            self.logger.error(f"Invalid generator_type or target_lod: {e}")
+        # Convert zu internem GenerationRequest falls nötig
+        if hasattr(request, 'generator_type') and hasattr(request, 'parameters'):
+            # OrchestratorRequest von orchestrator_manager
+            try:
+                gen_type_enum = GeneratorType(request.generator_type)
+                target_lod_enum = LODLevel(request.target_lod)
+            except ValueError as e:
+                self.logger.error(f"Invalid generator_type or target_lod: {e}")
+                return None
+
+            internal_request = GenerationRequest(
+                gen_type_enum,
+                request.parameters,
+                target_lod_enum,
+                request.source_tab,
+                request.priority
+            )
+        else:
+            # Fallback für Legacy-Calls
+            self.logger.warning("Legacy request format detected")
             return None
 
         # Parameter-Impact-Analyse
-        affected_generators = self.calculate_parameter_impact(gen_type_enum, parameters)
+        affected_generators = self.calculate_parameter_impact(internal_request.generator_type, internal_request.parameters)
 
         # Cache-Invalidation für betroffene Generatoren
         if affected_generators:
-            self.invalidate_downstream_dependencies(gen_type_enum, affected_generators)
-
-        # Request erstellen
-        request = GenerationRequest(gen_type_enum, parameters, target_lod_enum, source_tab, priority)
+            self.invalidate_downstream_dependencies(internal_request.generator_type, affected_generators)
 
         # Request zur DependencyQueue hinzufügen
-        self.dependency_queue.add_request(request)
-        self.state_tracker.set_request_queued(request)
+        self.dependency_queue.add_request(internal_request)
+        self.state_tracker.set_request_queued(internal_request)
+
+        # Request-Mapping für result_id Management
+        self.active_request_mapping[internal_request.request_id] = internal_request
 
         # Queue-Status-Update emittieren
         self.emit_queue_status_update()
 
-        self.logger.info(f"Generation queued: {request.request_id}")
-        return request.request_id
+        self.logger.info(f"Generation queued: {internal_request.request_id}")
+        return internal_request.request_id
 
     @threading_handler("dependency_resolution")
     def resolve_dependency_queue(self):
@@ -517,6 +508,9 @@ class GenerationOrchestrator(QObject):
         # Request aus aktiven entfernen
         self.processing_requests.discard(request)
 
+        # Request-Mapping aufräumen
+        self.active_request_mapping.pop(request.request_id, None)
+
         # Thread stoppen falls vorhanden
         thread_key = f"{request.generator_type.value}_{request.target_lod.value}"
         with QMutexLocker(self.thread_mutex):
@@ -549,7 +543,7 @@ class GenerationOrchestrator(QObject):
     def emit_queue_status_update(self):
         """
         Funktionsweise: Emittiert aktuellen Queue-Status für UI-Updates
-        Aufgabe: Stellt 8-Thread-Status für UI-Display bereit
+        Aufgabe: Stellt 6-Thread-Status für UI-Display bereit
         """
         status_list = self.state_tracker.get_all_thread_status()
         self.queue_status_changed.emit(status_list)
@@ -690,11 +684,8 @@ class GenerationOrchestrator(QObject):
         # Queue speichern für Tracking
         self.lod_progression_queue[generator_type.value] = lod_sequence
 
-        # Signal emittieren
-        self.lod_progression_started.emit(generator_type.value, target_lod.value)
-
         # Erste LOD-Stufe starten
-        return self.execute_next_lod_level(generator_type, request.parameters)
+        return self.execute_next_lod_level(generator_type, request.parameters, request.request_id)
 
     def create_lod_sequence(self, generator_type: GeneratorType, target_lod: LODLevel) -> List[LODLevel]:
         """
@@ -719,17 +710,17 @@ class GenerationOrchestrator(QObject):
         else:
             return []  # Bereits höheres LOD verfügbar
 
-    def execute_next_lod_level(self, generator_type: GeneratorType, parameters: Dict[str, Any]) -> bool:
+    def execute_next_lod_level(self, generator_type: GeneratorType, parameters: Dict[str, Any], request_id: str) -> bool:
         """
         Funktionsweise: Führt nächstes LOD-Level in der Progression aus
-        Parameter: generator_type, parameters
+        Parameter: generator_type, parameters, request_id
         Return: bool - Success
         """
         queue_key = generator_type.value
 
         if queue_key not in self.lod_progression_queue or not self.lod_progression_queue[queue_key]:
-            # Progression abgeschlossen
-            self.lod_progression_completed.emit(generator_type.value, "COMPLETED")
+            # Progression abgeschlossen - Final Completion Signal emittieren
+            self.emit_final_completion_signal(request_id, generator_type)
             return True
 
         # Nächstes LOD-Level aus Queue
@@ -749,12 +740,13 @@ class GenerationOrchestrator(QObject):
             lod_level=current_lod,
             parameters=parameters,
             data_manager=self.data_manager,
+            request_id=request_id,
             parent=self
         )
 
         # Thread-Signals verbinden
         thread.generation_completed.connect(self.on_lod_generation_completed)
-        thread.generation_progress.connect(self.generation_progress.emit)
+        thread.generation_progress.connect(self.on_generation_progress)
 
         # Thread starten
         with QMutexLocker(self.thread_mutex):
@@ -763,23 +755,21 @@ class GenerationOrchestrator(QObject):
 
         thread.start()
 
-        # Signal emittieren
-        self.generation_started.emit(generator_type.value, current_lod.value)
-
         return True
 
-    def on_lod_generation_completed(self, generator_type: str, lod_level: str, success: bool):
+    def on_lod_generation_completed(self, request_id: str, generator_type: str, lod_level: str, success: bool,
+                                    result_data: dict):
         """
-        Funktionsweise: Callback für abgeschlossene LOD-Generation
-        Parameter: generator_type, lod_level, success
+        Funktionsweise: Callback für abgeschlossene LOD-Generation mit Tab-kompatiblen Signals
+        Parameter: request_id, generator_type, lod_level, success, result_data
         """
         # LOD-Status aktualisieren
         if success:
             self.lod_completion_status[generator_type][lod_level] = True
             self.state_tracker.set_request_completed(generator_type, lod_level)
 
-        # Signal emittieren
-        self.generation_completed.emit(generator_type, lod_level, success)
+        # LOD-Progression-Signal emittieren (für sofortige UI-Updates mit bestem verfügbarem LOD)
+        self.lod_progression_completed.emit(request_id, lod_level)
 
         # Thread aufräumen
         thread_key = f"{generator_type}_{lod_level}"
@@ -791,13 +781,67 @@ class GenerationOrchestrator(QObject):
             # Nächstes LOD-Level starten
             try:
                 generator_type_enum = GeneratorType(generator_type)
-                # Parameters aus letzter Request verwenden (würde normalerweise gespeichert werden)
-                self.execute_next_lod_level(generator_type_enum, {})
+
+                # Original-Request aus Mapping holen für Parameter
+                original_request = self.active_request_mapping.get(request_id)
+                if original_request:
+                    self.execute_next_lod_level(generator_type_enum, original_request.parameters, request_id)
+                else:
+                    self.logger.warning(f"Could not find original request for {request_id}")
+
             except ValueError:
                 self.logger.error(f"Invalid generator_type in callback: {generator_type}")
+        else:
+            # Bei Fehler: Request aus aktiven entfernen
+            original_request = self.active_request_mapping.get(request_id)
+            if original_request:
+                self.processing_requests.discard(original_request)
+                self.active_request_mapping.pop(request_id, None)
+                self.state_tracker.set_request_failed(original_request, result_data.get("error", "Unknown error"))
 
         # Queue-Resolution triggern falls neue Dependencies verfügbar
         QTimer.singleShot(100, self.resolve_dependency_queue)
+
+    def on_generation_progress(self, progress: int, message: str):
+        """
+        Funktionsweise: Callback für Generation-Progress mit vereinfachten Parametern
+        Parameter: progress, message
+        """
+        # Vereinfachtes Progress-Signal emittieren (ohne Generator-spezifische Parameter)
+        self.generation_progress.emit(progress, message)
+
+    def emit_final_completion_signal(self, request_id: str, generator_type: GeneratorType):
+        """
+        Funktionsweise: Emittiert Final-Completion-Signal wenn alle LOD-Level abgeschlossen sind
+        Parameter: request_id, generator_type
+        """
+        # Original-Request aus Mapping holen
+        original_request = self.active_request_mapping.get(request_id)
+        if not original_request:
+            self.logger.warning(f"Could not find original request for final completion: {request_id}")
+            return
+
+        # Generator-Output aus DataManager holen
+        generator_data = self.data_manager.get_generator_data(generator_type.value)
+
+        # result_data für Tab-Kompatibilität zusammenstellen
+        result_data = {
+            "generator_type": generator_type.value,
+            "lod_level": original_request.target_lod.value,
+            "success": True,
+            "data": generator_data,
+            "source_tab": original_request.source_tab,
+            "timestamp": time.time()
+        }
+
+        # Final-Completion-Signal emittieren (für Tab on_generation_completed Handlers)
+        self.generation_completed.emit(request_id, result_data)
+
+        # Request aus aktiven entfernen
+        self.processing_requests.discard(original_request)
+        self.active_request_mapping.pop(request_id, None)
+
+        self.logger.info(f"Final completion emitted for {request_id}")
 
     def get_generator_instance(self, generator_type: GeneratorType):
         """
@@ -876,41 +920,38 @@ class GenerationOrchestrator(QObject):
             self.dependency_queue.clear()
         self.processing_requests.clear()
         self.lod_progression_queue.clear()
+        self.active_request_mapping.clear()
 
         self.logger.info("Generation orchestrator cleanup completed")
 
 
 class GenerationThread(QThread):
     """
-    Funktionsweise: Worker-Thread für einzelne Generator-Ausführung
+    Funktionsweise: Worker-Thread für einzelne Generator-Ausführung mit Tab-kompatiblen Signals
     Aufgabe: Background-Generation ohne UI-Blocking
     """
 
-    generation_completed = pyqtSignal(str, str, bool)  # (generator_type, lod_level, success)
-    generation_progress = pyqtSignal(str, str, int, str)  # (generator_type, lod_level, percent, detail)
+    generation_completed = pyqtSignal(str, str, str, bool, dict)  # (request_id, generator_type, lod_level, success, result_data)
+    generation_progress = pyqtSignal(int, str)  # (progress, message) - vereinfacht für alle Tabs
 
     def __init__(self, generator_instance, generator_type: GeneratorType, lod_level: LODLevel,
-                 parameters: Dict[str, Any], data_manager, parent=None):
+                 parameters: Dict[str, Any], data_manager, request_id: str, parent=None):
         super().__init__(parent)
         self.generator_instance = generator_instance
         self.generator_type = generator_type
         self.lod_level = lod_level
         self.parameters = parameters
         self.data_manager = data_manager
+        self.request_id = request_id
 
     def run(self):
         """
-        Funktionsweise: Thread-Execution für Generator
+        Funktionsweise: Thread-Execution für Generator mit Tab-kompatiblen Signals
         """
         try:
             # Progress-Callback definieren
             def progress_callback(step_name, progress_percent, detail_message):
-                self.generation_progress.emit(
-                    self.generator_type.value,
-                    self.lod_level.value,
-                    progress_percent,
-                    detail_message
-                )
+                self.generation_progress.emit(progress_percent, f"{step_name}: {detail_message}")
 
             # Generator ausführen
             result = self.generator_instance.generate(
@@ -923,16 +964,28 @@ class GenerationThread(QThread):
             # Success basierend auf Result
             success = result is not None
 
+            # result_data für Tabs zusammenstellen
+            result_data = {
+                "generator_output": result,
+                "lod_level": self.lod_level.value,
+                "parameters_used": self.parameters,
+                "timestamp": time.time()
+            }
+
             self.generation_completed.emit(
+                self.request_id,
                 self.generator_type.value,
                 self.lod_level.value,
-                success
+                success,
+                result_data
             )
 
         except Exception as e:
             # Error-Handling
             self.generation_completed.emit(
+                self.request_id,
                 self.generator_type.value,
                 self.lod_level.value,
-                False
+                False,
+                {"error": str(e)}
             )

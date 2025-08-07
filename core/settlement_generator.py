@@ -1,4 +1,4 @@
-"""""
+"""
 # =============================================================================
 # Legacy-Kompatibilität für bestehende Imports
 # =============================================================================
@@ -7,7 +7,7 @@
 # Sie delegieren intern an die neuen BaseGenerator-Implementierungen
 
 # TerrainSuitabilityAnalyzer - bereits neu implementiert
-# PathfindingSystem - bereits neu implementiert  
+# PathfindingSystem - bereits neu implementiert
 # CivilizationInfluenceMapper - bereits neu implementiert
 # PlotNodeSystem - bereits neu implementiert
 # Location, PlotNode, Plot - bereits neu implementiert
@@ -18,7 +18,7 @@ Path: core/settlement_generator.py
 Funktionsweise: Intelligente Settlement-Platzierung mit BaseGenerator-Integration und LOD-System
 - BaseGenerator-Integration mit einheitlicher API und LOD-System
 - Terrain-Suitability Analysis (Steigung, Höhe, Wasser-Nähe)
-- Locations: 
+- Locations:
     Settlements: Städte oder Dörfer die an bestimmten Orten vorkommen können (Täler, flache Hügel). Settlements verringern die Terrainverformung in der Nähe etwas. Je nach Radius (Siedlungsgröße) ist der Einfluss auf die Umgebung größer/kleiner. Die Form der Stadt soll zB Linsenförmig sein und über die Slopemap erzeugt werden. Zwischen Settlements gibt es einen Minimalabstand je nach map_size und Anzahl von Settlements. Innerhalb der Stadtgrenzen ist civ_map = 1, außerhalb nimmt der Einfluss ab.
     Roads: Nachdem Settlements entstanden sind werden die ersten Wege zwischen den Ortschaften geplottet. Dazu soll der Weg des geringsten Widerstands gefunden werden (Pathfinding via slopemap-cost). Danach werden die Straßen etwas gebogen über sanfte Splineinterpolation zwischen zB jedem 3.Waypoint. Erzeugen sehr geringen Einfluss entlang der Wege (z.B. 0.3).
     Roadsites: z.B. Taverne, Handelsposten, Wegschrein, Zollhaus, Galgenplatz, Markt, besondere Industrie. Entstehen in einem Bereich von 30%-70% Weglänge zwischen Settlements entlang von Roads. Der civ_map-Einfluss ist wesentlich geringer als der von Städten.
@@ -66,17 +66,17 @@ TerrainSuitabilityAnalyzer
     Aufgabe: Erstellt Suitability-Map für optimale Settlement-Platzierung
     Methoden: analyze_slope_suitability(), calculate_water_proximity(), evaluate_elevation_fitness()
 
-PathfindingSystem   
+PathfindingSystem
     Funktionsweise: Findet Wege geringsten Widerstands zwischen Settlements für Straßen
     Aufgabe: Erstellt realistische Straßenverbindungen mit Spline-Interpolation und LOD-Optimierung
     Methoden: find_least_resistance_path(), apply_spline_smoothing(), calculate_movement_cost()
 
-CivilizationInfluenceMapper    
+CivilizationInfluenceMapper
     Funktionsweise: Berechnet civ_map durch radialen Decay von Settlement/Road/Landmark-Punkten
     Aufgabe: Erstellt realistische Zivilisations-Verteilung mit Decay-Kernels
     Methoden: apply_settlement_influence(), calculate_road_influence(), apply_decay_kernel()
 
-PlotNodeSystem    
+PlotNodeSystem
     Funktionsweise: Generiert Plotnodes mit Delaunay-Triangulation und Grundstücks-Bildung
     Aufgabe: Erstellt Grundstücks-System für späteres Gameplay mit LOD-abhängiger Dichte
     Methoden: generate_plot_nodes(), create_delaunay_triangulation(), merge_to_plots(), optimize_node_positions()
@@ -95,21 +95,111 @@ from core.base_generator import BaseGenerator
 
 class SettlementData:
     """
-    Funktionsweise: Container für alle Settlement-Daten mit LOD-Informationen
-    Aufgabe: Speichert settlement_list, landmark_list, roadsite_list, plot_map, civ_map und Metainformationen
+    Funktionsweise: Container für alle Settlement-Daten mit Status-System und LOD-Management
+    Aufgabe: Speichert alle internen und externen Maps mit Validity-State und Parameter-Hash
     """
+
     def __init__(self):
-        self.settlement_list = []       # List[Location] - Alle Settlements
-        self.landmark_list = []         # List[Location] - Alle Landmarks  
-        self.roadsite_list = []         # List[Location] - Alle Roadsites
-        self.plot_map = None           # (height, width) - Plot-IDs
-        self.civ_map = None            # (height, width) - Zivilisations-Einfluss
-        self.plot_nodes = []           # List[PlotNode] - Alle PlotNodes
-        self.plots = []                # List[Plot] - Alle Plots
-        self.roads = []                # List[List[Tuple]] - Alle Road-Pfade
-        self.lod_level = "LOD64"       # Aktueller LOD-Level
-        self.actual_size = 64          # Tatsächliche Kartengröße
-        self.parameters = {}           # Verwendete Parameter für Cache-Management
+        # Externe Outputs
+        self.settlement_list = []  # List[Location] - Alle Settlements
+        self.landmark_list = []  # List[Location] - Alle Landmarks
+        self.roadsite_list = []  # List[Location] - Alle Roadsites
+        self.plot_map = None  # (height, width) - Plot-IDs
+        self.civ_map = None  # (height, width) - Zivilisations-Einfluss
+        self.plot_nodes = []  # List[PlotNode] - Alle PlotNodes
+        self.plots = []  # List[Plot] - Alle Plots
+        self.roads = []  # List[List[Tuple]] - Alle Road-Pfade
+
+        # Interne Daten
+        self.combined_suitability_map = None  # Terrain-Suitability für Settlement-Platzierung
+
+        # Status-Attribute für jeden Berechnungsschritt
+        self.terrain_suitability_valid = False
+        self.settlements_valid = False
+        self.road_network_valid = False
+        self.roadsites_valid = False
+        self.civilization_mapping_valid = False
+        self.landmarks_valid = False
+        self.plots_valid = False
+
+        # LOD-Tracking
+        self.lod_level = "LOD64"  # Aktueller LOD-Level
+        self.actual_size = 64  # Tatsächliche Kartengröße
+        self.validity_state = {}  # Validity-State pro LOD-Level
+        self.parameter_hash = None  # Parameter-Hash für Cache-Validation
+        self.parameters = {}  # Verwendete Parameter für Cache-Management
+
+    def is_step_valid(self, step: str) -> bool:
+        """
+        Funktionsweise: Prüft ob einzelner Berechnungsschritt valid ist
+        Parameter: step (str) - Name des Berechnungsschritts
+        Returns: bool - True wenn Schritt valid
+        """
+        step_mapping = {
+            'terrain_suitability': self.terrain_suitability_valid,
+            'settlements': self.settlements_valid,
+            'road_network': self.road_network_valid,
+            'roadsites': self.roadsites_valid,
+            'civilization_mapping': self.civilization_mapping_valid,
+            'landmarks': self.landmarks_valid,
+            'plots': self.plots_valid
+        }
+        return step_mapping.get(step, False)
+
+    def invalidate_step(self, step: str):
+        """
+        Funktionsweise: Invalidiert einzelnen Berechnungsschritt
+        Parameter: step (str) - Name des zu invalidierenden Schritts
+        """
+        if step == 'terrain_suitability':
+            self.terrain_suitability_valid = False
+        elif step == 'settlements':
+            self.settlements_valid = False
+        elif step == 'road_network':
+            self.road_network_valid = False
+        elif step == 'roadsites':
+            self.roadsites_valid = False
+        elif step == 'civilization_mapping':
+            self.civilization_mapping_valid = False
+        elif step == 'landmarks':
+            self.landmarks_valid = False
+        elif step == 'plots':
+            self.plots_valid = False
+
+    def get_step_status(self, step: str) -> dict:
+        """
+        Funktionsweise: Gibt detaillierten Status eines Berechnungsschritts zurück
+        Parameter: step (str) - Name des Berechnungsschritts
+        Returns: dict - Detaillierter Status mit Metadaten
+        """
+        status = {
+            'valid': self.is_step_valid(step),
+            'lod_level': self.lod_level,
+            'data_available': False,
+            'details': {}
+        }
+
+        if step == 'terrain_suitability':
+            status['data_available'] = self.combined_suitability_map is not None
+        elif step == 'settlements':
+            status['data_available'] = len(self.settlement_list) > 0
+            status['details']['settlement_count'] = len(self.settlement_list)
+        elif step == 'road_network':
+            status['data_available'] = len(self.roads) > 0
+            status['details']['road_count'] = len(self.roads)
+        elif step == 'roadsites':
+            status['data_available'] = len(self.roadsite_list) > 0
+            status['details']['roadsite_count'] = len(self.roadsite_list)
+        elif step == 'civilization_mapping':
+            status['data_available'] = self.civ_map is not None
+        elif step == 'landmarks':
+            status['data_available'] = len(self.landmark_list) > 0
+            status['details']['landmark_count'] = len(self.landmark_list)
+        elif step == 'plots':
+            status['data_available'] = len(self.plots) > 0
+            status['details']['plot_count'] = len(self.plots)
+
+        return status
 
 
 @dataclass
@@ -169,7 +259,7 @@ class TerrainSuitabilityAnalyzer:
         """
         self.terrain_factor = terrain_factor_villages
         self.lod_level = lod_level
-        
+
         # LOD-abhängige Optimierungen
         self.lod_optimizations = {
             "LOD64": {"analysis_detail": 0.5, "max_distance_check": 20},
@@ -190,7 +280,7 @@ class TerrainSuitabilityAnalyzer:
 
         height, width = slopemap.shape[:2]
         slope_suitability = np.zeros((height, width), dtype=np.float32)
-        
+
         # LOD-abhängige Detailgrad
         detail_level = self.lod_optimizations[self.lod_level]["analysis_detail"]
 
@@ -231,7 +321,7 @@ class TerrainSuitabilityAnalyzer:
 
         height, width = water_map.shape
         water_suitability = np.zeros((height, width), dtype=np.float32)
-        
+
         # LOD-abhängige Maximal-Distanz
         max_distance = self.lod_optimizations[self.lod_level]["max_distance_check"]
 
@@ -247,7 +337,7 @@ class TerrainSuitabilityAnalyzer:
                 # Minimale Distanz zu Wasser berechnen (mit LOD-Limit)
                 distances = np.sqrt((water_pixels[1] - x) ** 2 + (water_pixels[0] - y) ** 2)
                 min_distance = np.min(distances)
-                
+
                 # Bei niedrigen LODs: früher abbrechen
                 if min_distance > max_distance:
                     water_suitability[y, x] = 0.0
@@ -360,7 +450,7 @@ class PathfindingSystem:
         """
         self.slope_distance_ratio = road_slope_to_distance_ratio
         self.lod_level = lod_level
-        
+
         # LOD-abhängige Pathfinding-Optimierungen
         self.lod_settings = {
             "LOD64": {"max_search_nodes": 500, "path_resolution": 2},
@@ -402,7 +492,7 @@ class PathfindingSystem:
         height, width = slopemap.shape[:2]
         start_x, start_y = int(start_pos[0]), int(start_pos[1])
         end_x, end_y = int(end_pos[0]), int(end_pos[1])
-        
+
         # LOD-Einstellungen
         max_nodes = self.lod_settings[self.lod_level]["max_search_nodes"]
         path_resolution = self.lod_settings[self.lod_level]["path_resolution"]
@@ -412,7 +502,7 @@ class PathfindingSystem:
         came_from = {}
         g_score = {(start_x, start_y): 0}
         f_score = {(start_x, start_y): self._heuristic((start_x, start_y), (end_x, end_y))}
-        
+
         nodes_explored = 0
 
         while open_set and nodes_explored < max_nodes:
@@ -462,7 +552,7 @@ class PathfindingSystem:
         # Kein Pfad gefunden oder Node-Limit erreicht - direkte Linie als Fallback
         if progress_callback:
             progress_callback("Road Building", 30, f"Pathfinding fallback after {nodes_explored} nodes")
-        
+
         return [(start_x, start_y), (end_x, end_y)]
 
     def _heuristic(self, pos1, pos2):
@@ -513,563 +603,6 @@ class PathfindingSystem:
         except:
             # Fallback bei Spline-Fehlern
             return path
-
-
-class CivilizationInfluenceMapper:
-    """
-    Funktionsweise: Berechnet civ_map durch radialen Decay von Settlement/Road/Landmark-Punkten
-    Aufgabe: Erstellt realistische Zivilisations-Verteilung mit Decay-Kernels
-    """
-
-    def __init__(self, civ_influence_decay=1.0):
-        """
-        Funktionsweise: Initialisiert Civilization-Influence-Mapper mit Decay-Parameter
-        Aufgabe: Setup der Zivilisations-Einfluss-Berechnung
-        Parameter: civ_influence_decay (float) - Stärke des Einfluss-Abfalls mit Distanz
-        """
-        self.decay_factor = civ_influence_decay
-
-    def apply_settlement_influence(self, civ_map, settlements, slopemap, progress_callback=None):
-        """
-        Funktionsweise: Wendet Settlement-Einfluss auf civ_map an mit radialem Decay
-        Aufgabe: Berechnet Zivilisations-Einfluss von Städten und Dörfern
-        Parameter: civ_map, settlements, slopemap, progress_callback - Civ-Map, Settlement-Liste, Slope-Daten und Progress
-        Returns: numpy.ndarray - Aktualisierte civ_map
-        """
-        if progress_callback:
-            progress_callback("Civilization Mapping", 55, f"Applying influence for {len(settlements)} settlements...")
-
-        height, width = civ_map.shape
-
-        for i, settlement in enumerate(settlements):
-            center_x = int(settlement.x)
-            center_y = int(settlement.y)
-            radius = settlement.radius
-            base_influence = settlement.civ_influence
-
-            # Einflussbereich berechnen
-            for y in range(max(0, center_y - int(radius) - 5), min(height, center_y + int(radius) + 6)):
-                for x in range(max(0, center_x - int(radius) - 5), min(width, center_x + int(radius) + 6)):
-                    distance = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
-
-                    if distance <= radius:
-                        # Innerhalb Stadt: maximaler Einfluss (1.0)
-                        civ_map[y, x] = max(civ_map[y, x], 1.0)
-                    else:
-                        # Außerhalb: radialer Decay mit Slope-Modifikation
-                        slope_modifier = self._calculate_slope_decay_modifier(slopemap, x, y)
-                        decay_distance = (distance - radius) * self.decay_factor * slope_modifier
-
-                        if decay_distance < radius * 2:
-                            influence = base_influence * np.exp(-decay_distance / radius)
-                            civ_map[y, x] = max(civ_map[y, x], influence)
-
-            # Progress-Update pro Settlement-Batch
-            if progress_callback and (i + 1) % max(1, len(settlements) // 4) == 0:
-                progress = 55 + (i + 1) * 10 // len(settlements)
-                progress_callback("Civilization Mapping", progress, f"Processed {i + 1}/{len(settlements)} settlements")
-
-        return civ_map
-
-    def calculate_road_influence(self, civ_map, roads, slopemap, progress_callback=None):
-        """
-        Funktionsweise: Wendet Road-Einfluss auf civ_map an entlang der Straßenverläufe
-        Aufgabe: Berechnet Zivilisations-Einfluss entlang von Straßen
-        Parameter: civ_map, roads, slopemap, progress_callback - Civ-Map, Straßen-Pfade, Slope-Daten und Progress
-        Returns: numpy.ndarray - Aktualisierte civ_map
-        """
-        if progress_callback:
-            progress_callback("Civilization Mapping", 65, f"Applying road influence for {len(roads)} roads...")
-
-        road_influence = 0.2
-        max_road_civ = 0.5
-        road_width = 2
-
-        for road_idx, road in enumerate(roads):
-            for point in road:
-                x, y = int(point[0]), int(point[1])
-
-                # Einfluss um Straßenpunkt
-                for dy in range(-road_width, road_width + 1):
-                    for dx in range(-road_width, road_width + 1):
-                        nx, ny = x + dx, y + dy
-
-                        if 0 <= nx < civ_map.shape[1] and 0 <= ny < civ_map.shape[0]:
-                            distance = np.sqrt(dx ** 2 + dy ** 2)
-                            if distance <= road_width:
-                                influence = road_influence * (1 - distance / road_width)
-                                new_value = min(max_road_civ, civ_map[ny, nx] + influence)
-                                civ_map[ny, nx] = new_value
-
-        return civ_map
-
-    def apply_decay_kernel(self, civ_map, location, influence_value, radius, slopemap):
-        """
-        Funktionsweise: Wendet radialen Decay-Kernel um einzelne Location an
-        Aufgabe: Generische Einfluss-Verteilung für beliebige Locations
-        Parameter: civ_map, location, influence_value, radius, slopemap
-        Returns: numpy.ndarray - Aktualisierte civ_map
-        """
-        height, width = civ_map.shape
-        center_x, center_y = int(location.x), int(location.y)
-
-        for y in range(max(0, center_y - int(radius) - 2), min(height, center_y + int(radius) + 3)):
-            for x in range(max(0, center_x - int(radius) - 2), min(width, center_x + int(radius) + 3)):
-                distance = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
-
-                if distance <= radius:
-                    # Slope-Modifikation
-                    slope_modifier = self._calculate_slope_decay_modifier(slopemap, x, y)
-                    decay_distance = distance * self.decay_factor * slope_modifier
-
-                    influence = influence_value * np.exp(-decay_distance / radius)
-                    civ_map[y, x] = max(civ_map[y, x], influence)
-
-        return civ_map
-
-    def _calculate_slope_decay_modifier(self, slopemap, x, y):
-        """
-        Funktionsweise: Berechnet Slope-basierten Modifier für Einfluss-Decay
-        Aufgabe: Verstärkt Decay an Hanglagen, so dass Zivilisation nicht auf Berge reicht
-        Parameter: slopemap, x, y - Slope-Daten und Koordinaten
-        Returns: float - Slope-Decay-Modifier (>1 = stärkerer Decay)
-        """
-        height, width = slopemap.shape[:2]
-
-        if x < 0 or x >= width or y < 0 or y >= height:
-            return 2.0  # Starker Decay außerhalb der Map
-
-        # Slope-Magnitude berechnen
-        dz_dx = slopemap[y, x, 0]
-        dz_dy = slopemap[y, x, 1]
-        slope_magnitude = np.sqrt(dz_dx ** 2 + dz_dy ** 2)
-
-        # Modifier: 1.0 (flach) bis 3.0 (sehr steil)
-        slope_modifier = 1.0 + slope_magnitude * 2.0
-        return min(3.0, slope_modifier)
-
-
-class PlotNodeSystem:
-    """
-    Funktionsweise: Generiert Plotnodes mit Delaunay-Triangulation und Grundstücks-Bildung
-    Aufgabe: Erstellt Grundstücks-System für späteres Gameplay mit LOD-abhängiger Dichte
-    """
-
-    def __init__(self, plotsize=1.0, lod_level="LOD64"):
-        """
-        Funktionsweise: Initialisiert PlotNode-System mit Plot-Größen-Parameter und LOD
-        Aufgabe: Setup der Grundstücks-Generierung mit LOD-Anpassung
-        Parameter: plotsize (float), lod_level (str) - Akkumulierter Civ-Wert für Plot-Größe und LOD
-        """
-        self.plotsize_threshold = plotsize
-        self.lod_level = lod_level
-        self.next_node_id = 0
-        self.next_plot_id = 0
-        
-        # LOD-abhängige PlotNode-Dichte
-        self.lod_density_factors = {
-            "LOD64": 0.3,    # 30% der gewünschten Nodes
-            "LOD128": 0.6,   # 60% der gewünschten Nodes
-            "LOD256": 0.9,   # 90% der gewünschten Nodes
-            "FINAL": 1.0     # 100% der gewünschten Nodes
-        }
-
-    def generate_plot_nodes(self, civ_map, plotnodes_count, settlements, progress_callback=None):
-        """
-        Funktionsweise: Generiert PlotNodes gleichmäßig verteilt außerhalb von Städten und Wilderness
-        Aufgabe: Erstellt initiale PlotNode-Verteilung für Grundstücks-System mit LOD-Optimierung
-        Parameter: civ_map, plotnodes_count, settlements, progress_callback - Civ-Map, Anzahl Nodes, Settlements und Progress
-        Returns: List[PlotNode] - Generierte PlotNodes
-        """
-        if progress_callback:
-            progress_callback("Plot Generation", 70, "Generating plot nodes...")
-
-        height, width = civ_map.shape
-        nodes = []
-        
-        # LOD-abhängige Node-Anzahl
-        density_factor = self.lod_density_factors[self.lod_level]
-        adjusted_count = int(plotnodes_count * density_factor)
-
-        # Gültige Bereiche finden (nicht in Städten, nicht in Wilderness)
-        valid_positions = []
-
-        for y in range(height):
-            for x in range(width):
-                civ_value = civ_map[y, x]
-
-                # Wilderness ausschließen (< 0.2)
-                if civ_value < 0.2:
-                    continue
-
-                # Stadt-Bereiche ausschließen (= 1.0)
-                if civ_value >= 1.0:
-                    continue
-
-                # Mindestabstand zu Settlements prüfen
-                too_close = False
-                for settlement in settlements:
-                    distance = np.sqrt((x - settlement.x) ** 2 + (y - settlement.y) ** 2)
-                    if distance < settlement.radius * 1.2:
-                        too_close = True
-                        break
-
-                if not too_close:
-                    valid_positions.append((x, y, civ_value))
-
-        # PlotNodes gleichmäßig verteilen
-        if len(valid_positions) < adjusted_count:
-            adjusted_count = len(valid_positions)
-
-        # Sampling für gleichmäßige Verteilung
-        sampled_positions = self._sample_uniform_distribution(valid_positions, adjusted_count)
-
-        for x, y, civ_value in sampled_positions:
-            node = PlotNode(
-                node_id=self.next_node_id,
-                node_location=(float(x), float(y)),
-                connector_id=[],
-                connector_distance=[],
-                connector_elevation=[],
-                connector_movecost=[]
-            )
-            nodes.append(node)
-            self.next_node_id += 1
-
-        if progress_callback:
-            progress_callback("Plot Generation", 75, f"Generated {len(nodes)} plot nodes")
-
-        return nodes
-
-    def create_delaunay_triangulation(self, nodes, heightmap, biome_map=None, progress_callback=None):
-        """
-        Funktionsweise: Erstellt Delaunay-Triangulation zwischen PlotNodes mit MoveCost-Berechnung
-        Aufgabe: Verbindet PlotNodes über Delaunay-Dreiecke für Grundstücks-Bildung
-        Parameter: nodes, heightmap, biome_map, progress_callback - PlotNode-Liste, Höhendaten, Biom-Map und Progress
-        Returns: List[PlotNode] - Nodes mit aktualisierten Verbindungen
-        """
-        if progress_callback:
-            progress_callback("Plot Generation", 80, "Creating Delaunay triangulation...")
-
-        if len(nodes) < 3:
-            return nodes
-
-        # Koordinaten extrahieren
-        points = np.array([node.node_location for node in nodes])
-
-        try:
-            # Delaunay-Triangulation
-            tri = Delaunay(points)
-
-            # Verbindungen aus Triangulation extrahieren
-            for node in nodes:
-                node.connector_id = []
-                node.connector_distance = []
-                node.connector_elevation = []
-                node.connector_movecost = []
-
-            for simplex in tri.simplices:
-                # Jedes Dreieck verbindet 3 Nodes
-                for i in range(3):
-                    for j in range(i + 1, 3):
-                        node_a_idx = simplex[i]
-                        node_b_idx = simplex[j]
-
-                        node_a = nodes[node_a_idx]
-                        node_b = nodes[node_b_idx]
-
-                        # Verbindung A->B
-                        if node_b.node_id not in node_a.connector_id:
-                            distance = self._calculate_distance(node_a.node_location, node_b.node_location)
-                            elevation_diff = self._calculate_elevation_difference(
-                                node_a.node_location, node_b.node_location, heightmap
-                            )
-                            movecost = self._calculate_biome_movecost(
-                                node_a.node_location, node_b.node_location, biome_map, distance, elevation_diff
-                            )
-
-                            node_a.connector_id.append(node_b.node_id)
-                            node_a.connector_distance.append(distance)
-                            node_a.connector_elevation.append(elevation_diff)
-                            node_a.connector_movecost.append(movecost)
-
-                        # Verbindung B->A
-                        if node_a.node_id not in node_b.connector_id:
-                            distance = self._calculate_distance(node_b.node_location, node_a.node_location)
-                            elevation_diff = self._calculate_elevation_difference(
-                                node_b.node_location, node_a.node_location, heightmap
-                            )
-                            movecost = self._calculate_biome_movecost(
-                                node_b.node_location, node_a.node_location, biome_map, distance, elevation_diff
-                            )
-
-                            node_b.connector_id.append(node_a.node_id)
-                            node_b.connector_distance.append(distance)
-                            node_b.connector_elevation.append(elevation_diff)
-                            node_b.connector_movecost.append(movecost)
-
-            return nodes
-
-        except Exception as e:
-            # Fallback: keine Verbindungen
-            if progress_callback:
-                progress_callback("Plot Generation", 80, f"Delaunay triangulation failed: {e}")
-            return nodes
-
-    def merge_to_plots(self, nodes, civ_map, progress_callback=None):
-        """
-        Funktionsweise: Fusioniert PlotNodes zu Plots basierend auf akkumuliertem Civ-Wert
-        Aufgabe: Erstellt Grundstücke durch Node-Gruppierung nach Civ-Wert-Schwellwert
-        Parameter: nodes, civ_map, progress_callback - PlotNode-Liste, Civ-Map und Progress
-        Returns: List[Plot] - Generierte Plots
-        """
-        if progress_callback:
-            progress_callback("Plot Generation", 85, "Merging nodes to plots...")
-
-        plots = []
-        used_nodes = set()
-
-        for start_node in nodes:
-            if start_node.node_id in used_nodes:
-                continue
-
-            # Neuen Plot starten
-            plot_nodes = [start_node]
-            used_nodes.add(start_node.node_id)
-            accumulated_civ = self._get_node_civ_value(start_node, civ_map)
-
-            # Nachbarn hinzufügen bis Schwellwert erreicht
-            candidates = [start_node]
-
-            while candidates and accumulated_civ < self.plotsize_threshold:
-                current_node = candidates.pop(0)
-
-                # Nachbarn des aktuellen Nodes prüfen
-                for neighbor_id in current_node.connector_id:
-                    if neighbor_id in used_nodes:
-                        continue
-
-                    neighbor_node = self._find_node_by_id(nodes, neighbor_id)
-                    if neighbor_node is None:
-                        continue
-
-                    neighbor_civ = self._get_node_civ_value(neighbor_node, civ_map)
-
-                    # Node zum Plot hinzufügen
-                    plot_nodes.append(neighbor_node)
-                    used_nodes.add(neighbor_id)
-                    accumulated_civ += neighbor_civ
-                    candidates.append(neighbor_node)
-
-                    if accumulated_civ >= self.plotsize_threshold:
-                        break
-
-            # Plot erstellen
-            if len(plot_nodes) > 0:
-                plot = Plot(
-                    plot_id=self.next_plot_id,
-                    nodes=plot_nodes,
-                    biome_amount={},  # Wird später gefüllt
-                    resource_amount={},  # Wird später gefüllt
-                    plot_area=self._calculate_plot_area(plot_nodes),
-                    plot_distance=self._calculate_plot_distance(plot_nodes)
-                )
-                plots.append(plot)
-                self.next_plot_id += 1
-
-        if progress_callback:
-            progress_callback("Plot Generation", 90, f"Created {len(plots)} plots from {len(nodes)} nodes")
-
-        return plots
-
-    def optimize_node_positions(self, nodes, iterations=5, progress_callback=None):
-        """
-        Funktionsweise: Optimiert PlotNode-Positionen durch Abstoßungslogik und Winkel-Glättung
-        Aufgabe: Verbessert Node-Anordnung für natürlichere Grundstücks-Formen
-        Parameter: nodes, iterations, progress_callback - PlotNode-Liste, Iterationen und Progress
-        Returns: List[PlotNode] - Optimierte PlotNodes
-        """
-        if progress_callback:
-            progress_callback("Plot Generation", 92, f"Optimizing node positions ({iterations} iterations)...")
-
-        # LOD-abhängige Iterations-Anzahl
-        if self.lod_level == "LOD64":
-            iterations = max(2, iterations // 2)
-
-        for iteration in range(iterations):
-            # Abstoßungslogik zwischen zu nahen Nodes
-            for i, node_a in enumerate(nodes):
-                for j, node_b in enumerate(nodes[i + 1:], i + 1):
-                    distance = self._calculate_distance(node_a.node_location, node_b.node_location)
-
-                    if distance < 3.0:  # Zu nah
-                        # Abstoßungsvektor berechnen
-                        dx = node_b.node_location[0] - node_a.node_location[0]
-                        dy = node_b.node_location[1] - node_a.node_location[1]
-
-                        if distance > 0:
-                            # Normalisieren und Abstoßung anwenden
-                            dx /= distance
-                            dy /= distance
-
-                            repulsion_strength = (3.0 - distance) * 0.1
-
-                            node_a.node_location = (
-                                node_a.node_location[0] - dx * repulsion_strength,
-                                node_a.node_location[1] - dy * repulsion_strength
-                            )
-                            node_b.node_location = (
-                                node_b.node_location[0] + dx * repulsion_strength,
-                                node_b.node_location[1] + dy * repulsion_strength
-                            )
-
-            # Progress-Update pro Iteration
-            if progress_callback and iteration % max(1, iterations // 3) == 0:
-                progress = 92 + iteration * 3 // iterations
-                progress_callback("Plot Generation", progress, f"Optimization iteration {iteration + 1}/{iterations}")
-
-        return nodes
-
-    def _calculate_biome_movecost(self, pos1, pos2, biome_map, distance, elevation_diff):
-        """
-        Funktionsweise: Berechnet Bewegungskosten basierend auf Biom-Typen entlang des Pfades
-        Aufgabe: Biom-abhängige MoveCost für PlotNode-Verbindungen
-        Parameter: pos1, pos2, biome_map, distance, elevation_diff
-        Returns: float - Biom-adjustierte Bewegungskosten
-        """
-        if biome_map is None:
-            # Fallback: nur Distanz + Elevation
-            return distance + abs(elevation_diff) * 0.5
-
-        # Vereinfachte Biom-Kosten-Matrix
-        biome_costs = {
-            0: 1.0,   # ice_cap - schwer
-            1: 0.8,   # tundra - moderat
-            2: 0.6,   # taiga - leicht
-            3: 0.4,   # grassland - sehr leicht
-            4: 0.6,   # temperate_forest - moderat
-            5: 0.5,   # mediterranean - leicht
-            6: 1.2,   # desert - schwer
-            7: 0.7,   # semi_arid - moderat
-            8: 0.9,   # tropical_rainforest - schwer
-            9: 0.7,   # tropical_seasonal - moderat
-            10: 0.5,  # savanna - leicht
-            11: 0.8,  # montane_forest - moderat
-            12: 1.5,  # swamp - sehr schwer
-            13: 0.6,  # coastal_dunes - moderat
-            14: 1.1   # badlands - schwer
-        }
-
-        # Biom-Typ an Mittelpunkt der Verbindung
-        mid_x = int((pos1[0] + pos2[0]) / 2)
-        mid_y = int((pos1[1] + pos2[1]) / 2)
-
-        if (0 <= mid_x < biome_map.shape[1] and 0 <= mid_y < biome_map.shape[0]):
-            biome_type = biome_map[mid_y, mid_x]
-            biome_cost_factor = biome_costs.get(biome_type, 1.0)
-        else:
-            biome_cost_factor = 1.0
-
-        return distance * biome_cost_factor + abs(elevation_diff) * 0.5
-
-    def _sample_uniform_distribution(self, positions, count):
-        """
-        Funktionsweise: Sampelt Positionen für gleichmäßige räumliche Verteilung
-        Aufgabe: Verhindert Clustering von PlotNodes
-        Parameter: positions, count - Verfügbare Positionen und gewünschte Anzahl
-        Returns: List[Tuple] - Gleichmäßig verteilte Positionen
-        """
-        if len(positions) <= count:
-            return positions
-
-        # Einfaches Grid-basiertes Sampling
-        positions.sort(key=lambda p: (p[1], p[0]))  # Sort by y, then x
-
-        step = len(positions) // count
-        sampled = []
-
-        for i in range(0, len(positions), step):
-            if len(sampled) < count:
-                sampled.append(positions[i])
-
-        return sampled
-
-    def _calculate_distance(self, pos1, pos2):
-        """
-        Funktionsweise: Berechnet Euklidische Distanz zwischen zwei Positionen
-        Aufgabe: Standard-Distanzberechnung für PlotNode-Verbindungen
-        """
-        return np.sqrt((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2)
-
-    def _calculate_elevation_difference(self, pos1, pos2, heightmap):
-        """
-        Funktionsweise: Berechnet akkumulierten Höhenunterschied zwischen zwei Positionen
-        Aufgabe: Höhendifferenz für MoveCost-Berechnung
-        """
-        x1, y1 = int(pos1[0]), int(pos1[1])
-        x2, y2 = int(pos2[0]), int(pos2[1])
-
-        height, width = heightmap.shape
-
-        if (0 <= x1 < width and 0 <= y1 < height and
-                0 <= x2 < width and 0 <= y2 < height):
-            return heightmap[y2, x2] - heightmap[y1, x1]
-
-        return 0.0
-
-    def _get_node_civ_value(self, node, civ_map):
-        """
-        Funktionsweise: Holt Civ-Wert für PlotNode-Position aus civ_map
-        Aufgabe: Civ-Wert-Lookup für Plot-Größen-Berechnung
-        """
-        x, y = int(node.node_location[0]), int(node.node_location[1])
-        height, width = civ_map.shape
-
-        if 0 <= x < width and 0 <= y < height:
-            return civ_map[y, x]
-
-        return 0.0
-
-    def _find_node_by_id(self, nodes, node_id):
-        """
-        Funktionsweise: Findet PlotNode anhand der ID
-        Aufgabe: Node-Lookup für Nachbar-Suche
-        """
-        for node in nodes:
-            if node.node_id == node_id:
-                return node
-        return None
-
-    def _calculate_plot_area(self, plot_nodes):
-        """
-        Funktionsweise: Berechnet approximative Fläche eines Plots
-        Aufgabe: Plot-Größen-Berechnung für Gameplay-Eigenschaften
-        """
-        if len(plot_nodes) < 3:
-            return 1.0
-
-        # Simplified: Anzahl Nodes als Flächen-Approximation
-        return float(len(plot_nodes))
-
-    def _calculate_plot_distance(self, plot_nodes):
-        """
-        Funktionsweise: Berechnet durchschnittliche Entfernung zwischen Plot-Nodes
-        Aufgabe: Plot-Distanz-Metrik für Gameplay
-        """
-        if len(plot_nodes) < 2:
-            return 0.0
-
-        total_distance = 0.0
-        connections = 0
-
-        for node in plot_nodes:
-            total_distance += sum(node.connector_distance)
-            connections += len(node.connector_distance)
-
-        if connections > 0:
-            return total_distance / connections
-
-        return 0.0
 
 
 class SettlementGenerator(BaseGenerator):
@@ -1135,10 +668,10 @@ class SettlementGenerator(BaseGenerator):
 
         # REQUIRED Dependencies - müssen vorhanden sein
         required_deps = ['heightmap', 'slopemap', 'water_map']
-        
+
         for dep_name in required_deps:
             data = None
-            
+
             # Terrain-Daten
             if dep_name in ['heightmap', 'slopemap']:
                 terrain_data = data_manager.get_terrain_data("complete")
@@ -1146,8 +679,8 @@ class SettlementGenerator(BaseGenerator):
                     data = getattr(terrain_data, dep_name, None)
                 if data is None:
                     data = data_manager.get_terrain_data(dep_name)
-            
-            # Water-Daten  
+
+            # Water-Daten
             elif dep_name == 'water_map':
                 data = data_manager.get_water_data('water_map')
                 if data is None:
@@ -1215,9 +748,9 @@ class SettlementGenerator(BaseGenerator):
     def _execute_generation(self, lod, dependencies, parameters):
         """
         Funktionsweise: Führt Settlement-Generierung mit Progress-Updates aus
-        Aufgabe: Kernlogik der Settlement-Generierung mit allen 5 Hauptphasen
+        Aufgabe: Kernlogik der Settlement-Generierung mit allen 7 Hauptphasen und Status-Tracking
         Parameter: lod, dependencies, parameters
-        Returns: SettlementData-Objekt mit allen Settlement-Outputs
+        Returns: SettlementData-Objekt mit allen Settlement-Outputs und Status-Tracking
         """
         heightmap = dependencies['heightmap']
         slopemap = dependencies['slopemap']
@@ -1245,59 +778,77 @@ class SettlementGenerator(BaseGenerator):
             water_map = self._interpolate_array(water_map, target_size)
             biome_map = self._interpolate_array(biome_map, target_size)
 
-        # Phase 1: Settlement Generation (5% - 25%)
-        self._update_progress("Settlement Placement", 5, "Analyzing terrain suitability...")
-        settlement_list = self._generate_settlements(heightmap, slopemap, water_map, lod)
-
-        # Phase 2: Road Network Creation (25% - 40%)
-        self._update_progress("Road Building", 25, "Creating road networks between settlements...")
-        roads = self._create_road_network(settlement_list, slopemap, lod)
-
-        # Phase 3: Roadsite Placement (40% - 50%)
-        self._update_progress("Roadsite Placement", 40, "Placing roadsites along roads...")
-        roadsite_list = self._place_roadsites(roads, lod)
-
-        # Phase 4: Civilization Mapping (50% - 70%)
-        self._update_progress("Civilization Mapping", 50, "Creating civilization influence map...")
-        civ_map = self._create_civilization_map(heightmap, slopemap, settlement_list, roads, roadsite_list)
-
-        # Phase 5: Landmark & Plot Generation (70% - 95%)
-        self._update_progress("Landmarks & Plots", 70, "Placing landmarks in wilderness areas...")
-        landmark_list = self._place_landmarks(civ_map, heightmap, slopemap, lod)
-
-        plot_nodes, plots = self._generate_plots(civ_map, settlement_list, heightmap, biome_map, lod)
-        plot_map = self._create_plot_map(heightmap.shape, plots)
-
         # SettlementData-Objekt erstellen
         settlement_data = SettlementData()
-        settlement_data.settlement_list = settlement_list
-        settlement_data.landmark_list = landmark_list
-        settlement_data.roadsite_list = roadsite_list
-        settlement_data.plot_map = plot_map
-        settlement_data.civ_map = civ_map
-        settlement_data.plot_nodes = plot_nodes
-        settlement_data.plots = plots
-        settlement_data.roads = roads
         settlement_data.lod_level = lod
         settlement_data.actual_size = target_size
         settlement_data.parameters = parameters.copy()
 
+        # Phase 1: Terrain Suitability Analysis (5% - 15%)
+        self._update_progress("Terrain Analysis", 5, "Analyzing terrain suitability for settlements...")
+        settlement_data.combined_suitability_map = self.calculate_terrain_suitability(heightmap, slopemap, water_map, lod)
+        settlement_data.terrain_suitability_valid = True
+
+        # Phase 2: Settlement Placement (15% - 25%)
+        self._update_progress("Settlement Placement", 15, "Placing settlements based on suitability...")
+        settlement_data.settlement_list = self.calculate_settlements(settlement_data.combined_suitability_map, heightmap, lod)
+        settlement_data.settlements_valid = True
+
+        # Phase 3: Road Network Creation (25% - 40%)
+        self._update_progress("Road Building", 25, "Creating road networks between settlements...")
+        settlement_data.roads = self.calculate_road_network(settlement_data.settlement_list, slopemap, lod)
+        settlement_data.road_network_valid = True
+
+        # Phase 4: Roadsite Placement (40% - 50%)
+        self._update_progress("Roadsite Placement", 40, "Placing roadsites along roads...")
+        settlement_data.roadsite_list = self.calculate_roadsites(settlement_data.roads, lod)
+        settlement_data.roadsites_valid = True
+
+        # Phase 5: Civilization Mapping (50% - 65%)
+        self._update_progress("Civilization Mapping", 50, "Creating civilization influence map...")
+        settlement_data.civ_map = self.calculate_civilization_mapping(heightmap, slopemap, settlement_data.settlement_list,
+                                                                     settlement_data.roads, settlement_data.roadsite_list)
+        settlement_data.civilization_mapping_valid = True
+
+        # Phase 6: Landmark Placement (65% - 75%)
+        self._update_progress("Landmark Placement", 65, "Placing landmarks in wilderness areas...")
+        settlement_data.landmark_list = self.calculate_landmarks(settlement_data.civ_map, heightmap, slopemap, lod)
+        settlement_data.landmarks_valid = True
+
+        # Phase 7: Plot Generation (75% - 95%)
+        self._update_progress("Plot Generation", 75, "Generating plot system...")
+        settlement_data.plot_nodes, settlement_data.plots = self.calculate_plots(settlement_data.civ_map,
+                                                                                 settlement_data.settlement_list,
+                                                                                 heightmap, biome_map, lod)
+        settlement_data.plot_map = self._create_plot_map(heightmap.shape, settlement_data.plots)
+        settlement_data.plots_valid = True
+
         self.logger.debug(f"Settlement generation complete - LOD: {lod}, size: {target_size}")
-        self.logger.debug(f"Generated: {len(settlement_list)} settlements, {len(roads)} roads, {len(plots)} plots")
+        self.logger.debug(f"Generated: {len(settlement_data.settlement_list)} settlements, {len(settlement_data.roads)} roads, {len(settlement_data.plots)} plots")
 
         return settlement_data
 
-    def _generate_settlements(self, heightmap, slopemap, water_map, lod):
+    def calculate_terrain_suitability(self, heightmap, slopemap, water_map, lod):
         """
-        Funktionsweise: Generiert Settlement-Positionen basierend auf Terrain-Suitability
-        Aufgabe: Platziert Städte und Dörfer an optimal geeigneten Locations
+        Funktionsweise: Berechnet Terrain-Suitability für optimale Settlement-Platzierung
+        Aufgabe: Kombiniert Slope-, Water-Proximity- und Elevation-Fitness zu finaler Suitability-Map
+        Parameter: heightmap, slopemap, water_map, lod - Alle Terrain-Daten und LOD-Level
+        Returns: numpy.ndarray - Kombinierte Suitability-Map für Settlement-Platzierung
+        """
+        analyzer = TerrainSuitabilityAnalyzer(self.terrain_factor_villages, lod)
+        combined_suitability = analyzer.create_combined_suitability(heightmap, slopemap, water_map, self._update_progress)
+        return combined_suitability
+
+    def calculate_settlements(self, suitability_map, heightmap, lod):
+        """
+        Funktionsweise: Platziert Settlements basierend auf Terrain-Suitability mit LOD-abhängiger Anzahl
+        Aufgabe: Erstellt Settlement-Liste mit optimaler Positionierung und Mindestabständen
+        Parameter: suitability_map, heightmap, lod - Suitability-Daten und LOD-Level
+        Returns: List[Location] - Alle platzierten Settlements
         """
         # LOD-abhängige Settlement-Anzahl
         lod_factors = {"LOD64": 0.5, "LOD128": 0.8, "LOD256": 1.0, "FINAL": 1.0}
         adjusted_count = max(1, int(self.settlements * lod_factors.get(lod, 1.0)))
-
-        analyzer = TerrainSuitabilityAnalyzer(self.terrain_factor_villages, lod)
-        suitability_map = analyzer.create_combined_suitability(heightmap, slopemap, water_map, self._update_progress)
 
         settlements = []
         height, width = heightmap.shape
@@ -1344,14 +895,17 @@ class SettlementGenerator(BaseGenerator):
 
             # Progress-Update
             if self._update_progress:
-                progress = 5 + (len(settlements) * 15) // adjusted_count
+                progress = 15 + (len(settlements) * 10) // adjusted_count
                 self._update_progress("Settlement Placement", progress, f"Placed {len(settlements)}/{adjusted_count} settlements")
 
         return settlements
 
-    def _create_road_network(self, settlements, slopemap, lod):
+    def calculate_road_network(self, settlements, slopemap, lod):
         """
         Funktionsweise: Erstellt Straßennetzwerk zwischen Settlements mit LOD-optimiertem Pathfinding
+        Aufgabe: Findet optimale Straßenverbindungen mit Spline-Interpolation
+        Parameter: settlements, slopemap, lod - Settlement-Liste, Slope-Daten und LOD-Level
+        Returns: List[List[Tuple]] - Alle Road-Pfade als Wegpunkt-Listen
         """
         if len(settlements) < 2:
             return []
@@ -1403,14 +957,17 @@ class SettlementGenerator(BaseGenerator):
 
                 # Progress-Update für Straßen
                 if self._update_progress:
-                    progress = 25 + (road_count * 10) // total_roads
+                    progress = 25 + (road_count * 15) // total_roads
                     self._update_progress("Road Building", progress, f"Built {road_count}/{total_roads} roads")
 
         return roads
 
-    def _place_roadsites(self, roads, lod):
+    def calculate_roadsites(self, roads, lod):
         """
         Funktionsweise: Platziert Roadsites entlang von Straßen zwischen 30-70% der Weglänge
+        Aufgabe: Erstellt Roadsite-Liste mit verschiedenen Typen (Tavern, Trading Post, etc.)
+        Parameter: roads, lod - Road-Pfade und LOD-Level
+        Returns: List[Location] - Alle platzierten Roadsites
         """
         roadsites = []
 
@@ -1463,9 +1020,12 @@ class SettlementGenerator(BaseGenerator):
 
         return roadsites
 
-    def _create_civilization_map(self, heightmap, slopemap, settlements, roads, roadsites):
+    def calculate_civilization_mapping(self, heightmap, slopemap, settlements, roads, roadsites):
         """
-        Funktionsweise: Erstellt finale civ_map durch Kombination aller Zivilisations-Einflüsse
+        Funktionsweise: Erstellt civ_map durch radialen Decay von Settlement/Road/Roadsite-Punkten
+        Aufgabe: Berechnet Zivilisations-Einfluss mit Slope-abhängigem Decay und Wilderness-Definition
+        Parameter: heightmap, slopemap, settlements, roads, roadsites - Alle Zivilisations-Quellen
+        Returns: numpy.ndarray - Civilization-Influence-Map mit Wilderness-Bereichen
         """
         height, width = heightmap.shape
         civ_map = np.zeros((height, width), dtype=np.float32)
@@ -1490,9 +1050,12 @@ class SettlementGenerator(BaseGenerator):
 
         return civ_map
 
-    def _place_landmarks(self, civ_map, heightmap, slopemap, lod):
+    def calculate_landmarks(self, civ_map, heightmap, slopemap, lod):
         """
-        Funktionsweise: Platziert Landmarks in Wilderness-Bereichen mit niedrigem Civ-Wert
+        Funktionsweise: Platziert Landmarks in Wilderness-Bereichen mit niedrigem civ_map-Wert
+        Aufgabe: Erstellt Landmark-Liste (Castle, Monastery, etc.) mit Elevation/Slope-Constraints
+        Parameter: civ_map, heightmap, slopemap, lod - Civilization-Map, Terrain-Daten und LOD-Level
+        Returns: List[Location] - Alle platzierten Landmarks
         """
         landmarks = []
 
@@ -1544,13 +1107,16 @@ class SettlementGenerator(BaseGenerator):
             self.next_location_id += 1
 
         if self._update_progress:
-            self._update_progress("Landmarks & Plots", 72, f"Placed {len(landmarks)} landmarks")
+            self._update_progress("Landmark Placement", 70, f"Placed {len(landmarks)} landmarks")
 
         return landmarks
 
-    def _generate_plots(self, civ_map, settlements, heightmap, biome_map, lod):
+    def calculate_plots(self, civ_map, settlements, heightmap, biome_map, lod):
         """
-        Funktionsweise: Generiert Grundstücks-System mit PlotNodes und Delaunay-Triangulation
+        Funktionsweise: Generiert PlotNode-System mit Delaunay-Triangulation und Plot-Fusion
+        Aufgabe: Erstellt Grundstücks-System basierend auf akkumuliertem Civ-Wert mit LOD-optimierter Dichte
+        Parameter: civ_map, settlements, heightmap, biome_map, lod - Alle Plot-Daten und LOD-Level
+        Returns: Tuple[List[PlotNode], List[Plot]] - PlotNode-Liste und finale Plot-Liste
         """
         plot_system = PlotNodeSystem(self.plotsize, lod)
 
@@ -1586,6 +1152,10 @@ class SettlementGenerator(BaseGenerator):
             data_manager.set_settlement_data("plot_nodes", result.plot_nodes, parameters)
             data_manager.set_settlement_data("plots", result.plots, parameters)
             data_manager.set_settlement_data("roads", result.roads, parameters)
+            data_manager.set_settlement_data("combined_suitability_map", result.combined_suitability_map, parameters)
+
+            # Komplettes SettlementData-Objekt auch speichern
+            data_manager.set_settlement_data("settlement_data_complete", result, parameters)
 
             self.logger.debug(f"SettlementData object saved to DataManager - {len(result.settlement_list)} settlements, {len(result.plots)} plots")
         else:
@@ -1802,7 +1372,7 @@ class SettlementGenerator(BaseGenerator):
         Funktionsweise: Legacy-Methode für Road-Network-Erstellung
         """
         pathfinder = PathfindingSystem(road_slope_to_distance_ratio, "LOD64")
-        return self._create_road_network(settlements, slopemap, "LOD64")
+        return self.calculate_road_network(settlements, slopemap, "LOD64")
 
     def place_landmarks(self, civ_map, landmarks_count, landmark_wilderness, heightmap, slopemap):
         """
@@ -1810,14 +1380,14 @@ class SettlementGenerator(BaseGenerator):
         """
         self.landmarks = landmarks_count
         self.landmark_wilderness = landmark_wilderness
-        return self._place_landmarks(civ_map, heightmap, slopemap, "LOD64")
+        return self.calculate_landmarks(civ_map, heightmap, slopemap, "LOD64")
 
     def place_roadsites(self, roads, roadsites_count):
         """
         Funktionsweise: Legacy-Methode für Roadsite-Platzierung
         """
         self.roadsites = roadsites_count
-        return self._place_roadsites(roads, "LOD64")
+        return self.calculate_roadsites(roads, "LOD64")
 
     def generate_plots(self, civ_map, plotnodes_count, plotsize, settlements, heightmap):
         """
@@ -1826,14 +1396,14 @@ class SettlementGenerator(BaseGenerator):
         self.plotnodes = plotnodes_count
         self.plotsize = plotsize
         biome_map = self._create_fallback_biome_map(heightmap)
-        return self._generate_plots(civ_map, settlements, heightmap, biome_map, "LOD64")
+        return self.calculate_plots(civ_map, settlements, heightmap, biome_map, "LOD64")
 
     def create_civilization_map(self, heightmap, slopemap, settlements, roads, landmarks, roadsites, civ_influence_decay):
         """
         Funktionsweise: Legacy-Methode für Civilization-Map-Erstellung
         """
         self.civ_influence_decay = civ_influence_decay
-        return self._create_civilization_map(heightmap, slopemap, settlements, roads, roadsites)
+        return self.calculate_civilization_mapping(heightmap, slopemap, settlements, roads, roadsites)
 
     def generate_complete_settlements(self, heightmap, slopemap, water_map, map_seed, settlements,
                                       landmarks, roadsites, plotnodes, civ_influence_decay, terrain_factor_villages,
@@ -2036,6 +1606,7 @@ class SettlementGenerator(BaseGenerator):
 
         return len(errors) == 0, warnings, errors
 
+
 # =============================================================================
 # Utility Functions für Settlement-System
 # =============================================================================
@@ -2072,6 +1643,7 @@ def create_settlement_summary(settlement_data):
             'plot_nodes': 0,  # Nicht verfügbar in Legacy-Format
             'parameters_used': {}
         }
+
 
 def export_settlement_data(settlement_data, format_type='dict'):
     """
@@ -2132,4 +1704,646 @@ def export_settlement_data(settlement_data, format_type='dict'):
     elif format_type == 'summary':
         return create_settlement_summary(settlement_data)
     else:
-        raise ValueError(f"Unsupported export format: {format_type}")
+        raise ValueError(
+            f"Unsupported export format: {format_type}")  # Nachbarn prüfen (8-Connectivity mit LOD-Resolution)
+        for dx in range(-path_resolution, path_resolution + 1, path_resolution):
+            for dy in range(-path_resolution, path_resolution + 1, path_resolution):
+                if dx == 0 and dy == 0:
+                    continue
+
+                neighbor_x = current_x + dx
+                neighbor_y = current_y + dy
+
+                if (neighbor_x < 0 or neighbor_x >= width or
+                        neighbor_y < 0 or neighbor_y >= height):
+                    continue
+
+                # Bewegungskosten berechnen
+                movement_cost = self.calculate_movement_cost(slopemap, neighbor_x, neighbor_y)
+                if movement_cost == float('inf'):
+                    continue
+
+                # Diagonale Bewegung kostet mehr
+                if dx != 0 and dy != 0:
+                    movement_cost *= 1.414
+
+                tentative_g_score = g_score.get((current_x, current_y), float('inf')) + movement_cost
+
+                if tentative_g_score < g_score.get((neighbor_x, neighbor_y), float('inf')):
+                    came_from[(neighbor_x, neighbor_y)] = (current_x, current_y)
+                    g_score[(neighbor_x, neighbor_y)] = tentative_g_score
+                    f_score[(neighbor_x, neighbor_y)] = tentative_g_score + self._heuristic(
+                        (neighbor_x, neighbor_y), (end_x, end_y))
+                    heapq.heappush(open_set, (f_score[(neighbor_x, neighbor_y)], neighbor_x, neighbor_y))
+
+    # Kein Pfad gefunden oder Node-Limit erreicht - direkte Linie als Fallback
+    if progress_callback:
+        progress_callback("Road Building", 30, f"Pathfinding fallback after {nodes_explored} nodes")
+
+    return [(start_x, start_y), (end_x, end_y)]
+
+
+def _heuristic(self, pos1, pos2):
+    """
+    Funktionsweise: Heuristik-Funktion für A*-Algorithmus
+    Aufgabe: Schätzt Kosten vom aktuellen Punkt zum Ziel
+    Parameter: pos1, pos2 - Aktuelle und Ziel-Position
+    Returns: float - Geschätzte Kosten
+    """
+    return np.sqrt((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2)
+
+
+def apply_spline_smoothing(self, path, smoothing_factor=3, progress_callback=None):
+    """
+    Funktionsweise: Wendet Spline-Interpolation auf Pfad an für sanfte Straßenführung
+    Aufgabe: Glättet Straßenverlauf zwischen Wegpunkten
+    Parameter: path (List[Tuple]), smoothing_factor (int), progress_callback - Pfad, Glättung und Progress
+    Returns: List[Tuple] - Geglätteter Pfad
+    """
+    if len(path) < 4:
+        return path
+
+    # LOD-abhängige Spline-Qualität
+    if self.lod_level == "LOD64":
+        smoothing_factor = max(5, smoothing_factor)  # Weniger Punkte bei LOD64
+
+    # Nur jeden N-ten Punkt für Spline verwenden
+    control_points = path[::smoothing_factor]
+    if path[-1] not in control_points:
+        control_points.append(path[-1])
+
+    if len(control_points) < 3:
+        return path
+
+    # Koordinaten extrahieren
+    x_coords = [p[0] for p in control_points]
+    y_coords = [p[1] for p in control_points]
+
+    try:
+        # Spline interpolieren
+        tck, u = splprep([x_coords, y_coords], s=0)
+
+        # Neue Punkte entlang Spline generieren
+        u_new = np.linspace(0, 1, len(path))
+        smoothed_coords = splev(u_new, tck)
+
+        smoothed_path = [(int(x), int(y)) for x, y in zip(smoothed_coords[0], smoothed_coords[1])]
+        return smoothed_path
+    except:
+        # Fallback bei Spline-Fehlern
+        return path
+
+
+class CivilizationInfluenceMapper:
+    """
+    Funktionsweise: Berechnet civ_map durch radialen Decay von Settlement/Road/Landmark-Punkten
+    Aufgabe: Erstellt realistische Zivilisations-Verteilung mit Decay-Kernels
+    """
+
+    def __init__(self, civ_influence_decay=1.0):
+        """
+        Funktionsweise: Initialisiert Civilization-Influence-Mapper mit Decay-Parameter
+        Aufgabe: Setup der Zivilisations-Einfluss-Berechnung
+        Parameter: civ_influence_decay (float) - Stärke des Einfluss-Abfalls mit Distanz
+        """
+        self.decay_factor = civ_influence_decay
+
+    def apply_settlement_influence(self, civ_map, settlements, slopemap, progress_callback=None):
+        """
+        Funktionsweise: Wendet Settlement-Einfluss auf civ_map an mit radialem Decay
+        Aufgabe: Berechnet Zivilisations-Einfluss von Städten und Dörfern
+        Parameter: civ_map, settlements, slopemap, progress_callback - Civ-Map, Settlement-Liste, Slope-Daten und Progress
+        Returns: numpy.ndarray - Aktualisierte civ_map
+        """
+        if progress_callback:
+            progress_callback("Civilization Mapping", 55, f"Applying influence for {len(settlements)} settlements...")
+
+        height, width = civ_map.shape
+
+        for i, settlement in enumerate(settlements):
+            center_x = int(settlement.x)
+            center_y = int(settlement.y)
+            radius = settlement.radius
+            base_influence = settlement.civ_influence
+
+            # Einflussbereich berechnen
+            for y in range(max(0, center_y - int(radius) - 5), min(height, center_y + int(radius) + 6)):
+                for x in range(max(0, center_x - int(radius) - 5), min(width, center_x + int(radius) + 6)):
+                    distance = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+
+                    if distance <= radius:
+                        # Innerhalb Stadt: maximaler Einfluss (1.0)
+                        civ_map[y, x] = max(civ_map[y, x], 1.0)
+                    else:
+                        # Außerhalb: radialer Decay mit Slope-Modifikation
+                        slope_modifier = self._calculate_slope_decay_modifier(slopemap, x, y)
+                        decay_distance = (distance - radius) * self.decay_factor * slope_modifier
+
+                        if decay_distance < radius * 2:
+                            influence = base_influence * np.exp(-decay_distance / radius)
+                            civ_map[y, x] = max(civ_map[y, x], influence)
+
+            # Progress-Update pro Settlement-Batch
+            if progress_callback and (i + 1) % max(1, len(settlements) // 4) == 0:
+                progress = 55 + (i + 1) * 10 // len(settlements)
+                progress_callback("Civilization Mapping", progress, f"Processed {i + 1}/{len(settlements)} settlements")
+
+        return civ_map
+
+    def calculate_road_influence(self, civ_map, roads, slopemap, progress_callback=None):
+        """
+        Funktionsweise: Wendet Road-Einfluss auf civ_map an entlang der Straßenverläufe
+        Aufgabe: Berechnet Zivilisations-Einfluss entlang von Straßen
+        Parameter: civ_map, roads, slopemap, progress_callback - Civ-Map, Straßen-Pfade, Slope-Daten und Progress
+        Returns: numpy.ndarray - Aktualisierte civ_map
+        """
+        if progress_callback:
+            progress_callback("Civilization Mapping", 65, f"Applying road influence for {len(roads)} roads...")
+
+        road_influence = 0.2
+        max_road_civ = 0.5
+        road_width = 2
+
+        for road_idx, road in enumerate(roads):
+            for point in road:
+                x, y = int(point[0]), int(point[1])
+
+                # Einfluss um Straßenpunkt
+                for dy in range(-road_width, road_width + 1):
+                    for dx in range(-road_width, road_width + 1):
+                        nx, ny = x + dx, y + dy
+
+                        if 0 <= nx < civ_map.shape[1] and 0 <= ny < civ_map.shape[0]:
+                            distance = np.sqrt(dx ** 2 + dy ** 2)
+                            if distance <= road_width:
+                                influence = road_influence * (1 - distance / road_width)
+                                new_value = min(max_road_civ, civ_map[ny, nx] + influence)
+                                civ_map[ny, nx] = new_value
+
+        return civ_map
+
+    def apply_decay_kernel(self, civ_map, location, influence_value, radius, slopemap):
+        """
+        Funktionsweise: Wendet radialen Decay-Kernel um einzelne Location an
+        Aufgabe: Generische Einfluss-Verteilung für beliebige Locations
+        Parameter: civ_map, location, influence_value, radius, slopemap
+        Returns: numpy.ndarray - Aktualisierte civ_map
+        """
+        height, width = civ_map.shape
+        center_x, center_y = int(location.x), int(location.y)
+
+        for y in range(max(0, center_y - int(radius) - 2), min(height, center_y + int(radius) + 3)):
+            for x in range(max(0, center_x - int(radius) - 2), min(width, center_x + int(radius) + 3)):
+                distance = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+
+                if distance <= radius:
+                    # Slope-Modifikation
+                    slope_modifier = self._calculate_slope_decay_modifier(slopemap, x, y)
+                    decay_distance = distance * self.decay_factor * slope_modifier
+
+                    influence = influence_value * np.exp(-decay_distance / radius)
+                    civ_map[y, x] = max(civ_map[y, x], influence)
+
+        return civ_map
+
+    def _calculate_slope_decay_modifier(self, slopemap, x, y):
+        """
+        Funktionsweise: Berechnet Slope-basierten Modifier für Einfluss-Decay
+        Aufgabe: Verstärkt Decay an Hanglagen, so dass Zivilisation nicht auf Berge reicht
+        Parameter: slopemap, x, y - Slope-Daten und Koordinaten
+        Returns: float - Slope-Decay-Modifier (>1 = stärkerer Decay)
+        """
+        height, width = slopemap.shape[:2]
+
+        if x < 0 or x >= width or y < 0 or y >= height:
+            return 2.0  # Starker Decay außerhalb der Map
+
+        # Slope-Magnitude berechnen
+        dz_dx = slopemap[y, x, 0]
+        dz_dy = slopemap[y, x, 1]
+        slope_magnitude = np.sqrt(dz_dx ** 2 + dz_dy ** 2)
+
+        # Modifier: 1.0 (flach) bis 3.0 (sehr steil)
+        slope_modifier = 1.0 + slope_magnitude * 2.0
+        return min(3.0, slope_modifier)
+
+
+class PlotNodeSystem:
+    """
+    Funktionsweise: Generiert Plotnodes mit Delaunay-Triangulation und Grundstücks-Bildung
+    Aufgabe: Erstellt Grundstücks-System für späteres Gameplay mit LOD-abhängiger Dichte
+    """
+
+    def __init__(self, plotsize=1.0, lod_level="LOD64"):
+        """
+        Funktionsweise: Initialisiert PlotNode-System mit Plot-Größen-Parameter und LOD
+        Aufgabe: Setup der Grundstücks-Generierung mit LOD-Anpassung
+        Parameter: plotsize (float), lod_level (str) - Akkumulierter Civ-Wert für Plot-Größe und LOD
+        """
+        self.plotsize_threshold = plotsize
+        self.lod_level = lod_level
+        self.next_node_id = 0
+        self.next_plot_id = 0
+
+        # LOD-abhängige PlotNode-Dichte
+        self.lod_density_factors = {
+            "LOD64": 0.3,  # 30% der gewünschten Nodes
+            "LOD128": 0.6,  # 60% der gewünschten Nodes
+            "LOD256": 0.9,  # 90% der gewünschten Nodes
+            "FINAL": 1.0  # 100% der gewünschten Nodes
+        }
+
+    def generate_plot_nodes(self, civ_map, plotnodes_count, settlements, progress_callback=None):
+        """
+        Funktionsweise: Generiert PlotNodes gleichmäßig verteilt außerhalb von Städten und Wilderness
+        Aufgabe: Erstellt initiale PlotNode-Verteilung für Grundstücks-System mit LOD-Optimierung
+        Parameter: civ_map, plotnodes_count, settlements, progress_callback - Civ-Map, Anzahl Nodes, Settlements und Progress
+        Returns: List[PlotNode] - Generierte PlotNodes
+        """
+        if progress_callback:
+            progress_callback("Plot Generation", 80, "Generating plot nodes...")
+
+        height, width = civ_map.shape
+        nodes = []
+
+        # LOD-abhängige Node-Anzahl
+        density_factor = self.lod_density_factors[self.lod_level]
+        adjusted_count = int(plotnodes_count * density_factor)
+
+        # Gültige Bereiche finden (nicht in Städten, nicht in Wilderness)
+        valid_positions = []
+
+        for y in range(height):
+            for x in range(width):
+                civ_value = civ_map[y, x]
+
+                # Wilderness ausschließen (< 0.2)
+                if civ_value < 0.2:
+                    continue
+
+                # Stadt-Bereiche ausschließen (= 1.0)
+                if civ_value >= 1.0:
+                    continue
+
+                # Mindestabstand zu Settlements prüfen
+                too_close = False
+                for settlement in settlements:
+                    distance = np.sqrt((x - settlement.x) ** 2 + (y - settlement.y) ** 2)
+                    if distance < settlement.radius * 1.2:
+                        too_close = True
+                        break
+
+                if not too_close:
+                    valid_positions.append((x, y, civ_value))
+
+        # PlotNodes gleichmäßig verteilen
+        if len(valid_positions) < adjusted_count:
+            adjusted_count = len(valid_positions)
+
+        # Sampling für gleichmäßige Verteilung
+        sampled_positions = self._sample_uniform_distribution(valid_positions, adjusted_count)
+
+        for x, y, civ_value in sampled_positions:
+            node = PlotNode(
+                node_id=self.next_node_id,
+                node_location=(float(x), float(y)),
+                connector_id=[],
+                connector_distance=[],
+                connector_elevation=[],
+                connector_movecost=[]
+            )
+            nodes.append(node)
+            self.next_node_id += 1
+
+        if progress_callback:
+            progress_callback("Plot Generation", 85, f"Generated {len(nodes)} plot nodes")
+
+        return nodes
+
+    def create_delaunay_triangulation(self, nodes, heightmap, biome_map=None, progress_callback=None):
+        """
+        Funktionsweise: Erstellt Delaunay-Triangulation zwischen PlotNodes mit MoveCost-Berechnung
+        Aufgabe: Verbindet PlotNodes über Delaunay-Dreiecke für Grundstücks-Bildung
+        Parameter: nodes, heightmap, biome_map, progress_callback - PlotNode-Liste, Höhendaten, Biom-Map und Progress
+        Returns: List[PlotNode] - Nodes mit aktualisierten Verbindungen
+        """
+        if progress_callback:
+            progress_callback("Plot Generation", 87, "Creating Delaunay triangulation...")
+
+        if len(nodes) < 3:
+            return nodes
+
+        # Koordinaten extrahieren
+        points = np.array([node.node_location for node in nodes])
+
+        try:
+            # Delaunay-Triangulation
+            tri = Delaunay(points)
+
+            # Verbindungen aus Triangulation extrahieren
+            for node in nodes:
+                node.connector_id = []
+                node.connector_distance = []
+                node.connector_elevation = []
+                node.connector_movecost = []
+
+            for simplex in tri.simplices:
+                # Jedes Dreieck verbindet 3 Nodes
+                for i in range(3):
+                    for j in range(i + 1, 3):
+                        node_a_idx = simplex[i]
+                        node_b_idx = simplex[j]
+
+                        node_a = nodes[node_a_idx]
+                        node_b = nodes[node_b_idx]
+
+                        # Verbindung A->B
+                        if node_b.node_id not in node_a.connector_id:
+                            distance = self._calculate_distance(node_a.node_location, node_b.node_location)
+                            elevation_diff = self._calculate_elevation_difference(
+                                node_a.node_location, node_b.node_location, heightmap
+                            )
+                            movecost = self._calculate_biome_movecost(
+                                node_a.node_location, node_b.node_location, biome_map, distance, elevation_diff
+                            )
+
+                            node_a.connector_id.append(node_b.node_id)
+                            node_a.connector_distance.append(distance)
+                            node_a.connector_elevation.append(elevation_diff)
+                            node_a.connector_movecost.append(movecost)
+
+                        # Verbindung B->A
+                        if node_a.node_id not in node_b.connector_id:
+                            distance = self._calculate_distance(node_b.node_location, node_a.node_location)
+                            elevation_diff = self._calculate_elevation_difference(
+                                node_b.node_location, node_a.node_location, heightmap
+                            )
+                            movecost = self._calculate_biome_movecost(
+                                node_b.node_location, node_a.node_location, biome_map, distance, elevation_diff
+                            )
+
+                            node_b.connector_id.append(node_a.node_id)
+                            node_b.connector_distance.append(distance)
+                            node_b.connector_elevation.append(elevation_diff)
+                            node_b.connector_movecost.append(movecost)
+
+            return nodes
+
+        except Exception as e:
+            # Fallback: keine Verbindungen
+            if progress_callback:
+                progress_callback("Plot Generation", 87, f"Delaunay triangulation failed: {e}")
+            return nodes
+
+    def merge_to_plots(self, nodes, civ_map, progress_callback=None):
+        """
+        Funktionsweise: Fusioniert PlotNodes zu Plots basierend auf akkumuliertem Civ-Wert
+        Aufgabe: Erstellt Grundstücke durch Node-Gruppierung nach Civ-Wert-Schwellwert
+        Parameter: nodes, civ_map, progress_callback - PlotNode-Liste, Civ-Map und Progress
+        Returns: List[Plot] - Generierte Plots
+        """
+        if progress_callback:
+            progress_callback("Plot Generation", 90, "Merging nodes to plots...")
+
+        plots = []
+        used_nodes = set()
+
+        for start_node in nodes:
+            if start_node.node_id in used_nodes:
+                continue
+
+            # Neuen Plot starten
+            plot_nodes = [start_node]
+            used_nodes.add(start_node.node_id)
+            accumulated_civ = self._get_node_civ_value(start_node, civ_map)
+
+            # Nachbarn hinzufügen bis Schwellwert erreicht
+            candidates = [start_node]
+
+            while candidates and accumulated_civ < self.plotsize_threshold:
+                current_node = candidates.pop(0)
+
+                # Nachbarn des aktuellen Nodes prüfen
+                for neighbor_id in current_node.connector_id:
+                    if neighbor_id in used_nodes:
+                        continue
+
+                    neighbor_node = self._find_node_by_id(nodes, neighbor_id)
+                    if neighbor_node is None:
+                        continue
+
+                    neighbor_civ = self._get_node_civ_value(neighbor_node, civ_map)
+
+                    # Node zum Plot hinzufügen
+                    plot_nodes.append(neighbor_node)
+                    used_nodes.add(neighbor_id)
+                    accumulated_civ += neighbor_civ
+                    candidates.append(neighbor_node)
+
+                    if accumulated_civ >= self.plotsize_threshold:
+                        break
+
+            # Plot erstellen
+            if len(plot_nodes) > 0:
+                plot = Plot(
+                    plot_id=self.next_plot_id,
+                    nodes=plot_nodes,
+                    biome_amount={},  # Wird später gefüllt
+                    resource_amount={},  # Wird später gefüllt
+                    plot_area=self._calculate_plot_area(plot_nodes),
+                    plot_distance=self._calculate_plot_distance(plot_nodes)
+                )
+                plots.append(plot)
+                self.next_plot_id += 1
+
+        if progress_callback:
+            progress_callback("Plot Generation", 92, f"Created {len(plots)} plots from {len(nodes)} nodes")
+
+        return plots
+
+    def optimize_node_positions(self, nodes, iterations=5, progress_callback=None):
+        """
+        Funktionsweise: Optimiert PlotNode-Positionen durch Abstoßungslogik und Winkel-Glättung
+        Aufgabe: Verbessert Node-Anordnung für natürlichere Grundstücks-Formen
+        Parameter: nodes, iterations, progress_callback - PlotNode-Liste, Iterationen und Progress
+        Returns: List[PlotNode] - Optimierte PlotNodes
+        """
+        if progress_callback:
+            progress_callback("Plot Generation", 94, f"Optimizing node positions ({iterations} iterations)...")
+
+        # LOD-abhängige Iterations-Anzahl
+        if self.lod_level == "LOD64":
+            iterations = max(2, iterations // 2)
+
+        for iteration in range(iterations):
+            # Abstoßungslogik zwischen zu nahen Nodes
+            for i, node_a in enumerate(nodes):
+                for j, node_b in enumerate(nodes[i + 1:], i + 1):
+                    distance = self._calculate_distance(node_a.node_location, node_b.node_location)
+
+                    if distance < 3.0:  # Zu nah
+                        # Abstoßungsvektor berechnen
+                        dx = node_b.node_location[0] - node_a.node_location[0]
+                        dy = node_b.node_location[1] - node_a.node_location[1]
+
+                        if distance > 0:
+                            # Normalisieren und Abstoßung anwenden
+                            dx /= distance
+                            dy /= distance
+
+                            repulsion_strength = (3.0 - distance) * 0.1
+
+                            node_a.node_location = (
+                                node_a.node_location[0] - dx * repulsion_strength,
+                                node_a.node_location[1] - dy * repulsion_strength
+                            )
+                            node_b.node_location = (
+                                node_b.node_location[0] + dx * repulsion_strength,
+                                node_b.node_location[1] + dy * repulsion_strength
+                            )
+
+        if progress_callback:
+            progress_callback("Plot Generation", 95, f"Node optimization completed")
+
+        return nodes
+
+    def _calculate_biome_movecost(self, pos1, pos2, biome_map, distance, elevation_diff):
+        """
+        Funktionsweise: Berechnet Bewegungskosten basierend auf Biom-Typen entlang des Pfades
+        Aufgabe: Biom-abhängige MoveCost für PlotNode-Verbindungen
+        Parameter: pos1, pos2, biome_map, distance, elevation_diff
+        Returns: float - Biom-adjustierte Bewegungskosten
+        """
+        if biome_map is None:
+            # Fallback: nur Distanz + Elevation
+            return distance + abs(elevation_diff) * 0.5
+
+        # Vereinfachte Biom-Kosten-Matrix
+        biome_costs = {
+            0: 1.0,  # ice_cap - schwer
+            1: 0.8,  # tundra - moderat
+            2: 0.6,  # taiga - leicht
+            3: 0.4,  # grassland - sehr leicht
+            4: 0.6,  # temperate_forest - moderat
+            5: 0.5,  # mediterranean - leicht
+            6: 1.2,  # desert - schwer
+            7: 0.7,  # semi_arid - moderat
+            8: 0.9,  # tropical_rainforest - schwer
+            9: 0.7,  # tropical_seasonal - moderat
+            10: 0.5,  # savanna - leicht
+            11: 0.8,  # montane_forest - moderat
+            12: 1.5,  # swamp - sehr schwer
+            13: 0.6,  # coastal_dunes - moderat
+            14: 1.1  # badlands - schwer
+        }
+
+        # Biom-Typ an Mittelpunkt der Verbindung
+        mid_x = int((pos1[0] + pos2[0]) / 2)
+        mid_y = int((pos1[1] + pos2[1]) / 2)
+
+        if (0 <= mid_x < biome_map.shape[1] and 0 <= mid_y < biome_map.shape[0]):
+            biome_type = biome_map[mid_y, mid_x]
+            biome_cost_factor = biome_costs.get(biome_type, 1.0)
+        else:
+            biome_cost_factor = 1.0
+
+        return distance * biome_cost_factor + abs(elevation_diff) * 0.5
+
+    def _sample_uniform_distribution(self, positions, count):
+        """
+        Funktionsweise: Sampelt Positionen für gleichmäßige räumliche Verteilung
+        Aufgabe: Verhindert Clustering von PlotNodes
+        Parameter: positions, count - Verfügbare Positionen und gewünschte Anzahl
+        Returns: List[Tuple] - Gleichmäßig verteilte Positionen
+        """
+        if len(positions) <= count:
+            return positions
+
+        # Einfaches Grid-basiertes Sampling
+        positions.sort(key=lambda p: (p[1], p[0]))  # Sort by y, then x
+
+        step = len(positions) // count
+        sampled = []
+
+        for i in range(0, len(positions), step):
+            if len(sampled) < count:
+                sampled.append(positions[i])
+
+        return sampled
+
+    def _calculate_distance(self, pos1, pos2):
+        """
+        Funktionsweise: Berechnet Euklidische Distanz zwischen zwei Positionen
+        Aufgabe: Standard-Distanzberechnung für PlotNode-Verbindungen
+        """
+        return np.sqrt((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2)
+
+    def _calculate_elevation_difference(self, pos1, pos2, heightmap):
+        """
+        Funktionsweise: Berechnet akkumulierten Höhenunterschied zwischen zwei Positionen
+        Aufgabe: Höhendifferenz für MoveCost-Berechnung
+        """
+        x1, y1 = int(pos1[0]), int(pos1[1])
+        x2, y2 = int(pos2[0]), int(pos2[1])
+
+        height, width = heightmap.shape
+
+        if (0 <= x1 < width and 0 <= y1 < height and
+                0 <= x2 < width and 0 <= y2 < height):
+            return heightmap[y2, x2] - heightmap[y1, x1]
+
+        return 0.0
+
+    def _get_node_civ_value(self, node, civ_map):
+        """
+        Funktionsweise: Holt Civ-Wert für PlotNode-Position aus civ_map
+        Aufgabe: Civ-Wert-Lookup für Plot-Größen-Berechnung
+        """
+        x, y = int(node.node_location[0]), int(node.node_location[1])
+        height, width = civ_map.shape
+
+        if 0 <= x < width and 0 <= y < height:
+            return civ_map[y, x]
+
+        return 0.0
+
+    def _find_node_by_id(self, nodes, node_id):
+        """
+        Funktionsweise: Findet PlotNode anhand der ID
+        Aufgabe: Node-Lookup für Nachbar-Suche
+        """
+        for node in nodes:
+            if node.node_id == node_id:
+                return node
+        return None
+
+    def _calculate_plot_area(self, plot_nodes):
+        """
+        Funktionsweise: Berechnet approximative Fläche eines Plots
+        Aufgabe: Plot-Größen-Berechnung für Gameplay-Eigenschaften
+        """
+        if len(plot_nodes) < 3:
+            return 1.0
+
+        # Simplified: Anzahl Nodes als Flächen-Approximation
+        return float(len(plot_nodes))
+
+    def _calculate_plot_distance(self, plot_nodes):
+        """
+        Funktionsweise: Berechnet durchschnittliche Entfernung zwischen Plot-Nodes
+        Aufgabe: Plot-Distanz-Metrik für Gameplay
+        """
+        if len(plot_nodes) < 2:
+            return 0.0
+
+        total_distance = 0.0
+        connections = 0
+
+        for node in plot_nodes:
+            total_distance += sum(node.connector_distance)
+            connections += len(node.connector_distance)
+
+        if connections > 0:
+            return total_distance / connections
+
+        return 0.0
