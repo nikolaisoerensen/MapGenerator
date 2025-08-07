@@ -42,7 +42,6 @@ class NavigationManager(QObject):
         # Tab-Reihenfolge wie in Dokumentation definiert
         self.tab_order = [
             "main_menu",
-            "loading",
             "terrain",
             "geology",
             "weather",

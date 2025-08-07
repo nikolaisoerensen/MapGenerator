@@ -1,81 +1,10 @@
 """
-    Path: gui/managers/orchestrator_manager.py
+Path: gui/managers/orchestrator_manager.py
 
-    Funktionsweise: Homogene Orchestrator-Integration für alle Generator-Tabs mit vereinheitlichter Signal-Architektur
-    Aufgabe: Standard-Orchestrator-Handler, Request-Building, Signal-Management für wiederverwendbare Integration zwischen allen Tabs
-    Features: Direkte Signal-Connections, Thread-safe UI-Updates, Request-Validation, einheitliche Tab-Integration
-
-    Komponenten:
-    StandardOrchestratorHandler:
-        Funktionsweise: Einheitliche Orchestrator-Integration für alle Generator-Tabs mit direkten Signals
-        Aufgabe: Eliminiert Code-Duplikation zwischen allen Generator-Tabs mit homogener Signal-Architektur
-        Konstruktor: StandardOrchestratorHandler(parent_tab, generator_type) - einheitlich für alle Tabs
-        Signal-Integration: Direkte Signals ohne komplexe UI-Method-Mappings
-        Direkte Signals:
-            - generation_completed(result_id: str, result_data: dict) - für alle Tab-Completion-Handlers
-            - lod_progression_completed(result_id: str, lod_level: str) - für LOD-Updates in allen Tabs
-            - generation_progress(progress: int, message: str) - für Progress-Updates in allen Tabs
-        Setup: setup_standard_handlers() verbindet alle Standard-Orchestrator-Signals automatisch
-        Connection-Management: cleanup_connections() für proper Disconnect bei Tab-Destruction
-
-    OrchestratorRequestBuilder:
-        Funktionsweise: Builder-Pattern für alle Generator-Types mit typ-sicherer Request-Erstellung
-        Aufgabe: Konsistente Request-Erstellung für alle 6 Standard-Generator-Types
-        Features: Generator-spezifische Builder mit Parameter-Validation und Default-Values
-        Request-Templates für alle Generator-Types:
-            - build_terrain_request(parameters, target_lod, source_tab) - Terrain-Generator
-            - build_geology_request(parameters, target_lod, source_tab) - Geology-Generator
-            - build_weather_request(parameters, target_lod, source_tab) - Weather-Generator
-            - build_water_request(parameters, target_lod, source_tab) - Water-Generator
-            - build_biome_request(parameters, target_lod, source_tab) - Biome-Generator
-            - build_settlement_request(parameters, target_lod, source_tab) - Settlement-Generator
-        Validation: Request-Completeness-Check, LOD-Validation, Priority-Range-Check, Parameter-Constraint-Validation
-        Batch-Operations: build_batch_request() für Multi-Generator-Requests
-
-    Homogene Tab-Integration:
-        Funktionsweise: Alle 6 Generator-Tabs nutzen identisches Integration-Pattern
-        Setup-Pattern für alle Tabs:
-            1. Konstruktor: StandardOrchestratorHandler(self, "generator_type")
-            2. Setup: self.orchestrator_handler.setup_standard_handlers()
-            3. Connections: Direkte Signal-Connections zu Tab-spezifischen Slots
-
-        Einheitliche Signal-Connections für alle Tabs:
-            self.orchestrator_handler.generation_completed.connect(self.on_[generator]_generation_completed)
-            self.orchestrator_handler.lod_progression_completed.connect(self.on_lod_progression_completed)
-            self.orchestrator_handler.generation_progress.connect(self.update_generation_progress)
-
-        Tab-spezifische Slot-Signatures (einheitlich für alle):
-            - on_[generator]_generation_completed(result_id: str, result_data: dict)
-            - on_lod_progression_completed(result_id: str, lod_level: str)
-            - update_generation_progress(progress: int, message: str)
-
-    Request-Erstellung für alle Generator-Types:
-        Funktionsweise: Einheitliches Request-Pattern für alle 6 Generator-Tabs
-        Pattern für alle Tabs:
-            1. Parameter sammeln: parameters = self.get_current_parameters()
-            2. Request bauen: request = OrchestratorRequestBuilder.build_[generator]_request(parameters, target_lod, source_tab)
-            3. Request senden: request_id = self.generation_orchestrator.request_generation(request)
-            4. Status updates über standardisierte Signals
-
-    Thread-Safety und Performance:
-        - Direkte Qt-Signal-Connections für Thread-safe UI-Updates ohne QMetaObject.invokeMethod()
-        - Vereinfachte Signal-Architektur eliminiert komplexe Method-Mapping-Overhead
-        - Automatic-Cleanup bei Tab-Destruction über proper Signal-Disconnection
-        - Memory-Leak-Prevention durch simplified Connection-Management
-
-    Vereinfachungen gegenüber vorheriger Version:
-        - Entfernt: Komplexe UI-Update-Method-Mappings (set_custom_ui_methods)
-        - Entfernt: OrchestratorIntegrationManager (zu komplex für homogene Tab-Integration)
-        - Entfernt: OrchestratorErrorHandler (wird vom Orchestrator selbst gehandhabt)
-        - Vereinfacht: Direkte Signal-Connections statt generischer generation_status_changed
-        - Standardisiert: Einheitlicher Konstruktor für alle Tabs ohne Generator-spezifische Parameter
-
-    Kommunikationskanäle:
-        - Input: Parameter von allen 6 Generator-Tabs über einheitliches Request-Pattern
-        - Output: Direkte Signals an Tab-spezifische Slots für UI-Updates
-        - Integration: Homogenes Setup-Pattern für terrain_tab, geology_tab, settlement_tab, weather_tab, water_tab, biome_tab
-        - Orchestrator: Einheitliche Request-Submission über OrchestratorRequestBuilder für alle Generator-Types
-    """
+Funktionsweise: Homogene Orchestrator-Integration für alle Generator-Tabs mit vereinheitlichter Signal-Architektur
+Aufgabe: Standard-Orchestrator-Handler, Request-Building, Signal-Management für wiederverwendbare Integration zwischen allen Tabs
+Features: Direkte Signal-Connections, Thread-safe UI-Updates, Request-Validation, einheitliche Tab-Integration
+"""
 
 import time
 import logging
@@ -106,7 +35,7 @@ class StandardOrchestratorHandler(QObject):
     Aufgabe: Eliminiert Code-Duplikation zwischen allen Generator-Tabs mit homogener Signal-Architektur
     """
 
-    # Direkte Signals für alle Tabs (einheitliche Signatures)
+    # HOMOGENE SIGNALS für alle Tabs (einheitliche Signatures entsprechend Descriptoren)
     generation_completed = pyqtSignal(str, dict)  # (result_id, result_data)
     lod_progression_completed = pyqtSignal(str, str)  # (result_id, lod_level)
     generation_progress = pyqtSignal(int, str)  # (progress, message)
@@ -130,7 +59,7 @@ class StandardOrchestratorHandler(QObject):
             self.logger.warning(f"No orchestrator available for {self.generator_type}")
             return False
 
-        # Standard-Signal-Verbindungen
+        # Standard-Signal-Verbindungen (entsprechend harmonisierter Orchestrator-Signals)
         signal_mappings = [
             ('generation_completed', self._on_generation_completed),
             ('generation_progress', self._on_generation_progress),
@@ -141,9 +70,12 @@ class StandardOrchestratorHandler(QObject):
         for signal_name, handler_method in signal_mappings:
             if hasattr(self.orchestrator, signal_name):
                 signal = getattr(self.orchestrator, signal_name)
-                connection = signal.connect(handler_method)
-                self.connected_signals.append((signal_name, signal, connection))
-                self.logger.debug(f"Connected {signal_name} for {self.generator_type}")
+                try:
+                    connection = signal.connect(handler_method)
+                    self.connected_signals.append((signal_name, signal, handler_method))
+                    self.logger.debug(f"Connected {signal_name} for {self.generator_type}")
+                except Exception as e:
+                    self.logger.error(f"Failed to connect {signal_name}: {e}")
             else:
                 self.logger.warning(f"Signal {signal_name} not found in orchestrator")
 
@@ -183,10 +115,10 @@ class StandardOrchestratorHandler(QObject):
         """
         disconnected_count = 0
 
-        for signal_name, signal, connection in self.connected_signals:
+        for signal_name, signal, handler_method in self.connected_signals:
             try:
                 if self.orchestrator:
-                    signal.disconnect(connection)
+                    signal.disconnect(handler_method)
                     disconnected_count += 1
             except (TypeError, RuntimeError) as e:
                 self.logger.debug(f"Signal {signal_name} disconnect failed: {e}")

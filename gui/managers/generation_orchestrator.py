@@ -265,7 +265,7 @@ class GenerationOrchestrator(QObject):
     Aufgabe: Koordiniert alle 6 Generatoren mit einheitlichen Signals für StandardOrchestratorHandler-Integration
     """
 
-    # Homogene Signal-Architektur für alle Tabs (kompatibel mit StandardOrchestratorHandler)
+    # HOMOGENE SIGNAL-ARCHITEKTUR (kompatibel mit StandardOrchestratorHandler)
     generation_completed = pyqtSignal(str, dict)  # (result_id, result_data)
     lod_progression_completed = pyqtSignal(str, str)  # (result_id, lod_level)
     generation_progress = pyqtSignal(int, str)  # (progress, message)
@@ -292,33 +292,32 @@ class GenerationOrchestrator(QObject):
 
         # Parameter-Impact-Matrix (welche Parameter-Änderungen invalidieren nachgelagerte Generatoren)
         self.impact_matrix = {
-            GeneratorType.TERRAIN: {  # Terrain-Änderungen invalidieren alles
+            GeneratorType.TERRAIN: {
                 "high_impact": ["map_seed", "size", "amplitude", "octaves", "frequency"],
                 "medium_impact": ["persistence", "lacunarity"],
                 "low_impact": ["redistribute_power"]
             },
-            GeneratorType.GEOLOGY: {  # Geology-Änderungen invalidieren Water+, da Water braucht Rock/Hardness
+            GeneratorType.GEOLOGY: {
                 "high_impact": ["sedimentary_hardness", "igneous_hardness", "metamorphic_hardness"],
                 "medium_impact": ["ridge_warping", "bevel_warping"],
                 "low_impact": ["metamorph_foliation", "igneous_flowing"]
             },
-            GeneratorType.WEATHER: {  # Weather-Änderungen invalidieren Water+, da Water braucht Precipitation/Temperature
+            GeneratorType.WEATHER: {
                 "high_impact": ["air_temp_entry", "solar_power", "altitude_cooling"],
                 "medium_impact": ["thermic_effect", "wind_speed_factor"],
                 "low_impact": ["terrain_factor"]
             },
-            GeneratorType.WATER: {  # Water-Änderungen invalidieren Biome+, da Biome braucht Soil Moisture
+            GeneratorType.WATER: {
                 "high_impact": ["lake_volume_threshold", "rain_threshold", "erosion_strength"],
                 "medium_impact": ["manning_coefficient", "sediment_capacity_factor"],
                 "low_impact": ["evaporation_base_rate", "diffusion_radius"]
             },
             GeneratorType.BIOME: {
-                # Biome-Änderungen invalidieren Settlement, da Settlement nutzt Biome für Plot-Optimierung
                 "high_impact": ["biome_wetness_factor", "biome_temp_factor", "sea_level"],
                 "medium_impact": ["alpine_level", "snow_level", "bank_width"],
                 "low_impact": ["edge_softness", "cliff_slope"]
             },
-            GeneratorType.SETTLEMENT: {  # Settlement-Änderungen invalidieren nichts (ist letzter in Chain)
+            GeneratorType.SETTLEMENT: {
                 "high_impact": ["settlements", "landmarks", "roadsites", "plotnodes"],
                 "medium_impact": ["civ_influence_decay", "terrain_factor_villages"],
                 "low_impact": ["plotsize", "landmark_wilderness", "road_slope_to_distance_ratio"]
@@ -333,7 +332,7 @@ class GenerationOrchestrator(QObject):
         self.thread_mutex = QMutex()
         self.active_requests = set()
 
-        # LOD-Progression Tracking
+        # LOD-Progression Tracking mit DataManager-Integration
         self.lod_progression_queue = {}  # generator_type -> [LOD64, LOD128, LOD256, FINAL]
         self.lod_completion_status = {}  # generator_type -> {LOD64: True, LOD128: False, ...}
 
@@ -357,7 +356,7 @@ class GenerationOrchestrator(QObject):
     def setup_lod_tracking(self):
         """
         Funktionsweise: Initialisiert LOD-Completion-Tracking für alle Generatoren
-        Aufgabe: Baseline für LOD-Progression-Management
+        Aufgabe: Baseline für LOD-Progression-Management mit DataManager-Integration
         """
         for generator_type in GeneratorType:
             self.lod_completion_status[generator_type.value] = {
@@ -491,7 +490,7 @@ class GenerationOrchestrator(QObject):
                 self.logger.warning(f"Request {request.request_id} timed out")
 
         # Prüfe Queue-Requests auf Timeout
-        queue_timeouts = self.dependency_queue.get_timed_out_requests(current_time, timeout_seconds=600)  # 10 Minuten
+        queue_timeouts = self.dependency_queue.get_timed_out_requests(current_time, timeout_seconds=600)
 
         # Timeout-Requests aufräumen
         for request in timed_out_requests + queue_timeouts:
@@ -528,16 +527,31 @@ class GenerationOrchestrator(QObject):
 
     def get_completed_generators(self) -> Dict[str, Set[str]]:
         """
-        Funktionsweise: Sammelt alle abgeschlossenen Generatoren pro LOD-Level
+        Funktionsweise: Sammelt alle abgeschlossenen Generatoren pro LOD-Level mit DataManager-Integration
         Return: Dict[generator_type, Set[completed_lod_levels]]
         """
         completed = {}
         for generator_type in GeneratorType:
             completed[generator_type.value] = set()
-            status = self.lod_completion_status.get(generator_type.value, {})
-            for lod_level, is_completed in status.items():
-                if is_completed:
-                    completed[generator_type.value].add(lod_level)
+
+            # DataManager-Integration für verfügbare LOD-Levels
+            if generator_type == GeneratorType.TERRAIN:
+                # Terrain-spezifische LOD-Prüfung über DataManager
+                if self.data_manager.has_terrain_lod("LOD64"):
+                    completed[generator_type.value].add("LOD64")
+                if self.data_manager.has_terrain_lod("LOD128"):
+                    completed[generator_type.value].add("LOD128")
+                if self.data_manager.has_terrain_lod("LOD256"):
+                    completed[generator_type.value].add("LOD256")
+                if self.data_manager.has_terrain_lod("FINAL"):
+                    completed[generator_type.value].add("FINAL")
+            else:
+                # Andere Generatoren: Standard-Status-Check
+                status = self.lod_completion_status.get(generator_type.value, {})
+                for lod_level, is_completed in status.items():
+                    if is_completed:
+                        completed[generator_type.value].add(lod_level)
+
         return completed
 
     def emit_queue_status_update(self):
@@ -548,134 +562,16 @@ class GenerationOrchestrator(QObject):
         status_list = self.state_tracker.get_all_thread_status()
         self.queue_status_changed.emit(status_list)
 
-    def calculate_parameter_impact(self, generator_type: GeneratorType,
-                                 new_parameters: Dict[str, Any]) -> Set[GeneratorType]:
-        """
-        Funktionsweise: Berechnet welche nachgelagerte Generatoren von Parameter-Änderungen betroffen sind
-        Parameter: generator_type, new_parameters
-        Return: Set von betroffenen GeneratorType
-        """
-        # Aktuelle Parameter aus DataManager holen
-        current_params = self.get_current_parameters(generator_type)
-
-        affected_generators = set()
-        impact_config = self.impact_matrix.get(generator_type, {})
-
-        # Parameter-Änderungen analysieren
-        for param_name, new_value in new_parameters.items():
-            current_value = current_params.get(param_name)
-
-            if current_value != new_value:
-                # Impact-Level bestimmen
-                impact_level = self.get_parameter_impact_level(generator_type, param_name)
-
-                if impact_level == "high_impact":
-                    # High-Impact: Alle nachgelagerten Generatoren betroffen
-                    affected_generators.update(self.get_downstream_generators(generator_type))
-                elif impact_level == "medium_impact":
-                    # Medium-Impact: Direkt abhängige Generatoren
-                    affected_generators.update(self.get_direct_dependents(generator_type))
-                # Low-Impact: Keine nachgelagerten Änderungen nötig
-
-        return affected_generators
-
-    def get_parameter_impact_level(self, generator_type: GeneratorType, param_name: str) -> str:
-        """
-        Funktionsweise: Bestimmt Impact-Level eines spezifischen Parameters
-        Parameter: generator_type, param_name
-        Return: "high_impact", "medium_impact", "low_impact"
-        """
-        impact_config = self.impact_matrix.get(generator_type, {})
-
-        for impact_level, param_list in impact_config.items():
-            if param_name in param_list:
-                return impact_level
-
-        return "low_impact"  # Default für unbekannte Parameter
-
-    def get_downstream_generators(self, generator_type: GeneratorType) -> Set[GeneratorType]:
-        """
-        Funktionsweise: Findet alle Generatoren die (direkt oder indirekt) von diesem abhängen
-        Parameter: generator_type
-        Return: Set aller abhängigen Generatoren
-        """
-        downstream = set()
-
-        # Alle Generatoren prüfen ob sie direkt oder indirekt abhängen
-        for dependent_type, dependencies in self.dependency_tree.items():
-            if generator_type in dependencies:
-                downstream.add(dependent_type)
-                # Rekursive Abhängigkeiten hinzufügen
-                downstream.update(self.get_downstream_generators(dependent_type))
-
-        return downstream
-
-    def get_direct_dependents(self, generator_type: GeneratorType) -> Set[GeneratorType]:
-        """
-        Funktionsweise: Findet Generatoren die direkt von diesem abhängen
-        Parameter: generator_type
-        Return: Set direkt abhängiger Generatoren
-        """
-        dependents = set()
-
-        for dependent_type, dependencies in self.dependency_tree.items():
-            if generator_type in dependencies:
-                dependents.add(dependent_type)
-
-        return dependents
-
-    def invalidate_downstream_dependencies(self, generator_type: GeneratorType,
-                                         affected_generators: Set[GeneratorType]):
-        """
-        Funktionsweise: Invalidiert Cache und LOD-Status für alle betroffenen Generatoren
-        Parameter: generator_type, affected_generators
-        """
-        for affected_type in affected_generators:
-            # DataManager Cache invalidieren
-            self.data_manager.invalidate_cache(affected_type.value)
-
-            # LOD-Status zurücksetzen
-            self.reset_lod_status(affected_type)
-
-            self.logger.info(f"Invalidated {affected_type.value} due to {generator_type.value} changes")
-
-        # Signal emittieren
-        affected_names = [gen.value for gen in affected_generators]
-        self.dependency_invalidated.emit(generator_type.value, affected_names)
-
-    def reset_lod_status(self, generator_type: GeneratorType):
-        """
-        Funktionsweise: Setzt LOD-Completion-Status für Generator zurück
-        Parameter: generator_type
-        """
-        for lod_level in LODLevel:
-            self.lod_completion_status[generator_type.value][lod_level.value] = False
-
-    def check_dependencies_available(self, generator_type: GeneratorType) -> bool:
-        """
-        Funktionsweise: Prüft ob alle Dependencies für Generator verfügbar sind
-        Parameter: generator_type
-        Return: bool - Dependencies verfügbar
-        """
-        dependencies = self.dependency_tree.get(generator_type, set())
-
-        for dependency in dependencies:
-            # Mindestens LOD64 muss verfügbar sein
-            if not self.lod_completion_status[dependency.value][LODLevel.LOD64.value]:
-                return False
-
-        return True
-
     def start_lod_progression(self, request: GenerationRequest) -> bool:
         """
-        Funktionsweise: Startet LOD-Progression für eine Generation-Request
+        Funktionsweise: Startet LOD-Progression für eine Generation-Request mit DataManager-Integration
         Parameter: request
         Return: bool - Success
         """
         generator_type = request.generator_type
         target_lod = request.target_lod
 
-        # LOD-Progression-Queue erstellen
+        # LOD-Progression-Queue erstellen basierend auf verfügbaren DataManager-Daten
         lod_sequence = self.create_lod_sequence(generator_type, target_lod)
 
         if not lod_sequence:
@@ -689,20 +585,27 @@ class GenerationOrchestrator(QObject):
 
     def create_lod_sequence(self, generator_type: GeneratorType, target_lod: LODLevel) -> List[LODLevel]:
         """
-        Funktionsweise: Erstellt LOD-Sequence von aktuellem Status bis Target-LOD
+        Funktionsweise: Erstellt LOD-Sequence von aktuellem DataManager-Status bis Target-LOD
         Parameter: generator_type, target_lod
         Return: Liste der zu berechnenden LOD-Level
         """
         all_lods = [LODLevel.LOD64, LODLevel.LOD128, LODLevel.LOD256, LODLevel.FINAL]
         target_index = all_lods.index(target_lod)
 
-        # Finde höchstes bereits verfügbares LOD
-        current_status = self.lod_completion_status[generator_type.value]
+        # Finde höchstes bereits verfügbares LOD über DataManager
         start_index = 0
 
-        for i, lod in enumerate(all_lods):
-            if current_status[lod.value]:
-                start_index = i + 1
+        if generator_type == GeneratorType.TERRAIN:
+            # DataManager-basierte LOD-Prüfung für Terrain
+            for i, lod in enumerate(all_lods):
+                if self.data_manager.has_terrain_lod(lod.value):
+                    start_index = i + 1
+        else:
+            # Standard-Status-Check für andere Generatoren
+            current_status = self.lod_completion_status[generator_type.value]
+            for i, lod in enumerate(all_lods):
+                if current_status[lod.value]:
+                    start_index = i + 1
 
         # LOD-Sequence vom nächsten Level bis Target
         if start_index <= target_index:
@@ -760,13 +663,16 @@ class GenerationOrchestrator(QObject):
     def on_lod_generation_completed(self, request_id: str, generator_type: str, lod_level: str, success: bool,
                                     result_data: dict):
         """
-        Funktionsweise: Callback für abgeschlossene LOD-Generation mit Tab-kompatiblen Signals
+        Funktionsweise: Callback für abgeschlossene LOD-Generation mit DataManager-Integration
         Parameter: request_id, generator_type, lod_level, success, result_data
         """
         # LOD-Status aktualisieren
         if success:
             self.lod_completion_status[generator_type][lod_level] = True
             self.state_tracker.set_request_completed(generator_type, lod_level)
+
+            # DataManager-Integration: Ergebnis automatisch speichern
+            self.save_generation_result_to_data_manager(generator_type, lod_level, result_data)
 
         # LOD-Progression-Signal emittieren (für sofortige UI-Updates mit bestem verfügbarem LOD)
         self.lod_progression_completed.emit(request_id, lod_level)
@@ -802,12 +708,70 @@ class GenerationOrchestrator(QObject):
         # Queue-Resolution triggern falls neue Dependencies verfügbar
         QTimer.singleShot(100, self.resolve_dependency_queue)
 
+    def save_generation_result_to_data_manager(self, generator_type: str, lod_level: str, result_data: dict):
+        """
+        Funktionsweise: Speichert Generation-Ergebnis automatisch im DataManager
+        Parameter: generator_type, lod_level, result_data
+        """
+        try:
+            generator_output = result_data.get("generator_output")
+            parameters_used = result_data.get("parameters_used", {})
+
+            if generator_type == "terrain" and generator_output:
+                # TerrainData-Objekt speichern
+                self.data_manager.set_terrain_data_complete(generator_output, parameters_used)
+                self.logger.debug(f"Terrain data saved to DataManager for {lod_level}")
+
+            elif generator_type == "geology" and generator_output:
+                # Geology-Daten speichern (rock_map, hardness_map)
+                if hasattr(generator_output, 'rock_map'):
+                    self.data_manager.set_geology_data("rock_map", generator_output.rock_map, parameters_used)
+                if hasattr(generator_output, 'hardness_map'):
+                    self.data_manager.set_geology_data("hardness_map", generator_output.hardness_map, parameters_used)
+
+            elif generator_type == "weather" and generator_output:
+                # Weather-Daten speichern
+                weather_outputs = ["wind_map", "temp_map", "precip_map", "humid_map"]
+                for output_key in weather_outputs:
+                    if hasattr(generator_output, output_key):
+                        output_data = getattr(generator_output, output_key)
+                        self.data_manager.set_weather_data(output_key, output_data, parameters_used)
+
+            elif generator_type == "water" and generator_output:
+                # Water-Daten speichern
+                water_outputs = ["water_map", "flow_map", "flow_speed", "cross_section", "soil_moist_map",
+                               "erosion_map", "sedimentation_map", "rock_map_updated", "evaporation_map",
+                               "ocean_outflow", "water_biomes_map"]
+                for output_key in water_outputs:
+                    if hasattr(generator_output, output_key):
+                        output_data = getattr(generator_output, output_key)
+                        self.data_manager.set_water_data(output_key, output_data, parameters_used)
+
+            elif generator_type == "biome" and generator_output:
+                # Biome-Daten speichern
+                biome_outputs = ["biome_map", "biome_map_super", "super_biome_mask"]
+                for output_key in biome_outputs:
+                    if hasattr(generator_output, output_key):
+                        output_data = getattr(generator_output, output_key)
+                        self.data_manager.set_biome_data(output_key, output_data, parameters_used)
+
+            elif generator_type == "settlement" and generator_output:
+                # Settlement-Daten speichern
+                settlement_outputs = ["settlement_list", "landmark_list", "roadsite_list", "plot_map", "civ_map"]
+                for output_key in settlement_outputs:
+                    if hasattr(generator_output, output_key):
+                        output_data = getattr(generator_output, output_key)
+                        self.data_manager.set_settlement_data(output_key, output_data, parameters_used)
+
+        except Exception as e:
+            self.logger.error(f"Failed to save generation result to DataManager: {e}")
+
     def on_generation_progress(self, progress: int, message: str):
         """
         Funktionsweise: Callback für Generation-Progress mit vereinfachten Parametern
         Parameter: progress, message
         """
-        # Vereinfachtes Progress-Signal emittieren (ohne Generator-spezifische Parameter)
+        # Vereinfachtes Progress-Signal emittieren (homogen für alle Tabs)
         self.generation_progress.emit(progress, message)
 
     def emit_final_completion_signal(self, request_id: str, generator_type: GeneratorType):
@@ -822,7 +786,7 @@ class GenerationOrchestrator(QObject):
             return
 
         # Generator-Output aus DataManager holen
-        generator_data = self.data_manager.get_generator_data(generator_type.value)
+        generator_data = self.get_generator_data_from_data_manager(generator_type.value)
 
         # result_data für Tab-Kompatibilität zusammenstellen
         result_data = {
@@ -834,7 +798,7 @@ class GenerationOrchestrator(QObject):
             "timestamp": time.time()
         }
 
-        # Final-Completion-Signal emittieren (für Tab on_generation_completed Handlers)
+        # Final-Completion-Signal emittieren (homogen für alle Tabs)
         self.generation_completed.emit(request_id, result_data)
 
         # Request aus aktiven entfernen
@@ -842,6 +806,53 @@ class GenerationOrchestrator(QObject):
         self.active_request_mapping.pop(request_id, None)
 
         self.logger.info(f"Final completion emitted for {request_id}")
+
+    def get_generator_data_from_data_manager(self, generator_type: str) -> dict:
+        """
+        Funktionsweise: Holt Generator-Daten aus DataManager für Final-Completion
+        Parameter: generator_type
+        Return: dict mit allen Generator-Outputs
+        """
+        if generator_type == "terrain":
+            return {
+                "heightmap": self.data_manager.get_terrain_data("heightmap"),
+                "slopemap": self.data_manager.get_terrain_data("slopemap"),
+                "shadowmap": self.data_manager.get_terrain_data("shadowmap"),
+                "terrain_data_complete": self.data_manager.get_terrain_data("complete")
+            }
+        elif generator_type == "geology":
+            return {
+                "rock_map": self.data_manager.get_geology_data("rock_map"),
+                "hardness_map": self.data_manager.get_geology_data("hardness_map")
+            }
+        elif generator_type == "weather":
+            return {
+                "wind_map": self.data_manager.get_weather_data("wind_map"),
+                "temp_map": self.data_manager.get_weather_data("temp_map"),
+                "precip_map": self.data_manager.get_weather_data("precip_map"),
+                "humid_map": self.data_manager.get_weather_data("humid_map")
+            }
+        elif generator_type == "water":
+            return {
+                "water_map": self.data_manager.get_water_data("water_map"),
+                "flow_map": self.data_manager.get_water_data("flow_map"),
+                "soil_moist_map": self.data_manager.get_water_data("soil_moist_map"),
+                "water_biomes_map": self.data_manager.get_water_data("water_biomes_map")
+            }
+        elif generator_type == "biome":
+            return {
+                "biome_map": self.data_manager.get_biome_data("biome_map"),
+                "biome_map_super": self.data_manager.get_biome_data("biome_map_super"),
+                "super_biome_mask": self.data_manager.get_biome_data("super_biome_mask")
+            }
+        elif generator_type == "settlement":
+            return {
+                "settlement_list": self.data_manager.get_settlement_data("settlement_list"),
+                "plot_map": self.data_manager.get_settlement_data("plot_map"),
+                "civ_map": self.data_manager.get_settlement_data("civ_map")
+            }
+        else:
+            return {}
 
     def get_generator_instance(self, generator_type: GeneratorType):
         """
@@ -876,19 +887,119 @@ class GenerationOrchestrator(QObject):
 
         return self._generator_instances.get(generator_type.value)
 
+    def calculate_parameter_impact(self, generator_type: GeneratorType,
+                                 new_parameters: Dict[str, Any]) -> Set[GeneratorType]:
+        """
+        Funktionsweise: Berechnet welche nachgelagerte Generatoren von Parameter-Änderungen betroffen sind
+        Parameter: generator_type, new_parameters
+        Return: Set von betroffenen GeneratorType
+        """
+        # Aktuelle Parameter aus DataManager holen
+        current_params = self.get_current_parameters(generator_type)
+
+        affected_generators = set()
+        impact_config = self.impact_matrix.get(generator_type, {})
+
+        # Parameter-Änderungen analysieren
+        for param_name, new_value in new_parameters.items():
+            current_value = current_params.get(param_name)
+
+            if current_value != new_value:
+                # Impact-Level bestimmen
+                impact_level = self.get_parameter_impact_level(generator_type, param_name)
+
+                if impact_level == "high_impact":
+                    # High-Impact: Alle nachgelagerten Generatoren betroffen
+                    affected_generators.update(self.get_downstream_generators(generator_type))
+                elif impact_level == "medium_impact":
+                    # Medium-Impact: Direkt abhängige Generatoren
+                    affected_generators.update(self.get_direct_dependents(generator_type))
+
+        return affected_generators
+
+    def get_parameter_impact_level(self, generator_type: GeneratorType, param_name: str) -> str:
+        """
+        Funktionsweise: Bestimmt Impact-Level eines spezifischen Parameters
+        Parameter: generator_type, param_name
+        Return: "high_impact", "medium_impact", "low_impact"
+        """
+        impact_config = self.impact_matrix.get(generator_type, {})
+
+        for impact_level, param_list in impact_config.items():
+            if param_name in param_list:
+                return impact_level
+
+        return "low_impact"  # Default für unbekannte Parameter
+
+    def get_downstream_generators(self, generator_type: GeneratorType) -> Set[GeneratorType]:
+        """
+        Funktionsweise: Findet alle Generatoren die (direkt oder indirekt) von diesem abhängen
+        Parameter: generator_type
+        Return: Set aller abhängigen Generatoren
+        """
+        downstream = set()
+
+        for dependent_type, dependencies in self.dependency_tree.items():
+            if generator_type in dependencies:
+                downstream.add(dependent_type)
+                downstream.update(self.get_downstream_generators(dependent_type))
+
+        return downstream
+
+    def get_direct_dependents(self, generator_type: GeneratorType) -> Set[GeneratorType]:
+        """
+        Funktionsweise: Findet Generatoren die direkt von diesem abhängen
+        Parameter: generator_type
+        Return: Set direkt abhängiger Generatoren
+        """
+        dependents = set()
+
+        for dependent_type, dependencies in self.dependency_tree.items():
+            if generator_type in dependencies:
+                dependents.add(dependent_type)
+
+        return dependents
+
+    def invalidate_downstream_dependencies(self, generator_type: GeneratorType,
+                                         affected_generators: Set[GeneratorType]):
+        """
+        Funktionsweise: Invalidiert Cache und LOD-Status für alle betroffenen Generatoren
+        Parameter: generator_type, affected_generators
+        """
+        for affected_type in affected_generators:
+            # DataManager Cache invalidieren
+            self.data_manager.invalidate_cache(affected_type.value)
+
+            # LOD-Status zurücksetzen
+            self.reset_lod_status(affected_type)
+
+            self.logger.info(f"Invalidated {affected_type.value} due to {generator_type.value} changes")
+
+        # Signal emittieren
+        affected_names = [gen.value for gen in affected_generators]
+        self.dependency_invalidated.emit(generator_type.value, affected_names)
+
+    def reset_lod_status(self, generator_type: GeneratorType):
+        """
+        Funktionsweise: Setzt LOD-Completion-Status für Generator zurück
+        Parameter: generator_type
+        """
+        for lod_level in LODLevel:
+            self.lod_completion_status[generator_type.value][lod_level.value] = False
+
     def get_current_parameters(self, generator_type: GeneratorType) -> Dict[str, Any]:
         """
-        Funktionsweise: Holt aktuelle Parameter für Generator aus DataManager
+        Funktionsweise: Holt aktuelle Parameter für Generator (Placeholder - würde aus DataManager/Parameter-System geholt)
         Parameter: generator_type
         Return: Parameter-Dictionary
         """
-        # Placeholder - würde normalerweise aus DataManager geholt werden
+        # Placeholder - würde normalerweise aus DataManager oder Parameter-System geholt werden
         return {}
 
     def get_memory_usage_summary(self) -> Dict[str, Any]:
         """
         Funktionsweise: Sammelt Memory-Usage von allen aktiven Generationen
-        Return: Memory-Usage Summary
+        Return: Memory-Usage Summary mit DataManager-Integration
         """
         return {
             "data_manager_usage": self.data_manager.get_memory_usage(),
@@ -896,6 +1007,33 @@ class GenerationOrchestrator(QObject):
             "processing_requests": len(self.processing_requests),
             "queued_requests": len(self.dependency_queue.queued_requests)
         }
+
+    def cancel_generation(self, generator_type: str) -> bool:
+        """
+        Funktionsweise: Bricht laufende Generation für spezifischen Generator ab
+        Parameter: generator_type
+        Return: bool - Cancellation erfolgreich
+        """
+        cancelled_requests = []
+
+        # Aktive Requests finden und abbrechen
+        for request in list(self.processing_requests):
+            if request.generator_type.value == generator_type:
+                cancelled_requests.append(request)
+
+        # Queue-Requests finden und entfernen
+        queue_requests_to_cancel = [req for req in self.dependency_queue.queued_requests.values()
+                                   if req.generator_type.value == generator_type]
+
+        # Alle gefundenen Requests abbrechen
+        for request in cancelled_requests + queue_requests_to_cancel:
+            self.cleanup_timed_out_request(request)
+
+        if cancelled_requests or queue_requests_to_cancel:
+            self.logger.info(f"Cancelled {len(cancelled_requests + queue_requests_to_cancel)} requests for {generator_type}")
+            return True
+
+        return False
 
     def cleanup_resources(self):
         """
@@ -927,12 +1065,12 @@ class GenerationOrchestrator(QObject):
 
 class GenerationThread(QThread):
     """
-    Funktionsweise: Worker-Thread für einzelne Generator-Ausführung mit Tab-kompatiblen Signals
+    Funktionsweise: Worker-Thread für einzelne Generator-Ausführung mit homogenen Signals
     Aufgabe: Background-Generation ohne UI-Blocking
     """
 
-    generation_completed = pyqtSignal(str, str, str, bool, dict)  # (request_id, generator_type, lod_level, success, result_data)
-    generation_progress = pyqtSignal(int, str)  # (progress, message) - vereinfacht für alle Tabs
+    generation_completed = pyqtSignal(str, dict)  # (request_id, result_data)
+    generation_progress = pyqtSignal(int, str)  # (progress, message) - homogen für alle Tabs
 
     def __init__(self, generator_instance, generator_type: GeneratorType, lod_level: LODLevel,
                  parameters: Dict[str, Any], data_manager, request_id: str, parent=None):
@@ -946,30 +1084,42 @@ class GenerationThread(QThread):
 
     def run(self):
         """
-        Funktionsweise: Thread-Execution für Generator mit Tab-kompatiblen Signals
+        Funktionsweise: Thread-Execution für Generator mit homogenen Signals
         """
         try:
             # Progress-Callback definieren
             def progress_callback(step_name, progress_percent, detail_message):
                 self.generation_progress.emit(progress_percent, f"{step_name}: {detail_message}")
 
-            # Generator ausführen
-            result = self.generator_instance.generate(
-                lod=self.lod_level.value,
-                progress=progress_callback,
-                data_manager=self.data_manager,
-                **self.parameters
-            )
+            # Generator ausführen mit BaseGenerator-Interface
+            if hasattr(self.generator_instance, 'generate'):
+                # BaseGenerator-Interface
+                result = self.generator_instance.generate(
+                    lod=self.lod_level.value,
+                    dependencies={},  # Dependencies werden über DataManager automatisch geholt
+                    parameters=self.parameters,
+                    data_manager=self.data_manager,
+                    progress=progress_callback
+                )
+            else:
+                # Legacy-Interface fallback
+                result = self.generator_instance.generate_complete(
+                    lod=self.lod_level.value,
+                    progress=progress_callback,
+                    **self.parameters
+                )
 
             # Success basierend auf Result
             success = result is not None
 
-            # result_data für Tabs zusammenstellen
+            # result_data für homogene Tab-Integration
             result_data = {
-                "generator_output": result,
+                "generator_type": self.generator_type.value,
                 "lod_level": self.lod_level.value,
                 "parameters_used": self.parameters,
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "success": success,
+                "generator_output": result
             }
 
             self.generation_completed.emit(
@@ -981,7 +1131,7 @@ class GenerationThread(QThread):
             )
 
         except Exception as e:
-            # Error-Handling
+            # Error-Handling mit homogenen Signals
             self.generation_completed.emit(
                 self.request_id,
                 self.generator_type.value,

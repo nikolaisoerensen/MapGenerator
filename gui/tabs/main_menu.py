@@ -164,7 +164,7 @@ class MainMenuWindow(QMainWindow):
         layout.addWidget(title_label)
 
         # Subtitle
-        subtitle_label = QLabel("Professional Terrain & World Generation Suite")
+        subtitle_label = QLabel("World Generation Suite")
         subtitle_label.setAlignment(Qt.AlignCenter)
         subtitle_label.setStyleSheet("""
             QLabel {

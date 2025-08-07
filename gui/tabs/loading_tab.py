@@ -400,7 +400,7 @@ class LoadingTab(QDialog):
         self.generation_successful = True
         self.progress_widget.mark_all_complete()
         self.quit_button.setText("Fertig")
-        QTimer.singleShot(3000, self.complete_generation)
+        QTimer.singleShot(1000, self.complete_generation)
 
     @data_management_handler("generator_execution")
     def execute_generator_fallback(self, generator_name: str, import_path: str) -> bool:

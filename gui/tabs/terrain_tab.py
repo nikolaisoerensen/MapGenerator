@@ -25,6 +25,7 @@ import time
 from .base_tab import BaseMapTab
 from gui.config.value_default import TERRAIN, get_parameter_config, validate_parameter_set
 from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, RandomSeedButton, ParameterUpdateManager
+from gui.managers.orchestrator_manager import StandardOrchestratorHandler, OrchestratorRequestBuilder
 
 def get_terrain_error_decorators():
     """
@@ -80,8 +81,9 @@ class TerrainTab(BaseMapTab):
         # Parameter-Update-Manager für Race-Condition Prevention
         self.parameter_manager = ParameterUpdateManager(self)
 
-        # Setup Standard-Orchestrator-Handler
-        self.setup_standard_orchestrator_handlers("terrain")
+        # HOMOGENE ORCHESTRATOR-HANDLER INTEGRATION (entsprechend Descriptoren)
+        self.orchestrator_handler = StandardOrchestratorHandler(self, "terrain")
+        self.setup_orchestrator_integration()
 
         # Setup UI
         self.setup_terrain_ui()
@@ -89,6 +91,24 @@ class TerrainTab(BaseMapTab):
 
         # Initial Parameter Load
         self.load_default_parameters()
+
+    def setup_orchestrator_integration(self):
+        """
+        Funktionsweise: Einheitliche Orchestrator-Integration entsprechend Descriptoren
+        Aufgabe: Setup für Standard-Orchestrator-Handler mit homogenen Signal-Connections
+        """
+        # Standard-Handler Setup
+        success = self.orchestrator_handler.setup_standard_handlers()
+
+        if success:
+            # HOMOGENE SIGNAL-CONNECTIONS (entsprechend Descriptor-Spezifikation)
+            self.orchestrator_handler.generation_completed.connect(self.on_terrain_generation_completed)
+            self.orchestrator_handler.lod_progression_completed.connect(self.on_lod_progression_completed)
+            self.orchestrator_handler.generation_progress.connect(self.update_generation_progress)
+
+            self.logger.info("Terrain orchestrator integration completed")
+        else:
+            self.logger.error("Failed to setup terrain orchestrator integration")
 
     def setup_terrain_ui(self):
         """
@@ -111,8 +131,8 @@ class TerrainTab(BaseMapTab):
         """
         Funktionsweise: Erstellt Parameter-Panel mit allen Terrain-Parametern - REFACTORED
         Aufgabe: Slider für alle Core-Parameter + Random-Seed Button
-        Return: QGroupBox mit allen Parameter-Slidern
-        REFACTORED: Nur eine Definition, RandomSeedButton korrekt integriert
+        Return: QGroupBox mit allen Parameter-Slidern (KONSISTENTE BREITE)
+        REFACTORED: Nur eine Definition, RandomSeedButton korrekt integriert, SLIDER-BREITE-FIX
         """
         panel = QGroupBox("Terrain Parameters")
         layout = QVBoxLayout()
@@ -135,7 +155,7 @@ class TerrainTab(BaseMapTab):
                 seed_layout = QHBoxLayout()
                 seed_layout.setContentsMargins(0, 0, 0, 0)
 
-                # Parameter-Slider
+                # Parameter-Slider mit FESTER BREITE
                 slider = ParameterSlider(
                     label="Map Seed",
                     min_val=param_config["min"],
@@ -144,6 +164,7 @@ class TerrainTab(BaseMapTab):
                     step=param_config.get("step", 1),
                     suffix=param_config.get("suffix", "")
                 )
+                slider.setFixedWidth(280)  # SLIDER-BREITE-FIX
 
                 # Random-Seed Button
                 random_button = RandomSeedButton()
@@ -158,7 +179,7 @@ class TerrainTab(BaseMapTab):
                 layout.addWidget(seed_container)
 
             else:
-                # Normale Parameter-Slider
+                # Normale Parameter-Slider mit FESTER BREITE
                 slider = ParameterSlider(
                     label=param_name.replace("_", " ").title(),
                     min_val=param_config["min"],
@@ -167,6 +188,7 @@ class TerrainTab(BaseMapTab):
                     step=param_config.get("step", 1),
                     suffix=param_config.get("suffix", "")
                 )
+                slider.setFixedWidth(300)  # SLIDER-BREITE-FIX
 
                 slider.valueChanged.connect(self.on_parameter_changed)
                 self.parameter_sliders[param_name] = slider
@@ -227,7 +249,9 @@ class TerrainTab(BaseMapTab):
         # MAP-SIZE SYNCHRONISATION zu anderen Tabs
         if "size" in parameters and self.data_manager:
             size = int(parameters["size"])
-            self.data_manager.set_global_parameter("map_size", size)
+            # HINZUGEFÜGT: sync_map_size für DataManager-Integration
+            if hasattr(self.data_manager, 'sync_map_size'):
+                self.data_manager.sync_map_size("terrain", size)
             self.logger.info(f"Map size synchronized: {size}")
 
     @pyqtSlot()
@@ -242,7 +266,7 @@ class TerrainTab(BaseMapTab):
         # Debounced Updates über ParameterUpdateManager
         self.parameter_manager.request_validation()
 
-        # Auto-Simulation triggern (wenn aktiviert)
+        # Auto-Simulation triggeren (wenn aktiviert)
         if self.auto_simulation_enabled and not self.generation_in_progress:
             if self.has_significant_parameter_change():
                 self.parameter_manager.request_generation()
@@ -280,9 +304,9 @@ class TerrainTab(BaseMapTab):
 
     def generate(self):
         """
-        Funktionsweise: Terrain-Generation - REPARIERT Generation-Interrupt
-        Aufgabe: Unterbricht laufende Generation, startet neue über Orchestrator
-        REPARIERT: Generation-Interrupt statt "already in progress" Skip
+        Funktionsweise: Terrain-Generation - REPARIERT Generation-Interrupt + Orchestrator-Integration
+        Aufgabe: Unterbricht laufende Generation, startet neue über Orchestrator mit OrchestratorRequestBuilder
+        REPARIERT: Generation-Interrupt statt "already in progress" Skip, Orchestrator-Request-Pattern
         """
         try:
             if not self.generation_orchestrator:
@@ -290,7 +314,7 @@ class TerrainTab(BaseMapTab):
                 self.handle_generation_error(Exception("GenerationOrchestrator not available"))
                 return
 
-            # LAUFENDE GENERATION UNTERBRECHEN statt skippen - FIX für Problem 8
+            # LAUFENDE GENERATION UNTERBRECHEN statt skippen - FIX für "nach einem mal rechnen"
             if self.generation_in_progress:
                 self.logger.info("Interrupting current terrain generation for new request")
                 try:
@@ -308,6 +332,40 @@ class TerrainTab(BaseMapTab):
             self.handle_generation_error(e)
             self.generation_in_progress = False
             raise
+
+    def _start_new_generation(self):
+        """
+        Funktionsweise: Startet neue Generation nach Interrupt - ORCHESTRATOR-INTEGRATION
+        Aufgabe: Trennt Generation-Start für saubere Interrupt-Handling mit OrchestratorRequestBuilder
+        """
+        self.logger.info(f"Starting terrain generation with target LOD: {self.target_lod}")
+
+        self.start_generation_timing()
+        self.generation_in_progress = True
+
+        params = self.current_parameters.copy()
+
+        # MAP-SIZE SYNCHRONISATION - FIX für DataManager-Integration
+        if self.data_manager and hasattr(self.data_manager, 'sync_map_size'):
+            self.data_manager.sync_map_size("terrain", params.get("size", 512))
+
+        # ORCHESTRATOR-REQUEST-BUILDER INTEGRATION (entsprechend Descriptoren)
+        request = OrchestratorRequestBuilder.build_terrain_request(
+            parameters=params,
+            target_lod=self.target_lod,
+            source_tab="terrain"
+        )
+
+        # Request an Orchestrator senden
+        request_id = self.generation_orchestrator.request_generation(request)
+
+        if request_id:
+            self.logger.info(f"Terrain generation requested: {request_id}")
+            self.last_generated_parameters = params.copy()
+        else:
+            self.logger.error("Failed to request terrain generation")
+            self.handle_generation_error(Exception("Failed to request generation"))
+            self.generation_in_progress = False
 
     def create_visualization_controls(self):
         """
@@ -351,43 +409,12 @@ class TerrainTab(BaseMapTab):
 
         return widget
 
-    def _start_new_generation(self):
-        """
-        Funktionsweise: Startet neue Generation nach Interrupt
-        Aufgabe: Trennt Generation-Start für saubere Interrupt-Handling
-        """
-        self.logger.info(f"Starting terrain generation with target LOD: {self.target_lod}")
-
-        self.start_generation_timing()
-        self.generation_in_progress = True
-
-        params = self.current_parameters.copy()
-
-        # MAP-SIZE SYNCHRONISATION - FIX für Problem 10
-        if self.data_manager and hasattr(self.data_manager, 'sync_map_size'):
-            self.data_manager.sync_map_size("terrain", params.get("size", 512))
-
-        request_id = self.generation_orchestrator.request_generation(
-            generator_type="terrain",
-            parameters=params,
-            target_lod=self.target_lod,
-            source_tab="terrain",
-            priority=10
-        )
-
-        if request_id:
-            self.logger.info(f"Terrain generation requested: {request_id}")
-            self.last_generated_parameters = params.copy()
-        else:
-            self.logger.error("Failed to request terrain generation")
-            self.handle_generation_error(Exception("Failed to request generation"))
-            self.generation_in_progress = False
-
     def update_display_mode(self):
         """
-        Funktionsweise: Handler für Terrain Display-Mode-Änderungen - REFACTORED
-        Aufgabe: Nutzt zentralen Renderer aus BaseTab
+        Funktionsweise: Handler für Terrain Display-Mode-Änderungen - REFACTORED + SHADOWMAP RGB-MIXING
+        Aufgabe: Nutzt zentralen Renderer aus BaseTab + implementiert dx/dz rot, dy/dz blau Mixing
         REFACTORED: Zentraler _render_current_mode eliminiert Code-Duplikation
+        HINZUGEFÜGT: RGB-Mixing für Shadowmap (dx/dz rot, dy/dz blau)
         """
         if not hasattr(self, 'display_mode'):
             return
@@ -409,10 +436,27 @@ class TerrainTab(BaseMapTab):
                 if heightmap is not None:
                     self._render_current_mode(current_mode, current_display, heightmap, "heightmap")
 
-            elif current_mode == 1:  # Slopemap
+            elif current_mode == 1:  # Slopemap - RGB-MIXING für dx/dz und dy/dz
                 slopemap = self.data_manager.get_terrain_data("slopemap")
                 if slopemap is not None:
-                    self._render_current_mode(current_mode, current_display, slopemap, "slopemap")
+                    # RGB-MIXING: dx/dz rot, dy/dz blau
+                    if len(slopemap.shape) == 3 and slopemap.shape[2] >= 2:
+                        dx_dz = slopemap[:, :, 0]  # dz/dx
+                        dy_dz = slopemap[:, :, 1]  # dz/dy
+
+                        # Normalisierung auf [0, 1]
+                        dx_norm = np.abs(dx_dz) / (np.max(np.abs(dx_dz)) + 1e-8)
+                        dy_norm = np.abs(dy_dz) / (np.max(np.abs(dy_dz)) + 1e-8)
+
+                        # RGB-Array erstellen: Rot für dx, Blau für dy, Grün = 0
+                        rgb_slopemap = np.zeros((slopemap.shape[0], slopemap.shape[1], 3))
+                        rgb_slopemap[:, :, 0] = dx_norm  # Rot-Kanal
+                        rgb_slopemap[:, :, 2] = dy_norm  # Blau-Kanal
+
+                        self._render_current_mode(current_mode, current_display, rgb_slopemap, "slopemap_rgb")
+                    else:
+                        # Fallback für 2D-Slopemap
+                        self._render_current_mode(current_mode, current_display, slopemap, "slopemap")
 
             elif current_mode == 2:  # Shademap mit Memory-optimiertem Slicing
                 try:
@@ -479,18 +523,19 @@ class TerrainTab(BaseMapTab):
 
         return "Unknown"
 
-    # STANDARD ORCHESTRATOR UI-UPDATE METHODS (von BaseTab übernommen):
+    # HOMOGENE TAB-INTEGRATION SLOTS (entsprechend Descriptor-Spezifikationen):
 
-    @pyqtSlot(str)
-    def _update_ui_generation_started(self, lod_level: str):
-        """UI-Update für Generation-Start - TERRAIN-SPEZIFISCH"""
-        super()._update_ui_generation_started(lod_level)
-        self.logger.debug(f"Terrain generation started: {lod_level}")
+    @pyqtSlot(str, dict)
+    def on_terrain_generation_completed(self, result_id: str, result_data: dict):
+        """
+        Funktionsweise: Slot für Generation-Completion - HOMOGENE SIGNATURE entsprechend Descriptoren
+        Parameter: result_id (str), result_data (dict) - Einheitlich für alle Tabs
+        """
+        success = result_data.get('success', False)
+        lod_level = result_data.get('lod_level', 'Unknown')
 
-    @pyqtSlot(str, bool)
-    def _update_ui_generation_completed(self, lod_level: str, success: bool):
-        """UI-Update für Generation-Completion - ERWEITERT mit Display-Update"""
-        super()._update_ui_generation_completed(lod_level, success)
+        # Generation-Status zurücksetzen
+        self.generation_in_progress = False
 
         if success:
             try:
@@ -504,24 +549,47 @@ class TerrainTab(BaseMapTab):
                     self.update_terrain_display()
 
                 self.update_terrain_statistics()
+
+                # LOD-Status aktualisieren
+                if lod_level in ["LOD64", "LOD128", "LOD256", "FINAL"]:
+                    self.available_lods.add(lod_level)
+
             except Exception as e:
                 self.logger.error(f"Post-generation update failed: {e}")
 
-        self.logger.info(f"Terrain generation completed: {lod_level} success={success}")
+        self.logger.info(f"Terrain generation completed: {result_id} lod={lod_level} success={success}")
 
-    @pyqtSlot(str, int, str)
-    def _update_ui_generation_progress(self, lod_level: str, progress_percent: int, detail: str):
-        """UI-Update für Generation-Progress - TERRAIN-SPEZIFISCH"""
-        super()._update_ui_generation_progress(lod_level, progress_percent, detail)
+    @pyqtSlot(str, str)
+    def on_lod_progression_completed(self, result_id: str, lod_level: str):
+        """
+        Funktionsweise: Slot für LOD-Progression-Updates - HOMOGENE SIGNATURE entsprechend Descriptoren
+        Parameter: result_id (str), lod_level (str) - Einheitlich für alle Tabs
+        """
+        self.logger.info(f"Terrain LOD progression completed: {result_id} -> {lod_level}")
 
+        # LOD-Level zu verfügbaren hinzufügen
+        if lod_level in ["LOD64", "LOD128", "LOD256", "FINAL"]:
+            self.available_lods.add(lod_level)
+
+        # Display sofort aktualisieren mit neuem LOD
+        try:
+            self.update_terrain_display()
+        except Exception as e:
+            self.logger.error(f"LOD progression display update failed: {e}")
+
+    @pyqtSlot(int, str)
+    def update_generation_progress(self, progress: int, message: str):
+        """
+        Funktionsweise: Slot für Progress-Updates - HOMOGENE SIGNATURE entsprechend Descriptoren
+        Parameter: progress (int), message (str) - Vereinfacht für alle Tabs
+        """
+        # Progress an Auto-Simulation-Panel weiterleiten
         if hasattr(self, 'auto_simulation_panel'):
-            self.auto_simulation_panel.set_generation_status("progress", detail)
+            self.auto_simulation_panel.set_generation_status("progress", message)
 
-    @pyqtSlot(str)
-    def _update_ui_lod_progression_completed(self, final_lod: str):
-        """UI-Update für LOD-Progression-Completion - TERRAIN-SPEZIFISCH"""
-        super()._update_ui_lod_progression_completed(final_lod)
-        self.logger.info(f"Terrain LOD progression completed: {final_lod}")
+        # Progress-Wert für UI-Elements
+        if hasattr(self, 'progress_bar'):
+            self.progress_bar.setValue(progress)
 
     def _validate_and_fix_slopemap(self, slopemap):
         """Robust slopemap validation"""
@@ -548,6 +616,10 @@ class TerrainTab(BaseMapTab):
         except Exception as e:
             self.logger.error(f"Slopemap validation failed: {e}")
             return self._create_fallback_slopemap()
+
+    def _create_fallback_slopemap(self):
+        """Erstellt Fallback-Slopemap für Validation-Fehler"""
+        return np.zeros((64, 64, 2), dtype=np.float32)
 
     def get_generation_status_summary(self) -> dict:
         """
@@ -579,11 +651,15 @@ class TerrainTab(BaseMapTab):
         """
         Funktionsweise: Cleanup-Methode für Resource-Management - ERWEITERT
         Aufgabe: Wird beim Tab-Wechsel oder Schließen aufgerufen
-        ERWEITERT: Parameter-Manager cleanup
+        ERWEITERT: Parameter-Manager cleanup, Orchestrator-Handler cleanup
         """
         # Parameter-Manager cleanup
         if hasattr(self, 'parameter_manager'):
             self.parameter_manager.cleanup()
+
+        # Orchestrator-Handler cleanup
+        if hasattr(self, 'orchestrator_handler'):
+            self.orchestrator_handler.cleanup_connections()
 
         # Parent Cleanup aufrufen
         super().cleanup_resources()

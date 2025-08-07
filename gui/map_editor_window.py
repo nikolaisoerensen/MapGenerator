@@ -137,7 +137,7 @@ class MapEditorWindow(QMainWindow):
         self._setup_ui()
         self._setup_tabs()
         self._setup_signals()
-        self._setup_orchestrator_integration()
+        #self._setup_orchestrator_integration()
 
         # Start status monitoring
         self.status_update_timer.start(EditorConstants.STATUS_UPDATE_INTERVAL_MS)

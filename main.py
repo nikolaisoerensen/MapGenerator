@@ -143,11 +143,12 @@ class MapGeneratorApp(QObject):
 
         # Generation orchestrator signals
         if self.generation_orchestrator:
-            self.generation_orchestrator.generation_started.connect(self._on_generation_started)
             self.generation_orchestrator.generation_completed.connect(self._on_generation_completed)
-            self.generation_orchestrator.lod_progression_started.connect(self._on_lod_progression_started)
             self.generation_orchestrator.lod_progression_completed.connect(self._on_lod_progression_completed)
+            self.generation_orchestrator.generation_progress.connect(self._on_generation_progress)
             self.generation_orchestrator.dependency_invalidated.connect(self._on_dependency_invalidated)
+            self.generation_orchestrator.batch_generation_completed.connect(self._on_batch_completed)
+            self.generation_orchestrator.queue_status_changed.connect(self._on_queue_status_changed)
 
     def _setup_memory_monitoring(self):
         """
@@ -414,25 +415,23 @@ class MapGeneratorApp(QObject):
         if self.map_editor and hasattr(self.map_editor, 'on_generation_started'):
             self.map_editor.on_generation_started(generator_type, lod_level)
 
-    @pyqtSlot(str, str, bool)
-    def _on_generation_completed(self, generator_type: str, lod_level: str, success: bool):
+    @pyqtSlot(str, dict)
+    def _on_generation_completed(self, request_id, result_data):
         """
-        Handle generation completion for UI updates
-        ==========================================
-
-        Processes generation completion notifications and updates
-        UI components with results. Enables dependent generators
-        when dependencies become available.
-
-        Args:
-            generator_type: Type of generator completed
-            lod_level: LOD level that was generated
-            success: Whether generation succeeded
+        Handle generation completion signal from orchestrator
+        =====================================================
+        Emits info log with generation type and result success status.
         """
-        self.logger.info(f"Generation completed: {generator_type} {lod_level} success={success}")
+        generator_type = result_data.get("generator_type", "unknown")
+        lod_level = result_data.get("lod_level", "unknown")
+        success = result_data.get("success", False)
 
-        # Route to active window
-        if self.map_editor and hasattr(self.map_editor, 'on_generation_completed'):
+        self.logger.info(
+            f"[{lod_level}] Generation completed: {generator_type} (request_id={request_id}) success=({success})"
+        )
+
+        # Optional: Weitergabe an MapEditor
+        if self.map_editor and hasattr(self.map_editor, "on_generation_completed"):
             self.map_editor.on_generation_completed(generator_type, lod_level, success)
 
     @pyqtSlot(str, str)
@@ -464,6 +463,41 @@ class MapGeneratorApp(QObject):
             final_lod: Final LOD level achieved
         """
         self.logger.info(f"LOD progression completed: {generator_type} final: {final_lod}")
+
+    @pyqtSlot(int, str)
+    def _on_generation_progress(self, progress, message):
+        """
+        Handle generation progress signals from orchestrator.
+        Has to be properly integrated soon!
+        """
+        self.logger.debug(f"Generation progress: {progress}% – {message}")
+
+    @pyqtSlot(bool, str)
+    def _on_batch_completed(self, success, summary_message):
+        """
+        Handle completion of a batch generation sequence.
+        Logs result and optionally triggers UI updates.
+        Has to be properly integrated soon!
+        """
+        status = "SUCCESS" if success else "FAILURE"
+        self.logger.info(f"Batch generation completed: {status} – {summary_message}")
+
+        # Optional: Weiterleiten an MapEditor
+        if self.map_editor and hasattr(self.map_editor, "on_batch_completed"):
+            self.map_editor.on_batch_completed(success, summary_message)
+
+    @pyqtSlot(list)
+    def _on_queue_status_changed(self, thread_status_list):
+        """
+        Handle updates to the generation thread queue status.
+        Provides data for status panels or logging.
+        Has to be properly integrated soon!
+        """
+        self.logger.debug(f"Queue status updated – {len(thread_status_list)} threads active or queued")
+
+        # Optional: Weiterleiten an MapEditor
+        if self.map_editor and hasattr(self.map_editor, "on_queue_status_changed"):
+            self.map_editor.on_queue_status_changed(thread_status_list)
 
     @pyqtSlot(str, list)
     def _on_dependency_invalidated(self, generator_type: str, affected_generators: list):

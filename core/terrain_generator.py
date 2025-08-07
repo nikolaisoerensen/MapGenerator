@@ -1,37 +1,28 @@
 """
 Path: core/terrain_generator.py
 
-Funktionsweise: Simplex-Noise basierte Terrain-Generierung
+Funktionsweise: Simplex-Noise basierte Terrain-Generierung mit BaseGenerator-Integration und DataManager-Kompatibilität
 - BaseTerrainGenerator mit Octaves/Persistence/Lacunarity
 - Multi-Scale Noise-Layering für realistische Landschaften
 - Höhen-Redistribution für natürliche Höhenverteilung
 - Deformation mittels ridge warping
-- Performance-optimiert für Live-Preview (low LOD), button-calculated-Preview (medium LOD) und final-Preview (high LOD) und Auslagerung auf GPU mit Shader
-- Berechnung der Verschattung mit Raycasts und 6 Sonnenwinkeln. Die 6 Sonnenwinkel können mit Slider durchgeschaltet werden
+- LOD-System: LOD64 → LOD128 → LOD256 → FINAL mit korrekter Verdopplung
+- Berechnung der Verschattung mit Raycasts und variablen Sonnenwinkeln
+- DataManager-Integration für TerrainData-Objekte
+- BaseGenerator-Interface für Orchestrator-Kompatibilität
 
 Parameter Input:
 - map_size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power, map_seed
 
 Output:
-- heightmap array
-- slopemap 2D array (dz/dx and dz/dy)
-- shademap array
+- TerrainData-Objekt mit heightmap, slopemap, shadowmap, LOD-Metadaten
+- Legacy-Kompatibilität: heightmap array, slopemap 2D array (dz/dx and dz/dy), shadowmap array
 
-Klassen:
-BaseTerrainGenerator
-    Funktionsweise: Hauptklasse für Simplex-Noise basierte Terrain-Generierung mit Multi-Scale Layering
-    Aufgabe: Koordiniert alle Terrain-Generierungsschritte und verwaltet Parameter
-    Methoden: generate_heightmap(), apply_redistribution(), calculate_slopes(), generate_shadows()
-
-SimplexNoiseGenerator   
-    Funktionsweise: Erzeugt OpenSimplex-Noise mit konfigurierbaren Octaves/Persistence/Lacunarity
-    Aufgabe: Basis-Noise-Funktionen für alle anderen Module
-    Methoden: noise_2d(), multi_octave_noise(), ridge_noise()
-
-ShadowCalculator    
-    Funktionsweise: Berechnet Verschattung mit Raycasts für 7 verschiedene Sonnenwinkel
-    Aufgabe: Erstellt shademap für Weather-System und visuelle Darstellung
-    Methoden: calculate_shadows_multi_angle(), raycast_shadow(), combine_shadow_angles()
+LOD-Definitionen mit korrekter Verdopplung:
+- LOD64: heightmap64x64, slopemap64x64, shadowmap64x64 (1 Sonnenwinkel - Mittag)
+- LOD128: heightmap128x128, slopemap128x128, shadowmap64x64 (3 Sonnenwinkel - Vormittag/Mittag/Nachmittag)
+- LOD256: heightmap256x256, slopemap256x256, shadowmap64x64 (5 Sonnenwinkel + Morgen/Abend)
+- FINAL: heightmapFullSize, slopemapFullSize, shadowmap64x64 (7 Sonnenwinkel + Dämmerung)
 """
 
 import numpy as np
@@ -43,8 +34,8 @@ from core.base_generator import BaseGenerator
 
 class TerrainData:
     """
-    Funktionsweise: Container für alle Terrain-Daten mit Metainformationen
-    Aufgabe: Speichert Heightmap, Slopemap, Shadowmap und LOD-Informationen
+    Funktionsweise: Container für alle Terrain-Daten mit Metainformationen und DataManager-Kompatibilität
+    Aufgabe: Speichert Heightmap, Slopemap, Shadowmap und LOD-Informationen für DataManager-Integration
     """
 
     def __init__(self):
@@ -55,11 +46,43 @@ class TerrainData:
         self.actual_size = 64
         self.calculated_sun_angles = []  # Welche Sonnenwinkel bereits berechnet
         self.parameters = {}  # Speichert verwendete Parameter
+        self.validity_state = "valid"  # Validity-System für Cache-Management
+        self.parameter_hash = None  # MD5-Hash der Parameter für Cache-Validation
+
+    def is_valid(self) -> bool:
+        """Prüft Validity-State des TerrainData-Objekts"""
+        return self.validity_state == "valid"
+
+    def invalidate(self):
+        """Invalidiert TerrainData-Objekt"""
+        self.validity_state = "invalid"
+
+    def validate_against_parameters(self, new_parameters: dict) -> bool:
+        """
+        Funktionsweise: Prüft ob TerrainData mit neuen Parametern kompatibel ist
+        Parameter: new_parameters (dict)
+        Return: bool - Kompatibel
+        """
+        import hashlib
+        new_hash = hashlib.md5(str(sorted(new_parameters.items())).encode()).hexdigest()
+        return self.parameter_hash == new_hash
+
+    def get_validity_summary(self) -> dict:
+        """
+        Return: dict mit Validity-Informationen für DataManager
+        """
+        return {
+            "validity_state": self.validity_state,
+            "lod_level": self.lod_level,
+            "actual_size": self.actual_size,
+            "calculated_sun_angles": len(self.calculated_sun_angles),
+            "parameter_hash": self.parameter_hash
+        }
 
 class SimplexNoiseGenerator:
     """
     Funktionsweise: Erzeugt OpenSimplex-Noise mit konfigurierbaren Octaves/Persistence/Lacunarity
-    Aufgabe: Basis-Noise-Funktionen für alle anderen Module
+    Aufgabe: Basis-Noise-Funktionen für alle anderen Module mit LOD-optimierter Batch-Verarbeitung
     """
 
     def __init__(self, seed=42):
@@ -122,7 +145,6 @@ class SimplexNoiseGenerator:
 
         return value / max_amplitude if max_amplitude > 0 else 0
 
-
     def generate_noise_grid(self, size, frequency, octaves, persistence, lacunarity, offset_x=0, offset_y=0):
         """
         Funktionsweise: Generiert komplettes Noise-Grid auf einmal statt Pixel für Pixel
@@ -170,7 +192,6 @@ class SimplexNoiseGenerator:
             noise_grid /= max_amplitude
 
         return noise_grid
-
 
     def interpolate_existing_grid(self, existing_grid, new_size):
         """
@@ -224,7 +245,6 @@ class SimplexNoiseGenerator:
 
         return interpolated_grid
 
-
     def add_detail_noise(self, base_grid, detail_frequency, detail_amplitude):
         """
         Funktionsweise: Fügt hochfrequente Detail-Noise zu bestehender interpolierter Basis hinzu
@@ -255,14 +275,14 @@ class SimplexNoiseGenerator:
 
 class ShadowCalculator:
     """
-    Funktionsweise: Berechnet Verschattung mit Raycasts für 6 verschiedene Sonnenwinkel
-    Aufgabe: Erstellt shademap für Weather-System und visuelle Darstellung
+    Funktionsweise: Berechnet Verschattung mit Raycasts für variable Sonnenwinkel je LOD-Level
+    Aufgabe: Erstellt shadowmap für Weather-System und visuelle Darstellung mit LOD-optimierter Berechnung
     """
 
     def __init__(self):
         """
-        Funktionsweise: Initialisiert Shadow-Calculator mit Standard-Sonnenwinkel-Konfiguration
-        Aufgabe: Setup der 7 Sonnenwinkel für Tagesverlauf-Simulation
+        Funktionsweise: Initialisiert Shadow-Calculator mit LOD-spezifischer Sonnenwinkel-Konfiguration
+        Aufgabe: Setup der variablen Sonnenwinkel für progressive LOD-Verbesserung
         """
 
         self.shader_manager = None
@@ -619,8 +639,8 @@ class ShadowCalculator:
 
 class BaseTerrainGenerator(BaseGenerator):
     """
-    Funktionsweise: Hauptklasse für Simplex-Noise basierte Terrain-Generierung mit Multi-Scale Layering und LOD-System
-    Aufgabe: Koordiniert alle Terrain-Generierungsschritte, verwaltet Parameter und Threading
+    Funktionsweise: Hauptklasse für Simplex-Noise basierte Terrain-Generierung mit BaseGenerator-Integration
+    Aufgabe: Koordiniert alle Terrain-Generierungsschritte, verwaltet Parameter und Threading mit DataManager-Integration
     """
 
     def __init__(self, map_seed=42):
@@ -643,7 +663,7 @@ class BaseTerrainGenerator(BaseGenerator):
         self.lacunarity = 2.0
         self.redistribute_power = 1.0
 
-        # LOD-System
+        # LOD-System mit korrekter Verdopplung
         self.lod_sizes = {"LOD64": 64, "LOD128": 128, "LOD256": 256}
         self.current_terrain_data = None
 
@@ -652,12 +672,117 @@ class BaseTerrainGenerator(BaseGenerator):
         self.calculation_thread = None
         self.progress_callback = None
 
+    def _load_default_parameters(self):
+        """
+        Funktionsweise: Lädt TERRAIN-Parameter aus value_default.py
+        Aufgabe: Standard-Parameter für Terrain-Generierung
+        Returns: dict - Alle Standard-Parameter für Terrain
+        """
+        try:
+            from gui.config.value_default import TERRAIN
+            return {
+                'map_size': TERRAIN.SIZE["default"],
+                'amplitude': TERRAIN.AMPLITUDE["default"],
+                'octaves': TERRAIN.OCTAVES["default"],
+                'frequency': TERRAIN.FREQUENCY["default"],
+                'persistence': TERRAIN.PERSISTENCE["default"],
+                'lacunarity': TERRAIN.LACUNARITY["default"],
+                'redistribute_power': TERRAIN.REDISTRIBUTE_POWER["default"],
+                'map_seed': TERRAIN.MAP_SEED["default"]
+            }
+        except ImportError:
+            # Fallback-Parameter falls value_default nicht verfügbar
+            return {
+                'map_size': 512,
+                'amplitude': 100,
+                'octaves': 6,
+                'frequency': 0.01,
+                'persistence': 0.5,
+                'lacunarity': 2.0,
+                'redistribute_power': 1.0,
+                'map_seed': 12345
+            }
+
+    def _get_dependencies(self, data_manager):
+        """
+        Funktionsweise: Terrain braucht keine Dependencies - ist der erste Generator
+        Aufgabe: Leere Dependencies für Basis-Generator
+        Parameter: data_manager - DataManager-Instanz (wird nicht verwendet)
+        Returns: dict - Leeres Dependencies-Dict
+        """
+        # Terrain ist der erste Generator und braucht keine Dependencies
+        return {}
+
+    def _execute_generation(self, lod, dependencies, parameters):
+        """
+        Funktionsweise: Führt Terrain-Generierung mit BaseGenerator-Interface aus
+        Aufgabe: Wrapper um bestehende Terrain-Generation mit Progress-Updates und DataManager-Integration
+        Parameter: lod, dependencies, parameters
+        Returns: TerrainData-Objekt für DataManager-Integration
+        """
+        # Parameter aktualisieren
+        self._update_parameters(
+            map_size=parameters['map_size'],
+            amplitude=parameters['amplitude'],
+            octaves=parameters['octaves'],
+            frequency=parameters['frequency'],
+            persistence=parameters['persistence'],
+            lacunarity=parameters['lacunarity'],
+            redistribute_power=parameters['redistribute_power'],
+            map_seed=parameters['map_seed']
+        )
+
+        # Progress-Updates für BaseGenerator-Kompatibilität
+        def terrain_progress_wrapper(step_name, progress_percent, detail_message):
+            # Konvertiere Terrain-spezifische Progress zu BaseGenerator-Progress
+            base_progress = int(15 + (progress_percent * 0.8))  # 15-95% Bereich
+            self._update_progress(step_name, base_progress, detail_message)
+
+        # Terrain-Generierung mit korrektem LOD-Verdopplung-Algorithmus
+        terrain_data = self.generate_terrain(
+            lod=lod,
+            progress=terrain_progress_wrapper,
+            background=False,
+            existing_data=None,
+            map_size=parameters['map_size'],
+            amplitude=parameters['amplitude'],
+            octaves=parameters['octaves'],
+            frequency=parameters['frequency'],
+            persistence=parameters['persistence'],
+            lacunarity=parameters['lacunarity'],
+            redistribute_power=parameters['redistribute_power'],
+            map_seed=parameters['map_seed']
+        )
+
+        return terrain_data
+
+    def _save_to_data_manager(self, data_manager, result, parameters):
+        """
+        Funktionsweise: Speichert TerrainData-Objekt im DataManager
+        Aufgabe: Automatische Speicherung aller Terrain-Outputs mit DataManager-Integration
+        Parameter: data_manager, result (TerrainData), parameters
+        """
+        if isinstance(result, TerrainData):
+            # Verwende die DataManager set_terrain_data_complete Methode
+            data_manager.set_terrain_data_complete(result, parameters)
+            self.logger.debug("TerrainData object saved to DataManager")
+        else:
+            # Fallback für Legacy-Format
+            if hasattr(result, '__len__') and len(result) == 3:
+                heightmap, slopemap, shadowmap = result
+                data_manager.set_terrain_data("heightmap", heightmap, parameters)
+                data_manager.set_terrain_data("slopemap", slopemap, parameters)
+                data_manager.set_terrain_data("shadowmap", shadowmap, parameters)
+                self.logger.debug("Legacy terrain data saved to DataManager")
+            else:
+                self.logger.warning(f"Unknown terrain result format: {type(result)}")
+
     def generate_terrain(self, lod="LOD64", progress=None, background=False,
                          existing_data=None, map_size=None, amplitude=None, octaves=None,
                          frequency=None, persistence=None, lacunarity=None,
                          redistribute_power=None, map_seed=None):
         """
-        Funktionsweise: Einheitliche Terrain-Generierung mit LOD-Support und Threading
+        Funktionsweise: Einheitliche Terrain-Generierung mit LOD-Support und korrekter Verdopplung
         Aufgabe: Hauptmethode für alle Terrain-Generierung mit progressiver Verbesserung
         Parameter: lod ("LOD64"/"LOD128"/"LOD256"/"FINAL") - LOD-Level
         Parameter: progress (function) - Callback für Fortschritts-Updates
@@ -687,11 +812,8 @@ class BaseTerrainGenerator(BaseGenerator):
         self.is_calculating = True
 
         try:
-            # Zielgröße bestimmen
-            if lod == "FINAL":
-                target_size = self.map_size
-            else:
-                target_size = self.lod_sizes[lod]
+            # KORRIGIERTE LOD-VERDOPPLUNG: Zielgröße bestimmen
+            target_size = self._calculate_target_size_for_lod(lod)
 
             # Progress-Update
             self._update_progress("Initialization", 0, f"Starting {lod} generation (size: {target_size})")
@@ -703,7 +825,7 @@ class BaseTerrainGenerator(BaseGenerator):
             else:
                 terrain_data = existing_data
 
-            # 1. Heightmap generieren/verbessern
+            # 1. Heightmap generieren/verbessern mit korrekter Verdopplung
             self._update_progress("Heightmap", 10, "Generating heightmap...")
             terrain_data.heightmap = self._progressive_heightmap_generation(
                 target_size, terrain_data.heightmap if existing_data else None
@@ -726,10 +848,17 @@ class BaseTerrainGenerator(BaseGenerator):
                 terrain_data.lod_level if existing_data else "LOD64"
             )
 
-            # 5. Metadaten aktualisieren
+            # 5. Metadaten aktualisieren mit Parameter-Hash für DataManager
             terrain_data.lod_level = lod
             terrain_data.actual_size = target_size
             terrain_data.calculated_sun_angles = self.shadow_calculator.get_sun_angles_for_lod(lod)[0]
+            terrain_data.validity_state = "valid"
+
+            # Parameter-Hash für Cache-Validation
+            import hashlib
+            terrain_data.parameter_hash = hashlib.md5(
+                str(sorted(self._get_current_parameters().items())).encode()
+            ).hexdigest()
 
             self._update_progress("Complete", 100, f"{lod} terrain generation complete!")
             self.current_terrain_data = terrain_data
@@ -738,6 +867,57 @@ class BaseTerrainGenerator(BaseGenerator):
 
         finally:
             self.is_calculating = False
+
+    def _calculate_target_size_for_lod(self, lod):
+        """
+        Funktionsweise: KORRIGIERTE LOD-VERDOPPLUNG - berechnet Zielgröße bis sie höher ist als finale map_size
+        Aufgabe: Implementiert "soll verdoppelt werden bis eine verdopplung höher ist als die ziel map-size"
+        Parameter: lod (str) - LOD-Level
+        Returns: int - Korrekte Zielgröße
+        """
+        if lod == "FINAL":
+            return self.map_size
+        elif lod == "LOD64":
+            return 64
+        elif lod == "LOD128":
+            return 128
+        elif lod == "LOD256":
+            return 256
+        else:
+            # Fallback: Verdopplung bis über map_size
+            size = 64
+            while size < self.map_size:
+                if size * 2 > self.map_size:
+                    break
+                size *= 2
+            return min(size, self.map_size)
+
+    def _calculate_lod_steps(self, final_size):
+        """
+        Funktionsweise: KORRIGIERTE LOD-VERDOPPLUNG - berechnet optimale LOD-Schritte
+        Aufgabe: "verdoppelt werden bis eine verdopplung höher ist als die ziel map-size und dann soll einfach nur die ziel-map-size genommen werden"
+        Parameter: final_size (int) - Finale Zielgröße
+        Returns: list - Liste der LOD-Schritte mit korrekter Verdopplung
+        """
+        steps = []
+        current_size = 64  # Immer mit 64 beginnen
+
+        # Verdopplung bis wir über final_size sind
+        while current_size <= final_size:
+            steps.append(current_size)
+
+            # Nächste Verdopplung prüfen
+            next_size = current_size * 2
+            if next_size > final_size:
+                # Verdopplung würde über Zielgröße gehen
+                if current_size < final_size:
+                    # Finale Größe hinzufügen wenn sie nicht bereits erreicht ist
+                    steps.append(final_size)
+                break
+            else:
+                current_size = next_size
+
+        return steps
 
     def _generate_terrain_threaded(self, lod, progress, existing_data):
         """
@@ -776,11 +956,8 @@ class BaseTerrainGenerator(BaseGenerator):
         self.is_calculating = True
 
         try:
-            # Zielgröße bestimmen
-            if lod == "FINAL":
-                target_size = self.map_size
-            else:
-                target_size = self.lod_sizes[lod]
+            # KORRIGIERTE Zielgröße bestimmen
+            target_size = self._calculate_target_size_for_lod(lod)
 
             self._update_progress("Initialization", 0, f"Starting background {lod} generation")
             self._yield_cpu()
@@ -816,10 +993,17 @@ class BaseTerrainGenerator(BaseGenerator):
                 terrain_data.lod_level if existing_data else "LOD64"
             )
 
-            # 5. Finalisierung
+            # 5. Finalisierung mit DataManager-Kompatibilität
             terrain_data.lod_level = lod
             terrain_data.actual_size = target_size
             terrain_data.calculated_sun_angles = self.shadow_calculator.get_sun_angles_for_lod(lod)[0]
+            terrain_data.validity_state = "valid"
+
+            # Parameter-Hash für DataManager-Integration
+            import hashlib
+            terrain_data.parameter_hash = hashlib.md5(
+                str(sorted(self._get_current_parameters().items())).encode()
+            ).hexdigest()
 
             self._update_progress("Complete", 100, f"Background {lod} generation complete!")
             self.current_terrain_data = terrain_data
@@ -829,104 +1013,11 @@ class BaseTerrainGenerator(BaseGenerator):
         finally:
             self.is_calculating = False
 
-    def _load_default_parameters(self):
-        """
-        Funktionsweise: Lädt TERRAIN-Parameter aus value_default.py
-        Aufgabe: Standard-Parameter für Terrain-Generierung
-        Returns: dict - Alle Standard-Parameter für Terrain
-        """
-        from gui.config.value_default import TERRAIN
-
-        return {
-            'map_size': TERRAIN.SIZE["default"],
-            'amplitude': TERRAIN.AMPLITUDE["default"],
-            'octaves': TERRAIN.OCTAVES["default"],
-            'frequency': TERRAIN.FREQUENCY["default"],
-            'persistence': TERRAIN.PERSISTENCE["default"],
-            'lacunarity': TERRAIN.LACUNARITY["default"],
-            'redistribute_power': TERRAIN.REDISTRIBUTE_POWER["default"],
-            'map_seed': TERRAIN.MAP_SEED["default"]
-        }
-
-    def _get_dependencies(self, data_manager):
-        """
-        Funktionsweise: Terrain braucht keine Dependencies - ist der erste Generator
-        Aufgabe: Leere Dependencies für Basis-Generator
-        Parameter: data_manager - DataManager-Instanz (wird nicht verwendet)
-        Returns: dict - Leeres Dependencies-Dict
-        """
-        # Terrain ist der erste Generator und braucht keine Dependencies
-        return {}
-
-    def _execute_generation(self, lod, dependencies, parameters):
-        """
-        Funktionsweise: Führt Terrain-Generierung mit bestehender Logik aus
-        Aufgabe: Wrapper um bestehende Terrain-Generation mit Progress-Updates
-        Parameter: lod, dependencies, parameters
-        Returns: TerrainData-Objekt
-        """
-        # Parameter aktualisieren
-        self._update_parameters(
-            map_size=parameters['map_size'],
-            amplitude=parameters['amplitude'],
-            octaves=parameters['octaves'],
-            frequency=parameters['frequency'],
-            persistence=parameters['persistence'],
-            lacunarity=parameters['lacunarity'],
-            redistribute_power=parameters['redistribute_power'],
-            map_seed=parameters['map_seed']
-        )
-
-        # Progress-Updates für BaseGenerator-Kompatibilität
-        def terrain_progress_wrapper(step_name, progress_percent, detail_message):
-            # Konvertiere Terrain-spezifische Progress zu BaseGenerator-Progress
-            base_progress = int(15 + (progress_percent * 0.8))  # 15-95% Bereich
-            self._update_progress(step_name, base_progress, detail_message)
-
-        # Bestehende generate_terrain Methode verwenden
-        terrain_data = self.generate_terrain(
-            lod=lod,
-            progress=terrain_progress_wrapper,
-            background=False,
-            existing_data=None,
-            map_size=parameters['map_size'],
-            amplitude=parameters['amplitude'],
-            octaves=parameters['octaves'],
-            frequency=parameters['frequency'],
-            persistence=parameters['persistence'],
-            lacunarity=parameters['lacunarity'],
-            redistribute_power=parameters['redistribute_power'],
-            map_seed=parameters['map_seed']
-        )
-
-        return terrain_data
-
-    def _save_to_data_manager(self, data_manager, result, parameters):
-        """
-        Funktionsweise: Speichert TerrainData-Objekt im DataManager
-        Aufgabe: Automatische Speicherung aller Terrain-Outputs
-        Parameter: data_manager, result (TerrainData), parameters
-        """
-        if isinstance(result, TerrainData):
-            # Verwende die neue set_terrain_data_complete Methode
-            data_manager.set_terrain_data_complete(result, parameters)
-            self.logger.debug("TerrainData object saved to DataManager")
-        else:
-            # Fallback für Legacy-Format
-            if hasattr(result, '__len__') and len(result) == 3:
-                heightmap, slopemap, shadowmap = result
-                data_manager.set_terrain_data("heightmap", heightmap, parameters)
-                data_manager.set_terrain_data("slopemap", slopemap, parameters)
-                data_manager.set_terrain_data("shadowmap", shadowmap, parameters)
-                self.logger.debug("Legacy terrain data saved to DataManager")
-            else:
-                self.logger.warning(f"Unknown terrain result format: {type(result)}")
-
     def _progressive_heightmap_generation(self, target_size, existing_heightmap=None):
         """
-        Funktionsweise: Generiert Heightmap progressiv oder von Grund auf
+        Funktionsweise: Generiert Heightmap progressiv oder von Grund auf mit korrekter Verdopplung
         Aufgabe: Wiederverwenden bestehender Daten mit Detail-Verfeinerung
-        Parameter: target_size (int) - Zielgröße für Heightmap
+        Parameter: target_size (int) - Zielgröße für Heightmap (aus korrigierter LOD-Verdopplung)
         Parameter: existing_heightmap (numpy.ndarray) - Bestehende Heightmap zum Erweitern
         Returns: numpy.ndarray - Generierte/erweiterte Heightmap
         """
@@ -1080,33 +1171,6 @@ class BaseTerrainGenerator(BaseGenerator):
 
         return slopemap
 
-    def _calculate_lod_steps(self, final_size):
-        """
-        Funktionsweise: Berechnet optimale LOD-Schritte nach Option A
-        Aufgabe: Bestimmt Zwischen-Auflösungen für progressive Generierung
-        Parameter: final_size (int) - Finale Zielgröße
-        Returns: list - Liste der LOD-Schritte [64, 128, 256, final_size]
-        """
-        steps = []
-
-        # Immer mit 64 beginnen (außer finale Größe ist kleiner)
-        if final_size >= 64:
-            steps.append(64)
-
-        # 128 hinzufügen wenn Zielgröße >= 128
-        if final_size >= 128:
-            steps.append(128)
-
-        # 256 hinzufügen wenn Zielgröße >= 256
-        if final_size >= 256:
-            steps.append(256)
-
-        # Finale Größe hinzufügen wenn sie nicht bereits in der Liste ist
-        if final_size not in steps:
-            steps.append(final_size)
-
-        return steps
-
     def _update_parameters(self, map_size=None, amplitude=None, octaves=None,
                            frequency=None, persistence=None, lacunarity=None,
                            redistribute_power=None, map_seed=None):
@@ -1248,7 +1312,7 @@ class BaseTerrainGenerator(BaseGenerator):
                                   redistribute_power, map_seed):
         """
         Funktionsweise: Legacy-Methode für komplette Terrain-Generierung (KOMPATIBILITÄT)
-        Aufgabe: Erhält bestehende API, verwendet intern neues LOD-System
+        Aufgabe: Erhält bestehende API, verwendet intern neues LOD-System mit DataManager-Integration
         """
         # Parameter setzen
         self._update_parameters(map_size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power,
