@@ -227,7 +227,6 @@ class WeatherTab(BaseMapTab):
         self.target_lod_combo = QComboBox()
         self.target_lod_combo.addItems(["LOD64 (Fast Preview)", "LOD128 (Medium)", "LOD256 (High)", "FINAL (Best)"])
         self.target_lod_combo.setCurrentIndex(3)
-        self.target_lod_combo.currentTextChanged.connect(self.on_target_lod_changed)
         target_layout.addWidget(self.target_lod_combo)
 
         layout.addLayout(target_layout)
@@ -398,43 +397,6 @@ class WeatherTab(BaseMapTab):
             self.handle_generation_error(e)
 
     @pyqtSlot(str)
-    def on_target_lod_changed(self, combo_text: str):
-        """Slot für Target-LOD-Änderungen"""
-        if "LOD64" in combo_text:
-            self.target_lod = "LOD64"
-        elif "LOD128" in combo_text:
-            self.target_lod = "LOD128"
-        elif "LOD256" in combo_text:
-            self.target_lod = "LOD256"
-        elif "FINAL" in combo_text:
-            self.target_lod = "FINAL"
-
-        self.logger.info(f"Target LOD changed to: {self.target_lod}")
-
-    def setup_orchestrator_integration(self):
-        """Setup für GenerationOrchestrator Integration"""
-        if not self.generation_orchestrator:
-            self.logger.warning("No GenerationOrchestrator provided to WeatherTab")
-            return
-
-        if hasattr(self.generation_orchestrator, 'generation_started'):
-            self.generation_orchestrator.generation_started.connect(self.on_orchestrator_generation_started)
-        if hasattr(self.generation_orchestrator, 'generation_completed'):
-            self.generation_orchestrator.generation_completed.connect(self.on_orchestrator_generation_completed)
-        if hasattr(self.generation_orchestrator, 'generation_progress'):
-            self.generation_orchestrator.generation_progress.connect(self.on_orchestrator_generation_progress)
-
-    @pyqtSlot(str, str)
-    def on_orchestrator_generation_started(self, generator_type: str, lod_level: str):
-        """Handler für Generation-Start vom Orchestrator"""
-        if generator_type != "weather":
-            return
-
-        QMetaObject.invokeMethod(self, "_update_ui_generation_started",
-                                 Qt.QueuedConnection,
-                                 Q_ARG(str, lod_level))
-
-    @pyqtSlot(str)
     def _update_ui_generation_started(self, lod_level: str):
         """UI-Update für Generation-Start in Main-Thread"""
         self.generation_progress.setValue(0)
@@ -442,17 +404,6 @@ class WeatherTab(BaseMapTab):
 
         if self.gpu_available and self.weather_shaders_loaded:
             self.shader_performance_timer.start(500)
-
-    @pyqtSlot(str, str, bool)
-    def on_orchestrator_generation_completed(self, generator_type: str, lod_level: str, success: bool):
-        """Handler für Generation-Completion vom Orchestrator"""
-        if generator_type != "weather":
-            return
-
-        QMetaObject.invokeMethod(self, "_update_ui_generation_completed",
-                                 Qt.QueuedConnection,
-                                 Q_ARG(str, lod_level),
-                                 Q_ARG(bool, success))
 
     @pyqtSlot(str, bool)
     def _update_ui_generation_completed(self, lod_level: str, success: bool):
@@ -483,18 +434,6 @@ class WeatherTab(BaseMapTab):
 
             if self.gpu_available:
                 self.shader_performance_timer.stop()
-
-    @pyqtSlot(str, str, int, str)
-    def on_orchestrator_generation_progress(self, generator_type: str, lod_level: str, progress_percent: int,
-                                            detail: str):
-        """Handler für Generation-Progress vom Orchestrator"""
-        if generator_type != "weather":
-            return
-
-        QMetaObject.invokeMethod(self, "_update_ui_generation_progress",
-                                 Qt.QueuedConnection,
-                                 Q_ARG(str, lod_level),
-                                 Q_ARG(int, progress_percent))
 
     @pyqtSlot(str, int)
     def _update_ui_generation_progress(self, lod_level: str, progress_percent: int):

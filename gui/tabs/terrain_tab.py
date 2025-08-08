@@ -13,19 +13,18 @@ Funktionsweise: Terrain-Editor mit GenerationOrchestrator Integration - VOLLSTÄ
 """
 
 from PyQt5.QtWidgets import (
-    QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QWidget, QCheckBox, QComboBox, QRadioButton
+    QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QWidget, QRadioButton
 )
 from PyQt5.QtCore import pyqtSlot, QTimer
-from PyQt5.QtGui import QFont
 
 import numpy as np
 import logging
-import time
 
 from .base_tab import BaseMapTab
-from gui.config.value_default import TERRAIN, get_parameter_config, validate_parameter_set
-from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, RandomSeedButton, ParameterUpdateManager
-from gui.managers.orchestrator_manager import StandardOrchestratorHandler, OrchestratorRequestBuilder
+from gui.config.value_default import get_parameter_config, validate_parameter_set
+from gui.widgets.widgets import ParameterSlider, StatusIndicator, RandomSeedButton, ParameterUpdateManager
+from ..managers import parameter_manager
+
 
 def get_terrain_error_decorators():
     """
@@ -74,6 +73,8 @@ class TerrainTab(BaseMapTab):
         self.terrain_constants = TerrainConstants()
         super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
 
+        self.parameter_manager = parameter_manager
+
         # Parameter-Tracking für Cache-Validation mit Sync
         self.current_parameters = {}
         self.last_generated_parameters = {}
@@ -81,8 +82,7 @@ class TerrainTab(BaseMapTab):
         # Parameter-Update-Manager für Race-Condition Prevention
         self.parameter_manager = ParameterUpdateManager(self)
 
-        # HOMOGENE ORCHESTRATOR-HANDLER INTEGRATION (entsprechend Descriptoren)
-        self.orchestrator_handler = StandardOrchestratorHandler(self, "terrain")
+        # fixen:?
         self.setup_orchestrator_integration()
 
         # Setup UI

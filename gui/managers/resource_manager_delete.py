@@ -19,7 +19,7 @@ from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 
 @dataclass
-class ResourceInfo:
+class ResourceInfoDelete:
     """Information über eine tracked Resource"""
     resource_id: str
     resource_type: str
@@ -29,7 +29,7 @@ class ResourceInfo:
     metadata: Dict[str, Any]
 
 
-class ResourceTracker(QObject):
+class ResourceTrackerDelete(QObject):
     """
     Funktionsweise: Systematisches Resource-Management für Memory-Leak-Prevention
     Aufgabe: Verfolgt alle erstellten Ressourcen und ermöglicht systematisches Cleanup
@@ -74,7 +74,7 @@ class ResourceTracker(QObject):
 
         # Resource-Info erstellen
         estimated_size = self._estimate_resource_size(resource)
-        info = ResourceInfo(
+        info = ResourceInfoDelete(
             resource_id=resource_id,
             resource_type=resource_type,
             creation_time=time.time(),
@@ -317,7 +317,7 @@ class ResourceTracker(QObject):
             return 1024  # Fallback bei Estimation-Fehlern
 
 
-class DisplayUpdateManager(QObject):
+class DisplayUpdateManagerDelete(QObject):
     """
     Funktionsweise: Change-Detection für Display-Updates um unnötige Re-Renderings zu vermeiden
     Aufgabe: Prüft ob Display-Update wirklich nötig ist basierend auf Data-Hash und Display-Mode

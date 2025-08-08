@@ -12,7 +12,10 @@ Funktionsweise: Zentrale Parameter-Defaults für alle Slider und Controls
 
 class TERRAIN:
     """Parameter für core/terrain_generator.py"""
-    SIZE = {"min": 64, "max": 512, "default": 128, "step": 32}
+    MAPSIZEMIN = 32
+    MAPSIZEMAX = 1024
+
+    MAPSIZE = {"min": MAPSIZEMIN, "max": MAPSIZEMAX, "default": 128, "step": 32}
     AMPLITUDE = {"min": 30, "max": 6000.0, "default": 2000.0, "step": 10, "suffix": "m"}
     OCTAVES = {"min": 1, "max": 12, "default": 8, "step": 1}
     FREQUENCY = {"min": 0.001, "max": 0.1, "default": 0.037, "step": 0.001}

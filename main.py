@@ -21,6 +21,8 @@ Architecture:
 import sys
 import logging
 from pathlib import Path
+from typing import List, Dict, Any
+
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
 
@@ -30,9 +32,8 @@ sys.path.insert(0, str(project_root))
 
 from gui.tabs.main_menu import MainMenuWindow
 from gui.config.gui_default import AppConstants
-from gui.tabs.loading_tab import LoadingTab
 from gui.map_editor_window import MapEditorWindow
-from gui.managers.data_manager import DataManager
+from gui.managers.data_lod_manager import DataLODManager
 from gui.managers.navigation_manager import NavigationManager
 from gui.managers.generation_orchestrator import GenerationOrchestrator
 
@@ -68,9 +69,9 @@ class MapGeneratorApp(QObject):
         self.logger = logging.getLogger(__name__)
 
         # Core managers - centralized creation
-        self.data_manager = DataManager()
-        self.navigation_manager = NavigationManager(data_manager=self.data_manager)
-        self.generation_orchestrator = GenerationOrchestrator(data_manager=self.data_manager)
+        self.data_lod_manager = DataLODManager()
+        self.navigation_manager = NavigationManager(data_manager=self.data_lod_manager)
+        self.generation_orchestrator = GenerationOrchestrator(data_manager=self.data_lod_manager)
 
         # Window references
         self.main_menu = None
@@ -188,12 +189,12 @@ class MapGeneratorApp(QObject):
         """
         try:
             self.main_menu = MainMenuWindow(
-                data_manager=self.data_manager,
+                data_manager=self.data_lod_manager,
                 navigation_manager=self.navigation_manager
             )
 
             # Connect map editor launch signal
-            self.main_menu.map_editor_requested.connect(self._start_map_editor)
+            self.main_menu.map_editor_requested.connect(self._show_map_editor())
 
             self.main_menu.show()
             self.current_window = self.main_menu
@@ -203,103 +204,6 @@ class MapGeneratorApp(QObject):
         except Exception as e:
             self.logger.error(f"Failed to create MainMenu: {e}")
             self._handle_critical_error("MainMenu creation failed", e)
-
-    @pyqtSlot()
-    def _start_map_editor(self):
-        """
-        Initiate map editor through loading process
-        ==========================================
-
-        Transitions from MainMenu to LoadingTab, then to MapEditor.
-        Handles the complete loading workflow with proper error
-        recovery and state management.
-        """
-        if self.is_shutting_down:
-            return
-
-        try:
-            self.logger.info("Starting map editor transition")
-
-            # Hide MainMenu (preserve for potential return)
-            if self.main_menu:
-                self.main_menu.hide()
-
-            # Create and display LoadingTab
-            self.loading_dialog = LoadingTab(
-                data_manager=self.data_manager,
-                generation_orchestrator=self.generation_orchestrator,
-                parent=None
-            )
-
-            # Connect loading completion signals
-            self.loading_dialog.loading_completed.connect(self._on_loading_completed)
-            self.loading_dialog.loading_cancelled.connect(self._on_loading_cancelled)
-
-            # Execute loading dialog
-            self.loading_dialog.exec_()
-
-        except Exception as e:
-            self.logger.error(f"Map editor transition failed: {e}")
-            self._recover_to_main_menu()
-
-    @pyqtSlot(bool)
-    def _on_loading_completed(self, success: bool):
-        """
-        Handle loading completion with simplified state management
-        =========================================================
-
-        Processes LoadingTab completion and transitions to MapEditor
-        on success or returns to MainMenu on failure. Uses simplified
-        state checking instead of complex flag management.
-
-        Args:
-            success: True if all generators loaded successfully
-        """
-        self.logger.info(f"Loading completed with success={success}")
-
-        # double-call protection
-        if hasattr(self, '_loading_completed_called') and self._loading_completed_called:
-            self.logger.debug("Loading completion already handled, ignoring duplicate call")
-            return
-        self._loading_completed_called = True
-
-        try:
-            self.loading_dialog.close()
-        except Exception as e:
-            self.logger.warning(f"Error closing loading dialog: {e}")
-        finally:
-            self.loading_dialog = None
-
-        if success:
-            self._show_map_editor()
-        else:
-            self.logger.warning("Loading failed, returning to MainMenu")
-            self._recover_to_main_menu()
-
-        # Reset flag after delay for next cycle
-        QTimer.singleShot(2000, lambda: delattr(self, '_loading_completed_called') if hasattr(self,'_loading_completed_called') else None)
-
-    @pyqtSlot()
-    def _on_loading_cancelled(self):
-        """
-        Handle loading cancellation by user
-        ===================================
-
-        Processes user cancellation of loading process and
-        returns gracefully to MainMenu with proper cleanup.
-        """
-        self.logger.info("Loading cancelled by user")
-
-        # Close loading dialog
-        if self.loading_dialog:
-            try:
-                self.loading_dialog.close()
-            except Exception as e:
-                self.logger.warning(f"Error closing loading dialog: {e}")
-            finally:
-                self.loading_dialog = None
-
-        self._recover_to_main_menu()
 
     def _show_map_editor(self):
         """
@@ -314,7 +218,7 @@ class MapGeneratorApp(QObject):
             self.logger.info("Creating MapEditor window")
 
             self.map_editor = MapEditorWindow(
-                data_manager=self.data_manager,
+                data_manager=self.data_lod_manager,
                 navigation_manager=self.navigation_manager,
                 generation_orchestrator=self.generation_orchestrator
             )
@@ -449,8 +353,8 @@ class MapGeneratorApp(QObject):
         """
         self.logger.debug(f"LOD progression started: {generator_type} → {target_lod}")
 
-    @pyqtSlot(str, str)
-    def _on_lod_progression_completed(self, generator_type: str, final_lod: str):
+    @pyqtSlot(str, int)
+    def _on_lod_progression_completed(self, result_id: str, lod_level: int):
         """
         Handle LOD progression completion
         ================================
@@ -462,42 +366,100 @@ class MapGeneratorApp(QObject):
             generator_type: Generator that completed progression
             final_lod: Final LOD level achieved
         """
-        self.logger.info(f"LOD progression completed: {generator_type} final: {final_lod}")
+        self.logger.info(f"LOD progression completed: {result_id} level: {lod_level}")
 
     @pyqtSlot(int, str)
-    def _on_generation_progress(self, progress, message):
+    def _on_generation_progress(self, progress: int, message: str):
         """
-        Handle generation progress signals from orchestrator.
-        Has to be properly integrated soon!
+        Funktionsweise: Empfängt Progress-Updates während der Generation
+        Parameter: progress (0-100), message (Detail-Beschreibung)
+        Aufgabe: Aktualisiert Progress-Bars und Status-Anzeigen in der UI
         """
-        self.logger.debug(f"Generation progress: {progress}% – {message}")
+        # Progress-Bar aktualisieren
+        if hasattr(self, 'progress_bar'):
+            self.progress_bar.setValue(progress)
+
+        # Status-Message anzeigen
+        if hasattr(self, 'status_label'):
+            self.status_label.setText(f"Progress: {progress}% - {message}")
+
+        # Auto-Simulation-Panel informieren
+        if hasattr(self, 'auto_simulation_panel'):
+            self.auto_simulation_panel.set_generation_status("progress", message)
 
     @pyqtSlot(bool, str)
-    def _on_batch_completed(self, success, summary_message):
+    def _on_batch_completed(self, success: bool, summary_message: str):
         """
-        Handle completion of a batch generation sequence.
-        Logs result and optionally triggers UI updates.
-        Has to be properly integrated soon!
+        Funktionsweise: Empfängt Batch-Generation-Completion-Status
+        Parameter: success (True/False), summary_message (Zusammenfassung)
+        Aufgabe: Zeigt Ergebnis einer Multi-Generator-Batch-Operation
         """
-        status = "SUCCESS" if success else "FAILURE"
-        self.logger.info(f"Batch generation completed: {status} – {summary_message}")
+        if success:
+            # Erfolgsmeldung anzeigen
+            self.show_success_notification(f"Batch completed: {summary_message}")
 
-        # Optional: Weiterleiten an MapEditor
-        if self.map_editor and hasattr(self.map_editor, "on_batch_completed"):
-            self.map_editor.on_batch_completed(success, summary_message)
+            # UI auf "completed" Status setzen
+            if hasattr(self, 'batch_status_widget'):
+                self.batch_status_widget.set_status("completed", summary_message)
+        else:
+            # Fehlermeldung anzeigen
+            self.show_error_notification(f"Batch failed: {summary_message}")
+
+            # UI auf "error" Status setzen
+            if hasattr(self, 'batch_status_widget'):
+                self.batch_status_widget.set_status("error", summary_message)
 
     @pyqtSlot(list)
-    def _on_queue_status_changed(self, thread_status_list):
+    def _on_queue_status_changed(self, thread_status_list: List[Dict[str, Any]]):
         """
-        Handle updates to the generation thread queue status.
-        Provides data for status panels or logging.
-        Has to be properly integrated soon!
-        """
-        self.logger.debug(f"Queue status updated – {len(thread_status_list)} threads active or queued")
+        Funktionsweise: Empfängt Status-Updates aller 6 Generator-Threads
+        Parameter: thread_status_list - Liste mit Status aller Generatoren
+        Aufgabe: Aktualisiert Thread-Status-Display für alle 6 Generatoren
 
-        # Optional: Weiterleiten an MapEditor
-        if self.map_editor and hasattr(self.map_editor, "on_queue_status_changed"):
-            self.map_editor.on_queue_status_changed(thread_status_list)
+        thread_status_list Format:
+        [
+            {
+                "generator": "Terrain",
+                "status": "Generating",
+                "current_lod": "LOD128",
+                "progress": 45,
+                "runtime": "2.3s",
+                "error": ""
+            },
+            {
+                "generator": "Geology",
+                "status": "Queued",
+                "current_lod": "LOD64",
+                "progress": 0,
+                "runtime": "0s",
+                "error": ""
+            },
+            ... (für alle 6 Generatoren)
+        ]
+        """
+        # Thread-Status-Widget aktualisieren (falls vorhanden)
+        if hasattr(self, 'thread_status_widget'):
+            self.thread_status_widget.update_all_threads(thread_status_list)
+
+        # Individual Generator-Status für aktuellen Tab extrahieren
+        current_generator_status = None
+        for thread_status in thread_status_list:
+            if thread_status["generator"].lower() == self.generator_type:
+                current_generator_status = thread_status
+                break
+
+        if current_generator_status:
+            # Status für aktuellen Generator anzeigen
+            status = current_generator_status["status"]
+            lod = current_generator_status["current_lod"]
+            progress = current_generator_status["progress"]
+            runtime = current_generator_status["runtime"]
+
+            # UI-Elements aktualisieren
+            if hasattr(self, 'generator_status_label'):
+                self.generator_status_label.setText(
+                    f"{status} - {lod} ({progress}%) - {runtime}"
+                )
 
     @pyqtSlot(str, list)
     def _on_dependency_invalidated(self, generator_type: str, affected_generators: list):

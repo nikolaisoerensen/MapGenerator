@@ -1,16 +1,68 @@
 """
-Path: gui/managers/generation_orchestrator.py
+    Path: gui/managers/generation_orchestrator.py
 
-Funktionsweise: Zentrale Orchestrierung aller Generator-Berechnungen mit homogener Signal-Architektur für alle Tabs
-Aufgabe: Koordiniert alle 6 Generatoren mit einheitlichen Signals, LOD-System, Dependency-Management und Threading
-Features: Tab-kompatible Signal-Signatures, Request-Processing, Background-Threading, Dependency-Resolution
+    GENERATION ORCHESTRATOR - THREADING UND LOD-PROGRESSION
+    ========================================================
+
+    OVERVIEW:
+    Koordiniert alle 6 Map-Generatoren durch intelligente Dependency-Resolution,
+    numerische LOD-Progression und CPU-optimierte Threading ohne UI-Blocking.
+
+    CORE FEATURES:
+    - Numerische LOD-Progression (1→2→3→4→n) basierend auf map_size
+    - CPU-adaptive Parallelisierung (cpu_count - 2 Threads)
+    - Dependency-Queue mit automatischer Resolution
+    - Parameter-Impact-Analysis für selective Cache-Invalidation
+    - DataManager-Integration für automatic Result-Storage
+
+    LOD-SYSTEM:
+    Numerische LOD-Levels: 1, 2, 3, 4, 5, 6, 7...
+    LOD-Size-Berechnung: map_size_min * 2^(lod_level-1)
+    Target-LOD: calculate_max_lod_for_size(map_size_parameter)
+
+    SIGNAL ARCHITECTURE:
+    Tab → Orchestrator:
+    - request_generation(request) → request_id
+
+    Orchestrator → Tab:
+    - generation_started(generator_type: str, lod_level: int)
+    - generation_completed(result_id: str, result_data: dict)
+    - lod_progression_completed(result_id: str, lod_level: int)
+    - generation_progress(progress: int, message: str)
+
+    DEPENDENCY FLOW:
+    Terrain → [Geology, Weather, Water] → Biome
+    Terrain + Geology → Settlement
+
+    REQUEST SYSTEM:
+    ```python
+    request = OrchestratorRequestBuilder.build_request(
+        parameters=tab.get_parameters(),
+        generator_type=GeneratorType.TERRAIN,
+        target_lod=5,  # Berechnet aus map_size
+        source_tab="terrain"
+    )
+    THREADING:
+
+    CPU-adaptive Limits: max(1, cpu_count - 2)
+    Background-Processing ohne UI-Block
+    Thread-per-LOD-Level für maximale Parallelisierung
+    Graceful Shutdown mit 3s Timeout
+
+    INTEGRATION:
+
+    DataManager: Automatic Result-Storage nach jeder LOD-Completion
+    BaseMapTab: generate() ruft Orchestrator auf
+    ParameterManager: Parameter-Changes triggern Impact-Analysis
 """
+from dataclasses import dataclass
 
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, QMutex, QMutexLocker, QTimer
-from typing import Dict, List, Set, Optional, Any, Tuple
+from typing import Dict, List, Set, Any
 import logging
 import time
 from enum import Enum
+import os
 
 def get_orchestrator_error_decorators():
     """
@@ -30,15 +82,6 @@ def get_orchestrator_error_decorators():
 
 threading_handler, memory_critical_handler, core_generation_handler = get_orchestrator_error_decorators()
 
-
-class LODLevel(Enum):
-    """LOD-Level Enumeration für Type-Safety"""
-    LOD64 = "LOD64"
-    LOD128 = "LOD128"
-    LOD256 = "LOD256"
-    FINAL = "FINAL"
-
-
 class GeneratorType(Enum):
     """Generator-Typen für Dependency-Management"""
     TERRAIN = "terrain"
@@ -55,14 +98,55 @@ class GenerationRequest:
     Aufgabe: Typ-sichere Übertragung von Generation-Parametern zwischen Komponenten
     """
     def __init__(self, generator_type: GeneratorType, parameters: Dict[str, Any],
-                 target_lod: LODLevel, source_tab: str, priority: int = 0):
+                 target_lod: int, source_tab: str, priority: int = 5):
         self.generator_type = generator_type
         self.parameters = parameters
         self.target_lod = target_lod
         self.source_tab = source_tab
         self.priority = priority
         self.timestamp = time.time()
-        self.request_id = f"{generator_type.value}_{target_lod.value}_{int(self.timestamp)}"
+        self.request_id = f"{generator_type.value}_{target_lod}_{int(self.timestamp)}"
+
+@dataclass
+class OrchestratorRequest:
+    """Standard-Request für GenerationOrchestrator"""
+    generator_type: str
+    parameters: Dict[str, Any]
+    target_lod: int
+    source_tab: str
+    priority: int = 5
+    timestamp: float = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = time.time()
+
+class OrchestratorRequestBuilder:
+    """Unified Request-Builder für alle Generator-Types"""
+
+    @staticmethod
+    def build_request(parameters: Dict[str, Any], generator_type: GeneratorType,
+                      target_lod: int = None, source_tab: str = None) -> OrchestratorRequest:
+        """Erstellt Request mit automatischer Target-LOD-Berechnung"""
+        if target_lod is None:
+            from gui.managers.data_lod_manager import calculate_max_lod_for_size
+            from gui.config.value_default import TERRAIN
+            map_size = parameters.get("size", TERRAIN.MAPSIZE["default"])
+            target_lod = calculate_max_lod_for_size(map_size)
+
+        if source_tab is None:
+            source_tab = generator_type.value
+
+        # Direkte Priority-Zuweisung
+        priority = 8 if generator_type == GeneratorType.TERRAIN else 5
+
+        return OrchestratorRequest(
+            generator_type=generator_type.value,
+            parameters=parameters,
+            target_lod=target_lod,
+            source_tab=source_tab,
+            priority=priority
+        )
 
 
 class ThreadState:
@@ -265,15 +349,19 @@ class GenerationOrchestrator(QObject):
     Aufgabe: Koordiniert alle 6 Generatoren mit einheitlichen Signals für StandardOrchestratorHandler-Integration
     """
 
-    # HOMOGENE SIGNAL-ARCHITEKTUR (kompatibel mit StandardOrchestratorHandler)
+    # Harmonisierte Signals mit numerischen LODs
     generation_completed = pyqtSignal(str, dict)  # (result_id, result_data)
-    lod_progression_completed = pyqtSignal(str, str)  # (result_id, lod_level)
+    lod_progression_completed = pyqtSignal(str, int)  # (result_id, lod_level) - int!
+
+    # Tab-kompatible Signals
+    generation_started = pyqtSignal(str, int)  # (generator_type, lod_level)
+    generation_failed = pyqtSignal(str, int, str)  # (generator_type, lod_level, error)
     generation_progress = pyqtSignal(int, str)  # (progress, message)
 
     # Zusätzliche Signals für erweiterte Funktionalität
-    dependency_invalidated = pyqtSignal(str, list)  # (generator_type, affected_generators)
-    batch_generation_completed = pyqtSignal(bool, str)  # (success, summary_message)
-    queue_status_changed = pyqtSignal(list)  # (thread_status_list)
+    dependency_invalidated = pyqtSignal(str, list)  # (generator_type: str, affected_generators: List[str])
+    batch_generation_completed = pyqtSignal(bool, str)  # (success: bool, summary_message: str)
+    queue_status_changed = pyqtSignal(list)  # (thread_status_list: List[Dict])
 
     def __init__(self, data_manager):
         super().__init__()
@@ -353,18 +441,24 @@ class GenerationOrchestrator(QObject):
         self.setup_threading()
         self.setup_dependency_resolution()
 
+        cpu_count = os.cpu_count() or 4
+        if cpu_count <= 2:
+            self.max_parallel_generations = cpu_count
+        else:
+            self.max_parallel_generations = max(1, cpu_count - 2)  # 2 Kerne frei lassen
+
+        self.logger.info(f"Parallel generation limit: {self.max_parallel_generations}")
+
     def setup_lod_tracking(self):
         """
-        Funktionsweise: Initialisiert LOD-Completion-Tracking für alle Generatoren
+        Funktionsweise: Initialisiert LOD-Completion-Tracking für alle Generatoren - NUMERISCH
         Aufgabe: Baseline für LOD-Progression-Management mit DataManager-Integration
         """
         for generator_type in GeneratorType:
-            self.lod_completion_status[generator_type.value] = {
-                LODLevel.LOD64.value: False,
-                LODLevel.LOD128.value: False,
-                LODLevel.LOD256.value: False,
-                LODLevel.FINAL.value: False
-            }
+            # Numerisches LOD-Tracking statt String-basiert
+            self.lod_completion_status[generator_type.value] = {}
+            # Wird dynamisch gefüllt wenn LODs completed werden
+            # Beispiel: {"terrain": {1: True, 2: True, 3: False, 4: False}}
 
     def setup_threading(self):
         """
@@ -403,15 +497,14 @@ class GenerationOrchestrator(QObject):
             # OrchestratorRequest von orchestrator_manager
             try:
                 gen_type_enum = GeneratorType(request.generator_type)
-                target_lod_enum = LODLevel(request.target_lod)
             except ValueError as e:
-                self.logger.error(f"Invalid generator_type or target_lod: {e}")
+                self.logger.error(f"Invalid generator_type: {e}")
                 return None
 
             internal_request = GenerationRequest(
                 gen_type_enum,
                 request.parameters,
-                target_lod_enum,
+                request.target_lod,
                 request.source_tab,
                 request.priority
             )
@@ -583,35 +676,14 @@ class GenerationOrchestrator(QObject):
         # Erste LOD-Stufe starten
         return self.execute_next_lod_level(generator_type, request.parameters, request.request_id)
 
-    def create_lod_sequence(self, generator_type: GeneratorType, target_lod: LODLevel) -> List[LODLevel]:
-        """
-        Funktionsweise: Erstellt LOD-Sequence von aktuellem DataManager-Status bis Target-LOD
-        Parameter: generator_type, target_lod
-        Return: Liste der zu berechnenden LOD-Level
-        """
-        all_lods = [LODLevel.LOD64, LODLevel.LOD128, LODLevel.LOD256, LODLevel.FINAL]
-        target_index = all_lods.index(target_lod)
+    def create_lod_sequence(self, generator_type: GeneratorType, target_lod: int) -> List[int]:
+        """Erstellt numerische LOD-Sequence von aktuellem Level bis Target"""
+        current_lod = self.data_manager.get_current_lod_level(generator_type.value)
 
-        # Finde höchstes bereits verfügbares LOD über DataManager
-        start_index = 0
+        if current_lod >= target_lod:
+            return []  # Bereits erreicht oder überschritten
 
-        if generator_type == GeneratorType.TERRAIN:
-            # DataManager-basierte LOD-Prüfung für Terrain
-            for i, lod in enumerate(all_lods):
-                if self.data_manager.has_terrain_lod(lod.value):
-                    start_index = i + 1
-        else:
-            # Standard-Status-Check für andere Generatoren
-            current_status = self.lod_completion_status[generator_type.value]
-            for i, lod in enumerate(all_lods):
-                if current_status[lod.value]:
-                    start_index = i + 1
-
-        # LOD-Sequence vom nächsten Level bis Target
-        if start_index <= target_index:
-            return all_lods[start_index:target_index + 1]
-        else:
-            return []  # Bereits höheres LOD verfügbar
+        return list(range(current_lod + 1, target_lod + 1))
 
     def execute_next_lod_level(self, generator_type: GeneratorType, parameters: Dict[str, Any], request_id: str) -> bool:
         """
@@ -984,8 +1056,8 @@ class GenerationOrchestrator(QObject):
         Funktionsweise: Setzt LOD-Completion-Status für Generator zurück
         Parameter: generator_type
         """
-        for lod_level in LODLevel:
-            self.lod_completion_status[generator_type.value][lod_level.value] = False
+        self.lod_completion_status[generator_type.value] = {}
+        # Wird dynamisch gefüllt bei LOD-Completions
 
     def get_current_parameters(self, generator_type: GeneratorType) -> Dict[str, Any]:
         """
@@ -1072,7 +1144,7 @@ class GenerationThread(QThread):
     generation_completed = pyqtSignal(str, dict)  # (request_id, result_data)
     generation_progress = pyqtSignal(int, str)  # (progress, message) - homogen für alle Tabs
 
-    def __init__(self, generator_instance, generator_type: GeneratorType, lod_level: LODLevel,
+    def __init__(self, generator_instance, generator_type: GeneratorType, lod_level: int,
                  parameters: Dict[str, Any], data_manager, request_id: str, parent=None):
         super().__init__(parent)
         self.generator_instance = generator_instance
