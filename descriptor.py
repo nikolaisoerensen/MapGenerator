@@ -676,7 +676,7 @@ def value_default():
 
     Struktur:
     class TERRAIN:
-        SIZE = {"min": 64, "max": 512, "default": 256, "step": 32}
+        SIZE = {"min": 32, "max": 2048, "default": 256, "step": 32}
         HEIGHT = {"min": 0, "max": 400, "default": 100, "step": 10, "suffix": "m"}
         OCTAVES = {"min": 1, "max": 10, "default": 4}
         # etc.
@@ -2025,229 +2025,268 @@ def base_tab():
     • Resource safety: Cleanup guaranteed even on exceptions
     • User feedback: Clear error messages in UI status displays
 
-    ERROR CATEGORIES:
-    • Setup Errors: UI creation failures → Minimal fallback UI
-    • Display Errors: Rendering failures → Continue with degraded display
-    • Generation Errors: Algorithm failures → Clear error status, enable retry
-    • Resource Errors: Memory/cleanup failures → Force cleanup and logging
+    Funktionsweise: Basis-Klasse für alle Map-Editor Tabs
+    - Standardisiertes 70/30 Layout (Canvas links, Controls rechts)
+    - Gemeinsame Auto-Simulation Controls für alle Tabs
+    - Input-Status Display (verfügbare Dependencies)
+    - Observer-Pattern für Cross-Tab Updates
+    - Einheitliche Navigation (Prev/Next Buttons)
+    - Performance-optimiertes Debouncing-System
 
-    MEMORY MANAGEMENT:
-    ------------------
+    Kommunikationskanäle:
+    - Signals: data_updated, parameter_changed, validation_status_changed
+    - Config: gui_default.py für Layout-Settings
+    - Data: data_manager für Input/Output
+    - Navigation: navigation_manager für Tab-Wechsel
 
-    RESOURCE TRACKING SYSTEM:
-    • ResourceTracker: Systematic registration and cleanup of all resources
-    • Weak references: Prevent circular dependencies
-    • Cleanup functions: Custom cleanup logic per resource type
-    • Age-based cleanup: Automatic cleanup of old resources
-
-    MEMORY OPTIMIZATION:
-    • Display change detection: Prevents unnecessary texture uploads
-    • Large array handling: Force garbage collection for >50MB arrays
-    • Resource pooling: Reuse display resources where possible
-    • Exception safety: Cleanup guaranteed even on errors
-
-    PERFORMANCE CONSIDERATIONS:
-    ---------------------------
-
-    UI RESPONSIVENESS:
-    • Auto-simulation debouncing: Prevents excessive generation triggers
-    • Progressive loading: LOD-based generation with incremental updates
-    • Background processing: Non-blocking generation workflows
-    • Change detection: Skip rendering if data hasn't changed
-
-    MEMORY EFFICIENCY:
-    • Reference sharing: numpy arrays shared between components (no copies)
-    • Lazy loading: Resources created only when needed
-    • Systematic cleanup: Prevent memory leaks through resource tracking
-    • Garbage collection: Forced GC for large operations
-
-    THREAD SAFETY:
-    • Signal-based communication: Qt's thread-safe signal system
-    • UI updates: All UI changes in main thread via pyqtSlot
-    • Resource access: Coordinated through data_manager
-    • State synchronization: Generation state managed centrally
-
-    =========================================================================================
-    USAGE EXAMPLES FOR SUB-CLASSES:
-    =========================================================================================
-
-    MINIMAL TAB IMPLEMENTATION:
-    ```python
-    class TerrainTab(BaseMapTab):
-        def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator):
-            # Required dependencies for this tab
-            self.required_dependencies = []  # No dependencies for terrain (base generator)
-
-            super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
-
-            # Setup orchestrator integration
-            self.setup_standard_orchestrator_handlers("terrain")
-
-            # Create parameter controls
-            self.create_parameter_controls()
-
-        def create_parameter_controls(self):
-            # Add custom parameter sliders/controls to self.control_panel.layout()
-            pass
-
-        def generate_terrain_system(self):
-            # Core generation logic
-            # Should emit self.data_updated.emit("terrain", "heightmap") when done
-            pass
-    ```
-
-    ADVANCED TAB WITH CUSTOM DISPLAYS:
-    ```python
-    class GeologyTab(BaseMapTab):
-        def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator):
-            self.required_dependencies = ["heightmap", "slopemap"]  # Requires terrain data
-
-            super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
-            self.setup_standard_orchestrator_handlers("geology")
-            self.create_parameter_controls()
-
-        def create_visualization_controls(self):
-            # Override to add custom display modes (rock_map, hardness_map)
-            widget = super().create_visualization_controls()
-
-            self.rock_radio = QRadioButton("Rock Types")
-            self.hardness_radio = QRadioButton("Hardness")
-
-            # Add to layout and connect signals
-            return widget
-
-        def update_display_mode(self):
-            # Custom rendering logic for geology-specific displays
-            if self.rock_radio.isChecked():
-                rock_data = self.data_manager.get_geology_data("rock_map")
-                current_display = self.get_current_display()
-                if rock_data is not None and current_display:
-                    self._render_current_mode(1, current_display, rock_data, "rock_types")
-            # ... etc
-
-        def generate_geology_system(self):
-            # Geology generation logic
-            # Emits data_updated signals for rock_map, hardness_map etc.
-            pass
-    ```
-
-    INTEGRATION CHECKLIST FOR NEW TABS:
-    • ✓ Define required_dependencies list
-    • ✓ Call setup_standard_orchestrator_handlers(generator_type)
-    • ✓ Implement generate_[tab_name]_system() method
-    • ✓ Create parameter controls and add to control_panel.layout()
-    • ✓ Override visualization controls if custom display modes needed
-    • ✓ Override update_display_mode() if custom rendering needed
-    • ✓ Emit data_updated signals when generation completes
-    • ✓ Handle parameter changes and auto-simulation appropriately
-
-    =========================================================================================
-
+    Gemeinsame Features:
+    - setup_common_ui() → 70/30 Layout
+    - setup_auto_simulation() → Auto-Update Checkbox + Manual Button
+    - setup_input_status() → Dependency-Status Widget
+    - setup_navigation() → Prev/Next Navigation
     """
 
 def terrain_tab():
     """
     Path: gui/tabs/terrain_tab.py
 
-    Funktionsweise: Terrain-Editor mit GenerationOrchestrator und StandardOrchestratorHandler Integration
-    - Erbt von BaseMapTab für gemeinsame Features
-    - GenerationOrchestrator für einheitliche Generator-Architektur mit Dependency-Management
-    - StandardOrchestratorHandler eliminiert Code-Duplikation zwischen Generator-Tabs
-    - OrchestratorRequestBuilder für typ-sichere Request-Erstellung mit Terrain-spezifischer Validation
-    - Live 2D/3D Preview über map_display_2d/3d.py mit Display-Modi (Height/Slope/Shadow)
-    - Real-time Terrain-Statistics mit Performance-optimierter Berechnung und Caching
-    - Parameter-Update-Manager gegen Race-Conditions mit Debouncing-System
-    - Generation-Interrupt-Logic mit Validity-System und automatischer Cache-Invalidation
-    - Output: TerrainData-Objekt über DataManager für nachfolgende Generatoren
-    - Map-Size-Synchronisation zwischen Tabs über DataManager.sync_map_size()
+    Funktionsweise: Terrain-Editor mit vollständiger BaseMapTab-Integration und Core-Generator-Anbindung
+    - Erbt alle BaseMapTab-Features: 70/30 Layout, 2D/3D Toggle, Manual-Generation, Resource-Management
+    - Terrain-Generator Integration über BaseTerrainGenerator aus core/terrain_generator.py
+    - Einheitliche Generation über BaseMapTab.generate() → calculate_heightmap(), calculate_shadows(), calculate_slopes()
+    - StandardOrchestratorHandler über BaseMapTab.setup_standard_orchestrator_handlers("terrain")
+    - Parameter-Integration über BaseMapTab's ParameterManager
+    - Verwendet LOD-System aus DataLODManager:
+        - LOD-Progression: Automatische Verdopplung 64→128→256→512→1024→2048 bis map_size erreicht
+        - LOD-Level: 1,2,3,4,5,6,7+ (mindestens 7 für alle Sonnenstände und theoretisch weitere bis map_size)
+    - Output: heightmap, slopemap, shadowmap für nachfolgende Generatoren
+    - Map-Size-Synchronisation über DataLODManager.sync_map_size() für Tab-übergreifende Konsistenz
 
-    UI-Layout:
-    Control Panel (rechts, 30% Breite):
-      - Generate Terrain Button: Manual Generation-Trigger mit Priority-Handling
-      - System Status Widget:
-        * LOD-Level-Display für Heightmap/Slopemap/Shadowmap mit Validity-State
-        * Generation-Status: Queued/Generating/Completed/Failed mit Progress-Details
-        * Dependency-Status: Waiting für Dependencies, Error-States mit Recovery-Suggestions
-        * Queue-Position und estimated completion Zeit
-      - Progress Bar: LOD-progression mit aktueller Phase (Heightmap/Slopes/Shadows) und Detail-Messages
-      - Terrain Parameters: Slider für alle Parameter mit RandomSeedButton für map_seed, Parameter-Validation mit Cross-Parameter-Constraints
-      - Terrain Statistics: Höhenverteilung, Steigungsstatistiken, Verschattungsinfo mit LOD-Info und Performance-Metriken
+    UI-Layout (erweitert BaseMapTab):
+    Control Panel Parameter-Sektion:
+      - Terrain Parameters GroupBox mit Verwendung von value_default.py für "min", "max", "default", "step" (und "suffix"
+      für Amplitude) und widgets.py für ParameterSlider und RandomSeedButton
+        * Map Size: ParameterSlider
+        * Height Amplitude: ParameterSlider
+        * Detail Octaves: ParameterSlider
+        * Base Frequency: ParameterSlider
+        * Detail Persistence: ParameterSlider
+        * Frequency Scaling: ParameterSlider
+        * Height Redistribution: ParameterSlider
+        * Map Seed: ParameterSlider + RandomSeedButton
 
-    Hauptpanel (links, 70% Breite):
-      - Oben: 2D/3D Toggle + Display-Optionen
-        * Height/Slope: Radio-Buttons (exklusiv)
-        * Shadow: Checkbox (Overlay-Modus) mit Sonnenwinkel-Slider (1-7 Winkel)
-            (Falls der aktive Winkel noch nicht berechnet wurde, sollte die Anzeige nicht dargestellt werden.)
-        * Contour Lines, Grid-Overlay: Checkboxes für zusätzliche Overlays
-      - Mitte: Display-Widget mit automatischer Colorbar und LOD-Info-Overlay
-      - Unten: Display-Tools (Measure Distance, Height-Profile, Export-View, etc.)
+      - Generation Control GroupBox:
+        * "Berechnen"-Button: Manual Generation-Trigger
+        * Generation Progress: ProgressBar mit LOD-Phase-Details
+        * System Status: LOD-Level-Display, Generation-Status
+
+      - Terrain Statistics GroupBox:
+        * Height Range: Min/Max/Mean/StdDev
+        * Slope Statistics: Max-Gradient, Mean-Slope in Degrees
+        * Shadow Coverage: Min/Max/Mean Shadow-Values über alle Sonnenwinkel
+        * Performance Metrics: Data-Size, Generation-Time
+
+    Canvas Visualization Controls:
+      - Terrain-spezifische Controls (nur 2D):
+        * Height/Slope: Radio-Buttons (exklusiv, nur für Terrain-2D-Display)
+     (erweitert BaseMapTab):
+      - Standard BaseMapTab Controls (2D+3D):
+        * Shadow: Checkbox (Overlay) + Shadow-Angle-Slider (0-6, entspricht 7 Sonnenstände)
+        * Contour Lines: Checkbox (Overlay mit Heightmap)
+        * Grid Overlay: Checkbox (für Measurement und Scale-Reference)
+
+    calculate_heightmap():
+
+    Input: Parameter-Set (size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power, map_seed) + current_lod_level
+    Core-Call: BaseTerrainGenerator.calculate_heightmap(parameters, lod_level)
+    Heightmap-Generation: Multi-Scale Simplex-Noise mit Octave-Layering und Progressive-Interpolation
+    Ridge-Warping: Deformation mittels ridge warping für natürliche Landschaftsformen
+    Height-Redistribution: Höhen-Redistribution für natürliche Höhenverteilung basierend auf redistribute_power
+    Validation: Shape/Range/NaN-Checks für generated heightmap
+    Output-Storage: DataLODManager.set_terrain_data_lod("heightmap", array, lod_level, parameters)
+    Signal-Emission: data_updated("terrain", "heightmap")
+
+    calculate_slopes():
+
+    Input: heightmap + terrain-parameters für Gradient-Berechnung
+    Core-Call: BaseTerrainGenerator.calculate_slopes(heightmap, parameters)
+    Slope-Calculation: dz/dx und dz/dy Gradienten-Berechnung über heightmap
+    Gradient-Magnitude: Berechnung der Slope-Intensity für Steigungsstatistiken
+    Output-Format: 3D-Array (H,W,2) mit dz/dx und dz/dy Komponenten
+    Validation: Gradient-Range-Checks und Consistency mit heightmap-Shape
+    Output-Storage: DataLODManager.set_terrain_data_lod("slopemap", array, lod_level, parameters)
+    Signal-Emission: data_updated("terrain", "slopemap")
+
+    calculate_shadows():
+
+    Input: heightmap + sun_angles (LOD-spezifische Sonnenwinkel-Anzahl) + shadow-parameters
+    Core-Call: BaseTerrainGenerator.calculate_shadows(heightmap, sun_angles, parameters)
+    Shadow-Calculation: Raycast-Shadow-Berechnung für multiple Sonnenwinkel mit GPU-Shader-Support
+    LOD-Progressive-Shadows: 1,3,5,7 Sonnenwinkel je nach LOD-Level (Mittag→Vormittag/Nachmittag→Morgen/Abend→Dämmerung)
+    Multi-Angle-Combination: Kombination aller Sonnenwinkel zu finaler Shadowmap
+    Output-Format: 3D-Array (H,W,angles) mit Shadow-Values [0-1] für jeden Sonnenwinkel
+    Validation: Shadow-Range-Checks [0-1] und Angle-Consistency
+    Output-Storage: DataLODManager.set_terrain_data_lod("shadowmap", array, lod_level, parameters)
+    Signal-Emission: data_updated("terrain", "shadowmap")
+
+    Parameter-Spezifika:
+    - Map Size: Power-of-2 Validation (64,128,256,512,1024,2048), Map-Size-Sync zu anderen Tabs
+    - Seed-System: RandomSeedButton aus widgets.py generiert Seeds
+    - Cross-Parameter-Constraints: Octaves vs Size Validation
+    - Parameter-Widgets: Alle ParameterSlider und RandomSeedButton aus widgets.py
 
     Kommunikationskanäle:
-    - Config: value_default.TERRAIN für alle Parameter-Ranges und Validation-Rules
-    - Core: GenerationOrchestrator.request_generation("terrain") mit OrchestratorRequestBuilder
-    - Handler: StandardOrchestratorHandler für einheitliche Signal-Integration und UI-Updates
-    - BaseGenerator-Integration: Nutzt einheitliche Generator-Architektur mit automatischem Dependency-Tracking
-    - Signals: terrain_data_updated, validity_changed (für nachfolgende Tabs)
-    - Output: TerrainData → DataManager.set_terrain_data_complete() für geology/settlement/weather
-    - Map-Size-Sync: DataManager.sync_map_size() für Tab-übergreifende Größen-Konsistenz mit Validity-Checks
+    - Config: value_default.TERRAIN für Parameter-Ranges, Validation-Rules, Default-Values
+    - Core: core/terrain_generator.py → BaseTerrainGenerator, SimplexNoiseGenerator, ShadowCalculator
+    - Manager: GenerationOrchestrator.request_generation("terrain") mit OrchestratorRequestBuilder
+    - Data: DataLODManager.set_terrain_data_complete() mit TerrainData für geology/settlement/weather
+    - Signals: BaseMapTab-Signals + terrain-spezifische Validity-Updates
+    - Display: BaseMapTab._render_current_mode() für Height/Slope/Shadow-Rendering
+    - Widgets: widgets.py für ParameterSlider, RandomSeedButton, StatusIndicator
 
-    Parameter: size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power, map_seed
+    Generation-Flow:
+    1. "Berechnen"-Button → generate()
+    1a. calculate_heightmap() → DataLODStorage → Signal-Emission
+    1b. calculate_slopes() → DataLODStorage → Signal-Emission
+    1c. calculate_shadows() → DataLODStorage → Signal-Emission
+    2. LOD-Progression über GenerationOrchestrator mit incremental Results
+    3. Display-Update über BaseMapTab._render_current_mode() nach jedem LOD
+    4. Statistics-Update in Real-time, Map-Size-Sync zu dependent Tabs
+    5. Signal-Emission für Cross-Tab-Dependencies (geology, weather, water, biome, settlement)
 
-    LOD-System Integration:
-    - System Status zeigt aktuelles LOD-Level und Validity-State für alle Terrain-Daten
-    - Generation läuft LOD64→LOD128→LOD256→FINAL mit Validity-Checks nach jedem Level
-    - Parameter-Änderungen invalidieren Daten und stoppen Generation nach aktuellem LOD-Step
-    - Display arbeitet immer mit besten verfügbaren LOD-Daten, zeigt LOD-Info in UI
-    - Cache-Invalidation propagiert automatisch zu nachgelagerten Generatoren über Impact-Matrix
+    Error-Handling:
+    - Parameter-Validation: Range-Checks, Cross-Parameter-Constraints
+    - Generation-Validation: TerrainData Shape/Range/NaN-Checks
+    - LOD-Consistency: Validity-Checks zwischen LOD-Levels
+    - GPU-Fallback: ShaderManager-Integration mit CPU-Fallback-Notification
+    - Memory-Management: Large-Array-Detection, Force-GC für >50MB Arrays
 
-    Generation-Flow mit Validity-System:
-    1. Parameter-Änderung → ParameterUpdateManager (Debouncing) → Validity-Check gegen cached Parameters
-    2. Parameter-Impact-Analysis → Cache-Invalidation für betroffene nachgelagerte Generatoren
-    3. Generate Button / Auto-Simulation → OrchestratorRequestBuilder.build_terrain_request()
-    4. Request-Validation → GenerationOrchestrator.request_generation() mit Dependency-Queue
-    5. LOD-progression mit Interrupt-Support bei Parameter-Änderungen und Validity-Re-Check
-    6. Progress-Updates → StandardOrchestratorHandler → System Status + Progress Bar Updates
-    7. Completion → Display-Update + Statistics-Update + Map-Size-Sync + Validity-State-Update
-    8. Validity-System stellt Konsistenz zwischen allen LOD-Levels sicher und triggert nachgelagerte Re-Generation bei kritischen Änderungen
-
-    Error-Handling und Recovery:
-    - OrchestratorErrorHandler mit Retry-Logic für Memory-Errors (LOD-Downgrade) und Parameter-Errors (Auto-Correction)
-    - Generation-Timeout-Detection mit automatischem Cleanup und User-Notification
-    - Invalid-Parameter-Detection mit User-friendly Error-Messages und Correction-Suggestions
-    - GPU-Fallback-Notification wenn ShaderManager auf CPU-Processing zurückfällt
+    Output-Datenstrukturen:
+    - heightmap: 2D numpy.float32 array, Elevation in Metern
+    - slopemap: 3D numpy.float32 array (H,W,2), dz/dx und dz/dy Gradienten
+    - shadowmap: 3D numpy.float32 array (H,W,7), Shadow-Values [0-1] für 7 Sonnenwinkel
+    - TerrainData: Container mit allen Arrays + LOD-Metadata + Validity-State + Parameter-Hash
     """
 
 def geology_tab():
     """
     Path: gui/tabs/geology_tab.py
 
-    Funktionsweise: Geologie-Editor mit 3D Textured Terrain
-    - Input: Heightmap von terrain_tab
-    - Core-Integration: geology_generator.py
-    - 3D-Rendering mit Gesteinstyp-Texturen
-    - Parameter: Rock-Types, Hardness-Values, Tektonische Deformation
+    Funktionsweise: Geology-Editor mit BaseMapTab-Integration und geologischer Simulation
+    - Erbt alle BaseMapTab-Features: 70/30 Layout, 2D/3D Toggle, Manual-Generation, Resource-Management
+    - Geology-Generator Integration über GeologyGenerator aus core/geology_generator.py
+    - Input-Dependencies: heightmap, slopemap von terrain_tab über DataLODManager
+    - Einheitliche Generation über BaseMapTab.generate() → calculate_rockmap(), calculate_massconservation(),
+    calculate_hardnessmap()
+    - Rock-Type-Classification: Sedimentary/Igneous/Metamorphic mit Mass-Conservation (Red (Sedimentary)+Green (Igneous)
+     + Blue(Metamorphic) = 255)
+    - LOD-Progression: Automatische Verdopplung bis map_size erreicht (entsprechend Terrain)
+    - Output: rock_map (RGB), hardness_map für water_generator und nachfolgende Systeme
+
+    UI-Layout (erweitert BaseMapTab):
+    Control Panel Parameter-Sektion mit "min", "max", "default", "step" aus value_default.py
+    und ParameterSlider aus widgets.py:
+      - Rock Hardness Parameters GroupBox:
+        * Sedimentary Hardness: ParameterSlider
+        * Igneous Hardness: ParameterSlider
+        * Metamorphic Hardness: ParameterSlider
+
+      - Tectonic Deformation Parameters GroupBox:
+        * Ridge Warping: ParameterSlider
+        * Bevel Warping: ParameterSlider
+        * Metamorphic Foliation: ParameterSlider
+        * Metamorphic Folding: ParameterSlider
+        * Igneous Flowing: ParameterSlider
+
+      - Generation Control GroupBox:
+        * "Berechnen"-Button: Manual Generation-Trigger  (erweitert BaseTab)
+        * Generation Progress: ProgressBar mit Geology-Phase-Details  (erweitert BaseTab)
+        * Input Dependencies: StatusIndicator für heightmap/slopemap-Verfügbarkeit
+
+      - Rock Distribution Widget:
+        * Hardness Preview: Progress-Bars für Sedimentary/Igneous/Metamorphic
+        * Distribution Statistics: Prozentuale Verteilung nach Generation
+        * Mass Conservation Status: StatusIndicator für R+G+B=255 Validation
+
+    Canvas Visualization Controls (erweitert BaseMapTab):
+      - Geology-spezifische Controls:
+        * Rock Types/Hardness: Radio-Buttons (2D+3D)
+      - Standard BaseMapTab Controls (2D+3D):
+        * Shadow: Checkbox (Overlay über alle Modi, nutzt Terrain-Shadowmap)
+        * Contour Lines: Checkbox (Overlay, nutzt Terrain-Heightmap) und erzeugt einen Sonnenwinkel-Slider (1-7)
+        * Grid Overlay: Checkbox (für alle Modi)
+
+    Core-Funktionalität:
+    calculate_rockmap():
+
+    - Input-Validation: heightmap/slopemap Shape/Range/Consistency-Checks
+    - Input: Parameter-Set + heightmap + slopemap von terrain_tab
+    - Core-Call: GeologyGenerator.calculate_rock_distribution(heightmap, slopemap, parameters)
+    - Rock-Classification: Höhen-basierte + Steigungs-basierte + Noise-basierte Verteilung
+    - Geological-Zones: Sedimentary/Igneous/Metamorphic-Zone-Calculation mit Simplex-Noise
+    - Ridge-Warping: Tektonische Verformung für härtere Gesteine in steilen Hängen
+    - Deformation-Effects: Bevel-Warping, Metamorphic-Foliation/Folding, Igneous-Flowing
+    - Output-Storage: DataLODManager.set_geology_data_lod("rock_map", array, lod_level, parameters)
+    - Signal-Emission: data_updated("geology", "rock_map")
+
+    calculate_hardnessmap():
+
+    - Input: rock_map + hardness-Parameters (sedimentary/igneous/metamorphic_hardness)
+    - Core-Call: GeologyGenerator.calculate_hardness_map(rock_map, hardness_parameters)
+    - Hardness-Calculation: Gewichtete Hardness-Map aus RGB-rock_map und hardness-Parametern
+    - Formula: hardness_map(x,y) = (R*sed_hardness + G*ign_hardness + B*met_hardness) / 255
+    - Output-Storage: DataLODManager.set_geology_data_lod("hardness_map", array, lod_level, parameters)
+    - Signal-Emission: data_updated("geology", "hardness_map")
+
+    calculate_massconservation():
+
+    - Input: rock_map mit potentiell inkonsistenten RGB-Werten
+    - Core-Call: MassConservationManager.normalize_rock_masses(rock_map)
+    - Mass-Conservation: R+G+B=255 Enforcement für alle Pixel
+    - Normalization: Proportionale Skalierung wenn R+G+B != 255
+    - Fallback: Gleichverteilung (85,85,85) bei R+G+B=0 Pixeln
+    - Output-Update: Überschreibt rock_map in DataLODManager mit korrigierten Werten
+    - Statistics-Update: Rock-Distribution-Widget mit korrigierter Verteilung
+
+    Dependency-Management:
+    - Required Dependencies: ["heightmap", "slopemap"] von terrain_tab
+    - check_input_dependencies(): Prüft Terrain-Data-Verfügbarkeit, Shape-Consistency, Data-Quality
+    - Dependency-Status-Display: StatusIndicator mit missing/invalid Inputs und Recovery-Suggestions
 
     Kommunikationskanäle:
-    - Input: heightmap von data_manager
-    - Core: geology_generator für Rock-Classification
-    - Output: rock_map, hardness_map → data_manager
-    - Config: value_default.GEOLOGY
-    """
+    - Config: value_default.GEOLOGY für Parameter-Ranges, Hardness-Defaults, Validation-Rules
+    - Core: core/geology_generator.py → GeologyGenerator, RockTypeClassifier, MassConservationManager
+    - Input: DataLODManager.get_terrain_data("heightmap/slopemap") für Basis-Terrain-Daten
+    - Output: DataLODManager.set_geology_data_lod() für rock_map/hardness_map zu water_generator
+    - Manager: GenerationOrchestrator.request_generation("geology") nach Dependency-Erfüllung
+    - Signals: BaseMapTab-Signals + geology-spezifische rock_map/hardness_map Updates
+    - Widgets: widgets.py für ParameterSlider, StatusIndicator, ProgressBar
 
-def settlement_tab():
-    """
-    Path: gui/tabs/settlement_tab.py
+    Display-Modi (erweitert BaseMapTab):
+    - Height Mode: Terrain-Heightmap als Basis-Layer
+    - Rock Types Mode: RGB rock_map mit Color-Coding (Rot=Sedimentary, Grün=Igneous, Blau=Metamorphic)
+    - Hardness Mode: Hardness-Map mit Grayscale/Color-Coding (Blau=weich, Rot=hart)
+    - 3D Terrain Overlay: Kombiniert Rock-Classification mit 3D-Terrain-Rendering
+    - Shadow/Contour/Grid Overlays: Nutzen Terrain-Data über alle Geology-Modi
 
-    Funktionsweise: Settlement-Platzierung mit Terrain-Integration
-    - Input: Heightmap, optional Rock-Map für Suitability
-    - Intelligent Settlement-Placement (Steigung, Wasser-Nähe)
-    - 3D-Markers für Villages/Landmarks auf Terrain
-    - Road-Network Visualization
+    LOD-System Integration:
+    - Progressive Generation: Automatische LOD-Progression im Hintergrund entsprechend Terrain
+    - LOD-Size-Verdopplung: 64→128→256→512→1024→2048 bis map_size erreicht
+    - LOD-Level-Nummerierung: 1,2,3,4,5,6+ entsprechend verfügbaren Terrain-LODs
+    - Incremental Updates: UI-Update nach jedem LOD-Level
+    - Display-Optimization: Immer bestes verfügbares LOD für Display
 
-    Kommunikationskanäle:
-    - Input: heightmap, rock_map von data_manager
-    - Core: settlement_generator für Placement-Algorithm
-    - Output: settlement_positions, road_network → data_manager
+    Generation-Flow:
+    1. Dependency-Check → heightmap/slopemap-Validation → "Berechnen"-Button
+    2. generate() → calculate_geology() → GeologyGenerator.generate()
+    3. Rock-Classification → Mass-Conservation → Hardness-Calculation
+    4. Validation → Repair → DataLODManager-Storage → Signal-Emission
+    5. Display-Update → Statistics-Update → Cross-Tab-Notification für Dependencies
+
+    Output-Datenstrukturen:
+    - rock_map: 3D numpy.uint8 array (H,W,3), RGB-Kanäle für Sedimentary/Igneous/Metamorphic mit R+G+B=255
+    - hardness_map: 2D numpy.float32 array, Gesteinshärte-Werte [0-100] für Erosions-Simulation
+    - GeologyData: Container mit rock_map/hardness_map + Validation-State + Mass-Conservation-Info
     """
 
 def weather_tab():
@@ -2296,6 +2335,22 @@ def biome_tab():
     - Input: heightmap, temperature_field, precipitation_field, settlements, water
     - Core: biome_generator für Ecosystem-Classification
     - Output: final_world_map mit allen Layern integriert
+    """
+
+def settlement_tab():
+    """
+    Path: gui/tabs/settlement_tab.py
+
+    Funktionsweise: Settlement-Platzierung mit Terrain-Integration
+    - Input: Heightmap, optional Rock-Map für Suitability
+    - Intelligent Settlement-Placement (Steigung, Wasser-Nähe)
+    - 3D-Markers für Villages/Landmarks auf Terrain
+    - Road-Network Visualization
+
+    Kommunikationskanäle:
+    - Input: heightmap, rock_map von data_manager
+    - Core: settlement_generator für Placement-Algorithm
+    - Output: settlement_positions, road_network → data_manager
     """
 
 def overview_tab():

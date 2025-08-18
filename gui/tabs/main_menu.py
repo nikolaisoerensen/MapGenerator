@@ -29,9 +29,7 @@ def get_error_decorators():
         def noop_decorator(*args, **kwargs):
             def decorator(func):
                 return func
-
             return decorator
-
         return noop_decorator, noop_decorator
 
 # Decorators global laden
