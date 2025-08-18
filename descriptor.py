@@ -23,37 +23,44 @@ def main():
 def terrain_generator():
     """
     Path: core/terrain_generator.py
+    date_updated: 18.08.2025
 
-    Funktionsweise: Simplex-Noise basierte Terrain-Generierung mit BaseGenerator-Integration und Validity-System
-    - BaseTerrainGenerator erbt von BaseGenerator für einheitliche Generator-Architektur
-    - Multi-Scale Noise-Layering für realistische Landschaften
+    Funktionsweise: Simplex-Noise basierte Terrain-Generierung mit DataLODManager-Integration und 3-stufigem Fallback-System
+    - BaseTerrainGenerator koordiniert alle Terrain-Generierungsschritte mit numerischem LOD-System
+    - Multi-Scale Noise-Layering für realistische Landschaften über SimplexNoiseGenerator
     - Progressive Heightmap-Generierung durch Interpolation und Detail-Noise
     - TerrainData-Container für strukturierte Datenorganisation mit Validity-System und Cache-Invalidation
     - Höhen-Redistribution für natürliche Höhenverteilung
     - Deformation mittels ridge warping
-    - LOD-System: LOD64 (64x64, 1 Sonnenwinkel) → LOD128 (128x128, 3 Sonnenwinkel) → LOD256 (256x256, 5 Sonnenwinkel) → FINAL (512x512, 7 Sonnenwinkel)
-    - Shadowmap konstant 64x64 für alle LODs, Sonnenwinkel-Anzahl steigt progressiv
-    - GPU-Shader-Integration über ShaderManager für Noise-Generation und Shadow-Berechnung
-    - Threading-Support für Hintergrund-Berechnung ohne GUI-Blocking mit CPU-Yields
+    - LOD-System: Numerisch 1,2,3...n mit map_size_min=32 und Verdopplung (32→64→128→256→512→1024→2048)
+    - Shadowmap konstant 64x64 für alle LODs, Sonnenwinkel-Anzahl steigt progressiv (1→3→5→7)
+    - ShaderManager-Integration mit 3-stufigem Fallback: GPU-Shader → CPU-Fallback → Simple-Fallback
+    - GenerationOrchestrator-Integration für Background-Threading ohne GUI-Blocking
 
     Parameter Input:
     - map_size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power, map_seed
 
     Output:
     - TerrainData-Objekt mit heightmap, slopemap, shadowmap, validity_state und LOD-Metadaten
-    - Legacy-Kompatibilität: heightmap array, slopemap 2D array (dz/dx and dz/dy), shadowmap array
+    - DataLODManager-Storage für nachfolgende Generatoren (geology, weather, water, biome, settlement)
 
-    LOD-Definitionen:
-    - LOD64: heightmap64x64, slopemap64x64, shadowmap64x64 (1 Sonnenwinkel - Mittag)
-    - LOD128: heightmap128x128, slopemap128x128, shadowmap64x64 (3 Sonnenwinkel - Vormittag/Mittag/Nachmittag)
-    - LOD256: heightmap256x256, slopemap256x256, shadowmap64x64 (5 Sonnenwinkel + Morgen/Abend)
-    - FINAL: heightmapFullSize, slopemapFullSize, shadowmap64x64 (7 Sonnenwinkel + Dämmerung)
+    LOD-System (Numerisch):
+    - lod_level 1: 32x32 (1 Sonnenwinkel - Mittag)
+    - lod_level 2: 64x64 (3 Sonnenwinkel - Vormittag/Mittag/Nachmittag)
+    - lod_level 3: 128x128 (5 Sonnenwinkel + Morgen/Abend)
+    - lod_level 4: 256x256 (7 Sonnenwinkel + Dämmerung)
+    - lod_level 5+: bis map_size erreicht, 7 Sonnenwinkel konstant
 
     Validity-System:
     - Parameter-Change-Detection: Erkennt signifikante Parameter-Änderungen für Cache-Invalidation
     - LOD-Consistency-Checks: Stellt sicher dass alle LOD-Level mit gleichen Parametern berechnet sind
     - Dependency-Invalidation: Invalidiert nachgelagerte Generatoren bei kritischen Parameter-Änderungen
     - State-Tracking: validity_flags in TerrainData für jeden LOD-Level und Output-Type
+
+    Fallback-System (3-stufig):
+    - GPU-Shader (Optimal): ShaderManager für parallele Multi-Octave-Noise-Berechnung
+    - CPU-Fallback (Gut): Optimierte NumPy-Implementierung mit Multiprocessing
+    - Simple-Fallback (Minimal): Direkte Implementierung im Generator, wenige Zeilen
 
     Klassen:
     TerrainData
@@ -63,27 +70,80 @@ def terrain_generator():
         Validity-Methods: is_valid(), invalidate(), validate_against_parameters(), get_validity_summary()
 
     BaseTerrainGenerator
-        Funktionsweise: Hauptklasse für Simplex-Noise basierte Terrain-Generierung mit einheitlicher Generator-Architektur
-        Aufgabe: Koordiniert alle Terrain-Generierungsschritte, verwaltet Parameter, Threading und Validity-Tracking
-        Methoden: generate() [Main-Funktion], calculate_heightmap(), calculate_slopes(), calculate_shadows()
-        BaseGenerator-Integration: _load_default_parameters(), _get_dependencies(), _execute_generation(), _save_to_data_manager()
-        Threading: Hintergrund-Berechnung mit CPU-Yields und Generation-Interrupt-Support
-        GPU-Integration: Nutzt ShaderManager für performance-kritische Noise- und Shadow-Operationen
+        Funktionsweise: Hauptklasse für Terrain-Generierung mit numerischem LOD-System und Manager-Integration
+        Aufgabe: Koordiniert alle Terrain-Generierungsschritte, verwaltet Parameter und LOD-Progression
+        External-Interface: calculate_heightmap(parameters, lod_level) - wird von GenerationOrchestrator aufgerufen
+        Internal-Methods: _coordinate_generation(), _validate_parameters(), _create_terrain_data()
+        Manager-Integration: DataLODManager für Storage, ShaderManager für Performance-Optimierung
+        Threading: Läuft in GenerationOrchestrator-Background-Threads mit LOD-Progression
+        Error-Handling: Graceful Degradation bei Shader/Generator-Fehlern, vollständige Fallback-Kette
 
     SimplexNoiseGenerator
-        Funktionsweise: Erzeugt OpenSimplex-Noise mit GPU-Shader-Beschleunigung und CPU-Fallback
-        Aufgabe: Basis-Noise-Funktionen für alle anderen Module mit LOD-optimierter Batch-Verarbeitung
+        Funktionsweise: Erzeugt OpenSimplex-Noise mit 3-stufiger Fallback-Strategie
+        Aufgabe: Basis-Noise-Funktionen für Heightmap-Generation mit Performance-Optimierung
         Methoden: noise_2d(), multi_octave_noise(), ridge_noise()
-        LOD-Optimiert: generate_noise_grid() für Batch-Verarbeitung, interpolate_existing_grid() für LOD-Upgrades, add_detail_noise() für Progressive Verfeinerung
-        GPU-Integration: Nutzt ShaderManager.process_noise_generation() für parallele Multi-Octave-Berechnung
+        ShaderManager-Integration:
+          - GPU-Optimal: request_noise_generation() für parallele Multi-Octave-Berechnung
+          - CPU-Fallback: Optimierte NumPy-Implementierung mit vectorization
+          - Simple-Fallback: Direkte Random-Noise-Generation (5-10 Zeilen)
+        LOD-Optimiert: generate_noise_grid() für Batch-Verarbeitung, interpolate_existing_grid() für LOD-Upgrades
+        Graceful-Degradation: Automatischer Fallback bei GPU-Unavailability, Error-Logging ohne Exception-Propagation
 
     ShadowCalculator
-        Funktionsweise: Berechnet Verschattung mit Raycasts für LOD-spezifische Sonnenwinkel mit GPU-Shader-Support
+        Funktionsweise: Berechnet Verschattung mit Raycasts für LOD-spezifische Sonnenwinkel
         Aufgabe: Erstellt shadowmap (konstant 64x64) für Weather-System und visuelle Darstellung
-        Methoden: calculate_shadows_multi_angle(), calculate_shadows_with_lod(), calculate_shadows_progressive(), raycast_shadow(), combine_shadow_angles()
+        Methoden: calculate_shadows(heightmap, lod_level, parameters), raycast_shadow(), combine_shadow_angles()
         LOD-System: get_sun_angles_for_lod() - 1,3,5,7 Sonnenwinkel je nach LOD-Level
-        GPU-Integration: Nutzt ShaderManager für GPU-beschleunigte Raycast-Shadow-Berechnung mit CPU-Fallback
+        ShaderManager-Integration:
+          - GPU-Optimal: Parallele Raycast-Berechnung für alle Sonnenwinkel
+          - CPU-Fallback: Optimierte CPU-Raycast-Implementierung
+          - Simple-Fallback: Einfache Height-Difference-Shadow-Approximation
         Progressive-Enhancement: Berechnet nur neue Sonnenwinkel bei LOD-Upgrades, kombiniert mit bestehenden Shadows
+        Graceful-Degradation: Shadow-Qualität degradiert schrittweise, niemals kompletter Ausfall
+
+    SlopeCalculator
+        Funktionsweise: Berechnet Steigungsgradienten (dz/dx, dz/dy) aus Heightmap
+        Aufgabe: Erstellt slopemap für Geology-Generator und visuelle Darstellung
+        Methoden: calculate_slopes(heightmap, parameters), gradient_magnitude(), validate_slopes()
+        ShaderManager-Integration:
+          - GPU-Optimal: Parallele Gradient-Berechnung mit GPU-Compute-Shader
+          - CPU-Fallback: NumPy gradient() mit optimierten Parametern
+          - Simple-Fallback: Einfache Finite-Difference-Approximation
+        Output-Format: 3D-Array (H,W,2) mit dz/dx und dz/dy Komponenten
+        Validation: Gradient-Range-Checks und Consistency mit heightmap-Shape
+        Graceful-Degradation: Slope-Precision degradiert, aber Shape/Format bleibt konsistent
+
+    Integration-Pattern:
+    GenerationOrchestrator → BaseTerrainGenerator.calculate_heightmap(parameters, lod_level)
+                          → SimplexNoiseGenerator.generate_noise() → ShaderManager-Request
+                          → SlopeCalculator.calculate_slopes() → ShaderManager-Request
+                          → ShadowCalculator.calculate_shadows() → ShaderManager-Request
+                          → TerrainData-Assembly → DataLODManager.store_result()
+
+    Graceful-Degradation-Strategy:
+    1. ShaderManager-Unavailability: Automatic CPU-Fallback ohne User-Intervention
+    2. CPU-Processing-Errors: Simple-Fallback mit reduzierter Qualität aber garantierter Completion
+    3. Memory-Constraints: LOD-Size-Reduction und progressive Quality-Degradation
+    4. Parameter-Invalidity: Default-Value-Substitution mit Warning-Logging
+    5. Critical-Failures: Minimal-Result-Generation (flat heightmap) für System-Continuity
+
+    Error-Recovery-Mechanisms:
+    - Exception-Safe-Operations: Alle kritischen Methoden mit try/except und Fallback-Returns
+    - Resource-Cleanup: Garantierte Memory/GPU-Resource-Freigabe auch bei Exceptions
+    - State-Consistency: Partial-Results werden validiert und repariert vor DataLODManager-Storage
+    - User-Notification: Error-Details an DataLODManager für UI-Status-Display, aber keine Generation-Stopps
+
+    Performance-Characteristics:
+    - GPU-Accelerated: 10-50x speedup für Multi-Octave-Noise bei großen LODs
+    - CPU-Optimized: Vectorized NumPy-Operations, Multiprocessing für Parallelisierung
+    - Memory-Efficient: LOD-based progressive allocation, automatic cleanup bei LOD-Completion
+    - Cache-Friendly: Parameter-Hash-basierte Result-Caching, LOD-Interpolation für upgrades
+
+    Output-Datenstrukturen:
+    - heightmap: 2D numpy.float32 array, Elevation in Metern
+    - slopemap: 3D numpy.float32 array (H,W,2), dz/dx und dz/dy Gradienten
+    - shadowmap: 3D numpy.float32 array (H,W,angles), Shadow-Values [0-1] für 1-7 Sonnenwinkel
+    - TerrainData: Validity-State, Parameter-Hash, LOD-Metadata, Performance-Stats
     """
 
 def geology_generator():
