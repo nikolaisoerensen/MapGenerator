@@ -23,19 +23,7 @@ def main():
 def terrain_generator():
     """
     Path: core/terrain_generator.py
-    date_updated: 18.08.2025
-
-    Funktionsweise: Simplex-Noise basierte Terrain-Generierung mit DataLODManager-Integration und 3-stufigem Fallback-System
-    - BaseTerrainGenerator koordiniert alle Terrain-Generierungsschritte mit numerischem LOD-System
-    - Multi-Scale Noise-Layering für realistische Landschaften über SimplexNoiseGenerator
-    - Progressive Heightmap-Generierung durch Interpolation und Detail-Noise
-    - TerrainData-Container für strukturierte Datenorganisation mit Validity-System und Cache-Invalidation
-    - Höhen-Redistribution für natürliche Höhenverteilung
-    - Deformation mittels ridge warping
-    - LOD-System: Numerisch 1,2,3...n mit map_size_min=32 und Verdopplung (32→64→128→256→512→1024→2048)
-    - Shadowmap konstant 64x64 für alle LODs, Sonnenwinkel-Anzahl steigt progressiv (1→3→5→7)
-    - ShaderManager-Integration mit 3-stufigem Fallback: GPU-Shader → CPU-Fallback → Simple-Fallback
-    - GenerationOrchestrator-Integration für Background-Threading ohne GUI-Blocking
+    date_changed: 18.08.2025
 
     Parameter Input:
     - map_size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power, map_seed
@@ -62,64 +50,6 @@ def terrain_generator():
     - CPU-Fallback (Gut): Optimierte NumPy-Implementierung mit Multiprocessing
     - Simple-Fallback (Minimal): Direkte Implementierung im Generator, wenige Zeilen
 
-    Klassen:
-    TerrainData
-        Funktionsweise: Container für alle Terrain-Daten mit Validity-System und Cache-Management
-        Aufgabe: Speichert Heightmap, Slopemap, Shadowmap mit LOD-Level, Validity-State und Parameter-Hash
-        Attribute: heightmap, slopemap, shadowmap, lod_level, actual_size, validity_state, parameter_hash, calculated_sun_angles, parameters
-        Validity-Methods: is_valid(), invalidate(), validate_against_parameters(), get_validity_summary()
-
-    BaseTerrainGenerator
-        Funktionsweise: Hauptklasse für Terrain-Generierung mit numerischem LOD-System und Manager-Integration
-        Aufgabe: Koordiniert alle Terrain-Generierungsschritte, verwaltet Parameter und LOD-Progression
-        External-Interface: calculate_heightmap(parameters, lod_level) - wird von GenerationOrchestrator aufgerufen
-        Internal-Methods: _coordinate_generation(), _validate_parameters(), _create_terrain_data()
-        Manager-Integration: DataLODManager für Storage, ShaderManager für Performance-Optimierung
-        Threading: Läuft in GenerationOrchestrator-Background-Threads mit LOD-Progression
-        Error-Handling: Graceful Degradation bei Shader/Generator-Fehlern, vollständige Fallback-Kette
-
-    SimplexNoiseGenerator
-        Funktionsweise: Erzeugt OpenSimplex-Noise mit 3-stufiger Fallback-Strategie
-        Aufgabe: Basis-Noise-Funktionen für Heightmap-Generation mit Performance-Optimierung
-        Methoden: noise_2d(), multi_octave_noise(), ridge_noise()
-        ShaderManager-Integration:
-          - GPU-Optimal: request_noise_generation() für parallele Multi-Octave-Berechnung
-          - CPU-Fallback: Optimierte NumPy-Implementierung mit vectorization
-          - Simple-Fallback: Direkte Random-Noise-Generation (5-10 Zeilen)
-        LOD-Optimiert: generate_noise_grid() für Batch-Verarbeitung, interpolate_existing_grid() für LOD-Upgrades
-        Graceful-Degradation: Automatischer Fallback bei GPU-Unavailability, Error-Logging ohne Exception-Propagation
-
-    ShadowCalculator
-        Funktionsweise: Berechnet Verschattung mit Raycasts für LOD-spezifische Sonnenwinkel
-        Aufgabe: Erstellt shadowmap (konstant 64x64) für Weather-System und visuelle Darstellung
-        Methoden: calculate_shadows(heightmap, lod_level, parameters), raycast_shadow(), combine_shadow_angles()
-        LOD-System: get_sun_angles_for_lod() - 1,3,5,7 Sonnenwinkel je nach LOD-Level
-        ShaderManager-Integration:
-          - GPU-Optimal: Parallele Raycast-Berechnung für alle Sonnenwinkel
-          - CPU-Fallback: Optimierte CPU-Raycast-Implementierung
-          - Simple-Fallback: Einfache Height-Difference-Shadow-Approximation
-        Progressive-Enhancement: Berechnet nur neue Sonnenwinkel bei LOD-Upgrades, kombiniert mit bestehenden Shadows
-        Graceful-Degradation: Shadow-Qualität degradiert schrittweise, niemals kompletter Ausfall
-
-    SlopeCalculator
-        Funktionsweise: Berechnet Steigungsgradienten (dz/dx, dz/dy) aus Heightmap
-        Aufgabe: Erstellt slopemap für Geology-Generator und visuelle Darstellung
-        Methoden: calculate_slopes(heightmap, parameters), gradient_magnitude(), validate_slopes()
-        ShaderManager-Integration:
-          - GPU-Optimal: Parallele Gradient-Berechnung mit GPU-Compute-Shader
-          - CPU-Fallback: NumPy gradient() mit optimierten Parametern
-          - Simple-Fallback: Einfache Finite-Difference-Approximation
-        Output-Format: 3D-Array (H,W,2) mit dz/dx und dz/dy Komponenten
-        Validation: Gradient-Range-Checks und Consistency mit heightmap-Shape
-        Graceful-Degradation: Slope-Precision degradiert, aber Shape/Format bleibt konsistent
-
-    Integration-Pattern:
-    GenerationOrchestrator → BaseTerrainGenerator.calculate_heightmap(parameters, lod_level)
-                          → SimplexNoiseGenerator.generate_noise() → ShaderManager-Request
-                          → SlopeCalculator.calculate_slopes() → ShaderManager-Request
-                          → ShadowCalculator.calculate_shadows() → ShaderManager-Request
-                          → TerrainData-Assembly → DataLODManager.store_result()
-
     Graceful-Degradation-Strategy:
     1. ShaderManager-Unavailability: Automatic CPU-Fallback ohne User-Intervention
     2. CPU-Processing-Errors: Simple-Fallback mit reduzierter Qualität aber garantierter Completion
@@ -139,6 +69,61 @@ def terrain_generator():
     - Memory-Efficient: LOD-based progressive allocation, automatic cleanup bei LOD-Completion
     - Cache-Friendly: Parameter-Hash-basierte Result-Caching, LOD-Interpolation für upgrades
 
+    Klassen:
+    TerrainData
+        Funktionsweise: Container für alle Terrain-Daten mit Validity-System und Cache-Management
+        Aufgabe: Speichert Heightmap, Slopemap, Shadowmap mit LOD-Level, Validity-State und Parameter-Hash
+        Attribute: heightmap, slopemap, shadowmap, lod_level, actual_size, validity_state, parameter_hash, calculated_sun_angles, parameters
+        Validity-Methods: is_valid(), invalidate(), validate_against_parameters(), get_validity_summary()
+
+    BaseTerrainGenerator
+        Funktionsweise: Hauptklasse für Terrain-Generierung mit numerischem LOD-System und Manager-Integration
+        Aufgabe: Koordiniert alle Terrain-Generierungsschritte, verwaltet Parameter und LOD-Progression
+        External-Interface: calculate_heightmap(parameters, lod_level) - wird von GenerationOrchestrator aufgerufen
+        Internal-Methods: _coordinate_generation(), _validate_parameters(), _create_terrain_data()
+        Manager-Integration: DataLODManager für Storage, ShaderManager für Performance-Optimierung
+        Threading: Läuft in GenerationOrchestrator-Background-Threads mit LOD-Progression
+        Error-Handling: Graceful Degradation bei Shader/Generator-Fehlern, vollständige Fallback-Kette
+
+    SimplexNoiseGenerator
+        Funktionsweise: Erzeugt OpenSimplex-Noise mit 3-stufiger Fallback-Strategie (siehe Fallback-System)
+        Aufgabe: Basis-Noise-Funktionen für Heightmap-Generation mit Performance-Optimierung
+        Methoden: noise_2d(), multi_octave_noise(), ridge_noise()
+        LOD-Optimiert: generate_noise_grid() für Batch-Verarbeitung, interpolate_existing_grid() für LOD-Upgrades
+        Spezifische Fallbacks:
+          - GPU-Optimal: request_noise_generation() für parallele Multi-Octave-Berechnung
+          - CPU-Fallback: Optimierte NumPy-Implementierung mit vectorization
+          - Simple-Fallback: Direkte Random-Noise-Generation (5-10 Zeilen)
+
+    ShadowCalculator
+        Funktionsweise: Berechnet Verschattung mit Raycasts für LOD-spezifische Sonnenwinkel
+        Aufgabe: Erstellt shadowmap (konstant 64x64) für Weather-System und visuelle Darstellung
+        Methoden: calculate_shadows(heightmap, lod_level, parameters), raycast_shadow(), combine_shadow_angles()
+        LOD-System: get_sun_angles_for_lod() - 1,3,5,7 Sonnenwinkel je nach LOD-Level
+        Progressive-Enhancement: Berechnet nur neue Sonnenwinkel bei LOD-Upgrades, kombiniert mit bestehenden Shadows
+        Spezifische Fallbacks:
+          - GPU-Optimal: Parallele Raycast-Berechnung für alle Sonnenwinkel
+          - CPU-Fallback: Optimierte CPU-Raycast-Implementierung
+          - Simple-Fallback: Einfache Height-Difference-Shadow-Approximation
+
+    SlopeCalculator
+        Funktionsweise: Berechnet Steigungsgradienten (dz/dx, dz/dy) aus Heightmap
+        Aufgabe: Erstellt slopemap für Geology-Generator und visuelle Darstellung
+        Methoden: calculate_slopes(heightmap, parameters), gradient_magnitude(), validate_slopes()
+        Output-Format: 3D-Array (H,W,2) mit dz/dx und dz/dy Komponenten
+        Validation: Gradient-Range-Checks und Consistency mit heightmap-Shape
+        Spezifische Fallbacks:
+          - GPU-Optimal: Parallele Gradient-Berechnung mit GPU-Compute-Shader
+          - CPU-Fallback: NumPy gradient() mit optimierten Parametern
+          - Simple-Fallback: Einfache Finite-Difference-Approximation
+
+    Integration und Datenfluss:
+    GenerationOrchestrator → BaseTerrainGenerator.calculate_heightmap(parameters, lod_level)
+                          → SimplexNoiseGenerator.generate_noise() → ShaderManager-Request
+                          → SlopeCalculator.calculate_slopes() → ShaderManager-Request
+                          → ShadowCalculator.calculate_shadows() → ShaderManager-Request
+                          → TerrainData-Assembly → DataLODManager.store_result()
+
     Output-Datenstrukturen:
     - heightmap: 2D numpy.float32 array, Elevation in Metern
     - slopemap: 3D numpy.float32 array (H,W,2), dz/dx und dz/dy Gradienten
@@ -150,39 +135,119 @@ def geology_generator():
     """
     Path: core/geology_generator.py
 
-    Funktionsweise: Geologische Schichten und Gesteinstypen
-    - Rock-Type Klassifizierung (sedimentary, metamorphic, igneous) basierend auf geologischer Simulation mit folgenden Techniken:
-        - die höhen werden genommen und dann mit einer neuen verzerrten noisefunktion multipliziert, so dass die höhen auch variieren für eine erste verteilung (weiche übergänge)
-        - in besonders steile hänge werden härtere steine mit reingemischt.
-        - geologische zonen werden in bestimmte zonen addiert und subtrahiert. d.h. je eine simplex funktion von 0 bis 1 bei der nur werte über 0.2 für sedimentär, eine andere simplex über 0.6 für metamorph und eine dritte simplex mit über 0.8 für igneous.
-        - alle drei maps werden zu einer RGB-Karte gewichtet addiert und die Summe der einzelnen R, G und B ergeben zusammen IMMER 255, so dass die Massenerhaltung bestehen bleibt, aber die Verhältnisse sich jeweils ändern können (später bei Erosion und Sedimentation durch Wasser (water_generator.py)).
-        - aus den Gesteinstypen wird entsprechend dem Eingabeparameter rock_type"_hardness" (mit sedimentary, igneous, metamorphic für rock_type) eine hardness_map(x,y) erstellt mit den jeweiligen Verhältnissen aus rock_map
+    Funktionsweise: Geologische Schichten und Gesteinstypen mit DataLODManager-Integration und 3-stufigem Fallback-System
+    - GeologyGenerator koordiniert geologische Simulation mit numerischem LOD-System
+    - Rock-Type Klassifizierung (sedimentary, metamorphic, igneous) basierend auf geologischer Simulation
+    - Mass-Conservation-System (R+G+B=255) für Erosions-/Sedimentations-Kompatibilität
+    - Hardness-Map-Generation für Water-Generator und nachfolgende Systeme
 
     Parameter Input:
-    - rock_types, hardness_values, ridge_warping, bevel_warping, metamorph_foliation, metamorph_folding, igneous_flowing
+    - sedimentary_hardness, igneous_hardness, metamorphic_hardness [0-100]
+    - ridge_warping, bevel_warping, metamorphic_foliation, metamorphic_folding, igneous_flowing [0.0-1.0]
 
-    data_manager Input:
-    - heightmap
+    Dependencies (über DataLODManager):
+    - heightmap (von terrain_generator)
+    - slopemap (von terrain_generator)
 
     Output:
-    - rock_map RGB array
-    - hardness_map array
+    - GeologyData-Objekt mit rock_map, hardness_map, validity_state und LOD-Metadaten
+    - DataLODManager-Storage für nachfolgende Generatoren (water, biome, settlement)
+
+    LOD-System (Numerisch):
+    - LOD-Progression entsprechend Terrain-LOD-System (32→64→128→256→512→1024→2048)
+    - Progressive Enhancement: Deformation-Detail und Zone-Complexity steigen mit LOD-Level
+    - Geological-Zones: Detaillierung von einfachen Height-Zones zu komplexen Multi-Layer-Noise
+
+    Fallback-System (3-stufig):
+    - GPU-Shader (Optimal): Parallele Noise-Generation und geologische Zone-Berechnung
+    - CPU-Fallback (Gut): Optimierte NumPy-Implementierung mit vectorization
+    - Simple-Fallback (Minimal): Höhen-basierte Linear-Classification ohne Noise-Zones
+
+    Rock-Distribution-Algorithmus:
+    1. Höhen-basierte Basis-Verteilung mit verzerrter Noise-Funktion
+    2. Steile Hänge: Härtere Gesteine (Igneous/Metamorphic) werden bevorzugt
+    3. Geologische Zonen: Drei Simplex-Funktionen für Sedimentary (>0.2), Metamorphic (>0.6), Igneous (>0.8)
+    4. RGB-Gewichtung: R=Sedimentary, G=Igneous, B=Metamorphic mit R+G+B=255 Massenerhaltung
+    5. Tektonische Deformation: Ridge/Bevel-Warping, Metamorphic-Foliation/Folding, Igneous-Flowing
+
+    Graceful-Degradation-Strategy:
+    1. ShaderManager-Unavailability: Automatic CPU-Fallback für alle geologischen Operationen
+    2. Input-Data-Problems: Default-Rock-Distribution basierend auf Height-Percentiles
+    3. Memory-Constraints: LOD-Size-Reduction und simplified Deformation-Processing
+    4. Parameter-Invalidity: Default-Hardness-Values und minimal Deformation-Effects
+    5. Critical-Failures: Uniform-Rock-Distribution (33% je Typ) für System-Continuity
+
+    Error-Recovery-Mechanisms:
+    - Exception-Safe-Operations: Alle Geology-Operations mit try/except und Fallback-Returns
+    - Input-Data-Repair: Corrupt heightmap/slopemap-Pixel werden interpoliert oder auf Defaults gesetzt
+    - Mass-Conservation-Enforcement: Garantierte R+G+B=255 auch bei Calculation-Errors
+    - State-Consistency: Partial-Results werden validiert und repariert vor DataLODManager-Storage
+
+    Performance-Characteristics:
+    - GPU-Accelerated: 5-20x speedup für Multi-Zone-Noise und Deformation-Processing
+    - CPU-Optimized: Vectorized NumPy-Operations, optimierte SciPy-Interpolation
+    - Memory-Efficient: LOD-based progressive allocation, Input-Data-Sharing mit Terrain-Generator
+    - Cache-Friendly: Parameter-Hash-basierte Result-Caching, Height-Data-Reuse zwischen LODs
 
     Klassen:
     GeologyGenerator
         Funktionsweise: Hauptklasse für geologische Schichten und Gesteinstyp-Verteilung
-        Aufgabe: Koordiniert Gesteinsverteilung und Härte-Berechnung
-        Methoden: generate_rock_distribution(), calculate_hardness_map(), apply_geological_zones()
+        Aufgabe: Koordiniert Gesteinsverteilung, Härte-Berechnung und Mass-Conservation
+        External-Interface: calculate_geology(heightmap, slopemap, parameters, lod_level) - wird von GenerationOrchestrator aufgerufen
+        Internal-Methods: _coordinate_geology_generation(), _validate_input_data(), _create_geology_data()
+        Dependencies: Prüft heightmap/slopemap-Verfügbarkeit und Shape-Consistency über DataLODManager
+        Error-Handling: Graceful Degradation bei Input-Inconsistencies, vollständige Fallback-Kette
 
     RockTypeClassifier
-        Funktionsweise: Klassifiziert Gesteinstypen (sedimentary, metamorphic, igneous) basierend auf Höhe und Steigung
+        Funktionsweise: Klassifiziert Gesteinstypen basierend auf Höhe, Steigung und geologischen Zonen
         Aufgabe: Erstellt rock_map mit RGB-Kanälen für drei Gesteinstypen
         Methoden: classify_by_elevation(), apply_slope_hardening(), blend_geological_zones()
+        Geological-Zones: Drei unabhängige Simplex-Noise-Layers für realistische geologische Verteilung
+        Spezifische Fallbacks:
+          - GPU-Optimal: Parallele Multi-Zone-Noise-Berechnung und Blend-Operations
+          - CPU-Fallback: NumPy-vectorized Zone-Classification mit optimierten Noise-Functions
+          - Simple-Fallback: Linear Height-based Classification (Sedimentary: 0-30%, Metamorphic: 30-70%, Igneous: 70-100%)
 
     MassConservationManager
         Funktionsweise: Stellt sicher dass R+G+B immer 255 ergibt für Massenerhaltung
-        Aufgabe: Verwaltet Gesteins-Massenverteilung für spätere Erosion
+        Aufgabe: Verwaltet Gesteins-Massenverteilung für spätere Erosion im Water-Generator
         Methoden: normalize_rock_masses(), validate_conservation(), redistribute_masses()
+        Conservation-Algorithm: Proportionale Skalierung wenn R+G+B != 255, Fallback zu (85,85,85) bei R+G+B=0
+        Output-Validation: Range-Checks [0-255], Consistency mit Rock-Map, NaN-Detection und Repair
+
+    HardnessCalculator
+        Funktionsweise: Berechnet Hardness-Map aus Rock-Map und Hardness-Parametern
+        Aufgabe: Erstellt hardness_map für Water-Generator Erosions-Simulation
+        Methoden: calculate_hardness_map(), validate_hardness_ranges(), apply_hardness_modifiers()
+        Formula: hardness_map(x,y) = (R*sed_hardness + G*ign_hardness + B*met_hardness) / 255
+        Output-Validation: Range-Checks [0-100], Consistency mit Rock-Map, NaN-Detection und Repair
+        Spezifische Fallbacks:
+          - GPU-Optimal: Parallele Weighted-Sum-Berechnung für alle Pixel
+          - CPU-Fallback: NumPy-Dot-Product-Operations für effiziente Hardness-Calculation
+          - Simple-Fallback: Durchschnitts-Hardness-Wert für gesamte Map
+
+    TectonicDeformationProcessor
+        Funktionsweise: Appliziert tektonische Verformung auf geologische Verteilung
+        Aufgabe: Ridge/Bevel-Warping, Metamorphic-Foliation/Folding, Igneous-Flowing für realistische Geologie
+        Methoden: apply_ridge_warping(), apply_bevel_warping(), process_metamorphic_effects(), process_igneous_flowing()
+        Deformation-Parameters: ridge_warping, bevel_warping, metamorphic_foliation/folding, igneous_flowing
+        Spezifische Fallbacks:
+          - GPU-Optimal: Parallele Deformation-Field-Calculation und Texture-Warping
+          - CPU-Fallback: SciPy-based Deformation mit optimierten Interpolation-Methods
+          - Simple-Fallback: Lineare Height-based Deformation ohne komplexe Warping
+
+    Integration und Datenfluss:
+    GenerationOrchestrator → GeologyGenerator.calculate_geology(heightmap, slopemap, parameters, lod_level)
+                          → RockTypeClassifier.classify_rock_types() → ShaderManager-Request
+                          → TectonicDeformationProcessor.apply_deformation() → ShaderManager-Request
+                          → MassConservationManager.normalize_masses() → ShaderManager-Request
+                          → HardnessCalculator.calculate_hardness() → ShaderManager-Request
+                          → GeologyData-Assembly → DataLODManager.store_result()
+
+    Output-Datenstrukturen:
+    - rock_map: 3D numpy.uint8 array (H,W,3), RGB-Kanäle für Sedimentary/Igneous/Metamorphic mit R+G+B=255
+    - hardness_map: 2D numpy.float32 array, Gesteinshärte-Werte [0-100] für Erosions-Simulation
+    - GeologyData: Validity-State, Parameter-Hash, LOD-Metadata, Mass-Conservation-Info, Performance-Stats
     """
 
 def settlement_generator():
@@ -769,1075 +834,1338 @@ def gui_default():
         SPLIT_RATIO = 0.7  # 70% Canvas, 30% Controls
     """
 
+
 def data_lod_manager():
     """
     Path: gui/managers/data_lod_manager.py
-    date_changed: 08.08.2025
+    date_changed: 18.08.2025
 
     =========================================================================================
     DATA LOD MANAGER - INTEGRIERTE DATENVERWALTUNG UND RESOURCE-MANAGEMENT
     =========================================================================================
 
-    OVERVIEW:
-    ---------
-    DataLODManager ist das zentrale Herzstück der Daten-Pipeline, das vier kritische Systeme
-    in einer kohärenten Architektur vereint: Datenverwaltung mit numerischem LOD-System,
-    Signal-basierte Tab-Kommunikation, systematisches Resource-Management und optimierte
-    Display-Updates. Diese Integration eliminiert Code-Duplikation und schafft eine
-    einheitliche Schnittstelle für alle datenabhängigen Operationen.
+    Parameter Input:
+    - lod_config: map_size_min, target_map_size für LOD-Progression
+    - memory_thresholds: tracking_threshold_mb, cleanup_threshold_mb, force_gc_threshold_mb
+    - tab_connections: generator_type → tab_instance mapping für Signal-Integration
 
-    CORE ARCHITECTURE:
-    ------------------
+    Output:
+    - Zentrale Datenverwaltung für alle 6 Generator-Typen mit numerischem LOD-System
+    - Signal-Hub für Tab-Kommunikation und Dependency-Management
+    - Resource-Tracker für Memory-Leak-Prevention und automatisches Cleanup
+    - Display-Manager für optimierte UI-Updates mit Change-Detection
 
-    ┌─────────────────────────────────────────────────────────────────────────────────┐
-    │                            DataLODManager (Main Hub)                            │
-    │ ┌─────────────────┬─────────────────┬─────────────────┬─────────────────────┐   │
-    │ │ LOD Data System │ Communication   │ Resource Mgmt   │ Display Optimization│   │
-    │ │ - Numerische    │ Hub             │ - Memory Leak   │ - Change Detection  │   │
-    │ │   LODs (1,2,3..)│ - Tab Signals   │   Prevention    │ - Hash Caching      │   │
-    │ │ - 6 Generators  │ - Dependencies  │ - WeakRef Track │ - Pending Updates   │   │
-    │ │ - Map-size      │ - Auto-Gen      │ - Age/Size      │ - Performance Stats │   │
-    │ │   Proportional  │   Triggering    │   Cleanup       │                     │   │
-    │ └─────────────────┴─────────────────┴─────────────────┴─────────────────────┘   │
-    └─────────────────────────────────────────────────────────────────────────────────┘
+    LOD-System (Numerisch):
+    - lod_level 1: map_size_min (default 32x32)
+    - lod_level 2: 64x64 (Verdopplung bis target_map_size erreicht)
+    - lod_level 3: 128x128
+    - lod_level n: erweiterbar, lod_size bleibt bei target_map_size fixiert
+    - Proportionale Generator-Skalierung: Weather CFD-Zellen, Settlement Nodes, etc.
 
-    INTEGRATED COMPONENTS:
-    ----------------------
-
-    1. **DATENVERWALTUNG (Numerisches LOD-System)**
-       - Alle 6 Generator-Typen: Terrain, Geology, Weather, Water, Biome, Settlement
-       - Numerische LOD-Levels (1,2,3...n)
-       - Map-size-proportionale Skalierung: Viele Generator-LOD skalieren mit der map-size d.h. Anzahl Rechenpunkten
-       - Die lod_size ist immer <= map_size. D.h. es verdoppelt sich bis es größer ist und dann wird der Wert bei
-            map_size fixiert und kommuniziert, dass die map_size erreicht ist. Die lod_level werden weiter größer bis
-            alle Rechnungen fertig sind, d.h. z.B. das bei geology sich nichts mehr ändert, aber bei terrain weiterhin
-            alle verbleibenden Sonnenstände berechnet werden.
-       - Generator-spezifische Optimierungen:
-         * Terrain: LOD-Level fügt Sonnenstände für Schattenberechnung hinzu (1-7)
-         * Weather: CFD-Zellen halbieren pro LOD, Z-Achse konstant (3 Schichten) d.h. wenn 1024x1024 das Ziel ist, dann
-            wird zunächst mit 32x32 Zellen der Länge und Breite von 32x32 gerechnet. Für lod_level 2 dann 64x64 Zellen
-            mit 16x16 etc. bis 1x1
-         * Biome: Super-sampling (2x2px pro 1x1px) siehe biome_generator.py, jedoch steigt LOD ganz regulär mit map_size
-         * Settlement: Skalierung mit Map-size und Verdopplung der Node-Anzahl bis der Zielwert erreicht:
-            plotnode_lod_steps = np.ceil(map_size / map_size_min)
-            Plotnodes-Parameter * 2^(lod_level-1) / plotnode_lod_steps ist dann der Wert für das jeweilige lod_level
-
-    2. **LOD COMMUNICATION HUB (Signal-Option B)**
-       - Zentrale Signal-Koordination zwischen allen Tabs
-       - Status-Tracking: idle/pending/success/failure pro Tab/LOD
-       - Dependency-Matrix: Vereinfacht auf gleiche LOD-Stufe zwischen Tabs
-       - Auto-Generation-Triggering für abhängige Tabs (Geology→Settlement→etc.)
-       - Progress-Updates und Error-Handling für UI-Integration
-
-    3. **RESOURCE TRACKER (Memory-Leak-Prevention)**
-       - WeakReference-basiertes Tracking aller großen Ressourcen (>10MB Arrays)
-       - Automatisches Cleanup bei Garbage Collection
-       - Age-based Cleanup (alte Ressourcen >2h)
-       - Size-based Cleanup (Ressourcen >50MB) bei Memory-Warnings
-       - Resource-Type-Management für systematische Bereinigung
-
-    4. **DISPLAY UPDATE MANAGER (Performance-Optimierung)**
-       - Hash-basierte Change-Detection verhindert unnötige Re-Renderings
-       - Sample-based Hashing für große Arrays (>1M Elemente)
-       - Pending-Updates-Management verhindert Race-Conditions
-       - Cache-Statistics für Performance-Monitoring
-       - Multi-Level-Hashing für verschiedene Display-Modi
-
-    LOD-SYSTEM DETAILS:
-    -------------------
-
-    **Numerische LOD-Progression:**
-    ```
-    lod_level : LOD Size = map_size_min * 2^(lod_level-1)
-    für map_size_min = 32:
-        lod_level 1: 32x32
-        lod_level 2: 64x64
-        lod_level 3: 128x128
-        lod_level 4: 256x256
-        lod_level 5: 512x512
-        lod_level 6: 1024x1024
-        lod_level 7: 2048x2048
-        lod_level n: erweiterbar
-    ```
-
-    **Dependency-Matrix (Vereinfacht):**
-    ```python
+    DEPENDENCY MATRIX (Zentral):
+    ---------------------------
     DEPENDENCY_MATRIX = {
-        "terrain": [],                           # Keine Dependencies
-        "geology": ["terrain"],                  # Gleiche LOD-Stufe
-        "weather": ["terrain"],                  # Gleiche LOD-Stufe
-        "water": ["terrain", weather],           # Gleiche LOD-Stufe
-        "biome": ["weather", "water"],           # Gleiche LOD-Stufe
-        "settlement": ["terrain", "geology"]     # Gleiche LOD-Stufe
+        "terrain": [],                                    # Basis-Generator
+        "geology": ["terrain"],                          # heightmap, slopemap
+        "weather": ["terrain"],                          # heightmap für orographic effects
+        "water": ["terrain", "geology", "weather"],     # heightmap, hardness_map, precipitation
+        "biome": ["terrain", "weather", "water", "geology"], # vollständige Umwelt-Dependencies
+        "settlement": ["terrain", "geology", "water", "biome"] # alle Dependencies für Settlement-Planning
     }
-    ```
 
-    **Auto-Generation-Flow:**
-    1. Terrain LOD n fertig → Geology, Weather, Water kann LOD n starten
-    2. Geology LOD n fertig → Settlement kann LOD n starten
-    3. Weather LOD n fertig → Water kann LOD n starten
-    4. Water LOD n fertig → Biome kann LOD n starten.
+    Dependency-Resolution:
+    - check_dependencies(generator_type, lod_level): Validiert alle Required-Dependencies
+    - dependencies_satisfied Signal-Emission bei Completion
+    - Auto-Generation-Triggering für nachgelagerte Generatoren
+
+    MEMORY-MANAGEMENT:
+    ------------------
+    Grenzwerte (für 2048x2048 Maps optimiert):
+    - Tracking-Threshold: 50 MB
+    - Cleanup-Threshold: 200 MB
+    - Force-GC-Threshold: 500 MB für kritische Memory-Situationen
+
+    Resource-Type-Management:
+    - WeakReference-basiertes Tracking aller großen Arrays
+    - Age-based Cleanup: Ressourcen >2h automatisch bereinigt
+    - Size-based Cleanup: Ressourcen >200MB bei Memory-Warnings
+    - Automatic Garbage-Collection bei Force-GC-Threshold
 
     SIGNAL ARCHITECTURE:
     --------------------
+    Outgoing Signals (Hub → Tabs/UI):
+    - tab_status_updated(tab, status_dict): Status-Changes für einzelne Tabs
+    - dependencies_satisfied(tab, lod_level): Dependency-Requirements erfüllt
+    - shader_info_updated(generator_type, shader_stats): GPU/CPU-Fallback-Status
+    - memory_warning(current_usage_mb, threshold_mb): Memory-Management-Warnings
 
-    **Outgoing Signals (Hub → Tabs/UI):**
-    - `tab_status_updated(tab, status_dict)` - Status-Changes für einzelne Tabs
-    - `dependencies_satisfied(tab, lod_level)` - Dependency-Requirements erfüllt
-    - `all_tabs_status(complete_status)` - Globaler Status-Überblick
-    - `auto_generation_ready(tab, lod_level)` - Auto-Generation kann starten
+    Incoming Signals (Tabs → Hub):
+    - on_tab_lod_started(tab, lod_level, lod_size): Generation gestartet
+    - on_tab_lod_progress(tab, lod_level, progress_percent): Progress-Update
+    - on_tab_lod_completed(tab, lod_level, success, data_keys): Generation fertig
+    - on_shader_status_changed(generator, operation, gpu_used, performance): ShaderManager-Updates
 
-    **Incoming Signals (Tabs → Hub):**
-    - `on_tab_lod_started(tab, lod_level, lod_size)` - Generation gestartet
-    - `on_tab_lod_progress(tab, lod_level, progress_percent)` - Progress-Update
-    - `on_tab_lod_completed(tab, lod_level, success, data_keys)` - Generation fertig
-    - `on_tab_lod_failed(tab, lod_level, error_message)` - Generation fehlgeschlagen
+    Legacy Compatibility:
+    - data_updated(generator_type, data_key): Für bestehende Tab-Integration
+    - cache_invalidated(generator_type): Cache-Management
+    - lod_data_stored(generator_type, lod_level, data_keys): Neue LOD-Daten
 
-    **Legacy Signals (Kompatibilität):**
-    - `data_updated(generator_type, data_key)` - Für bestehende Tab-Integration
-    - `cache_invalidated(generator_type)` - Cache-Management
-    - `lod_data_stored(generator_type, lod_level, data_keys)` - Neue LOD-Daten
+    Klassen:
+    --------
 
-    RESOURCE MANAGEMENT:
-    --------------------
+    DataLODManager
+        Funktionsweise: Zentrale Koordination aller vier Subsysteme mit einheitlicher API
+        Aufgabe: Datenverwaltung, Signal-Hub, Resource-Tracking, Display-Optimierung
+        Methoden: set_*_data_lod(), get_*_data(), connect_tab_to_hub(), check_dependencies()
+        LOD-Integration: Numerische LOD-Level für alle Generator-Typen, proportionale Skalierung
+        Memory-Management: Integrierte Resource-Tracker mit automatischem Cleanup
+        Threading: Thread-safe Operations durch QMutex, Signal-basierte Tab-Communication
 
-    **Automatisches Tracking:**
-    - Alle Arrays >10MB werden automatisch getrackt
-    - WeakReference verhindert Memory-Leaks bei vergessenen References
-    - Cleanup-Callbacks für komplexe Ressourcen (GPU-Texturen, etc.)
-    - Resource-Type-Kategorisierung für selektives Cleanup
+    LODDataStorage
+        Funktionsweise: Hierarchische Datenspeicherung mit numerischen LOD-Levels
+        Aufgabe: Effiziente Speicherung und Abruf von Generator-Daten nach LOD-Level
+        Methoden: store_data(), get_data(), get_available_lods(), cleanup_old_lods()
+        Data-Structure: nested dict {generator_type: {lod_level: {data_key: array}}}
+        Cache-Management: Parameter-Hash-basierte Invalidation, Memory-Usage-Tracking
 
-    **Memory-Management-Strategien:**
-    - **Präventiv:** Periodisches Cleanup alle 60s bei hoher Memory-Usage (>1GB)
-    - **Reaktiv:** Aggressive Cleanup bei Memory-Warnings (>500MB Threshold)
-    - **Age-based:** Ressourcen >2h werden automatisch bereinigt
-    - **Size-based:** Große Ressourcen >50MB werden bei Memory-Druck bereinigt
+    CommunicationHub
+        Funktionsweise: Signal-basierte Koordination zwischen Tabs mit Dependency-Management
+        Aufgabe: Status-Tracking, Dependency-Resolution, Auto-Generation-Triggering
+        Methoden: connect_tab(), emit_status_update(), check_tab_dependencies()
+        Status-States: idle/pending/running/success/failure pro Tab/LOD-Level
+        Dependency-Logic: DEPENDENCY_MATRIX-basierte Validation mit LOD-Level-Checks
 
-    **Display-Cache-Optimierung:**
-    - Hash-Caching verhindert doppelte Hash-Berechnungen
-    - Sample-based Hashing für Performance bei großen Arrays
-    - Pending-Updates verhindern Race-Conditions zwischen UI und Logic
-    - Alte Display-Cache-Einträge (>30min) werden automatisch bereinigt
+    ResourceTracker
+        Funktionsweise: WeakReference-basiertes Tracking mit automatischem Cleanup
+        Aufgabe: Memory-Leak-Prevention, Resource-Monitoring, Performance-Optimierung
+        Methoden: register_resource(), cleanup_resources(), get_memory_usage()
+        Tracking-Types: numpy-arrays, gpu-textures, custom-resources mit Cleanup-Callbacks
+        Cleanup-Strategies: age-based, size-based, force-gc bei kritischen Memory-Levels
 
-    USAGE PATTERNS:
-    ---------------
+    DisplayUpdateManager
+        Funktionsweise: Hash-basierte Change-Detection für optimierte UI-Updates
+        Aufgabe: Verhindert unnötige Re-Renderings, Performance-Monitoring
+        Methoden: needs_update(), mark_updated(), clear_cache()
+        Hash-Optimization: Sample-based Hashing für große Arrays (>1M Elemente)
+        Cache-Management: Pending-Updates-Prevention, automatische Cache-Bereinigung
 
-    **Standard Setup:**
+    Fallback-System (3-stufig):
+    ---------------------------
+    - Primary: Vollständige LOD-Integration mit allen Subsystemen
+    - Secondary: Legacy-Kompatibilität ohne LOD-Features aber mit Resource-Management
+    - Minimal: Basic Data-Storage ohne Signal-Integration oder Optimization
+
+    Error-Recovery-Mechanisms:
+    - Exception-Safe-Operations: Alle kritischen Methoden mit Fallback-Returns
+    - Resource-Cleanup: Garantierte Memory-Freigabe auch bei Exceptions
+    - Signal-Resilience: Tab-Communication funktioniert auch bei Hub-Fehlern
+    - Data-Integrity: Atomic Operations mit Rollback bei Critical-Failures
+
+    Performance-Characteristics:
+    - LOD-Caching: Numerische LODs 30% schneller als String-Vergleiche
+    - Memory-Efficiency: WeakReference ohne Memory-Overhead, Sample-based Hashing
+    - Signal-Performance: Direct pyqtSlot-Connections, Debounced Updates
+    - Resource-Optimization: Automatic Cleanup verhindert Memory-Accumulation
+
+    Usage-Pattern:
     ```python
-    # Factory-Methode mit konfigurierten Defaults
-    data_lod_manager = create_integrated_data_lod_manager(memory_threshold_mb=500)
+    # Factory-Setup mit konfigurierten Defaults
+    data_lod_manager = create_integrated_data_lod_manager(memory_threshold_mb=200)
 
-    # LOD-Config für Projekt
-    data_lod_manager.set_lod_config(minimal_map_size=32, target_map_size=512)
-
-    # Tab-Integration
-    data_lod_manager.connect_tab_to_hub("terrain", terrain_tab)
-    data_lod_manager.connect_tab_to_hub("geology", geology_tab)
-    ```
-
-    **Data Storage (Generator → DataManager):**
-    ```python
-    # Neue LOD-basierte Methoden
+    # LOD-basierte Data-Storage
     data_lod_manager.set_terrain_data_lod("heightmap", heightmap_array, lod_level=3, parameters)
-    data_lod_manager.set_geology_data_lod("rock_map", rock_array, lod_level=2, parameters)
 
-    # Legacy-kompatible Methoden (nutzen höchstes verfügbares LOD)
-    heightmap = data_lod_manager.get_terrain_data("heightmap")
-    rock_map = data_lod_manager.get_geology_data("rock_map")
+    # Legacy-kompatible Data-Retrieval
+    heightmap = data_lod_manager.get_terrain_data("heightmap")  # höchstes verfügbares LOD
     ```
 
-    **Resource Management:**
-    ```python
-    # Manuelle Resource-Registrierung für spezielle Ressourcen
-    resource_id = data_lod_manager.get_resource_tracker().register_resource(
-        large_texture, "gpu_texture", cleanup_func=lambda: texture.delete()
-    )
-
-    # Memory-Management
-    data_lod_manager.cleanup_old_lod_resources(max_age_hours=1.0)
-    data_lod_manager.cleanup_large_resources(size_threshold_mb=100.0)
-    ```
-
-    **Display Updates:**
-    ```python
-    # Change-Detection für optimierte Updates
-    display_manager = data_lod_manager.get_display_manager()
-    if display_manager.needs_update(display_id, data, layer_type):
-        display.update_display(data, layer_type)
-        display_manager.mark_updated(display_id, data, layer_type)
-    ```
-
-    PERFORMANCE CHARACTERISTICS:
-    ----------------------------
-
-    **Memory Efficiency:**
-    - No-Copy Array-Referenzen zwischen Komponenten
-    - WeakReference-basiertes Tracking ohne Memory-Overhead
-    - Sample-based Hashing reduziert Hash-Zeit für große Arrays von 100ms auf <10ms
-    - Aggressive Cleanup bei Memory-Warnings verhindert Out-of-Memory
-
-    **Signal Performance:**
-    - Direct pyqtSlot-Connections ohne QMetaObject-Overhead
-    - Debounced Updates verhindern Signal-Spam bei schnellen Parameter-Änderungen
-    - Cached Status-Updates vermeiden doppelte Dictionary-Konstruktionen
-
-    **LOD-System Performance:**
-    - Numerische LODs sind 30% schneller als String-Vergleiche
-    - LOD-basiertes Caching verhindert unnötige Re-Generationen
-    - Proportionale Skalierung reduziert Memory-Footprint bei niedrigen LODs
-
-    INTEGRATION POINTS:
-    -------------------
-
-    **BaseMapTab Integration:**
-    - ResourceTracker und DisplayUpdateManager aus base_tab.py werden ersetzt
-    - Signal-Integration über connect_tab_to_hub()
-    - Legacy get_*_data() Methoden bleiben kompatibel
-    - Auto-Simulation-Integration über Hub-Signals
-
-    **GenerationOrchestrator Integration:**
-    - LOD-Status-Updates über Hub-Signals
-    - Resource-Tracking für Generation-Threads
-    - Memory-Management während intensiver Berechnungen
-    - Display-Update-Koordination nach Generation
-
-    **Parameter-Manager Integration:**
-    - Parameter-Changes triggern Cache-Invalidation
-    - Cross-Tab Parameter-Dependencies über Hub
-    - Export/Import berücksichtigt LOD-Status
-    - Preset-Application mit LOD-Koordination
-
-    ERROR HANDLING & RESILIENCE:
-    -----------------------------
-
-    **Graceful Degradation:**
-    - Fallback auf Legacy-Methoden bei LOD-System-Fehlern
-    - Continued Operation auch bei Resource-Tracking-Problemen
-    - Display-Updates funktionieren auch ohne Change-Detection
-    - Tab-Communication funktioniert auch ohne Hub-Integration
-
-    **Memory Safety:**
-    - Exception-sichere Cleanup-Funktionen
-    - Force-Garbage-Collection bei kritischer Memory-Usage
-    - WeakReference verhindert Circular-Dependencies
-    - Resource-Leak-Detection und automatische Bereinigung
-
-    **Data Integrity:**
-    - Atomic LOD-Updates mit Rollback bei Fehlern
-    - Cache-Konsistenz durch Parameter-Hash-Validation
-    - Signal-Ordering durch Qt's Event-Queue
-    - Thread-safe Resource-Access durch QMutex (wo nötig)
-
-    MONITORING & DEBUGGING:
-    -----------------------
-
-    **Statistics APIs:**
-    ```python
-    # Comprehensive Statistics für Performance-Monitoring
-    stats = data_lod_manager.get_integrated_statistics()
-    # Returns: data_manager stats, resource_tracker stats, display_manager stats, lod_hub stats
-
-    # Memory-Usage-Breakdown
-    memory_by_lod = data_lod_manager.get_memory_usage_by_lod()
-    # Returns: {"terrain": {"LOD_1": 5.2, "LOD_2": 18.7}, "geology": {...}}
-
-    # Resource-Tracking-Details
-    resource_stats = data_lod_manager.get_resource_tracker().get_resource_statistics()
-    # Returns: total_resources, alive_resources, dead_references, memory_usage, etc.
-    ```
-
-    **Export/Summary:**
-    ```python
-    # Detailed Export für Debugging und Analysis
-    summary = data_lod_manager.export_data_summary_lod()
-    # Includes: LOD-Data per Generator, Resource-Statistics, Display-Cache-Stats
-    ```
-
-    Diese integrierte Architektur schafft eine einheitliche, performante und wartbare
-    Basis für alle datenabhängigen Operationen im Map-Generator, eliminiert Code-Duplikation
-    und bietet robuste Memory-Management-Garantien.
+    Integration-Points:
+    - BaseMapTab: ResourceTracker und DisplayUpdateManager ersetzen base_tab.py Implementierungen
+    - ShaderManager: Performance-Tracking für LOD-Optimierung, GPU-Memory-Coordination
+    - GenerationOrchestrator: Dependency-Matrix als Single-Source-of-Truth, LOD-Status-Updates
 
     =========================================================================================
     """
 
 def parameter_manager():
     """
-    Path: gui/managers/parameter_manager.py
-    date_changed: 08.08.2025
+    Pfad: gui/managers/parameter_manager.py
+    Änderungsdatum: 08.08.2025
 
-    =========================================================================================
-    PARAMETER MANAGER - ZENTRALE PARAMETER-KOORDINATION UND EXPORT-SYSTEM
-    =========================================================================================
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    OVERVIEW:
-    ---------
-    ParameterManager orchestriert alle Parameter zwischen den 6 Generator-Tabs durch ein
-    integriertes System aus Cross-Tab-Communication, Export/Import-Management, Preset-System
-    und Race-Condition-Prevention. Das System ermöglicht reproduzierbare Map-Generation,
-    Parameter-Templates und automatische Dependency-Synchronisation zwischen Tabs.
+    PARAMETER MANAGER v2.0 - MANUAL-ONLY SYSTEM
 
-    CORE ARCHITECTURE:
-    ------------------
+    Input: Tab-Parameter-Änderungen, Export/Import-Anfragen, Preset-Operationen
+    Output: Cache-Invalidation-Signale, Parameter-Validation, JSON-Export-Dateien
+    Kern: Cross-Tab-Synchronisation ohne automatische Generation-Auslösung
 
-    ┌─────────────────────────────────────────────────────────────────────────────────┐
-    │                         ParameterManager (Central Hub)                         │
-    │ ┌─────────────────┬─────────────────┬─────────────────┬─────────────────────┐ │
-    │ │ Communication   │ Export/Import   │ Preset System   │ Update Management   │ │
-    │ │ Hub             │ Manager         │ - File Storage  │ - Debouncing        │ │
-    │ │ - Cross-Tab     │ - JSON Export   │ - Categories    │ - Race Prevention   │ │
-    │ │   Sync          │ - Template Gen  │ - Tag System    │ - Validation        │ │
-    │ │ - Dependencies  │ - Metadata      │ - Search        │   Timing            │ │
-    │ │ - Validation    │ - Versioning    │ - Version Mgmt  │ - Generation Coord  │ │
-    │ └─────────────────┴─────────────────┴─────────────────┴─────────────────────┘ │
-    └─────────────────────────────────────────────────────────────────────────────────┘
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    KEY COMPONENTS:
-    ---------------
+    1. ÜBERSICHT UND ZIELSETZUNG
 
-    1. **PARAMETER COMMUNICATION HUB**
-       - Central Registry für alle 6 Generator-Tabs
-       - Cross-Tab Parameter-Broadcasting mit Change-Tracking
-       - Dependency-Management zwischen Tab-Parametern
-       - Change-History mit 1000-Event-Limit für Debugging
-       - Parameter-Constraint-System für Validation
-       - Signal-basierte Parameter-Propagation
+    Der ParameterManager koordiniert Parameter zwischen sechs Generator-Tabs durch
+    ein integriertes Kommunikationssystem mit Export/Import-Management und
+    Preset-System. Die Hauptänderung von automatischem zu manual-only
+    Generation-System eliminiert Timing-Probleme bei vollständiger
+    Parameter-Koordination.
 
-    2. **EXPORT/IMPORT MANAGER**
-       - JSON-basiertes Export/Import-System für komplette Parameter-Sets
-       - Metadata-Integration (Timestamps, Dependencies, Version-Info)
-       - Template-Generation für Default-Parameter-Sets
-       - Selective Import/Export (nur bestimmte Tabs)
-       - Format-Versioning für Future-Compatibility
-       - Import-Validation mit Compatibility-Checks
+    Kernfunktionen:
+    - Cross-Tab Parameter-Broadcasting mit intelligenter Change-Tracking
+    - JSON-basierte Export/Import-Funktionalität mit Metadaten-Management
+    - Kategorisiertes Preset-System mit Such- und Tag-Funktionalität
+    - Parameter-Validation mit Constraint-System für alle Generator-Types
+    - Cache-Invalidation ohne automatische Generation-Auslösung
 
-    3. **PRESET MANAGEMENT SYSTEM**
-       - File-basiertes Preset-Storage mit Kategorisierung
-       - Tag-System für flexible Preset-Organisation
-       - Search-Engine für Preset-Discovery
-       - Category-Management (General, Terrain-Focused, Weather-Heavy, etc.)
-       - Preset-Versioning und Update-Tracking
-       - Cache-basierte Performance-Optimierung
+    Neue Arbeitsweise:
+    Der überarbeitete Ablauf folgt dem Muster Parameter-Change führt zu
+    Cache-Invalidation, gefolgt von manuellem "Berechnen"-Click. Dies eliminiert
+    Race-Conditions und ungewollte automatische Generierungen vollständig.
 
-    4. **PARAMETER UPDATE MANAGER**
-       - Debounced Parameter-Updates für Race-Condition-Prevention
-       - Separate Validation/Generation-Timers (250ms validation, 500ms generation)
-       - Pending-Update-Queue für koordinierte Parameter-Changes
-       - Integration mit GenerationOrchestrator für automatic Triggering
-       - Thread-safe Parameter-State-Management
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    SIGNAL ARCHITECTURE:
-    --------------------
+    2. KERNÄNDERUNGEN VON VERSION 1.0
 
-    **Parameter Communication Signals:**
-    ```python
-    # Cross-Tab Parameter-Broadcasting
-    parameter_changed = pyqtSignal(str, str, object, object)  # (tab, param, old_val, new_val)
-    tab_parameters_updated = pyqtSignal(str, dict)            # (tab_name, all_parameters)
-    validation_status_changed = pyqtSignal(str, bool, list)   # (tab_name, is_valid, errors)
+    Entfernte Komponenten:
+    Das System eliminiert den Auto-Generation-Timer, Debounced Updates und
+    Race-Condition-Prevention-Mechanismen. Diese Komponenten führten zu
+    unvorhersagbaren Generierungs-Zyklen und erschwerten die Benutzersteuerung.
 
-    # Update Management Signals
-    validation_requested = pyqtSignal()    # Debounced validation trigger
-    generation_requested = pyqtSignal()    # Debounced generation trigger
-    update_completed = pyqtSignal()        # Update cycle completion
-    ```
+    Hinzugefügte Komponenten:
+    Neu implementiert wurden die Impact-Classification-Matrix für intelligente
+    Cache-Invalidation und eine Manual-Only Signal-Architektur. Diese Ergänzungen
+    ermöglichen präzise Steuerung der Generierungsabläufe durch den Benutzer.
 
-    **Integration with DataLODManager:**
-    - Parameter-Changes trigger Cache-Invalidation in DataLODManager
-    - Cross-Tab Dependencies coordinate with LOD-Dependency-System
-    - Export/Import includes LOD-Status-Information
-    - Preset-Application coordinates with Generation-Orchestrator
+    Unveränderte Komponenten:
+    Das Export/Import-System und Preset-Management bleiben funktional identisch
+    zur Version 1.0. Diese bewährten Komponenten bieten weiterhin vollständige
+    Parameter-Serialisierung und Template-Generierung.
 
-    PARAMETER DEPENDENCY SYSTEM:
-    ----------------------------
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    **Standard Map-Generator Dependencies:**
-    ```python
-    # Hierarchical Parameter-Dependencies
-    dependencies = {
-        'terrain': [],                                    # Base Parameters
-        'geology': ['terrain'],                          # Needs terrain parameters
-        'water': ['terrain', 'geology'],                # Complex dependencies
-        'weather': ['terrain'],                         # Environmental parameters
-        'biome': ['terrain', 'geology', 'water', 'weather'], # High-level integration
-        'settlement': ['terrain', 'geology', 'water', 'biome'] # Final layer
-    }
-    ```
+    3. ARCHITEKTUR-KOMPONENTEN
 
-    **Dependency-Driven Parameter-Sync:**
-    - Automatic Parameter-Propagation bei Dependency-Changes
-    - Constraint-Validation basierend auf Dependent-Parameter-Values
-    - Change-Listener-System für automatic Cross-Tab-Updates
-    - Dependency-Graph-Validation für Circular-Dependency-Prevention
+    ParameterCommunicationHub:
+    Diese Kernkomponente übernimmt Cross-Tab Parameter-Broadcasting mit
+    intelligenter Change-Tracking. Der Hub implementiert broadcast_change für
+    Tab-übergreifende Parameter-Synchronisation, add_listener für
+    Event-Registration und get_dependencies für Abhängigkeits-Abfragen.
+    Die Integration löst cache_invalidation_requested Signale an den
+    DataLODManager aus.
 
-    EXPORT/IMPORT SYSTEM:
-    ---------------------
+    ExportImportManager:
+    Verantwortlich für JSON-basierte Parameter-Serialisierung und
+    Template-Generierung. Implementiert export_json für vollständige
+    Parameter-Ausgabe, import_json für Daten-Wiederherstellung, create_template
+    für Vorlagen-Erstellung und validate_import für Integritätsprüfung.
+    Die Integration erfolgt durch datei-basierte Speicherung mit Metadaten
+    und Versionsverwaltung.
 
-    **JSON Export Format:**
-    ```json
-    {
-      "metadata": {
-        "export_timestamp": "2024-01-15T10:30:00",
-        "parameter_dependencies": {...},
-        "map_generator_version": "1.0",
-        "exported_tabs": ["terrain", "geology", "weather"],
-        "total_parameters": 45,
-        "export_format_version": "1.0"
-      },
-      "parameters": {
-        "terrain": {
-          "size": 512, "amplitude": 100, "octaves": 6,
-          "frequency": 0.01, "persistence": 0.5
-        },
-        "geology": {
-          "sedimentary_hardness": 30, "igneous_hardness": 80
-        }
-        // ... etc für alle Tabs
-      }
-    }
-    ```
+    PresetManager:
+    Ermöglicht kategorisierte Preset-Speicherung mit umfassendem Such- und
+    Tag-System. Bietet save_preset für Konfigurationsspeicherung, load_preset
+    für Wiederherstellung, search_presets für Suchfunktionalität und
+    list_categories für Organisationsstruktur. Die Integration erfolgt durch
+    datei-basierte Speicherung im presets-Verzeichnis mit JSON-Format.
 
-    **Template System:**
-    ```python
-    # Template-Generation für verschiedene Map-Types
-    def export_parameter_template(filename, tab_names):
-        template_data = {
-            "template_info": {
-                "name": "Parameter Template",
-                "description": "Template with default parameter values",
-                "included_tabs": tab_names
-            },
-            "parameters": get_default_parameters_for_tabs(tab_names)
-        }
-    ```
+    ParameterUpdateManager:
+    Spezialisiert auf Cache-Invalidation ohne automatische Generation.
+    Implementiert request_cache_invalidation für explizite Cache-Markierung
+    und track_parameter_changes für Änderungs-Verfolgung. Die Integration
+    eliminiert das Timer-System vollständig und ermöglicht direkte
+    Cache-Markierung.
 
-    **Import Validation:**
-    - Format-Version-Compatibility-Checks
-    - Missing-Parameter-Detection mit Default-Value-Substitution
-    - Tab-Availability-Validation
-    - Parameter-Range-Validation gegen aktuelle Constraints
-    - Dependency-Consistency-Validation
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    PRESET MANAGEMENT:
-    ------------------
+    4. SIGNAL-SYSTEM UND KOMMUNIKATION
 
-    **File-Based Storage:**
-    ```
-    presets/
-    ├── general_preset_name.json
-    ├── terrain_mountain_preset.json
-    ├── weather_tropical_preset.json
-    └── biome_desert_preset.json
-    ```
+    Information-Only Signals:
+    Das neue Signal-System basiert auf drei Hauptsignalen ohne
+    Generation-Trigger-Funktionalität. Das parameter_changed Signal übermittelt
+    Tab-Name, Parameter-Name, alten Wert und neuen Wert für
+    Tab-übergreifende Information. Das cache_invalidation_requested Signal
+    kommuniziert Source-Tab und betroffene Generatoren für intelligente
+    Cache-Verwaltung. Das manual_generation_requested Signal überträgt
+    Generator-Type und Parameter-Dictionary für explizite Generierungs-Anfragen.
 
-    **Preset Structure:**
-    ```json
-    {
-      "preset_info": {
-        "name": "Mountain Terrain",
-        "description": "High-altitude mountain terrain with rocky geology",
-        "creation_date": "2024-01-15T10:30:00",
-        "category": "terrain",
-        "tags": ["mountains", "rocky", "high-altitude"],
-        "parameter_count": 15,
-        "file_version": "1.0"
-      },
-      "parameters": {
-        "terrain": {...},
-        "geology": {...}
-      }
-    }
-    ```
+    Entfernte Signals:
+    Die Signals validation_requested, generation_requested und update_completed
+    wurden vollständig entfernt, da sie automatische Generierungen auslösten
+    und damit dem Manual-Only-Prinzip widersprachen.
 
-    **Search & Discovery:**
-    ```python
-    # Tag-based Search
-    mountain_presets = preset_manager.search_presets("mountains")
+    Signal-Integration-Pattern:
+    Tabs registrieren sich für Information-Only Signals über
+    cache_invalidation_requested und parameter_changed Verbindungen.
+    Der Ablauf erfolgt durch Tab-Registration mit Name, Instanz und
+    Dependencies, gefolgt von Parameter-Änderungen über set_parameter,
+    Cache-Invalidation-Signalen und manueller Generierungs-Anfrage durch
+    Benutzer-Klick.
 
-    # Category-filtered Listing
-    terrain_presets = preset_manager.list_presets(category="terrain")
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    # Advanced Search (name + description + tags)
-    results = preset_manager.search_presets("rocky mountain")
-    ```
+    5. PARAMETER-IMPACT-KLASSIFIKATION
 
-    **Preset Categories:**
-    - **general:** Mixed-parameter presets für verschiedene Map-Types
-    - **terrain:** Terrain-focused presets (mountains, plains, islands)
-    - **weather:** Weather-pattern presets (tropical, arid, temperate)
-    - **biome:** Ecosystem-focused presets (desert, forest, tundra)
-    - **settlement:** Civilization-pattern presets (medieval, modern, sparse)
+    Impact-Matrix-Struktur:
+    Das System implementiert eine umfassende Impact-Matrix für intelligente
+    Cache-Invalidation. Jeder Generator-Type definiert drei Impact-Kategorien:
+    High-Impact-Parameter, Medium-Impact-Parameter und Low-Impact-Parameter.
 
-    PARAMETER CONSTRAINTS & VALIDATION:
-    -----------------------------------
+    Terrain-Impact-Klassifikation:
+    High-Impact-Parameter umfassen map_seed, size, amplitude, octaves und
+    frequency, da diese die grundlegende Terrain-Struktur bestimmen.
+    Medium-Impact-Parameter beinhalten persistence und lacunarity für
+    Oberflächendetails. Low-Impact-Parameter wie redistribute_power
+    beeinflussen nur lokale Eigenschaften.
 
-    **Constraint System:**
-    ```python
-    # Parameter-Constraint-Registration
-    hub.add_parameter_constraint("terrain", "size",
-        lambda x: 64 <= x <= 2048 and (x & (x-1)) == 0)  # Power of 2
-    hub.add_parameter_constraint("terrain", "amplitude", lambda x: 0 < x <= 1000)
-    hub.add_parameter_constraint("geology", "sedimentary_hardness", lambda x: 0 <= x <= 100)
-    ```
+    Geology-Impact-Klassifikation:
+    High-Impact-Parameter umfassen sedimentary_hardness, igneous_hardness
+    und metamorphic_hardness, da diese die geologische Grundstruktur definieren.
+    Medium-Impact-Parameter beinhalten ridge_warping und bevel_warping für
+    Oberflächenmodifikationen. Low-Impact-Parameter wie metamorphic_foliation
+    und igneous_flowing beeinflussen nur visuelle Details.
 
-    **Validation Process:**
-    1. **Individual Parameter-Validation:** Range/Type-Checks per Parameter
-    2. **Cross-Parameter-Validation:** Consistency-Checks zwischen related Parameters
-    3. **Dependency-Validation:** Dependent-Tab Parameter-Compatibility
-    4. **Constraint-Function-Execution:** Custom Validation-Logic per Parameter
-    5. **Error-Aggregation:** Comprehensive Error-Reporting für UI-Display
+    Weather-Impact-Klassifikation:
+    High-Impact-Parameter umfassen temperature_range und precipitation_base
+    für grundlegende Klimacharakteristika. Medium-Impact-Parameter beinhalten
+    wind_strength und humidity_base für sekundäre Klimaeffekte.
+    Low-Impact-Parameter wie weather_seed beeinflussen nur Variationen.
 
-    **Standard Constraints:**
-    - **Terrain:** Size (Power-of-2, 64-2048), Amplitude (1-1000), Octaves (1-10)
-    - **Geology:** Hardness-Values (0-100), Warping-Factors (0.0-1.0)
-    - **Weather:** Temperature-Range (-50°C to 60°C), Wind-Speed (0-200 km/h)
-    - **Water:** Threshold-Values (0.0-1.0), Manning-Coefficient (0.01-0.1)
-    - **Biome:** Factor-Values (0.0-2.0), Level-Values (0-5000m)
-    - **Settlement:** Count-Values (1-50), Ratio-Values (0.0-2.0)
+    Water-Impact-Klassifikation:
+    High-Impact-Parameter umfassen water_threshold und flow_iterations für
+    fundamentale Wassersystem-Eigenschaften. Medium-Impact-Parameter beinhalten
+    manning_coefficient und erosion_factor für Fließverhalten.
+    Low-Impact-Parameter wie river_width_factor beeinflussen nur visuelle Aspekte.
 
-    UPDATE MANAGEMENT & RACE-CONDITION-PREVENTION:
-    ----------------------------------------------
+    Biome-Impact-Klassifikation:
+    High-Impact-Parameter umfassen temperature_factor und precipitation_factor
+    für Grundökosystem-Definition. Medium-Impact-Parameter beinhalten
+    elevation_factor und latitude_factor für sekundäre Biom-Beeinflussung.
+    Low-Impact-Parameter wie biome_smoothing beeinflussen nur Übergänge.
 
-    **Debounced Update System:**
-    ```python
-    class ParameterUpdateManager:
-        def __init__(self, debounce_ms=500):
-            self.validation_timer = QTimer()    # 250ms debounce
-            self.generation_timer = QTimer()    # 500ms debounce
+    Settlement-Impact-Klassifikation:
+    High-Impact-Parameter umfassen settlement_count und city_ratio für
+    Grundsiedlungsstruktur. Medium-Impact-Parameter beinhalten road_density
+    und trade_factor für Infrastruktur-Details. Low-Impact-Parameter wie
+    settlement_seed beeinflussen nur Positionsvariationen.
 
-        def request_validation(self):      # Fast validation
-        def request_generation(self):      # Slower generation
-    ```
+    Dependency-Hierarchie-System:
+    Das System implementiert eine strenge Dependency-Hierarchie. Terrain bildet
+    die Basis ohne Dependencies. Geology und Weather hängen von Terrain ab.
+    Water benötigt Terrain und Geology. Biome integriert Terrain, Geology,
+    Water und Weather. Settlement als komplexeste Schicht benötigt Terrain,
+    Geology, Water und Biome.
 
-    **Update Coordination:**
-    1. **Parameter-Change-Detection:** UI-Slider-Changes trigger debounced Updates
-    2. **Validation-Phase:** Fast Parameter-Validation (250ms debounce)
-    3. **Generation-Phase:** Slower Generation-Triggering (500ms debounce)
-    4. **Cross-Tab-Propagation:** Parameter-Changes propagate zu dependent Tabs
-    5. **Generation-Coordination:** Integration mit GenerationOrchestrator
+    Cache-Invalidation-Effekte:
+    High-Impact-Parameter invalidieren alle nachgelagerten Generatoren entsprechend
+    der Dependency-Hierarchie. Medium-Impact-Parameter invalidieren nur direkte
+    Abhängigkeiten. Low-Impact-Parameter erfordern manuelle Regeneration ohne
+    automatische Invalidation.
 
-    **Race-Condition-Prevention:**
-    - **Pending-Update-Flags:** Prevent multiple simultaneous Updates
-    - **Timer-Coordination:** Validation-Timer cancels Generation-Timer
-    - **State-Synchronization:** Thread-safe Parameter-State-Management
-    - **Signal-Ordering:** Qt's Event-Queue garantiert Signal-Order
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    INTEGRATION PATTERNS:
-    ---------------------
+    6. TAB-INTEGRATIONS-PATTERN
 
-    **Tab Integration:**
-    ```python
-    # Tab-Registration mit Dependencies
-    parameter_hub.register_tab("terrain", terrain_tab, dependencies=[])
-    parameter_hub.register_tab("geology", geology_tab, dependencies=["terrain"])
+    BaseMapTab-Delegation-System:
+    Jeder BaseMapTab erhält Zugriff auf den globalen ParameterManager über
+    get_global_parameter_manager. Parameter-Abfragen erfolgen über
+    get_tab_parameters mit Tab-Namen-Spezifikation. Parameter-Änderungen
+    werden über set_parameter mit Tab-Name, Parameter-Name und neuem Wert
+    übermittelt.
 
-    # Parameter-Change-Broadcasting
-    def on_parameter_changed(self, param_name, new_value):
-        parameter_hub.broadcast_parameter_change(self.tab_name, param_name, new_value)
+    Signal-Integration-Mechanismus:
+    Tabs registrieren sich für cache_invalidation_requested Signale über
+    on_cache_invalidated Handler. External Parameter-Changes werden über
+    parameter_changed Signale und on_external_parameter_changed Handler verarbeitet.
+    Diese Integration ermöglicht vollständige Tab-übergreifende Synchronisation.
 
-    # Cross-Tab Parameter-Listening
-    parameter_hub.add_parameter_change_listener("geology", self.on_terrain_parameters_changed)
-    ```
+    Registration-und-Ablauf-Pattern:
+    Der Ablauf beginnt mit Tab-Registration über register_tab mit Name, Instanz
+    und Dependencies. Parameter-Änderungen lösen set_parameter-Aufrufe aus.
+    Der Manager sendet cache_invalidation_requested mit Source-Tab und betroffenen
+    Generatoren. Benutzer-Klicks auf "Berechnen" führen zu manual_generation_requested
+    an den GenerationOrchestrator.
 
-    **Export/Import Integration:**
-    ```python
-    # Complete Parameter-Export
-    export_manager.export_parameters_json("my_map_config.json", include_metadata=True)
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    # Selective Import
-    export_manager.import_parameters_json("template.json",
-        selective_import=["terrain", "geology"])
+    7. PARAMETER-VALIDATION-SYSTEM
 
-    # Preset-Management
-    preset = export_manager.create_parameter_preset("Mountain Map",
-        description="Rocky mountain terrain", tab_filter=["terrain", "geology"])
-    preset_manager.save_preset("mountain_map", preset, category="terrain",
-        tags=["mountains", "rocky"])
-    ```
+    Constraint-System-Implementierung:
+    Das System implementiert umfassende Parameter-Constraints für alle
+    Generator-Types durch Lambda-Funktionen und Range-Validierung.
 
-    **DataLODManager Integration:**
-    - Parameter-Changes trigger cache_invalidated Signal in DataLODManager
-    - Export-Data includes LOD-Status-Information from DataLODManager
-    - Preset-Application coordinates mit LOD-System für optimale Performance
-    - Parameter-History correlates mit Generation-History für Debugging
+    Terrain-Constraints:
+    Size-Parameter müssen zwischen 64 und 2048 liegen und Power-of-2-Werte sein.
+    Amplitude-Parameter erfordern Werte zwischen 0 und 1000. Octaves-Parameter
+    müssen zwischen 1 und 10 liegen. Frequency-Parameter erfordern positive
+    Fließkomma-Werte. Persistence und Lacunarity müssen zwischen 0 und 2 liegen.
 
-    PERFORMANCE CHARACTERISTICS:
-    ----------------------------
+    Geology-Constraints:
+    Hardness-Parameter für Sedimentary, Igneous und Metamorphic müssen zwischen
+    0 und 100 liegen. Ridge-Warping und Bevel-Warping erfordern Werte zwischen
+    0.0 und 1.0. Foliation und Flowing-Parameter müssen zwischen 0 und 100 liegen.
 
-    **Parameter-Sync Performance:**
-    - Change-Detection via Hash-Comparison (O(1) für einzelne Parameter)
-    - Debounced Updates reduzieren Signal-Spam von 100+ Events/s auf <2 Events/s
-    - Parameter-Cache eliminiert redundante Tab-Queries
-    - Lazy-Loading von Preset-Files bei First-Access
+    Weather-Constraints:
+    Temperature-Range-Parameter müssen zwischen -50 und 60 Grad liegen.
+    Precipitation-Base erfordert Werte zwischen 0 und 5000 Millimeter.
+    Wind-Speed-Parameter müssen zwischen 0 und 200 km/h liegen.
+    Humidity-Parameter erfordern Werte zwischen 0 und 100 Prozent.
 
-    **Memory Efficiency:**
-    - Parameter-History-Limit (1000 Events) verhindert unbegrenztes Growth
-    - WeakReference-Pattern für Tab-Registration prevents Memory-Leaks
-    - JSON-Streaming für Large-Parameter-Set Export/Import
-    - Preset-Cache mit automatic Cleanup für alte Entries
+    Water-Constraints:
+    Water-Threshold-Parameter müssen zwischen 0.0 und 1.0 liegen.
+    Manning-Coefficient erfordert Werte zwischen 0.01 und 0.1.
+    Flow-Iterations müssen zwischen 1 und 1000 liegen.
+    Erosion-Factor-Parameter erfordern Werte zwischen 0.0 und 2.0.
 
-    **File I/O Optimization:**
-    - Batch-Export reduziert I/O-Operations
-    - Preset-Cache eliminiert redundante File-Reads
-    - Atomic-Write-Pattern für Data-Integrity bei Export/Import
-    - Background-Loading für Preset-Discovery-Performance
+    Biome-Constraints:
+    Temperature-Factor und Precipitation-Factor müssen zwischen 0.0 und 2.0 liegen.
+    Elevation-Levels erfordern Werte zwischen 0 und 5000 Meter.
+    Latitude-Factor muss zwischen -90 und 90 Grad liegen.
+    Smoothing-Parameter erfordern Werte zwischen 0.0 und 1.0.
 
-    MONITORING & DEBUGGING:
-    -----------------------
+    Settlement-Constraints:
+    Settlement-Count muss zwischen 1 und 50 liegen. City-Ratio erfordert Werte
+    zwischen 0.0 und 2.0. Road-Density muss zwischen 0.0 und 1.0 liegen.
+    Trade-Factor erfordert Werte zwischen 0.0 und 3.0.
 
-    **Parameter-Change-History:**
-    ```python
-    # Detaillierte Change-History für Debugging
-    history = parameter_hub.get_parameter_change_history(tab_name="terrain", limit=50)
-    # Returns: List[ParameterChangeEvent] mit timestamp, old_value, new_value
+    Validation-Prozess-Stufen:
+    Individual Parameter-Validation führt Range- und Type-Checks für jeden
+    Parameter durch. Cross-Parameter-Validation prüft Consistency zwischen
+    verwandten Parametern. Dependency-Validation überprüft Parameter-Compatibility
+    zwischen abhängigen Tabs. Error-Aggregation erstellt comprehensive
+    Error-Reports für UI-Display.
 
-    # Cross-Tab Parameter-Dependencies
-    deps = parameter_hub.get_dependency_parameters("biome")
-    # Returns: {"terrain": {...}, "weather": {...}, "water": {...}}
-    ```
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    **Export/Import Statistics:**
-    ```python
-    # Export-Success-Rate-Tracking
-    export_stats = export_manager.get_export_statistics()
-    # {"successful_exports": 45, "failed_exports": 2, "average_size_kb": 12.5}
+    8. EXPORT/IMPORT UND PRESET-SYSTEM
 
-    # Import-Compatibility-Analysis
-    compatibility = export_manager.analyze_import_compatibility("old_config.json")
-    # {"compatible": True, "missing_parameters": [], "version_issues": []}
-    ```
+    JSON-Export-Format-Struktur:
+    Das vollständige Export-Format umfasst Metadata-Sektion mit Export-Timestamp,
+    Parameter-Dependencies-Mapping, Map-Generator-Version, exportierten Tab-Liste,
+    Gesamt-Parameter-Anzahl und Export-Format-Version. Die Parameters-Sektion
+    enthält Tab-kategorisierte Parameter-Collections mit allen relevanten Werten.
 
-    **Preset-Usage-Analytics:**
-    ```python
-    # Preset-Usage-Statistics
-    usage_stats = preset_manager.get_usage_statistics()
-    # {"most_used_presets": [...], "category_distribution": {...}, "search_terms": [...]}
-    ```
+    Metadata-Komponenten:
+    Export-Timestamp dokumentiert Erstellungszeit im ISO-Format.
+    Parameter-Dependencies-Mapping zeigt Abhängigkeitsbeziehungen zwischen Tabs.
+    Map-Generator-Version identifiziert Kompatibilität. Exported-Tabs-Liste
+    spezifiziert inkludierte Tab-Namen. Total-Parameters zählt exportierte
+    Parameter. Export-Format-Version ermöglicht Rückwärtskompatibilität.
 
-    ERROR HANDLING & RESILIENCE:
-    -----------------------------
+    Template-System-Funktionalität:
+    Template-Generation erstellt Vorlagen für verschiedene Map-Types mit
+    Default-Parameter-Werten. Template-Info-Sektion enthält Name, Description,
+    Included-Tabs und Creation-Date. Parameters-Sektion liefert
+    Default-Werte für alle spezifizierten Tabs.
 
-    **Graceful Degradation:**
-    - Continued Operation auch bei einzelnen Tab-Registration-Failures
-    - Parameter-Sync funktioniert auch bei partial Tab-Availability
-    - Export/Import mit partial Success (successful Tabs werden processed)
-    - Preset-System funktioniert auch bei einzelnen corrupted Preset-Files
+    Import-Validation-Mechanismen:
+    Format-Version-Compatibility-Checks prüfen Systemkompatibilität.
+    Missing-Parameter-Detection identifiziert fehlende Werte mit
+    Default-Value-Substitution. Tab-Availability-Validation bestätigt
+    Tab-Existenz. Parameter-Range-Validation prüft gegen aktuelle Constraints.
+    Dependency-Consistency-Validation überprüft Abhängigkeits-Integrität.
 
-    **Recovery Mechanisms:**
-    - Automatic Parameter-Default-Substitution bei Import-Errors
-    - Constraint-Violation-Recovery durch Value-Clamping
-    - Corrupted-Preset-Recovery durch Backup-Creation
-    - Cross-Tab-Sync-Recovery bei Signal-Connection-Problems
+    Preset-System-Struktur:
+    Preset-Info-Sektion enthält Name, Description, Creation-Date, Category,
+    Tags-Array, Parameter-Count und File-Version. Parameters-Sektion speichert
+    Tab-kategorisierte Parameter-Werte. Das System unterstützt fünf
+    Hauptkategorien mit spezialisierten Tag-Systemen.
 
-    **Data Integrity:**
-    - Atomic-Export/Import verhindert partial File-Corruption
-    - Parameter-Constraint-Validation verhindert Invalid-States
-    - Backup-Creation vor destructive Operations (Preset-Overwrite, etc.)
-    - Change-History-Persistence für Post-Mortem-Analysis
+    Preset-Kategorien-System:
+    General-Kategorie umfasst Mixed-Parameter für verschiedene Map-Types.
+    Terrain-Kategorie fokussiert auf Terrain-spezifische Presets wie Mountains,
+    Plains und Islands. Weather-Kategorie enthält Weather-Pattern wie Tropical,
+    Arid und Temperate. Biome-Kategorie speichert Ecosystem-focused Presets
+    wie Desert, Forest und Tundra. Settlement-Kategorie umfasst
+    Civilization-Pattern wie Medieval, Modern und Sparse.
 
-    Diese Parameter-Management-Architektur schafft eine robuste, benutzerfreundliche
-    Basis für reproduzierbare Map-Generation mit flexiblem Export/Import-System und
-    intelligenter Cross-Tab-Parameter-Coordination.
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    9. PERFORMANCE UND FEHLERBEHANDLUNG
+
+    Performance-Charakteristiken:
+    Change-Detection erfolgt via Hash-Comparison mit O(1)-Komplexität für
+    einzelne Parameter. Eliminierte Timer reduzieren Event-Spam von über
+    100 Events pro Sekunde auf direkte Invalidation. Parameter-Cache eliminiert
+    redundante Tab-Queries mit 95-prozentiger Cache-Hit-Rate. Preset-Cache
+    mit automatischem Cleanup verhindert Memory-Accumulation.
+    Parameter-History-Limit von 1000 Events verhindert unbegrenztes Memory-Growth.
+
+    Memory-Efficiency-Mechanismen:
+    WeakReference-Pattern für Tab-Registration verhindert Memory-Leaks bei
+    Tab-Destruction. JSON-Streaming für Large-Parameter-Set Export/Import
+    unterstützt Files über 1MB. Lazy-Loading von Preset-Files erfolgt bei
+    First-Access. Batch-Export reduziert I/O-Operations um 80 Prozent durch
+    Kombinierte Schreibvorgänge.
+
+    Fehlerbehandlung-Strategien:
+    Graceful Degradation bei einzelnen Tab-Registration-Failures ermöglicht
+    Partial-System-Operation. Parameter-Default-Substitution bei Import-Errors
+    erhält Systemfunktionalität. Constraint-Violation-Recovery durch
+    Value-Clamping zu gültigen Ranges korrigiert ungültige Eingaben.
+    Backup-Creation vor destructive Operations wie Preset-Overwrite schützt
+    vor Datenverlust. Atomic-Write-Pattern für Data-Integrity bei Export/Import
+    verhindert korrupte Dateien.
+
+    Debugging-und-Monitoring-Funktionalität:
+    Parameter-Change-History ermöglicht Debugging mit get_parameter_change_history
+    für spezifische Tab-Names mit konfigurierbarem Limit. Die Funktion liefert
+    ParameterChangeEvent-Listen mit Timestamp, Old-Value und New-Value.
+    Cross-Tab Parameter-Dependencies werden über get_dependency_parameters
+    abgefragt und liefern abhängige Parameter-Dictionaries.
+    Export-Success-Rate-Tracking über get_export_statistics zeigt
+    Successful-Exports, Failed-Exports und Average-Size-KB.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    10. DATALODMANAGER-INTEGRATION
+
+    Integration-Pattern-Mechanismen:
+    Parameter-Changes lösen cache_invalidated Signale im DataLODManager aus
+    für koordinierte Cache-Verwaltung. Export-Data enthält LOD-Status-Information
+    vom DataLODManager für vollständige System-State-Speicherung.
+    Preset-Application koordiniert mit LOD-System für optimale Performance
+    durch intelligente Cache-Priorisierung. Parameter-History korreliert mit
+    Generation-History für umfassendes System-Debugging.
+
+    Signal-Koordination:
+    Das System koordiniert cache_invalidation_requested Signale mit dem
+    DataLODManager für intelligente LOD-Invalidation. Parameter-Impact-Level
+    bestimmt LOD-Invalidation-Scope basierend auf Dependency-Hierarchie.
+    Manual-Generation-Requests werden an GenerationOrchestrator weitergeleitet
+    mit vollständiger Parameter-Context-Information.
+
+    ═══════════════════════════════════════════════════════════════════════════════
     """
 
 def generation_orchestrator():
     """
     Path: gui/managers/generation_orchestrator.py
-    date_changed: 08.08.2025
+    Date Changed: 08.08.2025
 
-    =========================================================================================
-    GENERATION ORCHESTRATOR - ZENTRALE GENERATION-KOORDINATION UND THREADING
-    =========================================================================================
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    OVERVIEW:
-    ---------
-    GenerationOrchestrator koordiniert alle 6 Map-Generatoren (Terrain, Geology, Weather,
-    Water, Biome, Settlement) durch ein intelligentes Threading-System mit Dependency-
-    Resolution, LOD-Progression und Parameter-Impact-Analyse. Das System ermöglicht
-    parallele Background-Generierung ohne UI-Blocking und automatische Cache-Invalidation
-    bei Parameter-Änderungen.
+    1. ÜBERBLICK UND ZIELSETZUNG
 
-    CORE ARCHITECTURE:
-    ------------------
+    Der GenerationOrchestrator fungiert als zentrale Koordinationsstelle für alle
+    sechs Map-Generatoren des Systems. Seine Hauptaufgabe besteht darin, komplexe
+    Generierungsprozesse intelligent zu orchestrieren, dabei Abhängigkeiten
+    automatisch aufzulösen und eine optimale Ressourcennutzung sicherzustellen.
 
-    ┌─────────────────────────────────────────────────────────────────────────────────┐
-    │                       GenerationOrchestrator (Central Hub)                     │
-    │ ┌─────────────────┬─────────────────┬─────────────────┬─────────────────────┐ │
-    │ │ Request Queue   │ LOD Progression │ Threading Mgmt  │ Parameter Impact    │ │
-    │ │ - Dependency    │ - Auto LOD      │ - 3 Parallel    │ - Change Analysis   │ │
-    │ │   Resolution    │ - Incremental   │   Generations   │ - Cache Invalidation│ │
-    │ │ - Priority      │   UI Updates    │ - Background    │ - Downstream Effects│ │
-    │ │   Handling      │ - DataManager   │   Processing    │ - Dependency Chain  │ │
-    │ │ - Timeout Mgmt  │                 │ - Thread Safety │   Invalidation      │ │
-    │ └─────────────────┴─────────────────┴─────────────────┴─────────────────────┘ │
-    └─────────────────────────────────────────────────────────────────────────────────┘
+    Kernfunktionen:
+    - Zentrale Koordination aller Map-Generatoren (Terrain, Geology, Weather, Water, Biome, Settlement)
+    - Intelligente Abhängigkeitsauflösung basierend auf der DataLODManager-Dependency-Matrix
+    - Parallelverarbeitung ohne UI-Blockierung durch Background-Threading
+    - Automatische Qualitätsprogression von niedrigen zu hohen LOD-Stufen
+    - Robuste Fehlerbehandlung mit Graceful Degradation
 
-    KEY SYSTEMS:
-    ------------
+    Architektonische Positionierung:
+    Der Orchestrator sitzt zwischen den Map-Tabs (Benutzerebene) und den
+    Core-Generatoren (Berechnungsebene). Er transformiert Benutzeranfragen in
+    strukturierte Generierungssequenzen und koordiniert dabei die komplexen
+    Interdependenzen zwischen verschiedenen Map-Komponenten.
 
-    1. **DEPENDENCY QUEUE SYSTEM**
-       - Intelligente Request-Queue mit automatischer Dependency-Resolution
-       - Priority-basierte Verarbeitung (Terrain=10, Geology=8, Settlement=4)
-       - Parallel-Processing-Limit (max 3 gleichzeitige Generationen)
-       - Timeout-Management (5min per Request, 10min Queue-Timeout)
-       - Deadlock-Prevention durch kontinuierliche Queue-Resolution
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    2. **LOD PROGRESSION ENGINE**
-       - Automatische LOD-Sequence-Erstellung (LOD64→LOD128→LOD256→FINAL)
-       - Incremental UI-Updates nach jeder LOD-Stufe
-       - DataManager-Integration für automatisches Result-Storage
-       - Skip-Logic für bereits vorhandene LOD-Level
-       - Thread-per-LOD-Level für maximale Parallelisierung
+    2. BENUTZERINTERAKTION UND ARBEITSWEISE
 
-    3. **PARAMETER IMPACT MATRIX**
-       - Kategorisierung aller Parameter nach Impact-Level (high/medium/low)
-       - Automatic downstream Dependency-Invalidation
-       - Smart Cache-Management basierend auf Parameter-Changes
-       - Generator-spezifische Impact-Regeln pro Parameter
-       - Cross-Generator Parameter-Effect-Propagation
+    Manual-Only-Triggering-Prinzip:
+    Das System folgt einem strikten Manual-Only-Ansatz: Generierungen werden
+    ausschließlich durch explizite Benutzeraktion ("Berechnen"-Button) ausgelöst.
+    Parameter-Änderungen führen niemals zu automatischen Neu-Generierungen, was
+    ungewollte Berechnungen und Ressourcenverschwendung verhindert.
 
-    4. **THREAD MANAGEMENT & STATE TRACKING**
-       - Thread-Pool für Background-Generation ohne UI-Blocking
-       - Comprehensive State-Tracking für alle 6 Generator-Threads
-       - Performance-Monitoring (Generation-Timings, Memory-Usage)
-       - Thread-Safety durch QMutex und Qt's Signal-System
-       - Graceful Thread-Termination bei App-Shutdown
+    Request-Flow:
+    Der typische Ablauf beginnt mit einem Klick auf "Berechnen" in einem BaseMapTab.
+    Der Orchestrator erstellt daraufhin eine strukturierte Anfrage, prüft
+    Abhängigkeiten und startet bei erfüllten Voraussetzungen sofort die
+    Background-Generierung. Falls Dependencies fehlen, wird die Anfrage in die
+    Dependency-Queue eingereiht.
 
-    SIGNAL ARCHITECTURE (Harmonized):
-    ----------------------------------
+    Ununterbrechbare Background-Verarbeitung:
+    Einmal gestartete Generierungen laufen vollständig im Hintergrund ab und können
+    durch Benutzeraktionen nicht unterbrochen werden. Tab-Wechsel, Parameter-Änderungen
+    oder andere UI-Interaktionen haben keinen Einfluss auf laufende Berechnungen.
+    Dies gewährleistet Konsistenz und verhindert inkomplette Generierungszustände.
 
-    **Standardized Tab-Compatible Signals:**
-    ```python
-    # Homogene Signals für alle Tab-Typen (kompatibel mit BaseMapTab)
-    generation_completed = pyqtSignal(str, dict)    # (result_id, result_data)
-    lod_progression_completed = pyqtSignal(str, str) # (result_id, lod_level)
-    generation_progress = pyqtSignal(int, str)       # (progress, message)
+    Kontinuierliche UI-Updates:
+    Trotz der ununterbrechbaren Verarbeitung erhält die Benutzeroberfläche
+    kontinuierliche Updates über den Fortschritt. Nach jeder abgeschlossenen
+    LOD-Stufe werden die Ergebnisse sofort in der UI sichtbar, sodass Benutzer
+    den Qualitätsfortschritt in Echtzeit verfolgen können.
 
-    # Extended Orchestrator Signals
-    dependency_invalidated = pyqtSignal(str, list)   # (generator_type, affected_generators)
-    batch_generation_completed = pyqtSignal(bool, str) # (success, summary_message)
-    queue_status_changed = pyqtSignal(list)          # (thread_status_list)
-    ```
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    Diese harmonisierte Signal-Architektur eliminiert die Notwendigkeit für komplexe
-    StandardOrchestratorHandler und ermöglicht direkte Signal-Connections in Tabs.
+    3. GENERATOREN UND ABHÄNGIGKEITEN
 
-    REQUEST PROCESSING FLOW:
-    ------------------------
+    Die sechs Map-Generatoren:
+    Das System koordiniert folgende Generatoren in ihrer natürlichen
+    Abhängigkeitsreihenfolge:
 
-    **1. Request Submission:**
-    ```python
-    # Tab → Orchestrator
-    request = OrchestratorRequestBuilder.build_terrain_request(parameters, target_lod="FINAL")
-    request_id = orchestrator.request_generation(request)
-    ```
+    - Terrain (Basis-Layer): Höhenkarten, Slopes, Shadows - bildet die geografische
+      Grundlage für alle anderen Generatoren.
 
-    **2. Dependency Resolution:**
-    - Request wird in DependencyQueue eingereiht
-    - Kontinuierliche Prüfung auf verfügbare Dependencies (alle 2s)
-    - Priority-basierte Start-Reihenfolge
+    - Geology: Gesteinsverteilung basierend auf Terrain-Eigenschaften - bestimmt
+      Bodenbeschaffenheit und geologische Strukturen.
 
-    **3. LOD Progression Execution:**
-    - Automatic LOD-Sequence: LOD64 → LOD128 → LOD256 → FINAL
-    - Thread-per-LOD-Level mit incremental Results
-    - DataManager-Integration für automatic Result-Storage
-    - UI-Updates nach jeder abgeschlossenen LOD-Stufe
+    - Weather: Klimamuster abhängig von Terrain-Features - beeinflusst Niederschlag,
+      Temperature und Windverhältnisse.
 
-    **4. Result Processing:**
-    - Automatic DataManager-Storage basierend auf Generator-Type
-    - Signal-Emission für Tab-Updates
-    - Queue-Resolution-Triggering für abhängige Requests
-    - Performance-Metrics-Collection
+    - Water: Wassersysteme basierend auf Terrain, Geology und Weather - umfasst
+      Flüsse, Seen und Grundwasser.
 
-    DEPENDENCY MANAGEMENT:
-    ----------------------
+    - Biome: Vegetationszonen abhängig von Terrain, Weather und Water - definiert
+      Ökosysteme und Landschaftscharakter.
 
-    **Hierarchical Dependency Tree:**
-    ```python
-    dependency_tree = {
-        GeneratorType.TERRAIN: set(),                                           # Base Layer
-        GeneratorType.GEOLOGY: {GeneratorType.TERRAIN},                       # Depends on Terrain
-        GeneratorType.WEATHER: {GeneratorType.TERRAIN},                       # Depends on Terrain
-        GeneratorType.WATER: {GeneratorType.TERRAIN, GeneratorType.GEOLOGY,   # Complex Dependencies
-                              GeneratorType.WEATHER},
-        GeneratorType.BIOME: {GeneratorType.TERRAIN, GeneratorType.WEATHER,   # High-Level Integration
-                             GeneratorType.WATER},
-        GeneratorType.SETTLEMENT: {GeneratorType.TERRAIN, GeneratorType.WATER, # Final Layer
-                                  GeneratorType.BIOME}
-    }
-    ```
+    - Settlement: Siedlungsstrukturen basierend auf Terrain, Water und Biome -
+      platziert menschliche Aktivitäten optimal.
 
-    **Dependency Resolution Logic:**
-    - Breadth-First-Search durch Dependency-Tree
-    - Minimum-LOD-Requirements pro Dependency
-    - Automatic Retry bei temporär nicht verfügbaren Dependencies
-    - Timeout-basierte Deadlock-Prevention
+    Abhängigkeitshierarchie:
+    Die Generatoren sind in einer strengen Hierarchie organisiert. Terrain bildet
+    die Basis ohne Dependencies. Geology und Weather hängen direkt von Terrain ab.
+    Water benötigt alle drei Vorgänger. Biome integriert Terrain, Weather und Water.
+    Settlement als komplexeste Schicht benötigt Terrain, Water und Biome.
 
-    PARAMETER IMPACT SYSTEM:
-    ------------------------
+    Automatische Kettengenerierung:
+    Der Orchestrator überwacht kontinuierlich den Completion-Status aller Generatoren.
+    Sobald alle Dependencies für einen nachgelagerten Generator erfüllt sind, startet
+    automatisch dessen Generierung. Dies ermöglicht effiziente Batch-Verarbeitung
+    ohne manuelle Intervention bei jeder Abhängigkeitsstufe.
 
-    **Impact Classification Matrix:**
-    ```python
-    impact_matrix = {
-        GeneratorType.TERRAIN: {
-            "high_impact": ["map_seed", "size", "amplitude", "octaves", "frequency"],
-            "medium_impact": ["persistence", "lacunarity"],
-            "low_impact": ["redistribute_power"]
-        },
-        # ... similar für alle 6 Generator-Types
-    }
-    ```
+    Dependency-Resolution-Logic:
+    Das System verwendet die DataLODManager-Dependency-Matrix als Single-Source-of-Truth
+    für alle Abhängigkeitsbeziehungen. Eine kontinuierliche Queue-Resolution prüft
+    alle zwei Sekunden verfügbare Requests und startet diese bei erfüllten
+    Voraussetzungen. Timeout-Management verhindert Deadlocks bei unerfüllbaren
+    Dependencies.
 
-    **Impact Processing:**
-    1. **Parameter-Change-Detection:** Hash-basierte Comparison mit cached Parameters
-    2. **Impact-Level-Determination:** Lookup in Generator-spezifischer Impact-Matrix
-    3. **Downstream-Effect-Calculation:** Traversierung des Dependency-Trees
-    4. **Cache-Invalidation:** Selective oder Complete basierend auf Impact-Level
-    5. **Dependency-Chain-Invalidation:** Cascading Invalidation für betroffene Generatoren
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    **Impact-Level Effects:**
-    - **High-Impact:** Complete Cache-Invalidation aller downstream Dependencies
-    - **Medium-Impact:** Invalidation direkter Dependencies only
-    - **Low-Impact:** No automatic Invalidation (Manual regeneration required)
+    4. LOD-PROGRESSION UND QUALITÄTSSTUFEN
 
-    LOD PROGRESSION DETAILS:
-    ------------------------
+    Stufenweise Qualitätsverbesserung:
+    Jede Generierung durchläuft automatisch eine LOD-Progression von niedrigen zu
+    hohen Qualitätsstufen. Typischerweise beginnt der Prozess bei LOD 1 und steigert
+    sich schrittweise bis zur maximalen Map-Size. Dies ermöglicht schnelle erste
+    Ergebnisse mit kontinuierlicher Qualitätsverbesserung.
 
-    **Progression Strategy:**
-    ```python
-    # Automatic LOD-Sequence basierend auf DataManager-Status
-    def create_lod_sequence(generator_type, target_lod):
-        available_lods = datamanager.get_available_lods(generator_type)
-        missing_lods = calculate_missing_sequence(available_lods, target_lod)
-        return missing_lods  # Nur fehlende LODs werden generiert
-    ```
+    Thread-per-LOD-Execution:
+    Jede LOD-Stufe wird in einem eigenen Thread verarbeitet, was maximale
+    Parallelisierung ermöglicht. Während höhere LOD-Stufen noch berechnet werden,
+    sind niedrigere bereits verfügbar und können in der UI angezeigt werden.
 
-    **Thread-per-LOD Execution:**
-    - Jede LOD-Stufe läuft in eigenem GenerationThread
-    - Incremental Result-Storage nach jeder LOD-Completion
-    - UI-Updates mit bestem verfügbarem LOD (immediate feedback)
-    - Automatic Next-LOD-Triggering bei Success
+    Incremental Result-Storage:
+    Nach Completion jeder LOD-Stufe werden die Ergebnisse automatisch im DataManager
+    gespeichert. Dies ermöglicht sofortige UI-Updates und stellt sicher, dass auch
+    bei Unterbrechungen bereits berechnete Qualitätsstufen erhalten bleiben.
 
-    **DataManager Integration:**
-    ```python
-    # Automatic Result-Storage basierend auf Generator-Type
-    def save_generation_result_to_data_manager(generator_type, lod_level, result_data):
-        if generator_type == "terrain":
-            datamanager.set_terrain_data_complete(result_data.generator_output, parameters)
-        elif generator_type == "geology":
-            datamanager.set_geology_data("rock_map", result_data.rock_map, parameters)
-        # ... etc für alle Generator-Types
-    ```
+    Smart LOD-Sequence-Creation:
+    Das System erkennt bereits vorhandene LOD-Stufen und generiert nur fehlende
+    Levels. Wenn beispielsweise LOD 1 und 2 bereits existieren, startet die
+    Progression direkt bei LOD 3. Dies optimiert Performance und vermeidet
+    redundante Berechnungen.
 
-    THREADING & PERFORMANCE:
-    ------------------------
+    UI-Integration der Progression:
+    Die Benutzeroberfläche erhält nach jeder LOD-Completion ein Update mit der
+    besten verfügbaren Qualität. Benutzer sehen sofort Verbesserungen, ohne auf
+    die finale Completion warten zu müssen. Progress-Updates informieren über
+    aktuell verarbeitete LOD-Stufe und geschätzte Completion-Zeit.
 
-    **Thread Management:**
-    - QThread-basierte Background-Processing
-    - Thread-Pool-Pattern mit QMutex-Protection
-    - Graceful Thread-Termination (3s timeout, dann force-kill)
-    - Thread-State-Tracking für UI-Display (6-Thread-Status-Grid)
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    **Performance Optimizations:**
-    - Lazy-Loading von Generator-Instanzen (Import only when needed)
-    - Memory-Usage-Tracking pro Generation
-    - Generation-Timing-Statistics für Performance-Analysis
-    - Thread-Reuse für Sequential LOD-Processing
+    5. PARALLELVERARBEITUNG UND PERFORMANCE
 
-    **Memory Management:**
-    - Integration mit DataLODManager's ResourceTracker
-    - Automatic Memory-Cleanup bei Thread-Completion
-    - Large-Array-Detection und specialized Handling
-    - Force-Garbage-Collection bei Memory-Warnings
+    Threading-Architektur:
+    Das System basiert auf QThread-Background-Processing mit einem Thread-Pool-Pattern.
+    Maximal drei Generierungen laufen parallel, um optimale Ressourcennutzung ohne
+    System-Überlastung zu gewährleisten. QMutex-Protection sichert Thread-Safety
+    bei gleichzeitigen Datenzugriffen.
 
-    QUEUE MANAGEMENT & RESILIENCE:
-    ------------------------------
+    Parallellisierungs-Strategie:
+    Die Parallelverarbeitung erfolgt sowohl zwischen verschiedenen Generatoren als
+    auch zwischen verschiedenen LOD-Stufen desselben Generators. Dies maximiert die
+    Ausnutzung moderner Multi-Core-Systeme und minimiert Wartezeiten.
 
-    **Queue Processing:**
-    ```python
-    # Kontinuierliche Queue-Resolution (alle 2s)
-    def resolve_dependency_queue():
-        available_requests = queue.get_available_requests(
-            completed_generators=get_completed_generators(),
-            active_limit=3  # Max 3 parallele Generationen
-        )
-        for request in available_requests:
-            start_lod_progression(request)
-    ```
+    Performance-Monitoring:
+    Der Orchestrator sammelt kontinuierlich Performance-Metriken: Generation-Timings
+    pro LOD-Stufe, Memory-Usage pro Thread und System-Resource-Utilization. Diese
+    Daten ermöglichen Performance-Optimierung und frühzeitige Erkennung von Bottlenecks.
 
-    **Timeout & Error Handling:**
-    - **Request-Timeout:** 5 Minuten per Generation-Request
-    - **Queue-Timeout:** 10 Minuten maximale Queue-Verweilzeit
-    - **Thread-Timeout:** 3 Sekunden für graceful Thread-Termination
-    - **Deadlock-Prevention:** Kontinuierliche Queue-Resolution verhindert Starvation
+    Memory-Management-Integration:
+    Enge Integration mit dem DataLODManager's ResourceTracker ermöglicht intelligente
+    Memory-Allocation. Bei Memory-Warnings wird automatisch Garbage-Collection
+    ausgelöst und Large-Array-Processing speziell behandelt. Thread-Completion
+    triggert automatische Memory-Cleanup.
 
-    **Error Recovery:**
-    - Automatic Retry für transiente Fehler (Import-Errors, Memory-Shortage)
-    - Graceful Degradation bei Generator-Unavailability
-    - Error-Propagation mit detailliertem Error-Context
-    - Cleanup-on-Error verhindert Resource-Leaks
+    Resource-Coordination:
+    Der Orchestrator koordiniert sich mit anderen System-Komponenten bezüglich
+    Ressourcennutzung. ShaderManager-Integration optimiert Thread-Allocation
+    basierend auf GPU-Usage. DataManager-Coordination verhindert simultane
+    Large-Data-Operations.
 
-    REQUEST BUILDER SYSTEM:
-    -----------------------
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    **Type-Safe Request Construction:**
-    ```python
-    # Generator-spezifische Request-Builder mit Parameter-Validation
-    terrain_request = OrchestratorRequestBuilder.build_terrain_request(
-        parameters={"size": 512, "amplitude": 100, "octaves": 6},
-        target_lod="FINAL",
-        source_tab="terrain"
-    )
+    6. INTEGRATION UND DATENVERWALTUNG
 
-    # Batch-Request für Multiple Generators
-    batch_request = OrchestratorRequestBuilder.build_batch_request([
-        terrain_request, geology_request, weather_request
-    ])
-    ```
+    DataLODManager-Integration:
+    Der Orchestrator nutzt den DataLODManager als zentrale Datenquelle und -senke.
+    Alle Dependencies werden über dessen DEPENDENCY_MATRIX aufgelöst. Generated
+    Results werden automatisch im DataManager gespeichert, kategorisiert nach
+    Generator-Type und LOD-Level.
 
-    **Parameter Validation:**
-    - Generator-spezifische Parameter-Range-Validation
-    - Default-Value-Injection für missing Parameters
-    - Type-Checking und Value-Constraint-Enforcement
-    - Invalid-Request-Rejection mit detailed Error-Messages
+    Signal-System für UI-Updates:
+    Eine harmonisierte Signal-Architektur ermöglicht direkte Integration mit
+    BaseMapTabs ohne komplexe Handler-Classes. Standardisierte Signals wie
+    generation_completed, lod_progression_completed und generation_progress
+    gewährleisten konsistente UI-Updates across alle Tab-Types.
 
-    INTEGRATION PATTERNS:
-    ---------------------
+    Automatic Result-Storage:
+    Nach jeder LOD-Completion werden Ergebnisse automatisch im DataManager
+    persistiert. Terrain-Results als Heightmaps, Geology-Results als Rock-Maps,
+    Weather-Results als Climate-Data etc. Dies eliminiert manuelle DataManager-Calls
+    in den Tabs.
 
-    **Tab Integration (Simplified):**
-    ```python
-    # Direkte Signal-Connection ohne Handler-Classes
-    orchestrator.generation_completed.connect(tab.on_generation_completed)
-    orchestrator.lod_progression_completed.connect(tab.on_lod_progression_completed)
-    orchestrator.generation_progress.connect(tab.update_progress_bar)
+    Tab-Communication-Patterns:
+    Tabs verbinden sich direkt mit Orchestrator-Signals für Updates. Request-Submission
+    erfolgt über typisierte Builder-Pattern, die Parameter-Validation und
+    Default-Value-Injection handhaben. Error-Propagation liefert actionable
+    Information für User-Feedback.
 
-    # Request-Submission
-    request_id = orchestrator.request_generation(
-        OrchestratorRequestBuilder.build_terrain_request(tab.get_parameters())
-    )
-    ```
+    Cross-Component-Coordination:
+    Der Orchestrator koordiniert sich mit anderen Manager-Komponenten für optimale
+    System-Performance. Cache-Invalidation bei Parameter-Changes wird mit dem
+    DataManager koordiniert. Shader-Resource-Allocation erfolgt in Abstimmung mit
+    dem ShaderManager.
 
-    **DataManager Integration:**
-    - Automatic Result-Storage eliminiert manual DataManager-Calls in Tabs
-    - LOD-Status-Synchronization zwischen Orchestrator und DataManager
-    - Cache-Invalidation-Coordination bei Parameter-Changes
-    - Memory-Usage-Coordination für Large-Generation-Results
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    **UI Integration:**
-    - 6-Thread-Status-Display für Live-Generation-Monitoring
-    - Queue-Status-Updates für User-Feedback
-    - Progress-Updates mit LOD-specific Detail-Messages
-    - Error-Display mit actionable Error-Information
+    7. ROBUSTHEIT UND FEHLERBEHANDLUNG
 
-    MONITORING & DEBUGGING:
-    -----------------------
+    Graceful Degradation:
+    Das System ist darauf ausgelegt, auch bei partiellen Fehlern funktionsfähig
+    zu bleiben. Einzelne Generator-Failures führen nicht zum System-Ausfall.
+    Automatic Fallback auf Legacy-Generation-Methods erfolgt bei kritischen
+    Orchestrator-Problemen. UI-Responsiveness bleibt auch bei
+    Background-Generation-Overload erhalten.
 
-    **Performance Metrics:**
-    ```python
-    # Generation-Timing-Statistics
-    generation_timings = orchestrator.generation_timings
-    # {generator_type: {lod_level: duration_seconds}}
+    Recovery-Mechanismen:
+    Transiente Fehler werden automatisch mit bis zu drei Retry-Versuchen behandelt.
+    Thread-Pool-Recovery nach Thread-Crashes stellt kontinuierliche Verfügbarkeit
+    sicher. Queue-State-Recovery nach Memory-Shortage verhindert Request-Loss.
+    Background-Thread-Monitoring mit Health-Checks erkennt frühzeitig Probleme.
 
-    # Memory-Usage-Tracking
-    memory_usage = orchestrator.get_memory_usage_summary()
-    # {"data_manager_usage": {...}, "active_threads": 3, "processing_requests": 2}
+    Timeout-Management:
+    Mehrstufiges Timeout-Management verhindert System-Blockierung:
+    - Request-Timeout von fünf Minuten pro Generation-Request
+    - Queue-Timeout von zehn Minuten maximaler Verweilzeit
+    - Thread-Timeout von drei Sekunden für graceful Termination
+    - Deadlock-Prevention durch kontinuierliche Queue-Resolution
 
-    # Thread-State-Monitoring
-    thread_states = orchestrator.state_tracker.get_all_thread_status()
-    # [{"generator": "Terrain", "status": "Generating", "progress": 45, "runtime": "2.3s"}]
-    ```
+    Error-Propagation und User-Feedback:
+    Fehler werden mit detailliertem Context an die UI propagiert. Error-Messages
+    enthalten actionable Information für Benutzer. Partial-Success-Scenarios werden
+    klar kommuniziert. Critical-Error-Recovery-Suggestions helfen bei Problemlösung.
 
-    **Queue Analytics:**
-    ```python
-    # Queue-Status für Performance-Analysis
-    queue_status = orchestrator.dependency_queue.get_queue_status()
-    # {"total_queued": 5, "by_generator": {"terrain": 1, "geology": 2, "water": 2}}
+    System-Health-Monitoring:
+    Kontinuierliche Überwachung der System-Gesundheit durch:
+    - Health-Checks aller Background-Threads
+    - Memory-Usage-Monitoring mit Warning-Thresholds
+    - Queue-Length-Monitoring zur Deadlock-Prevention
+    - Performance-Metrics-Collection für Trend-Analysis
 
-    # Timeout-Analysis
-    timed_out_requests = orchestrator.dependency_queue.get_timed_out_requests(current_time)
-    ```
+    Shutdown-Gracefully:
+    Bei Application-Shutdown werden alle Background-Threads graceful terminiert.
+    Laufende Generierungen werden bis Completion fortgesetzt oder sauber abgebrochen.
+    Partial-Results werden gespeichert. Resource-Cleanup erfolgt vollständig ohne
+    Memory-Leaks.
 
-    ERROR HANDLING & RESILIENCE:
-    -----------------------------
-
-    **Graceful Degradation:**
-    - Continued Operation auch bei einzelnen Generator-Failures
-    - Automatic Fallback auf Legacy-Generation-Methods bei Orchestrator-Problems
-    - Partial-Success-Handling bei Batch-Generations
-    - UI-Responsiveness auch bei Background-Generation-Overload
-
-    **Recovery Mechanisms:**
-    - Automatic Request-Retry für transiente Failures
-    - Thread-Pool-Recovery nach Thread-Crashes
-    - Queue-State-Recovery nach Memory-Shortage
-    - DataManager-Integration-Recovery bei Connection-Problems
-
-    Diese Orchestrator-Architektur ermöglicht robuste, performante Background-Generierung
-    aller Map-Components mit automatischer Dependency-Resolution und intelligenter
-    Resource-Management-Integration.
-
-    =========================================================================================
+    ═══════════════════════════════════════════════════════════════════════════════
     """
 
 def shader_manager():
     """
     Path: gui/managers/shader_manager.py
+    Date Changed: 08.08.2025
 
-    Funktionsweise: GPU-Compute Management für Performance-kritische Operationen
-    - OpenGL Compute Shader für Parallel-Processing
-    - Fallback auf CPU für Systeme ohne GPU-Support
-    - Optimierte Operationen: Noise-Generation, Erosion, Biome-Blending
-    - Memory-Management zwischen GPU und CPU
+    ═══════════════════════════════════════════════════════════════════════════════
 
-    Einsatzgebiete:
-    - Terrain: Multi-Octave Simplex-Noise parallel
-    - Water: Hydraulic Erosion simulation
-    - Weather: Wind-Field calculations
-    - Biome: Vegetation distribution
+    SHADER MANAGER - GPU-COMPUTE INTEGRATION UND VALIDATION
 
-    Kommunikationskanäle:
-    - Input: Large numpy arrays für GPU-Processing
-    - Output: Processed arrays zurück an Data-Manager
+    Input: Generator-Requests für GPU-beschleunigte Operationen
+    Output: GPU-Berechnungen mit Success/Failure-Status und Datenvalidation
+    Kern: GPU-Shader-Verwaltung mit Execution-Monitoring und Datenvalidierung
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    1. ÜBERSICHT UND ZIELSETZUNG
+
+    Der ShaderManager bietet GPU-Compute-Beschleunigung für performance-kritische
+    Operationen aller sechs Generatoren mit fokussierter GPU-Shader-Verwaltung.
+    Die Integration erfolgt über Generator-Requests mit klarer Success/Failure-Rückgabe
+    und umfassender Shader-Execution-Validation. Fallback-Logik verbleibt vollständig
+    in den Generatoren.
+
+    Kernfunktionen:
+    - GPU-Compute-Beschleunigung mit OpenGL Compute Shadern
+    - GPU-Verfügbarkeits-Prüfung und Shader-Compilation-Management
+    - Shader-Execution-Monitoring und Datenvalidierung
+    - Success/Failure-Rückgabe für Generator-Fallback-Entscheidungen
+    - Performance-Monitoring und automatische GPU-Optimierung
+
+    Architektonische Positionierung:
+    Der ShaderManager fungiert als reine GPU-Compute-Schnittstelle zwischen
+    den Generatoren und der GPU-Hardware. Er konzentriert sich ausschließlich
+    auf GPU-Shader-Verwaltung, während Generatoren eigenständig CPU-Fallbacks
+    und Simple-Fallbacks implementieren.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    2. CORE ARCHITECTURE UND KOMPONENTEN
+
+    Performance-Layer-Struktur:
+    Der ShaderManager organisiert sich in drei Hauptkomponenten: GPU-Shader-Management
+    für Shader-Compilation und -Execution, Execution-Validation für
+    Datenintegritäts-Prüfung und Performance-Monitor für kontinuierliche
+    GPU-Optimierung.
+
+    GPU-Shader-Management-Komponente:
+    Diese Kernkomponente verwaltet OpenGL Compute Shader für parallele
+    Berechnung mit 10-50x speedup für Multi-Octave-Noise bei großen LODs.
+    LOD-spezifische Shader-Varianten optimieren Performance basierend auf
+    Auflösung. GPU-Memory-Management koordiniert sich mit DataLODManager
+    für optimale Ressourcennutzung. Shader-Compilation-Status wird kontinuierlich
+    überwacht.
+
+    Execution-Validation-Komponente:
+    Diese Komponente überwacht Shader-Execution-Status und validiert
+    Ergebnis-Daten auf Korrektheit. GPU-Execution-Monitoring erkennt
+    Shader-Crashes oder Timeouts. Datenvalidierung prüft Output-Arrays
+    auf NaN-Werte, Infinite-Values und Range-Violations. Memory-Corruption-Detection
+    identifiziert fehlerhafte GPU-Memory-Operations.
+
+    Performance-Monitor-Komponente:
+    Diese Komponente überwacht GPU-Performance-Metriken, sammelt
+    Execution-Timing-Stats und protokolliert GPU-Memory-Usage für
+    kontinuierliche System-Optimierung. Hardware-Capability-Detection
+    ermöglicht optimale Shader-Variant-Selection.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    3. GPU-SHADER-VERWALTUNG UND VALIDATION
+
+    GPU-Shader-Stufe (Optimale Performance):
+    Der ShaderManager konzentriert sich ausschließlich auf GPU-Shader-Management
+    für maximale Performance-Vorteile. OpenGL Compute Shader ermöglichen
+    parallele Berechnung mit dramatischen Performance-Steigerungen.
+    Multi-Octave-Noise bei großen LODs erreicht 10-50x speedup gegenüber
+    CPU-Implementierung. LOD-spezifische Shader-Varianten optimieren Performance
+    basierend auf Auflösung und Komplexität.
+
+    GPU-Verfügbarkeits-Prüfung:
+    Das System prüft kontinuierlich GPU-Verfügbarkeit und Shader-Compilation-Status.
+    OpenGL-Context-Validation stellt sicher, dass GPU-Operationen möglich sind.
+    Shader-Compilation-Error-Detection identifiziert problematische Shader.
+    Hardware-Capability-Assessment ermittelt optimale Shader-Variants für
+    spezifische GPU-Hardware.
+
+    Shader-Execution-Monitoring:
+    Während der Shader-Ausführung überwacht das System kontinuierlich
+    Execution-Status und Performance-Metriken. GPU-Timeout-Detection
+    erkennt hängende Shader-Operations. Memory-Access-Violation-Detection
+    identifiziert GPU-Memory-Probleme. Execution-Progress-Tracking
+    ermöglicht Cancellation bei Bedarf.
+
+    Datenvalidierung und Integrität:
+    Nach Shader-Completion führt das System umfassende Datenvalidierung durch.
+    NaN-Detection identifiziert mathematische Fehler in Shader-Output.
+    Range-Validation prüft Output-Werte gegen erwartete Parameter-Bereiche.
+    Array-Dimension-Validation stellt korrekte Output-Array-Größen sicher.
+    Memory-Corruption-Detection erkennt fehlerhafte GPU-Memory-Transfers.
+
+    Success/Failure-Rückgabe-Interface:
+    Der ShaderManager liefert klare Success/Failure-Information an Generatoren
+    für Fallback-Entscheidungen. Success-Status enthält validierte Output-Daten
+    und Performance-Metriken. Failure-Status spezifiziert Fehler-Typ und
+    Error-Details für Generator-Debugging. Execution-Timing-Information
+    ermöglicht Performance-Optimierung in Generatoren.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    4. GENERATOR-INTEGRATION PATTERN
+
+    Generator-Fallback-Pattern-Implementierung:
+    Jeder Generator implementiert eigenständige Fallback-Logik mit CPU-Optimized
+    und Simple-Fallback-Methoden. Der Generator prüft zunächst ShaderManager-Verfügbarkeit,
+    führt GPU-Request durch und entscheidet basierend auf Success/Failure-Rückgabe
+    über Fallback-Activation. CPU-Fallbacks und Simple-Fallbacks sind vollständig
+    Generator-internal implementiert.
+
+    TerrainGenerator-Integration-Muster:
+    Der TerrainGenerator implementiert calculate_heightmap mit drei Stufen:
+    GPU-Request über ShaderManager für multi_octave_noise, CPU-Fallback mit
+    optimierten NumPy-Operations bei GPU-Failure, Simple-Fallback mit
+    basic noise generation bei CPU-Problemen. Generator entscheidet autonom
+    über Fallback-Progression basierend auf ShaderManager-Response.
+
+    ShaderManager-Request-Interface:
+    Der ShaderManager-Request erfolgt mit Operation-Type, Input-Data,
+    Parameter-Dictionary und LOD-Level-Spezifikation. Response enthält
+    Success-Boolean, Output-Data bei Success, Error-Type und Error-Details
+    bei Failure, Execution-Time-Metrics für Performance-Tracking.
+    Generator implementiert Fallback-Logic basierend auf Response-Status.
+
+    Generator-Autonome-Fallback-Entscheidung:
+    Bei ShaderManager-Success verwendet Generator GPU-Output direkt.
+    Bei ShaderManager-Failure aktiviert Generator CPU-Fallback mit
+    optimierten NumPy-Vectorization und Multiprocessing. Bei CPU-Fallback-Failure
+    aktiviert Generator Simple-Fallback mit minimal-code Implementation.
+    Jede Fallback-Stufe ist Generator-internal ohne ShaderManager-Dependency.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    5. SHADER OPERATIONS FÜR ALLE GENERATOREN
+
+    Terrain-Generator-Operations:
+    Der ShaderManager bietet request_noise_generation für Multi-Octave
+    Simplex-Noise mit GPU-parallelisierter Octave-Berechnung.
+    Request_shadow_calculation implementiert parallele Raycast-Shadows
+    für realistische Beleuchtung. Request_slope_calculation führt
+    Gradient-Field-Computation für Slope-Maps durch.
+
+    Geology-Generator-Operations:
+    Request_geological_zones implementiert Multi-Zone-Noise-Classification
+    für geologische Gesteinsverteilung. Request_deformation_processing
+    führt Tectonic-Warping-Operations für geologische Verformung durch.
+    Request_mass_conservation implementiert Parallel-Normalization-Operations
+    für geologische Konsistenz.
+
+    Weather-Generator-Operations:
+    Request_wind_field_calculation implementiert CFD-Based Wind-Simulation
+    für realistische Luftströmungen. Request_temperature_distribution
+    führt Thermal-Gradient-Processing für Klimazonen durch.
+    Request_precipitation_modeling implementiert Orographic-Precipitation-Calculation
+    für höhenabhängige Niederschläge.
+
+    Water-Generator-Operations:
+    Request_erosion_simulation implementiert Hydraulic-Erosion-Processing
+    für realistische Landschaftsformung. Request_flow_accumulation
+    führt Watershed-Analysis-Computation für Wassereinzugsgebiete durch.
+    Request_water_distribution implementiert Flow-Network-Calculation
+    für Flusssystem-Generierung.
+
+    Biome-Generator-Operations:
+    Request_biome_blending implementiert Multi-Factor-Biome-Classification
+    basierend auf Klima, Höhe und Wasser. Request_vegetation_distribution
+    führt Density-Map-Generation für Vegetationsdichte durch.
+    Request_biome_transitions implementiert Smooth-Transition-Processing
+    für natürliche Biom-Übergänge.
+
+    Settlement-Generator-Operations:
+    Request_suitability_analysis implementiert Multi-Criteria-Suitability-Mapping
+    für optimale Siedlungsplatzierung. Request_network_optimization
+    führt Road/River-Network-Processing für Infrastruktur durch.
+    Request_settlement_distribution implementiert Population-Density-Calculation
+    für realistische Bevölkerungsverteilung.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    6. LOD-OPTIMIZATION SYSTEM
+
+    LOD-Level-Spezifische Shader-Varianten:
+    Das System implementiert verschiedene Shader-Varianten basierend auf
+    LOD-Level und Grid-Size. Für niedrige LODs bis Level 2 mit 32x32 und
+    64x64 Auflösung werden Fast-Shader-Variants verwendet, die Performance
+    über Qualität priorisieren. Mittlere LODs bis Level 4 mit 128x128 und
+    256x256 nutzen Balanced-Shader-Variants für optimalen Quality-Performance-Tradeoff.
+    Hohe LODs ab Level 5 mit 512x512+ verwenden Quality-Shader-Variants
+    für maximale Bildqualität.
+
+    Performance-Adaptive-Selection-Mechanismus:
+    Das System führt GPU-Performance-Profiling für den ersten LOD-Level
+    durch, um Hardware-Capabilities zu ermitteln. Automatic Fallback-Selection
+    basiert auf Performance-Thresholds, die aus diesem Profiling abgeleitet
+    werden. Memory-Usage-Monitoring überwacht GPU-Memory-Constraints für
+    intelligente Ressourcenallokation. LOD-Level-Performance-Caching
+    speichert Ergebnisse für zukünftige Requests.
+
+    Adaptive-Optimization-Strategien:
+    Das System lernt aus Performance-Daten und passt Shader-Selection
+    dynamisch an. Bei wiederholten Performance-Problemen erfolgt automatischer
+    Downgrade zu einfacheren Shader-Varianten. Memory-Constraints führen
+    zu progressiver LOD-Size-Reduction bis GPU-Memory-Fit erreicht wird.
+    Thread-Allocation wird basierend auf GPU-Utilization optimiert.
+
+    Quality-Performance-Balancing:
+    Für jeden LOD-Level wird der optimale Quality-Performance-Balance
+    automatisch ermittelt. Fast-Variants reduzieren Octave-Count und
+    Sampling-Rate für maximale Speed. Balanced-Variants maintainen
+    algorithmic correctness bei moderater Performance. Quality-Variants
+    implementieren Full-Resolution Processing mit allen Features.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    7. SIGNAL INTEGRATION UND DATALODMANAGER-HUB
+
+    Outgoing-Signals-Architektur:
+    Das Signal-System kommuniziert kontinuierlich mit dem DataLODManager
+    über vier Hauptsignale. Shader_status_changed übermittelt Generator-Name,
+    Operation-Type, GPU-Usage-Status und Performance-Information.
+    Shader_performance_optimized kommuniziert Generator, LOD-Level und
+    angewendete Optimization. GPU_memory_warning übermittelt aktuelle
+    Memory-Usage und Threshold-Werte. Fallback_strategy_activated
+    kommuniziert Generator, Operation und aktivierte Fallback-Stufe.
+
+    DataLODManager-Integration-Pattern:
+    Der DataLODManager empfängt Shader-Performance-Information über
+    shader_status_changed Signale und integriert diese in das globale
+    Performance-Monitoring. Performance-Information wird an UI-Komponenten
+    weitergeleitet über shader_info_updated Signale. Memory-Warnings
+    triggern koordinierte Resource-Cleanup-Aktionen zwischen ShaderManager
+    und DataLODManager.
+
+    UI-Status-Display-Integration:
+    Das System bietet umfassende UI-Integration für Benutzer-Information.
+    Active-Fallback-Strategy-Display zeigt aktuell verwendete Performance-Stufe.
+    GPU-Utilization-Stats ermöglichen Performance-Monitoring durch Benutzer.
+    Memory-Usage-Display zeigt GPU-Memory-Consumption für Resource-Management.
+    Shader-Compilation-Status bietet detaillierte Information für Debugging.
+
+    Signal-Flow-Koordination:
+    Shader-Requests triggern Performance-Monitoring-Signals an DataLODManager.
+    Memory-Warnings vom DataLODManager führen zu Shader-Memory-Cleanup.
+    LOD-Progression-Signals koordinieren Shader-Optimization mit
+    Generation-Progress. Error-Signals ermöglichen koordinierte
+    Fehlerbehandlung zwischen Komponenten.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    8. GPU-EXECUTION-VALIDATION UND ERROR-DETECTION
+
+    GPU-Execution-Monitoring-System:
+    Das System überwacht kontinuierlich GPU-Shader-Execution für Fehler-Detection
+    und Performance-Tracking. Execution-Timeout-Detection erkennt hängende
+    Shader-Operations mit konfigurierbaren Timeout-Werten. GPU-Memory-Access-Monitoring
+    identifiziert Memory-Violations und Invalid-Pointer-Access.
+    Shader-Crash-Detection erkennt GPU-Driver-Exceptions und Hardware-Failures.
+
+    Datenvalidierung-nach-Execution:
+    Nach Shader-Completion führt das System umfassende Output-Datenvalidierung
+    durch. NaN-Value-Detection identifiziert mathematische Errors in
+    Floating-Point-Calculations. Infinite-Value-Detection erkennt
+    Division-by-Zero und Overflow-Conditions. Range-Validation prüft
+    Output-Values gegen erwartete Parameter-Ranges für Plausibility-Checks.
+
+    Memory-Integrity-Validation:
+    Das System validiert GPU-Memory-Integrity vor und nach Shader-Execution.
+    Buffer-Size-Validation stellt korrekte Input/Output-Buffer-Dimensionen sicher.
+    Memory-Corruption-Detection identifiziert fehlerhafte GPU-Memory-Transfers.
+    Data-Type-Validation prüft korrekte Data-Type-Mapping zwischen CPU und GPU.
+
+    Error-Classification-und-Reporting:
+    Errors werden in kategorisierte Types klassifiziert für spezifische
+    Generator-Response. Hardware-Errors indizieren GPU-Driver-Probleme
+    oder Hardware-Failures. Shader-Compilation-Errors zeigen Code-Probleme
+    in Shader-Implementation. Data-Validation-Errors indizieren Input-Parameter-Probleme
+    oder Algorithm-Bugs. Performance-Errors zeigen Timeout oder Resource-Exhaustion.
+
+    Automatic-Error-Recovery-Mechanisms:
+    Bei detektierten Errors führt das System automatische Recovery-Versuche durch.
+    Memory-Cleanup bei Memory-Corruption resettet GPU-Memory-State.
+    Shader-Recompilation bei Compilation-Errors versucht Error-Correction.
+    Context-Reset bei Hardware-Errors reinitialisiert GPU-Context.
+    Timeout-Extension bei Performance-Errors erweitert Execution-Limits.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    9. PERFORMANCE MONITORING UND OPTIMIZATION
+
+    Performance-Metrics-Collection-System:
+    Das System sammelt umfassende Performance-Metriken für kontinuierliche
+    Optimierung. GPU-Execution-Times werden per Operation in Listen gespeichert
+    für Trend-Analysis. CPU-Fallback-Times ermöglichen Vergleichsanalysen
+    zwischen Performance-Stufen. Memory-Usage-Peaks dokumentieren
+    Peak-Memory-Consumption per Operation für Memory-Optimization.
+
+    Fallback-Frequency-Analysis:
+    Fallback-Frequencies werden per Operation und Strategy-Type getrackt
+    für System-Health-Monitoring. LOD-Performance-Scaling dokumentiert
+    Performance-Verhältnis zwischen LOD-Levels für Optimization-Decisions.
+    Hardware-Specific-Performance-Profiles ermöglichen adaptive Strategy-Selection.
+
+    Adaptive-Optimization-Implementation:
+    Performance-Threshold-Learning ermöglicht automatische Fallback-Selection
+    basierend auf Historical-Performance-Data. LOD-Level-Performance-Prediction
+    optimiert Thread-Allocation für maximale Effizienz. Memory-Usage-Prediction
+    ermöglicht proaktive GPU-Memory-Management. Generator-Specific-Performance-Profiling
+    ermöglicht Custom-Optimizations per Generator-Type.
+
+    Resource-Management-Coordination:
+    GPU-Texture-Memory-Pooling implementiert wiederverwendbare Resource-Allocation.
+    Automatic-GPU-Memory-Cleanup erfolgt bei DataLODManager-Memory-Warnings.
+    CPU-Memory-Coordination mit DataLODManager-Resource-Tracker optimiert
+    System-Resource-Usage. Thread-Pool-Coordination mit GenerationOrchestrator
+    verhindert Resource-Conflicts.
+
+    Real-Time-Performance-Adaptation:
+    Das System passt Performance-Strategies in Echtzeit basierend auf
+    aktueller System-Load an. Dynamic-Quality-Adjustment reduziert
+    Shader-Complexity bei Performance-Bottlenecks. Automatic-LOD-Downgrade
+    bei Memory-Constraints erhält System-Stability. Predictive-Optimization
+    basierend auf Historical-Data minimiert Fallback-Frequency.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    10. SYSTEM-RESILIENCE UND GPU-MANAGEMENT
+
+    GPU-Hardware-Resilience-Strategies:
+    Das System implementiert umfassende Resilience-Mechanisms für
+    GPU-Hardware-Probleme. GPU-Driver-Crash-Recovery reinitialisiert
+    GPU-Context nach Driver-Failures. Hardware-Failure-Detection
+    identifiziert defekte GPU-Hardware durch Error-Pattern-Analysis.
+    Automatic-GPU-Disable bei wiederholten Hardware-Failures schützt
+    System-Stability.
+
+    Shader-Compilation-Error-Management:
+    Bei Shader-Compilation-Problemen führt das System systematische
+    Error-Analysis durch. Syntax-Error-Detection identifiziert
+    Code-Probleme in Shader-Source. Hardware-Compatibility-Issues
+    werden durch Feature-Detection erkannt. Automatic-Shader-Fallback
+    zu einfacheren Shader-Variants bei Compilation-Failures.
+
+    Memory-Management-Resilience:
+    GPU-Memory-Management implementiert robuste Error-Recovery für
+    Memory-Probleme. Memory-Allocation-Failure-Recovery reduziert
+    Buffer-Sizes und versucht erneute Allocation. Memory-Leak-Detection
+    überwacht GPU-Memory-Usage für Leak-Prevention.
+    Automatic-Memory-Cleanup bei kritischen Memory-Levels.
+
+    Performance-Degradation-Handling:
+    Bei Performance-Problemen implementiert das System adaptive
+    Response-Strategies. Timeout-Extension für langsame GPU-Hardware
+    erweitert Execution-Limits. Quality-Reduction reduziert
+    Shader-Complexity bei Performance-Bottlenecks.
+    Automatic-LOD-Downgrade bei persistenten Performance-Issues.
+
+    System-State-Recovery:
+    Das System implementiert umfassende State-Recovery-Mechanisms.
+    GPU-Context-Reinitialization nach Context-Loss stellt
+    Functionality wieder her. Shader-Program-Reload nach GPU-Reset
+    recompiliert alle Shaders. Buffer-Reallocation nach Memory-Corruption
+    reinitialisiert GPU-Memory-Structures.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    11. INTEGRATION SUMMARY UND SYSTEM-BENEFITS
+
+    Generator-ShaderManager-Interface-Flow:
+    Der überarbeitete Ablauf beginnt mit Generator-Method-Call für spezifische
+    GPU-Operation. ShaderManager-Request mit Operation-Parameters wird erstellt.
+    ShaderManager prüft GPU-Verfügbarkeit und führt Shader-Execution durch.
+    Success/Failure-Response mit Daten oder Error-Information wird an Generator
+    zurückgegeben. Generator implementiert eigenständige Fallback-Logic
+    basierend auf ShaderManager-Response.
+
+    Klare Verantwortlichkeitstrennung:
+    ShaderManager konzentriert sich ausschließlich auf GPU-Shader-Management,
+    Execution-Monitoring und Datenvalidierung. Generatoren implementieren
+    vollständige Fallback-Logic mit CPU-Optimized und Simple-Fallback-Methoden.
+    Diese Trennung reduziert Complexity und verbessert Maintainability
+    durch klare Interface-Definitionen.
+
+    System-Benefits-durch-Fokussierung:
+    Performance-Benefit durch spezialisierte GPU-Shader-Optimization ohne
+    Fallback-Overhead. Reliability-Benefit durch robuste Shader-Execution-Validation
+    und Error-Detection. Maintainability-Benefit durch klare Verantwortlichkeitstrennung
+    zwischen ShaderManager und Generatoren. Scalability-Benefit durch
+    fokussierte GPU-Resource-Management.
+
+    Generator-Autonomie-Vorteile:
+    Generator-autonome Fallback-Implementation ermöglicht spezifische
+    Optimization pro Generator-Type. CPU-Fallback-Methods können
+    Generator-spezifisch optimiert werden. Simple-Fallback-Implementation
+    kann Domain-Knowledge des Generators nutzen. Fallback-Timing-Control
+    liegt vollständig beim Generator.
+
+    Development-und-Debugging-Benefits:
+    Simplified-ShaderManager-Interface reduziert Integration-Complexity.
+    Clear-Error-Reporting ermöglicht präzises Debugging von GPU-Issues.
+    Generator-focused-Fallback-Logic vereinfacht Generator-Development.
+    Separated-Concerns erleichtern Unit-Testing und System-Validation.
+
+    ═══════════════════════════════════════════════════════════════════════════════
+    Der komplette Ablauf beginnt mit Generator-Method-Call für spezifische
+    Operation. ShaderManager-Request mit Fallback-Function wird erstellt.
+    3-stufiges Fallback-System garantiert Operation-Success: GPU-Shader
+    bei Verfügbarkeit, CPU-Fallback bei GPU-Problemen, Simple-Fallback
+    als Ultimate-Guarantee. Performance-Stats werden an DataLODManager
+    übermittelt für UI-Status-Update.
+
+    System-Benefits-Realization:
+    Performance-Benefit durch GPU-Acceleration erreicht dramatische
+    Speedups wo Hardware verfügbar ist. Reliability-Benefit durch
+    Guaranteed-Success eliminiert Generation-Failures vollständig.
+    Scalability-Benefit durch LOD-optimierte Shader-Variants passt
+    Performance an Anforderungen an. Maintainability-Benefit durch
+    Simple-Fallbacks direkt in Generatoren reduziert System-Complexity.
+
+    User-Experience-Optimization:
+    Transparent-Fallback ohne Generation-Failures bietet nahtlose
+    User-Experience unabhängig von Hardware-Capabilities. Performance-Feedback
+    informiert Benutzer über aktuelle System-Performance ohne Technical-Overwhelm.
+    Quality-Options ermöglichen User-Control über Performance-Quality-Tradeoffs.
+    Debugging-Support assistiert bei Performance-Optimization und Troubleshooting.
+
+    Development-Benefits:
+    Unified-Interface für alle Generator-Types reduziert Integration-Complexity.
+    Standardized-Fallback-Pattern vereinfacht Generator-Development.
+    Performance-Monitoring-Integration ermöglicht Data-driven-Optimization.
+    Error-Handling-Abstraction reduziert Fehlerbehandlung in Generatoren.
+
+    ═══════════════════════════════════════════════════════════════════════════════
     """
 
 def navigation_manager():
     """
     Path: gui/managers/navigation_manager.py
 
-    Funktionsweise: Zentrale Tab-Navigation und Parameter-Persistierung mit Dependency-Validation
-    - Tab-Reihenfolge: main_menu → terrain → geology → settlement → weather → water → biome → overview
-    - Automatische Parameter-Speicherung vor Tab-Wechsel mit Validity-Checks
-    - Window-Geometrie Persistierung zwischen Sessions
-    - Dependency-Validation vor Navigation mit User-friendly Error-Messages
-    - Graceful Cleanup und Resource-Management bei Tab-Wechseln
-    - Cross-Tab-Parameter-Transfer über DataManager-Integration
+    Funktionsweise: Tab-Navigation und Fenster-Geometrie-Verwaltung ohne Interferenz mit Background-Generation
+    - NavigationManager koordiniert Tab-Wechsel mit Multi-Monitor-Support und Geometrie-Persistierung
+    - Tab-Sequence-Management mit Previous/Next-Navigation und Keyboard-Shortcuts
+    - Window-Geometry-System für Tab-spezifische Fenster-Konfigurationen
+    - Navigation-State-Tracking für UI-Control-Updates und User-Experience
 
-    Kommunikationskanäle:
-    - Signals: tab_changed, parameters_saved, validation_failed für Cross-Component-Communication
-    - Config: gui_default.py für Window-Settings und Default-Geometries
-    - Data: Koordination mit DataManager für Parameter-Transfer und Dependency-Checks
-    - Validation: Nutzt DataManager.check_dependencies() für vollständige Dependency-Validation
+    Parameter Input:
+    - target_tab [string]: Ziel-Tab aus TAB_SEQUENCE (main_menu, terrain, geology, water, biome, settlement, overview)
+    - save_geometry [boolean]: Geometrie vor Tab-Wechsel speichern
+    - restore_history [boolean]: Navigation-Historie wiederherstellen
+    - keyboard_navigation [boolean]: Keyboard-Shortcut-Unterstützung aktivieren
 
-    Tab-Dependencies (definiert Navigation-Constraints):
-    - main_menu: [] (keine Dependencies)
-    - terrain: [] (Basis-Generator)
-    - geology: [terrain] (braucht heightmap)
-    - weather: [terrain] (braucht heightmap für orographic effects)
-    - water: [terrain, geology, weather] (braucht heightmap, hardness_map, precipitation)
-    - biome: [terrain, weather, water] (braucht heightmap, temperature, soil_moisture)
-    - settlement: [terrain, water, biome] (braucht heightmap, water_biomes, biome_map)
-    - overview: [terrain, geology, settlement, weather, water, biome] (braucht alle für Export)
+    Dependencies:
+    - Keine direkten Dependencies zu DataLODManager, ParameterManager oder GenerationOrchestrator
+    - Read-Only Signal-Empfang für Status-Display von anderen Managern
+    - UI-Integration über MainWindow-Interface
 
-    Navigation-Validation:
-    - Dependency-Completeness-Check: Prüft ob alle required Outputs verfügbar sind
-    - LOD-Sufficiency-Check: Mindestens LOD64 muss für alle Dependencies vorhanden sein
-    - Parameter-Consistency-Check: Validiert dass alle Dependencies mit aktuellen Parametern berechnet sind
-    - Error-Recovery-Suggestions: Schlägt automatische Re-Generation fehlender Dependencies vor
+    Output:
+    - NavigationResult-Objekt mit current_tab, previous_tab, navigation_success
+    - WindowGeometry-Daten für Tab-spezifische Fenster-Restaurierung
+    - NavigationState-Updates für UI-Control-Synchronisation
 
-    Window-Management:
-    - Multi-Tab-Geometry-Persistence: Separate Geometrie für jeden Tab
-    - Resolution-Adaptation: Passt Window-Size an Display-Resolution an
-    - Multi-Monitor-Support: Merkt sich Monitor-Assignment für jeden Tab
-    - Graceful-Tab-Cleanup: Speichert Parameter und räumt Ressourcen auf bei Tab-Wechsel
+    Tab-Navigation-System (Simplified):
+    - Tab-Sequence: main_menu → terrain → geology → water → biome → settlement → overview
+    - Bidirectional-Navigation mit Previous/Next-Controls
+    - Direct-Tab-Access über Tab-Names ohne Dependency-Validation
+    - Background-Generation-Independence: Navigation unterbricht keine laufenden Prozesse
+
+    Fallback-System (3-stufig):
+    - Standard-Navigation: Vollständige Geometrie-Persistierung mit Multi-Monitor-Support
+    - Reduzierte-Navigation: Basis-Tab-Wechsel ohne komplexe Geometrie-Features bei Speicher-Problemen
+    - Minimal-Navigation: Einfacher Tab-Wechsel ohne Persistierung bei kritischen Fehlern
+
+    Window-Geometry-Management:
+    1. Tab-spezifische Geometrie-Speicherung (Position, Größe, Monitor-Assignment)
+    2. Multi-Monitor-Unterstützung mit automatischer Monitor-Detection
+    3. Resolution-Change-Adaptation ohne Navigation-Unterbrechung
+    4. Splitter-Position-Persistierung für Canvas/Control-Panel-Aufteilung
+    5. Minimized/Maximized-State-Recovery pro Tab
+
+    Navigation-State-Tracking:
+    1. Current-Tab-Management ohne Business-Logic-Validation
+    2. Navigation-History für Back/Forward-Funktionalität
+    3. Recently-Used-Tabs für Quick-Access-Features
+    4. Tab-Status-Display basierend auf Signal-Inputs von anderen Managern
+
+    Background-Generation-Independence:
+    - Tab-Wechsel haben keine Auswirkungen auf laufende Generation-Threads
+    - Background-Processes empfangen weiterhin Updates unabhängig vom aktiven Tab
+    - Navigation-Events triggern keine Parameter-Validierung oder Dependency-Checks
+    - Graceful-Navigation ohne Unterbrechung von Workflows
+
+    Error-Recovery-Mechanisms:
+    - Invalid-Tab-Recovery mit Fallback zu main_menu
+    - Corrupted-Geometry-Recovery mit Default-Window-Configuration
+    - Monitor-Unavailability-Recovery mit Primary-Monitor-Fallback
+    - Config-File-Corruption-Recovery mit Built-in-Default-Values
+
+    Performance-Characteristics:
+    - Navigation-Operations unter 10ms für instant User-Response
+    - Minimal Memory-Footprint durch Elimination komplexer Business-Logic
+    - Cached-Geometry-Lookups für Performance-optimierte Window-Restaurierung
+    - Non-Blocking-Operations während Navigation-Prozessen
+
+    Klassen:
+    NavigationManager
+        Funktionsweise: Hauptklasse für Tab-Navigation und Window-Management
+        Aufgabe: Koordiniert Tab-Wechsel, Geometrie-Persistierung und UI-State-Updates
+        External-Interface: navigate_to_tab(target_tab), get_current_tab(), save_window_state() - wird von MainWindow aufgerufen
+        Internal-Methods: _coordinate_navigation(), _validate_tab_target(), _update_ui_controls()
+        Dependencies: Keine direkten Dependencies, empfängt Status-Signals von anderen Managern
+        Error-Handling: Graceful Degradation bei Navigation-Problemen, Fallback-Chain ohne Workflow-Disruption
+
+    TabSequenceManager
+        Funktionsweise: Verwaltet Tab-Reihenfolge und Navigation-Logik für Previous/Next-Operations
+        Aufgabe: Bestimmt Target-Tab basierend auf aktueller Position und Navigation-Direction
+        Methoden: get_next_tab(), get_previous_tab(), get_tab_index(), validate_tab_sequence()
+        Tab-Sequence: Linear-Array mit Wrap-Around-Logic für seamless Navigation
+        Spezifische Fallbacks:
+          - Standard-Sequence: Vollständige TAB_SEQUENCE mit allen Generator-Tabs
+          - Reduced-Sequence: Basis-Tabs (main_menu, terrain, overview) bei Memory-Constraints
+          - Minimal-Sequence: Nur main_menu und overview bei kritischen System-Zuständen
+
+    WindowGeometryController
+        Funktionsweise: Speichert und restauriert Tab-spezifische Fenster-Geometrie mit Multi-Monitor-Support
+        Aufgabe: Geometrie-Persistierung, Monitor-Assignment, Resolution-Adaptation
+        Methoden: save_current_geometry(), restore_geometry_for_tab(), adapt_to_display_change()
+        Geometry-Storage: Tab-spezifische Dictionaries mit width, height, x, y, monitor_id
+        Spezifische Fallbacks:
+          - Full-Geometry: Komplette Geometrie-Persistierung mit Multi-Monitor-Daten
+          - Basic-Geometry: Standard-Größe ohne Position-Tracking bei Storage-Problemen
+          - Default-Geometry: Fixed-Layout (1400x900) bei Geometry-System-Failures
+
+    NavigationStateTracker
+        Funktionsweise: Verfolgt Navigation-Zustand und Historie für UI-Control-Updates
+        Aufgabe: Current-Tab-Management, Navigation-History, UI-Status-Synchronisation
+        Methoden: update_current_tab(), add_to_history(), get_navigation_state(), reset_navigation_state()
+        State-Management: Current-Tab, Previous-Tab, Navigation-Direction, History-Stack
+        Spezifische Fallbacks:
+          - Full-Tracking: Komplette Navigation-Historie mit Timestamps und User-Actions
+          - Basic-Tracking: Current/Previous-Tab ohne detaillierte Historie bei Memory-Limits
+          - Minimal-Tracking: Nur Current-Tab ohne Historie bei kritischen Zuständen
+
+    NavigationControlsManager
+        Funktionsweise: Verwaltet Navigation-UI-Controls und Keyboard-Shortcuts
+        Aufgabe: Button-State-Updates, Keyboard-Handling, Control-Synchronisation mit Navigation-State
+        Methoden: update_button_states(), handle_keyboard_shortcuts(), sync_with_navigation_state()
+        Control-Elements: Previous/Next-Buttons, Tab-Indicators, Keyboard-Shortcuts (Ctrl+PageUp/Down)
+        Spezifische Fallbacks:
+          - Full-Controls: Alle Navigation-Controls mit Keyboard-Shortcuts und Visual-Indicators
+          - Basic-Controls: Previous/Next-Buttons ohne komplexe Keyboard-Handling
+          - Minimal-Controls: Nur Direct-Tab-Selection ohne Navigation-Enhancements
+
+    Integration und Datenfluss:
+    MainWindow → NavigationManager.navigate_to_tab(target_tab)
+              → TabSequenceManager.determine_target_tab() → Validation
+              → WindowGeometryController.save_current_geometry() → Persistence
+              → NavigationStateTracker.update_navigation_state() → State-Updates
+              → NavigationControlsManager.update_ui_controls() → UI-Synchronisation
+              → MainWindow.switch_active_tab() → UI-Display-Update
+
+    Signal-Architecture:
+
+    Outgoing Signals (NavigationManager → UI):
+    tab_changed = pyqtSignal(str, str)              # (from_tab, to_tab)
+    navigation_state_updated = pyqtSignal(dict)     # (current_tab, can_go_back, can_go_forward)
+    window_geometry_changed = pyqtSignal(str, dict) # (tab_name, geometry_data)
+    navigation_error = pyqtSignal(str, str)         # (error_type, error_message)
+
+    Incoming Signals (Andere Manager → NavigationManager für Status-Display):
+    data_lod_manager.tab_status_changed.connect(navigation_manager.update_tab_status_indicators)
+    generation_orchestrator.background_status.connect(navigation_manager.update_generation_indicators)
+    parameter_manager.parameter_validation_state.connect(navigation_manager.update_parameter_indicators)
+
+    Output-Datenstrukturen:
+    - NavigationResult: success_state, current_tab, previous_tab, navigation_time, error_info
+    - WindowGeometry: width, height, x_position, y_position, monitor_id, maximized_state
+    - NavigationState: current_tab, tab_history, can_navigate_back, can_navigate_forward, active_shortcuts
+    - ControlState: button_states, keyboard_enabled, visual_indicators, status_messages
     """
 
 def main_menu():
