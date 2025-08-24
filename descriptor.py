@@ -890,6 +890,7 @@ def data_lod_manager():
     - Age-based Cleanup: Ressourcen >2h automatisch bereinigt
     - Size-based Cleanup: Ressourcen >200MB bei Memory-Warnings
     - Automatic Garbage-Collection bei Force-GC-Threshold
+    - LOD-Memory-Optimization: Automatisches Löschen niedrigerer LODs, wenn höhere LOD erfolgreich erstellt
 
     SIGNAL ARCHITECTURE:
     --------------------
@@ -1081,17 +1082,16 @@ def parameter_manager():
 
     Information-Only Signals:
     Das neue Signal-System basiert auf drei Hauptsignalen ohne
-    Generation-Trigger-Funktionalität. Das parameter_changed Signal übermittelt
-    Tab-Name, Parameter-Name, alten Wert und neuen Wert für
-    Tab-übergreifende Information. Das cache_invalidation_requested Signal
-    kommuniziert Source-Tab und betroffene Generatoren für intelligente
-    Cache-Verwaltung. Das manual_generation_requested Signal überträgt
-    Generator-Type und Parameter-Dictionary für explizite Generierungs-Anfragen.
-
-    Entfernte Signals:
-    Die Signals validation_requested, generation_requested und update_completed
-    wurden vollständig entfernt, da sie automatische Generierungen auslösten
-    und damit dem Manual-Only-Prinzip widersprachen.
+    Generation-Trigger-Funktionalität.
+    - parameter_changed:
+        Signal übermittelt Tab-Name, Parameter-Name, alten Wert und neuen Wert für
+        Tab-übergreifende Information.
+    - cache_invalidation_requested:
+        Signal kommuniziert Source-Tab und betroffene
+        Generatoren für intelligente Cache-Verwaltung.
+    - manual_generation_requested:
+        Signal überträgt Generator-Type und Parameter-
+        Dictionary für explizite Generierungs-Anfragen.
 
     Signal-Integration-Pattern:
     Tabs registrieren sich für Information-Only Signals über
@@ -1585,6 +1585,7 @@ def shader_manager():
     """
     Path: gui/managers/shader_manager.py
     Date Changed: 08.08.2025
+    Status: eventuell einige falsche Inhalte
 
     ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2187,543 +2188,1138 @@ def main_menu():
 def base_tab():
     """
     Path: gui/tabs/base_tab_refactored.py
-    date_changed: 07.08.2025
+    date_changed: 24.08.2025
 
-    =========================================================================================
-    BASEMAPTAB - VOLLSTÄNDIGE REFACTORED IMPLEMENTATION
-    =========================================================================================
-
-    ARCHITECTURE OVERVIEW:
-    ----------------------
+    ## ÜBERSICHT UND ZIELSETZUNG
 
     BaseMapTab ist die fundamentale Basis-Klasse für alle spezialisierten Map-Editor Tabs.
-    Sie implementiert ein standardisiertes 70/30 Layout-System, Cross-Tab-Kommunikation,
-    automatische Generation-Workflows und robustes Resource-Management.
+    Sie implementiert ein standardisiertes 70/30 Layout-System, Cross-Tab-Kommunikation
+    und robustes UI-Management mit klarer Trennung zwischen UI-Layer und Business-Logic.
 
-    DESIGN PRINCIPLES:
-    ------------------
-    1. MODULARE ARCHITEKTUR: Jede Funktionalität ist in separate, testbare Methoden aufgeteilt
-    2. RESOURCE SAFETY: Systematisches Tracking und Cleanup aller UI-Ressourcen
-    3. ERROR RESILIENCE: Jede kritische Operation hat Exception-Handling
-    4. SIGNAL ORCHESTRATION: Standardisierte Cross-Tab-Kommunikation über Signals
-    5. MEMORY EFFICIENCY: Change-Detection verhindert unnötige Display-Updates
-    6. EXTENSIBILITY: Sub-Classes können jede Funktionalität selektiv überschreiben
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## KERNVERANTWORTLICHKEITEN
 
-    CORE COMPONENTS:
-    ----------------
+    **UI-Layout und Display-Management:**
+    - Standardisiertes 70/30 Layout mit QSplitter (Canvas links, Controls rechts)
+    - 2D/3D Display-Stack mit Toggle-Controls und Fallback-Management
+    - Parameter-UI-Controls als Proxy zum ParameterManager
+    - Display-Update-Koordination ohne eigene Business-Logic
 
-    ┌─────────────────┬─────────────────────────────────────────────────────────────┐
-    │ COMPONENT       │ RESPONSIBILITY                                               │
-    ├─────────────────┼─────────────────────────────────────────────────────────────┤
-    │ Layout System   │ 70/30 Canvas/Control Split mit dynamischer Größenanpassung │
-    │ Display Stack   │ 2D/3D View-Toggle mit Fallback-Management                  │
-    │ Auto-Simulation │ Parameter-Change-Detection und Auto-Generation             │
-    │ Orchestrator    │ Integration mit GenerationOrchestrator für LOD-Progression │
-    │ Resource Track  │ Memory-Leak-Prevention durch systematisches Cleanup        │
-    │ Signal Hub      │ Cross-Tab-Communication und Data-Change-Notifications      │
-    └─────────────────┴─────────────────────────────────────────────────────────────┘
+    **Manager-Integration als Proxy:**
+    - ParameterManager: UI-Parameter ↔ Storage-Parameter Synchronisation
+    - GenerationOrchestrator: Generation-Requests mit Parameter-Weiterleitung
+    - DataLODManager: Display-Data-Retrieval für UI-Updates
+    - NavigationManager: Tab-Navigation und Window-Geometry
 
-    SIGNAL ARCHITECTURE:
-    --------------------
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## SIGNAL-ARCHITEKTUR
 
-    OUTGOING SIGNALS (BaseMapTab → Other Components):
-    • data_updated(generator_type: str, data_key: str)
-      - Emittiert wenn Tab neue Daten generiert hat
-      - Andere Tabs können darauf reagieren und ihre Dependencies prüfen
+    **Outgoing Signals (UI-Events):**
+    - `generate_requested(generator_type: str)` → GenerationOrchestrator
+    - `parameter_ui_changed(param_name: str, value)` → ParameterManager
+    - `display_mode_changed(mode: str)` → self.update_display()
 
-    • parameter_changed(generator_type: str, parameters: dict)
-      - Emittiert bei Parameter-Änderungen
-      - Triggert Auto-Simulation in anderen Tabs falls aktiviert
+    **Incoming Signals (UI-Updates):**
+    - `parameter_manager.parameter_changed` → update_parameter_ui()
+    - `data_lod_manager.data_updated` → update_display()
+    - `generation_orchestrator.generation_progress` → update_progress_ui()
 
-    • validation_status_changed(generator_type: str, is_valid: bool, messages: list)
-      - Emittiert bei Dependency-Status-Änderungen
-      - Navigation-Manager kann Tab-Verfügbarkeit entsprechend anpassen
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## UI-ARCHITEKTUR
 
-    • generation_completed(generator_type: str, success: bool)
-      - Emittiert nach Abschluss einer Generation
-      - Ermöglicht Chain-Generationen zwischen Tabs
+    **Main Layout Structure:**
+    BaseMapTab (QWidget)
+    ├── QHBoxLayout (70/30 Split mit QSplitter)
+    │   ├── Canvas Container (70%)
+    │   │   ├── View Toggle Buttons (2D/3D)
+    │   │   └── QStackedWidget (Display-Switcher)
+    │   └── Control Widget (30%)
+    │       ├── QScrollArea (Parameter-Controls - scrollable)
+    │       └── Navigation Panel (Fixed - not scrollable)
 
-    INCOMING SIGNALS (Other Components → BaseMapTab):
-    • data_manager.data_updated → on_external_data_updated()
-      - Reagiert auf Daten-Updates von anderen Generatoren
-      - Prüft Dependencies und triggert Display-Updates
+    **Control Panel Composition:**
+    QScrollArea (scrollable content)
+    ├── Control Panel (QWidget) ← Sub-Classes add content here
+    │   ├── Custom Parameter Controls ← Via control_panel.layout()
+    │   ├── Auto-Simulation Panel ← Standardized across all tabs
+    │   └── Error Status Display ← Shows dependency/generation status
+    └── Navigation Panel (fixed) ← Always visible, not scrollable
 
-    • data_manager.cache_invalidated → on_cache_invalidated()
-      - Reagiert auf Cache-Invalidierung
-      - Refresht Display falls nötig
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## LIFECYCLE-MANAGEMENT
 
-    • generation_orchestrator.* → _on_generation_*()
-      - Empfängt LOD-Progression-Updates vom Orchestrator
-      - Aktualisiert UI-Status und Progress-Anzeigen
+    **Initialization Sequence:**
+    1. `__init__()`: Core attribute setup, Manager-Referenzen
+    2. `setup_ui()`: UI structure creation mit Exception-Handling
+       - `setup_layout_structure()`: 70/30 Split, Splitter-Konfiguration
+       - `setup_display_stack()`: 2D/3D Views mit Fallback-Handling
+       - `setup_control_panel()`: Scrollable Parameter-Area
+       - `setup_navigation_panel()`: Fixed Navigation (not scrollable)
+       - `setup_auto_simulation()`: Auto-Generation Controls
+    3. `setup_signals()`: Manager-Signal-Verbindungen
+    4. `setup_generation_handlers()`: GenerationOrchestrator Integration
 
-    UI ARCHITECTURE:
-    ----------------
+    **Cleanup Sequence:**
+    1. `cleanup_ui_resources()`: UI-spezifische Resource-Deallocation
+    2. `disconnect_manager_signals()`: Exception-safe Signal-Disconnects
+    3. Parameter-UI-State reset ohne Manager-Interferenz
 
-    MAIN LAYOUT STRUCTURE:
-    ┌──────────────────────────────────────────────────────────────────────────────────┐
-    │ BaseMapTab (QWidget)                                                             │
-    │ ┌──────────────────────────────────────────────────────────────────────────────┐ │
-    │ │ QHBoxLayout (main_layout)                                                    │ │
-    │ │ ┌───────────────────────────┬──────────────────────────────────────────────┐ │ │
-    │ │ │ Canvas Container (70%)    │ Control Widget (30%)                         │ │ │
-    │ │ │ ┌───────────────────────┐ │ ┌──────────────────────────────────────────┐ │ │ │
-    │ │ │ │ View Toggle Buttons   │ │ │ QVBoxLayout                              │ │ │ │
-    │ │ │ └───────────────────────┘ │ │ ┌──────────────────────────────────────┐ │ │ │ │
-    │ │ │ ┌───────────────────────┐ │ │ │ QScrollArea                          │ │ │ │ │
-    │ │ │ │ QStackedWidget        │ │ │ │ ┌──────────────────────────────────┐ │ │ │ │ │
-    │ │ │ │ ├─ 2D Display         │ │ │ │ │ Control Panel (QWidget)          │ │ │ │ │ │
-    │ │ │ │ └─ 3D Display         │ │ │ │ │ ┌─ Parameter Controls (Sub-Class)│ │ │ │ │ │
-    │ │ │ └───────────────────────┘ │ │ │ │ ├─ Auto-Simulation Panel         │ │ │ │ │ │
-    │ │ └───────────────────────────┘ │ │ │ └─ Error Status Display          │ │ │ │ │ │
-    │ │                               │ │ └──────────────────────────────────┘ │ │ │ │ │
-    │ │                               │ └──────────────────────────────────────┘ │ │ │ │
-    │ │                               │ ┌──────────────────────────────────────┐ │ │ │ │
-    │ │                               │ │ Navigation Panel (not scrollable)    │ │ │ │ │
-    │ │                               │ └──────────────────────────────────────┘ │ │ │ │
-    │ │                               └──────────────────────────────────────────┘ │ │ │
-    │ └────────────────────────────────────────────────────────────────────────────┘ │ │
-    │                                                                                │ │
-    │ QSplitter (Canvas ↔ Control resizable, 70/30 ratio maintained)                 │ │
-    └────────────────────────────────────────────────────────────────────────────────┘ │
-                                                                                       │
-    └──────────────────────────────────────────────────────────────────────────────────┘
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## DISPLAY-SYSTEM
 
-    CONTROL PANEL COMPOSITION:
-    ┌─────────────────────────────────────┐
-    │ QScrollArea (scrollable content)    │
-    │ ┌─────────────────────────────────┐ │
-    │ │ Control Panel (QWidget)         │ │  ← Sub-Classes add content here
-    │ │ ┌─ Custom Parameter Controls   │ │  ← Via control_panel.layout()
-    │ │ ├─ Auto-Simulation Panel       │ │  ← Standardized across all tabs
-    │ │ └─ Error Status Display        │ │  ← Shows dependency/generation status
-    │ └─────────────────────────────────┘ │
-    └─────────────────────────────────────┘
-    ┌─────────────────────────────────────┐
-    │ Navigation Panel (fixed)            │  ← Always visible, not scrollable
-    └─────────────────────────────────────┘
+    **View Switching Architecture:**
+    - 2D/3D Toggle: QStackedWidget mit DisplayWrapper-Abstraction
+    - Fallback System: Graceful Degradation bei Display-Class-Unavailability
+    - State Management: Active/Inactive Display-Coordination
+    - Memory Management: Texture-Cleanup bei View-Switches
 
-    LIFECYCLE MANAGEMENT:
-    ---------------------
+    **Display Update Pipeline:**
+    1. `update_display_mode()` → `_render_current_mode()`
+    2. Change Detection via Hash-Comparison (verhindert unnötige Updates)
+    3. Data-Retrieval via DataLODManager.get_*_data()
+    4. Apply new Data zu Active Display
+    5. UI-Status Updates (Progress, Statistics)
 
-    INITIALIZATION SEQUENCE:
-    1. __init__(): Core attribute setup, dependency injection
-    2. setup_ui(): UI structure creation with error handling
-       ├─ setup_layout_structure(): 70/30 split, splitter configuration
-       ├─ setup_display_stack(): 2D/3D views with fallback handling
-       ├─ setup_control_panel(): Scrollable parameter area
-       ├─ setup_navigation_panel(): Fixed navigation (not scrollable)
-       ├─ setup_auto_simulation(): Auto-generation controls
-       └─ setup_error_handling(): Status display and error recovery
-    3. setup_signals(): Cross-tab communication setup
-    4. setup_standard_orchestrator_handlers(): LOD-progression integration
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## EXTENSIBILITY FÜR SUB-CLASSES
 
-    CLEANUP SEQUENCE:
-    1. cleanup_resources(): Systematic resource deallocation
-       ├─ _safe_disconnect_orchestrator_signals(): Exception-safe disconnects
-       ├─ _safe_disconnect_data_manager_signals(): Exception-safe disconnects
-       ├─ resource_tracker.force_cleanup_all(): Memory leak prevention
-       ├─ parameter_manager.cleanup(): Parameter state cleanup
-       └─ Force garbage collection for large arrays
+    **Required Implementations:**
+    - `generator_type`: str = "terrain"/"geology" etc.
+    - `required_dependencies`: List[str] = Dependencies von anderen Generatoren
+    - `create_parameter_controls()`: UI-Controls für Generator-Parameter
 
-    DATA RESET SEQUENCE (NEW):
-    1. reset_all_data(): Complete data reset while keeping parameters
-       ├─ data_manager.clear_all_data(): Clear all generated data
-       ├─ _reset_display_content(): Clear display content
-       ├─ Generation state reset: Stop timers, reset flags
-       └─ UI status reset: Ready state, clear error messages
+    **Optional Overrides:**
+    - `create_visualization_controls()`: Custom Display-Mode Buttons
+    - `update_display_mode()`: Custom Display-Rendering Logic
+    - `check_input_dependencies()`: Custom Dependency-Validation
+    - `on_external_data_updated()`: Custom Cross-Tab Data-Handling
 
-    GENERATION WORKFLOW:
-    --------------------
+    **Standard Integration Points:**
+    - `control_panel.layout()`: Add custom Parameter-Controls
+    - `setup_generation_handlers(generator_type)`: GenerationOrchestrator Integration
+    - Signal connections: Connect zu Manager-Signals für Updates
 
-    STANDARD GENERATION FLOW:
-    1. User Action/Auto-Trigger → generate()
-    2. State validation and reset (prevents double-generation)
-    3. Check for tab-specific generator method (generate_[tab_name]_system)
-    4. Start performance timing
-    5. Execute generation with error handling
-    6. Update UI status and progress (via orchestrator signals)
-    7. End timing and cleanup state
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## PARAMETER-INTEGRATION
 
-    AUTO-SIMULATION FLOW:
-    1. Parameter change detected → auto_simulation_timer starts
-    2. Timer expires → on_auto_simulation_triggered()
-    3. For auto-generation tabs (geology+): Check dependencies
-    4. If dependencies satisfied: Trigger generation
-    5. Update dependent tabs via signals
+    **ParameterManager Integration:**
+    - UI-Controls → ParameterManager.set_parameter()
+    - Parameter-Changes ← ParameterManager.parameter_changed Signal
+    - Validation-Display ← ParameterManager.validation_status_changed
+    - Auto-Simulation Trigger ← ParameterManager Auto-Generation Logic
 
-    AUTO-TAB-GENERATION (NEW FEATURE):
-    - Tabs: Geology, Settlement, Weather, Water, Biome
-    - Behavior: Automatic generation on tab switch OR manual generate click
-    - Dependency: Only executes if required dependencies are available
-    - Integration: check_input_dependencies() → generate() → signal emission
+    **Parameter-UI-Proxy Pattern:**
+    # UI-Control Change
+    def on_slider_changed(self, value):
+        self.parameter_manager.set_parameter(
+            self.generator_type, "amplitude", value
+        )
 
-    DISPLAY SYSTEM:
-    ---------------
+    # Manager Update
+    def on_parameter_changed(self, generator, param_name, value):
+        if generator == self.generator_type:
+            self.update_parameter_ui(param_name, value)
 
-    VIEW SWITCHING ARCHITECTURE:
-    • 2D/3D Toggle: QStackedWidget with DisplayWrapper abstraction
-    • Fallback System: Graceful degradation when display classes unavailable
-    • State Management: Active/inactive display coordination
-    • Memory Management: Texture cleanup on view switches
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## ERROR-HANDLING STRATEGY
 
-    DISPLAY UPDATE OPTIMIZATION:
-    • Change Detection: Hash-based comparison prevents unnecessary updates
-    • Resource Tracking: Systematic cleanup of display resources
-    • Memory Management: Garbage collection for large array updates
-    • Error Resilience: Failed updates don't crash the UI
+    **Defensive Programming:**
+    - Jede kritische Operation wrapped in try/except
+    - Graceful Degradation: Continue operation auch bei non-critical Failures
+    - UI-Safety: Cleanup guaranteed auch bei Exceptions
+    - User Feedback: Clear Error-Messages in UI-Status-Displays
 
-    RENDERING PIPELINE:
-    1. update_display_mode() → _render_current_mode()
-    2. Change detection via DisplayUpdateManager
-    3. Cleanup old textures if update needed
-    4. Apply new data to display
-    5. Mark as updated in cache
-    6. Force GC for large arrays (>50MB)
+    **Manager-Integration Safety:**
+    - Manager-Unavailability: UI funktioniert auch ohne Manager-Verbindungen
+    - Signal-Resilience: UI-Updates funktionieren auch bei Signal-Failures
+    - Resource-Safety: UI-Cleanup unabhängig von Manager-States
 
-    EXTENSIBILITY FOR SUB-CLASSES:
-    ------------------------------
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## KLASSEN
 
-    REQUIRED IMPLEMENTATIONS:
-    • generate_[tab_name]_system(): Core generation logic
-    • required_dependencies: List[str]: Input dependency specification
-    • create_parameter_controls(): UI controls for generator parameters
+    **BaseMapTab**
+    - Funktionsweise: Vereinfachte Basis-Klasse für UI-Management ohne Business-Logic
+    - Aufgabe: Layout, Display-Coordination, Parameter-UI-Proxy zu Managern
+    - Methoden: setup_ui(), create_parameter_controls(), update_display()
+    - Manager-Integration: Reine Proxy-Funktionen zu ParameterManager und GenerationOrchestrator
 
-    OPTIONAL OVERRIDES:
-    • create_visualization_controls(): Custom display mode buttons
-    • update_display_mode(): Custom display rendering logic
-    • check_input_dependencies(): Custom dependency validation
-    • on_external_data_updated(): Custom cross-tab data handling
+    **ParameterUIProxy**
+    - Funktionsweise: Verbindet Parameter-UI-Controls mit ParameterManager
+    - Aufgabe: UI-Control-Creation, Value-Updates, Validation-Display
+    - Methoden: create_sliders(), update_ui_values(), show_validation_errors()
 
-    STANDARD INTEGRATION POINTS:
-    • control_panel.layout(): Add custom parameter controls
-    • setup_standard_orchestrator_handlers(generator_type): LOD integration
-    • Signal connections: Connect to data_updated, parameter_changed etc.
-
-    PARAMETER INTEGRATION:
-    • parameter_manager: Handles slider persistence and change detection
-    • Auto-simulation: Automatic triggering on parameter changes
-    • Validation: Dependency checking and UI state updates
-
-    ERROR HANDLING STRATEGY:
-    ------------------------
-
-    DEFENSIVE PROGRAMMING:
-    • Every critical operation wrapped in try/except
-    • Graceful degradation: Continue operation even if non-critical parts fail
-    • Resource safety: Cleanup guaranteed even on exceptions
-    • User feedback: Clear error messages in UI status displays
-
-    Funktionsweise: Basis-Klasse für alle Map-Editor Tabs
-    - Standardisiertes 70/30 Layout (Canvas links, Controls rechts)
-    - Gemeinsame Auto-Simulation Controls für alle Tabs
-    - Input-Status Display (verfügbare Dependencies)
-    - Observer-Pattern für Cross-Tab Updates
-    - Einheitliche Navigation (Prev/Next Buttons)
-    - Performance-optimiertes Debouncing-System
-
-    Kommunikationskanäle:
-    - Signals: data_updated, parameter_changed, validation_status_changed
-    - Config: gui_default.py für Layout-Settings
-    - Data: data_manager für Input/Output
-    - Navigation: navigation_manager für Tab-Wechsel
-
-    Gemeinsame Features:
-    - setup_common_ui() → 70/30 Layout
-    - setup_auto_simulation() → Auto-Update Checkbox + Manual Button
-    - setup_input_status() → Dependency-Status Widget
-    - setup_navigation() → Prev/Next Navigation
+    **DisplayCoordinator**
+    - Funktionsweise: Koordiniert 2D/3D Display-Updates ohne Business-Logic
+    - Aufgabe: Display-Mode-Switching, Overlay-Management, Update-Coordination
+    - Methoden: switch_display_mode(), apply_overlays(), refresh_display()
     """
 
 def terrain_tab():
     """
     Path: gui/tabs/terrain_tab.py
+    Date changed: 24.08.2025
 
-    Funktionsweise: Terrain-Editor mit vollständiger BaseMapTab-Integration und Core-Generator-Anbindung
-    - Erbt alle BaseMapTab-Features: 70/30 Layout, 2D/3D Toggle, Manual-Generation, Resource-Management
-    - Terrain-Generator Integration über BaseTerrainGenerator aus core/terrain_generator.py
-    - Einheitliche Generation über BaseMapTab.generate() → calculate_heightmap(), calculate_shadows(), calculate_slopes()
-    - StandardOrchestratorHandler über BaseMapTab.setup_standard_orchestrator_handlers("terrain")
-    - Parameter-Integration über BaseMapTab's ParameterManager
-    - Verwendet LOD-System aus DataLODManager:
-        - LOD-Progression: Automatische Verdopplung 64→128→256→512→1024→2048 bis map_size erreicht
-        - LOD-Level: 1,2,3,4,5,6,7+ (mindestens 7 für alle Sonnenstände und theoretisch weitere bis map_size)
-    - Output: heightmap, slopemap, shadowmap für nachfolgende Generatoren
-    - Map-Size-Synchronisation über DataLODManager.sync_map_size() für Tab-übergreifende Konsistenz
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## ÜBERSICHT UND ZIELSETZUNG
 
-    UI-Layout (erweitert BaseMapTab):
-    Control Panel Parameter-Sektion:
-      - Terrain Parameters GroupBox mit Verwendung von value_default.py für "min", "max", "default", "step" (und "suffix"
-      für Amplitude) und widgets.py für ParameterSlider und RandomSeedButton
-        * Map Size: ParameterSlider
-        * Height Amplitude: ParameterSlider
-        * Detail Octaves: ParameterSlider
-        * Base Frequency: ParameterSlider
-        * Detail Persistence: ParameterSlider
-        * Frequency Scaling: ParameterSlider
-        * Height Redistribution: ParameterSlider
-        * Map Seed: ParameterSlider + RandomSeedButton
+    TerrainTab implementiert die Terrain-Generator UI mit vollständiger BaseMapTab-Integration
+    und direkter Anbindung an den TerrainGenerator aus core/terrain_generator.py. Als Basis-Generator
+    ohne Dependencies liefert er heightmap, slopemap und shadowmap für alle nachgelagerten Systeme.
 
-      - Generation Control GroupBox:
-        * "Berechnen"-Button: Manual Generation-Trigger
-        * Generation Progress: ProgressBar mit LOD-Phase-Details
-        * System Status: LOD-Level-Display, Generation-Status
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## CORE-GENERATOR INTEGRATION
 
-      - Terrain Statistics GroupBox:
-        * Height Range: Min/Max/Mean/StdDev
-        * Slope Statistics: Max-Gradient, Mean-Slope in Degrees
-        * Shadow Coverage: Min/Max/Mean Shadow-Values über alle Sonnenwinkel
-        * Performance Metrics: Data-Size, Generation-Time
+    **BaseTerrainGenerator Anbindung:**
+    - Core-Call: BaseTerrainGenerator.calculate_heightmap(parameters, lod_level)
+    - Heightmap-Generation: Multi-Scale Simplex-Noise mit Octave-Layering
+    - Ridge-Warping: Deformation für natürliche Landschaftsformen
+    - Height-Redistribution: Natürliche Höhenverteilung basierend auf redistribute_power
 
-    Canvas Visualization Controls:
-      - Terrain-spezifische Controls (nur 2D):
-        * Height/Slope: Radio-Buttons (exklusiv, nur für Terrain-2D-Display)
-     (erweitert BaseMapTab):
-      - Standard BaseMapTab Controls (2D+3D):
-        * Shadow: Checkbox (Overlay) + Shadow-Angle-Slider (0-6, entspricht 7 Sonnenstände)
-        * Contour Lines: Checkbox (Overlay mit Heightmap)
-        * Grid Overlay: Checkbox (für Measurement und Scale-Reference)
-
-    calculate_heightmap():
-
-    Input: Parameter-Set (size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power, map_seed) + current_lod_level
-    Core-Call: BaseTerrainGenerator.calculate_heightmap(parameters, lod_level)
-    Heightmap-Generation: Multi-Scale Simplex-Noise mit Octave-Layering und Progressive-Interpolation
-    Ridge-Warping: Deformation mittels ridge warping für natürliche Landschaftsformen
-    Height-Redistribution: Höhen-Redistribution für natürliche Höhenverteilung basierend auf redistribute_power
-    Validation: Shape/Range/NaN-Checks für generated heightmap
-    Output-Storage: DataLODManager.set_terrain_data_lod("heightmap", array, lod_level, parameters)
-    Signal-Emission: data_updated("terrain", "heightmap")
-
-    calculate_slopes():
-
-    Input: heightmap + terrain-parameters für Gradient-Berechnung
-    Core-Call: BaseTerrainGenerator.calculate_slopes(heightmap, parameters)
-    Slope-Calculation: dz/dx und dz/dy Gradienten-Berechnung über heightmap
-    Gradient-Magnitude: Berechnung der Slope-Intensity für Steigungsstatistiken
-    Output-Format: 3D-Array (H,W,2) mit dz/dx und dz/dy Komponenten
-    Validation: Gradient-Range-Checks und Consistency mit heightmap-Shape
-    Output-Storage: DataLODManager.set_terrain_data_lod("slopemap", array, lod_level, parameters)
-    Signal-Emission: data_updated("terrain", "slopemap")
-
-    calculate_shadows():
-
-    Input: heightmap + sun_angles (LOD-spezifische Sonnenwinkel-Anzahl) + shadow-parameters
-    Core-Call: BaseTerrainGenerator.calculate_shadows(heightmap, sun_angles, parameters)
-    Shadow-Calculation: Raycast-Shadow-Berechnung für multiple Sonnenwinkel mit GPU-Shader-Support
-    LOD-Progressive-Shadows: 1,3,5,7 Sonnenwinkel je nach LOD-Level (Mittag→Vormittag/Nachmittag→Morgen/Abend→Dämmerung)
-    Multi-Angle-Combination: Kombination aller Sonnenwinkel zu finaler Shadowmap
-    Output-Format: 3D-Array (H,W,angles) mit Shadow-Values [0-1] für jeden Sonnenwinkel
-    Validation: Shadow-Range-Checks [0-1] und Angle-Consistency
-    Output-Storage: DataLODManager.set_terrain_data_lod("shadowmap", array, lod_level, parameters)
-    Signal-Emission: data_updated("terrain", "shadowmap")
-
-    Parameter-Spezifika:
-    - Map Size: Power-of-2 Validation (64,128,256,512,1024,2048), Map-Size-Sync zu anderen Tabs
-    - Seed-System: RandomSeedButton aus widgets.py generiert Seeds
-    - Cross-Parameter-Constraints: Octaves vs Size Validation
-    - Parameter-Widgets: Alle ParameterSlider und RandomSeedButton aus widgets.py
-
-    Kommunikationskanäle:
-    - Config: value_default.TERRAIN für Parameter-Ranges, Validation-Rules, Default-Values
-    - Core: core/terrain_generator.py → BaseTerrainGenerator, SimplexNoiseGenerator, ShadowCalculator
-    - Manager: GenerationOrchestrator.request_generation("terrain") mit OrchestratorRequestBuilder
-    - Data: DataLODManager.set_terrain_data_complete() mit TerrainData für geology/settlement/weather
-    - Signals: BaseMapTab-Signals + terrain-spezifische Validity-Updates
-    - Display: BaseMapTab._render_current_mode() für Height/Slope/Shadow-Rendering
-    - Widgets: widgets.py für ParameterSlider, RandomSeedButton, StatusIndicator
-
-    Generation-Flow:
-    1. "Berechnen"-Button → generate()
-    1a. calculate_heightmap() → DataLODStorage → Signal-Emission
-    1b. calculate_slopes() → DataLODStorage → Signal-Emission
-    1c. calculate_shadows() → DataLODStorage → Signal-Emission
-    2. LOD-Progression über GenerationOrchestrator mit incremental Results
-    3. Display-Update über BaseMapTab._render_current_mode() nach jedem LOD
-    4. Statistics-Update in Real-time, Map-Size-Sync zu dependent Tabs
-    5. Signal-Emission für Cross-Tab-Dependencies (geology, weather, water, biome, settlement)
-
-    Error-Handling:
-    - Parameter-Validation: Range-Checks, Cross-Parameter-Constraints
-    - Generation-Validation: TerrainData Shape/Range/NaN-Checks
-    - LOD-Consistency: Validity-Checks zwischen LOD-Levels
-    - GPU-Fallback: ShaderManager-Integration mit CPU-Fallback-Notification
-    - Memory-Management: Large-Array-Detection, Force-GC für >50MB Arrays
-
-    Output-Datenstrukturen:
+    **TerrainData Output:**
     - heightmap: 2D numpy.float32 array, Elevation in Metern
     - slopemap: 3D numpy.float32 array (H,W,2), dz/dx und dz/dy Gradienten
     - shadowmap: 3D numpy.float32 array (H,W,7), Shadow-Values [0-1] für 7 Sonnenwinkel
-    - TerrainData: Container mit allen Arrays + LOD-Metadata + Validity-State + Parameter-Hash
+
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## UI-LAYOUT (erweitert BaseMapTab)
+
+    **Control Panel Parameter-Sektion:**
+    Terrain Parameters GroupBox:
+    ├── Map Size: ParameterSlider (value_default.TERRAIN.SIZE)
+    ├── Height Amplitude: ParameterSlider (value_default.TERRAIN.HEIGHT) + suffix:"m"
+    ├── Detail Octaves: ParameterSlider (value_default.TERRAIN.OCTAVES)
+    ├── Base Frequency: ParameterSlider (value_default.TERRAIN.FREQUENCY)
+    ├── Detail Persistence: ParameterSlider (value_default.TERRAIN.PERSISTENCE)
+    ├── Frequency Scaling: ParameterSlider (value_default.TERRAIN.LACUNARITY)
+    ├── Height Redistribution: ParameterSlider (value_default.TERRAIN.REDISTRIBUTE)
+    └── Map Seed: ParameterSlider + RandomSeedButton (widgets.py)
+
+    Generation Control GroupBox:
+    ├── "Berechnen"-Button: Manual Generation-Trigger
+    ├── Generation Progress: ProgressBar mit LOD-Phase-Details
+    └── System Status: LOD-Level-Display, Generation-Status
+
+    Terrain Statistics GroupBox:
+    ├── Height Range: Min/Max/Mean/StdDev
+    ├── Slope Statistics: Max-Gradient, Mean-Slope in Degrees
+    ├── Shadow Coverage: Min/Max/Mean Shadow-Values über alle Sonnenwinkel
+    └── Performance Metrics: Data-Size, Generation-Time
+
+    **Canvas Visualization Controls:**
+    Terrain-spezifische Controls (nur 2D):
+    └── Height/Slope: Radio-Buttons (exklusiv für Terrain-2D-Display)
+
+    Standard BaseMapTab Controls (2D+3D):
+    ├── Shadow: Checkbox (Overlay) + Shadow-Angle-Slider (0-6, entspricht 7 Sonnenstände)
+    ├── Contour Lines: Checkbox (Overlay mit Heightmap)
+    └── Grid Overlay: Checkbox (für Measurement und Scale-Reference)
+
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## GENERATION-WORKFLOW
+
+    **Generation-Flow:**
+    1. "Berechnen"-Button → generate_terrain_system()
+    2. Parameter-Validation → GenerationOrchestrator.request_generation("terrain")
+    3. BaseTerrainGenerator.calculate_heightmap() → TerrainData Creation
+    4. LOD-Progression über GenerationOrchestrator mit incremental Results
+    5. DataLODManager.set_terrain_data_lod() → Signal-Emission
+    6. Display-Update über BaseMapTab._render_current_mode() nach jedem LOD
+    7. Statistics-Update in Real-time, Map-Size-Sync zu dependent Tabs
+
+    **LOD-System Integration:**
+    - LOD-Progression: 64→128→256→512→1024→2048 bis map_size erreicht
+    - LOD-Level: 1,2,3,4,5,6+ (numerisches System entsprechend DataLODManager)
+    - Progressive Enhancement: UI-Update nach jedem LOD-Level
+    - Shadow-Progression: 1,3,5,7 Sonnenwinkel je nach LOD-Level
+
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## PARAMETER-SYSTEM
+
+    **Map-Size Synchronisation:**
+    - Power-of-2 Validation (64,128,256,512,1024,2048)
+    - Map-Size-Sync zu anderen Tabs über DataLODManager.sync_map_size()
+    - Cross-Parameter-Constraints: Octaves vs Size Validation
+
+    **Seed-System:**
+    - RandomSeedButton aus widgets.py generiert Seeds
+    - Reproduzierbare Results über map_seed Parameter
+    - Seed-Validation und Range-Checks
+
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## MANAGER-INTEGRATION
+
+    **Kommunikationskanäle:**
+    - Config: value_default.TERRAIN für Parameter-Ranges, Validation-Rules, Default-Values
+    - Core: core/terrain_generator.py → BaseTerrainGenerator, SimplexNoiseGenerator, ShadowCalculator
+    - Manager: GenerationOrchestrator.request_generation("terrain") mit Parameter-Set
+    - Data: DataLODManager.set_terrain_data_lod() für geology/settlement/weather Dependencies
+    - Widgets: widgets.py für ParameterSlider, RandomSeedButton, StatusIndicator
+
+    **Signal-Flow:**
+    TerrainTab.generate_requested("terrain")
+    → GenerationOrchestrator.request_generation("terrain", parameters)
+    → BaseTerrainGenerator.calculate_heightmap()
+    → DataLODManager.set_terrain_data_lod()
+    → data_updated("terrain") Signal
+    → TerrainTab.on_data_updated()
+    → TerrainTab.update_display()
+
+
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## ERROR-HANDLING UND VALIDATION
+
+    **Parameter-Validation:**
+    - Range-Checks über value_default.TERRAIN Constraints
+    - Cross-Parameter-Constraints (Octaves vs Size)
+    - Real-time Validation-Feedback in UI
+
+    **Generation-Validation:**
+    - TerrainData Shape/Range/NaN-Checks
+    - LOD-Consistency zwischen LOD-Levels
+    - GPU-Fallback über ShaderManager mit CPU-Fallback-Notification
+
+    **Memory-Management:**
+    - Large-Array-Detection für >50MB Arrays
+    - Force-GC nach Generation-Completion
+    - Resource-Cleanup über DataLODManager.ResourceTracker
+
+    ═══════════════════════════════════════════════════════════════════════════════
+    ## ABHÄNGIGKEITEN UND OUTPUT
+
+    **Dependencies:**
+    - required_dependencies: [] (Basis-Generator ohne Input-Dependencies)
+    - No Dependency-Checks erforderlich
+
+    **Output für nachgelagerte Generatoren:**
+    - heightmap → geology_generator, weather_generator, water_generator
+    - slopemap → geology_generator, settlement_generator
+    - shadowmap → alle Generatoren für Overlay-Visualisierung
+    - Map-Size-Synchronisation → alle abhängigen Tabs
     """
 
 def geology_tab():
     """
     Path: gui/tabs/geology_tab.py
+    Date Changed: 24.08.2025
 
-    Funktionsweise: Geology-Editor mit BaseMapTab-Integration und geologischer Simulation
-    - Erbt alle BaseMapTab-Features: 70/30 Layout, 2D/3D Toggle, Manual-Generation, Resource-Management
-    - Geology-Generator Integration über GeologyGenerator aus core/geology_generator.py
-    - Input-Dependencies: heightmap, slopemap von terrain_tab über DataLODManager
-    - Einheitliche Generation über BaseMapTab.generate() → calculate_rockmap(), calculate_massconservation(),
-    calculate_hardnessmap()
-    - Rock-Type-Classification: Sedimentary/Igneous/Metamorphic mit Mass-Conservation (Red (Sedimentary)+Green (Igneous)
-     + Blue(Metamorphic) = 255)
+    ## ÜBERSICHT UND ZIELSETZUNG
+
+    GeologyTab implementiert die Geology-Generator UI mit BaseMapTab-Integration und geologischer
+    Simulation basierend auf Terrain-Input. Erzeugt Rock-Type-Classification und Hardness-Maps
+    für realistische geologische Strukturen mit Mass-Conservation-System.
+
+    ## CORE-GENERATOR INTEGRATION
+
+    **GeologyGenerator Anbindung:**
+    - Core-Call: GeologyGenerator.calculate_geology(heightmap, slopemap, parameters, lod_level)
+    - Rock-Classification: Sedimentary/Igneous/Metamorphic mit Mass-Conservation (R+G+B=255)
+    - Geological-Zones: Multi-Zone Simplex-Noise für realistische Gesteinsverteilung
+    - Tectonic-Deformation: Ridge/Bevel-Warping, Metamorphic-Foliation/Folding, Igneous-Flowing
+
+    **GeologyData Output:**
+    - rock_map: 3D numpy.uint8 array (H,W,3), RGB-Kanäle für Sedimentary/Igneous/Metamorphic mit R+G+B=255
+    - hardness_map: 2D numpy.float32 array, Gesteinshärte-Werte [0-100] für Erosions-Simulation
+
+    ## UI-LAYOUT (erweitert BaseMapTab)
+
+    **Control Panel Parameter-Sektion:**
+    Rock Hardness Parameters GroupBox:
+    ├── Sedimentary Hardness: ParameterSlider (value_default.GEOLOGY.SEDIMENTARY_HARDNESS)
+    ├── Igneous Hardness: ParameterSlider (value_default.GEOLOGY.IGNEOUS_HARDNESS)
+    └── Metamorphic Hardness: ParameterSlider (value_default.GEOLOGY.METAMORPHIC_HARDNESS)
+
+    Tectonic Deformation Parameters GroupBox:
+    ├── Ridge Warping: ParameterSlider (value_default.GEOLOGY.RIDGE_WARPING)
+    ├── Bevel Warping: ParameterSlider (value_default.GEOLOGY.BEVEL_WARPING)
+    ├── Metamorphic Foliation: ParameterSlider (value_default.GEOLOGY.METAMORPHIC_FOLIATION)
+    ├── Metamorphic Folding: ParameterSlider (value_default.GEOLOGY.METAMORPHIC_FOLDING)
+    └── Igneous Flowing: ParameterSlider (value_default.GEOLOGY.IGNEOUS_FLOWING)
+
+    Generation Control GroupBox:
+    ├── "Berechnen"-Button: Manual Generation-Trigger
+    ├── Generation Progress: ProgressBar mit Geology-Phase-Details
+    └── Input Dependencies: StatusIndicator für heightmap/slopemap-Verfügbarkeit
+
+    Rock Distribution Widget:
+    ├── Hardness Preview: Progress-Bars für Sedimentary/Igneous/Metamorphic
+    ├── Distribution Statistics: Prozentuale Verteilung nach Generation
+    └── Mass Conservation Status: StatusIndicator für R+G+B=255 Validation
+
+    **Canvas Visualization Controls:**
+    Geology-spezifische Controls:
+    └── Rock Types/Hardness: Radio-Buttons (2D+3D)
+
+    Standard BaseMapTab Controls (2D+3D):
+    ├── Shadow: Checkbox (Overlay über alle Modi, nutzt Terrain-Shadowmap)
+    ├── Contour Lines: Checkbox (Overlay, nutzt Terrain-Heightmap) + Shadow-Angle-Slider (0-6)
+    └── Grid Overlay: Checkbox (für alle Modi)
+
+    ## GENERATION-WORKFLOW
+
+    **Generation-Flow:**
+    1. Dependency-Check → heightmap/slopemap-Validation → "Berechnen"-Button
+    2. generate_geology_system() → GenerationOrchestrator.request_generation("geology")
+    3. GeologyGenerator.calculate_geology() → Rock-Classification + Mass-Conservation + Hardness-Calculation
+    4. LOD-Progression über GenerationOrchestrator entsprechend Terrain-LODs
+    5. DataLODManager.set_geology_data_lod() → Signal-Emission
+    6. Display-Update → Statistics-Update → Cross-Tab-Notification für Dependencies
+
+    **LOD-System Integration:**
     - LOD-Progression: Automatische Verdopplung bis map_size erreicht (entsprechend Terrain)
-    - Output: rock_map (RGB), hardness_map für water_generator und nachfolgende Systeme
+    - LOD-Size-Verdopplung: 64→128→256→512→1024→2048 bis map_size erreicht
+    - LOD-Level-Nummerierung: 1,2,3,4,5,6+ entsprechend verfügbaren Terrain-LODs
+    - Progressive Enhancement: Deformation-Detail und Zone-Complexity steigen mit LOD-Level
 
-    UI-Layout (erweitert BaseMapTab):
-    Control Panel Parameter-Sektion mit "min", "max", "default", "step" aus value_default.py
-    und ParameterSlider aus widgets.py:
-      - Rock Hardness Parameters GroupBox:
-        * Sedimentary Hardness: ParameterSlider
-        * Igneous Hardness: ParameterSlider
-        * Metamorphic Hardness: ParameterSlider
+    ## DEPENDENCY-MANAGEMENT
 
-      - Tectonic Deformation Parameters GroupBox:
-        * Ridge Warping: ParameterSlider
-        * Bevel Warping: ParameterSlider
-        * Metamorphic Foliation: ParameterSlider
-        * Metamorphic Folding: ParameterSlider
-        * Igneous Flowing: ParameterSlider
-
-      - Generation Control GroupBox:
-        * "Berechnen"-Button: Manual Generation-Trigger  (erweitert BaseTab)
-        * Generation Progress: ProgressBar mit Geology-Phase-Details  (erweitert BaseTab)
-        * Input Dependencies: StatusIndicator für heightmap/slopemap-Verfügbarkeit
-
-      - Rock Distribution Widget:
-        * Hardness Preview: Progress-Bars für Sedimentary/Igneous/Metamorphic
-        * Distribution Statistics: Prozentuale Verteilung nach Generation
-        * Mass Conservation Status: StatusIndicator für R+G+B=255 Validation
-
-    Canvas Visualization Controls (erweitert BaseMapTab):
-      - Geology-spezifische Controls:
-        * Rock Types/Hardness: Radio-Buttons (2D+3D)
-      - Standard BaseMapTab Controls (2D+3D):
-        * Shadow: Checkbox (Overlay über alle Modi, nutzt Terrain-Shadowmap)
-        * Contour Lines: Checkbox (Overlay, nutzt Terrain-Heightmap) und erzeugt einen Sonnenwinkel-Slider (1-7)
-        * Grid Overlay: Checkbox (für alle Modi)
-
-    Core-Funktionalität:
-    calculate_rockmap():
-
-    - Input-Validation: heightmap/slopemap Shape/Range/Consistency-Checks
-    - Input: Parameter-Set + heightmap + slopemap von terrain_tab
-    - Core-Call: GeologyGenerator.calculate_rock_distribution(heightmap, slopemap, parameters)
-    - Rock-Classification: Höhen-basierte + Steigungs-basierte + Noise-basierte Verteilung
-    - Geological-Zones: Sedimentary/Igneous/Metamorphic-Zone-Calculation mit Simplex-Noise
-    - Ridge-Warping: Tektonische Verformung für härtere Gesteine in steilen Hängen
-    - Deformation-Effects: Bevel-Warping, Metamorphic-Foliation/Folding, Igneous-Flowing
-    - Output-Storage: DataLODManager.set_geology_data_lod("rock_map", array, lod_level, parameters)
-    - Signal-Emission: data_updated("geology", "rock_map")
-
-    calculate_hardnessmap():
-
-    - Input: rock_map + hardness-Parameters (sedimentary/igneous/metamorphic_hardness)
-    - Core-Call: GeologyGenerator.calculate_hardness_map(rock_map, hardness_parameters)
-    - Hardness-Calculation: Gewichtete Hardness-Map aus RGB-rock_map und hardness-Parametern
-    - Formula: hardness_map(x,y) = (R*sed_hardness + G*ign_hardness + B*met_hardness) / 255
-    - Output-Storage: DataLODManager.set_geology_data_lod("hardness_map", array, lod_level, parameters)
-    - Signal-Emission: data_updated("geology", "hardness_map")
-
-    calculate_massconservation():
-
-    - Input: rock_map mit potentiell inkonsistenten RGB-Werten
-    - Core-Call: MassConservationManager.normalize_rock_masses(rock_map)
-    - Mass-Conservation: R+G+B=255 Enforcement für alle Pixel
-    - Normalization: Proportionale Skalierung wenn R+G+B != 255
-    - Fallback: Gleichverteilung (85,85,85) bei R+G+B=0 Pixeln
-    - Output-Update: Überschreibt rock_map in DataLODManager mit korrigierten Werten
-    - Statistics-Update: Rock-Distribution-Widget mit korrigierter Verteilung
-
-    Dependency-Management:
-    - Required Dependencies: ["heightmap", "slopemap"] von terrain_tab
+    **Input Dependencies:**
+    - required_dependencies: ["heightmap", "slopemap"] von terrain_tab
     - check_input_dependencies(): Prüft Terrain-Data-Verfügbarkeit, Shape-Consistency, Data-Quality
     - Dependency-Status-Display: StatusIndicator mit missing/invalid Inputs und Recovery-Suggestions
 
-    Kommunikationskanäle:
+    **Input-Validation:**
+    - heightmap/slopemap Shape/Range/Consistency-Checks
+    - Data-Quality-Validation (NaN-Detection, Range-Validation)
+    - LOD-Level-Consistency zwischen Terrain- und Geology-Data
+
+    ## MASS-CONSERVATION-SYSTEM
+
+    **R+G+B=255 Enforcement:**
+    - Mass-Conservation: Proportionale Skalierung wenn R+G+B != 255
+    - Fallback: Gleichverteilung (85,85,85) bei R+G+B=0 Pixeln
+    - Real-time Validation: Mass-Conservation-Status in UI
+    - Error-Recovery: Automatic Repair bei Mass-Conservation-Violations
+
+    ## MANAGER-INTEGRATION
+
+    **Kommunikationskanäle:**
     - Config: value_default.GEOLOGY für Parameter-Ranges, Hardness-Defaults, Validation-Rules
     - Core: core/geology_generator.py → GeologyGenerator, RockTypeClassifier, MassConservationManager
     - Input: DataLODManager.get_terrain_data("heightmap/slopemap") für Basis-Terrain-Daten
     - Output: DataLODManager.set_geology_data_lod() für rock_map/hardness_map zu water_generator
     - Manager: GenerationOrchestrator.request_generation("geology") nach Dependency-Erfüllung
-    - Signals: BaseMapTab-Signals + geology-spezifische rock_map/hardness_map Updates
     - Widgets: widgets.py für ParameterSlider, StatusIndicator, ProgressBar
 
-    Display-Modi (erweitert BaseMapTab):
+    **Signal-Flow:**
+    GeologyTab.generate_requested("geology")
+    → GenerationOrchestrator.request_generation("geology", parameters)
+    → GeologyGenerator.calculate_geology()
+    → DataLODManager.set_geology_data_lod()
+    → data_updated("geology") Signal
+    → GeologyTab.on_data_updated()
+    → GeologyTab.update_display()
+
+    ## DISPLAY-MODI (erweitert BaseMapTab)
+
+    **Visualization Modes:**
     - Height Mode: Terrain-Heightmap als Basis-Layer
     - Rock Types Mode: RGB rock_map mit Color-Coding (Rot=Sedimentary, Grün=Igneous, Blau=Metamorphic)
     - Hardness Mode: Hardness-Map mit Grayscale/Color-Coding (Blau=weich, Rot=hart)
     - 3D Terrain Overlay: Kombiniert Rock-Classification mit 3D-Terrain-Rendering
-    - Shadow/Contour/Grid Overlays: Nutzen Terrain-Data über alle Geology-Modi
 
-    LOD-System Integration:
-    - Progressive Generation: Automatische LOD-Progression im Hintergrund entsprechend Terrain
-    - LOD-Size-Verdopplung: 64→128→256→512→1024→2048 bis map_size erreicht
-    - LOD-Level-Nummerierung: 1,2,3,4,5,6+ entsprechend verfügbaren Terrain-LODs
-    - Incremental Updates: UI-Update nach jedem LOD-Level
+    **Overlay-System:**
+    - Shadow/Contour/Grid Overlays: Nutzen Terrain-Data über alle Geology-Modi
     - Display-Optimization: Immer bestes verfügbares LOD für Display
 
-    Generation-Flow:
-    1. Dependency-Check → heightmap/slopemap-Validation → "Berechnen"-Button
-    2. generate() → calculate_geology() → GeologyGenerator.generate()
-    3. Rock-Classification → Mass-Conservation → Hardness-Calculation
-    4. Validation → Repair → DataLODManager-Storage → Signal-Emission
-    5. Display-Update → Statistics-Update → Cross-Tab-Notification für Dependencies
+    ## ERROR-HANDLING UND VALIDATION
 
-    Output-Datenstrukturen:
-    - rock_map: 3D numpy.uint8 array (H,W,3), RGB-Kanäle für Sedimentary/Igneous/Metamorphic mit R+G+B=255
-    - hardness_map: 2D numpy.float32 array, Gesteinshärte-Werte [0-100] für Erosions-Simulation
-    - GeologyData: Container mit rock_map/hardness_map + Validation-State + Mass-Conservation-Info
+    **Parameter-Validation:**
+    - Range-Checks über value_default.GEOLOGY Constraints
+    - Hardness-Parameter [0-100] Validation
+    - Deformation-Parameter [0.0-1.0] Validation
+
+    **Geology-Data-Validation:**
+    - Rock-Map RGB-Range-Checks [0-255]
+    - Mass-Conservation-Validation (R+G+B=255)
+    - Hardness-Map Range-Checks [0-100]
+
+    **Error-Recovery:**
+    - Invalid-Input-Recovery mit Default-Rock-Distribution
+    - Mass-Conservation-Repair bei R+G+B != 255
+    - Automatic Fallback bei Critical-Generation-Failures
+
+    ## ABHÄNGIGKEITEN UND OUTPUT
+
+    **Dependencies:**
+    - required_dependencies: ["heightmap", "slopemap"] von terrain_tab
+    - Dependency-Validation erforderlich vor Generation
+
+    **Output für nachgelagerte Generatoren:**
+    - rock_map → water_generator für Erosions-Simulation
+    - hardness_map → water_generator für variable Erosions-Resistance
+    - Geological-Data → settlement_generator für Suitability-Analysis
     """
 
 def weather_tab():
-    """
-    Path: gui/tabs/weather_tab.py
+   """
+   Path: gui/tabs/weather_tab.py
+   Date Changed: 24.08.2025
 
-    Funktionsweise: Wetter-System mit 3D Wind-Visualization
-    - Climate-Modeling basierend auf Terrain (Orographic Effects)
-    - 3D Wind-Vector Display über Heightmap
-    - Live Climate-Classification Display
-    - Temperature/Precipitation Field Generation
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## ÜBERSICHT UND ZIELSETZUNG
+   ═══════════════════════════════════════════════════════════════════════════════
 
-    Kommunikationskanäle:
-    - Input: heightmap für orographic effects
-    - Core: weather_generator für Climate-Simulation
-    - Output: temperature_field, precipitation_field, wind_vectors → data_manager
-    """
+   WeatherTab implementiert die Weather-Generator UI mit BaseMapTab-Integration und
+   dynamischer Klimasimulation basierend auf Terrain-Input. Erzeugt realistische
+   Temperatur-, Niederschlags-, Wind- und Feuchtigkeitsfelder durch CFD-basierte
+   Atmosphären-Simulation mit orographischen Effekten.
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## CORE-GENERATOR INTEGRATION
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **WeatherSystemGenerator Anbindung:**
+   - Core-Call: WeatherSystemGenerator.generate_weather_system(heightmap, shadowmap, parameters, lod_level)
+   - Climate-Modeling: Terrain-basierte Temperaturberechnung mit Altitude/Solar/Latitude-Effekten
+   - Wind-Field-Simulation: CFD-basierte Luftströmung mit Berg-Ablenkung und Düseneffekten
+   - Orographischer Niederschlag: Luv-/Lee-Effekte mit Feuchtigkeitstransport
+   - Atmospheric-Moisture: Evaporation/Kondensation-Zyklen mit Temperatur-Kopplung
+
+   **WeatherData Output:**
+   - temp_map: 2D numpy.float32 array, Lufttemperatur in °C
+   - precip_map: 2D numpy.float32 array, Niederschlag in gH2O/m²
+   - wind_map: 3D numpy.float32 array (H,W,2), Windvektoren (u,v) in m/s
+   - humid_map: 2D numpy.float32 array, Luftfeuchtigkeit in gH2O/m³
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## UI-LAYOUT (erweitert BaseMapTab)
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Control Panel Parameter-Sektion:**
+   Climate Base Parameters GroupBox:
+   ├── Air Temperature Entry: ParameterSlider (value_default.WEATHER.AIR_TEMP_ENTRY) + suffix:"°C"
+   ├── Solar Power: ParameterSlider (value_default.WEATHER.SOLAR_POWER) + suffix:"°C"
+   ├── Altitude Cooling: ParameterSlider (value_default.WEATHER.ALTITUDE_COOLING) + suffix:"°C/100m"
+   └── Latitude Effect: ParameterSlider (value_default.WEATHER.LATITUDE_EFFECT) + suffix:"°C"
+
+   Wind System Parameters GroupBox:
+   ├── Wind Speed Factor: ParameterSlider (value_default.WEATHER.WIND_SPEED_FACTOR) + suffix:"m/s/Pa"
+   ├── Thermic Effect: ParameterSlider (value_default.WEATHER.THERMIC_EFFECT) + suffix:"factor"
+   ├── Terrain Factor: ParameterSlider (value_default.WEATHER.TERRAIN_FACTOR) + suffix:"factor"
+   └── Flow Direction: ParameterSlider (value_default.WEATHER.FLOW_DIRECTION) + suffix:"degrees"
+
+   Atmospheric Parameters GroupBox:
+   ├── Base Humidity: ParameterSlider (value_default.WEATHER.BASE_HUMIDITY) + suffix:"gH2O/m³"
+   ├── Evaporation Rate: ParameterSlider (value_default.WEATHER.EVAPORATION_RATE) + suffix:"factor"
+   ├── Condensation Threshold: ParameterSlider (value_default.WEATHER.CONDENSATION_THRESHOLD) + suffix:"factor"
+   └── Weather Seed: ParameterSlider + RandomSeedButton (widgets.py)
+
+   Generation Control GroupBox:
+   ├── "Berechnen"-Button: Manual Generation-Trigger
+   ├── Generation Progress: ProgressBar mit CFD-Iteration-Details
+   └── Input Dependencies: StatusIndicator für heightmap/shadowmap-Verfügbarkeit
+
+   Climate Statistics GroupBox:
+   ├── Temperature Range: Min/Max/Mean/StdDev in °C
+   ├── Precipitation Stats: Total/Max/Mean/Distribution in mm/Jahr
+   ├── Wind Statistics: Max-Speed, Mean-Speed, Dominant-Direction
+   ├── Humidity Distribution: Min/Max/Mean Luftfeuchtigkeit
+   └── Performance Metrics: CFD-Iterations, Solver-Time, Convergence-Rate
+
+
+   **Canvas Visualization Controls:**
+   Weather-spezifische Controls (2D+3D):
+   └── Temperature/Precipitation/Wind/Humidity: Radio-Buttons (exklusiv für Weather-Modi)
+
+   Standard BaseMapTab Controls (2D+3D):
+   ├── Shadow: Checkbox (Overlay über alle Modi, nutzt Terrain-Shadowmap) + Shadow-Angle-Slider (0-6)
+   ├── Contour Lines: Checkbox (Overlay mit Heightmap für alle Weather-Modi)
+   ├── Grid Overlay: Checkbox (für alle Modi)
+   └── Wind Vectors: Checkbox (3D-Arrows über Terrain in allen Modi)
+
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## GENERATION-WORKFLOW
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Generation-Flow:**
+   1. Dependency-Check → heightmap/shadowmap-Validation → "Berechnen"-Button
+   2. generate_weather_system() → GenerationOrchestrator.request_generation("weather")
+   3. WeatherSystemGenerator.generate_weather_system() → CFD-Simulation + Climate-Modeling
+   4. LOD-Progression über GenerationOrchestrator mit steigender CFD-Komplexität
+   5. DataLODManager.set_weather_data_lod() → Signal-Emission
+   6. Display-Update → Statistics-Update → Cross-Tab-Notification für Dependencies
+
+   **LOD-System Integration:**
+   - LOD-Progression: CFD-Grid skaliert automatisch bis map_size erreicht (entsprechend Terrain)
+   - LOD-Grid-Scaling: 32x32→64x64→128x128→256x256→512x512→1024x1024→2048x2048
+   - LOD-Level-Nummerierung: 1,2,3,4,5,6+ entsprechend verfügbaren Terrain-LODs
+   - Progressive Enhancement: CFD-Solver-Iterations steigen von 3→5→7→10→15→20 mit LOD-Level
+   - Performance-Scaling: Wind-Field-Auflösung und Atmospheric-Detail steigen progressiv
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## DEPENDENCY-MANAGEMENT
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Input Dependencies:**
+   - required_dependencies: ["heightmap", "shadowmap"] von terrain_tab
+   - check_input_dependencies(): Prüft Terrain-Data-Verfügbarkeit, Orographic-Data-Quality, Solar-Data-Consistency
+   - Dependency-Status-Display: StatusIndicator mit missing/invalid Inputs und Recovery-Suggestions
+
+   **Input-Validation:**
+   - heightmap Shape/Range/Orographic-Suitability-Checks für Wind-Deflection
+   - shadowmap Solar-Data-Quality-Validation für Temperature-Calculation
+   - Data-Quality-Validation (NaN-Detection, Physical-Range-Validation)
+   - LOD-Level-Consistency zwischen Terrain- und Weather-Data
+
+   **Orographic Effects Integration:**
+   - Terrain-Height → Altitude-Cooling (6°C/100m default)
+   - Terrain-Slope → Wind-Deflection und Orographic-Lifting
+   - Shadow-Data → Solar-Heating-Variation über Tagesverlauf
+   - Valley-Detection → Wind-Channeling und Temperature-Inversion
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## MANAGER-INTEGRATION
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Kommunikationskanäle:**
+   - Config: value_default.WEATHER für Parameter-Ranges, Climate-Defaults, CFD-Settings
+   - Core: core/weather_generator.py → WeatherSystemGenerator, TemperatureCalculator, WindFieldSimulator
+   - Input: DataLODManager.get_terrain_data("heightmap/shadowmap") für Orographic-Base-Data
+   - Output: DataLODManager.set_weather_data_lod() für temp_map/precip_map/wind_map zu water_generator
+   - Manager: GenerationOrchestrator.request_generation("weather") nach Dependency-Erfüllung
+   - Widgets: widgets.py für ParameterSlider, StatusIndicator, ProgressBar, RandomSeedButton
+
+   **Signal-Flow:**
+   WeatherTab.generate_requested("weather")
+   ↑ GenerationOrchestrator.request_generation("weather", parameters)
+   ↑ WeatherSystemGenerator.generate_weather_system()
+   ↑ DataLODManager.set_weather_data_lod()
+   ↑ data_updated("weather") Signal
+   ↑ WeatherTab.on_data_updated()
+   ↑ WeatherTab.update_display()
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## DISPLAY-MODI (erweitert BaseMapTab)
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Visualization Modes:**
+   - Temperature Mode: temp_map mit Color-Coding (Blau=-20°C → Rot=50°C)
+   - Precipitation Mode: precip_map mit Niederschlags-Intensität (Weiß=0mm → Dunkelblau=200mm)
+   - Wind Mode: wind_map als 2D-Vektorfeld + 3D-Wind-Arrows über Terrain-Mesh
+   - Humidity Mode: humid_map mit Feuchtigkeits-Gradienten (Gelb=trocken → Grün=feucht)
+
+   **3D-Integration:**
+   - Wind-Vectors: 3D-Arrows skaliert nach wind_map-Magnitude über 3D-Terrain
+   - Temperature-Overlay: Color-coded Temperature auf 3D-Terrain-Surface
+   - Precipitation-Visualization: Animated Rain-Effects basierend auf precip_map
+   - Atmospheric-Effects: Fog/Mist-Rendering basierend auf Humidity-Levels
+
+   **Overlay-System:**
+   - Shadow/Contour/Grid Overlays: Nutzen Terrain-Data über alle Weather-Modi
+   - Display-Optimization: Immer bestes verfügbares LOD für Display
+   - Multi-Layer-Rendering: Kombiniert Weather-Data mit Terrain-Base-Layer
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## ERROR-HANDLING UND VALIDATION
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Parameter-Validation:**
+   - Range-Checks über value_default.WEATHER Constraints
+   - Temperature-Parameter [-50°C bis +60°C] Validation
+   - Wind-Parameter [0-200 km/h] Physical-Plausibility-Checks
+   - CFD-Parameter [Iteration-Limits, Convergence-Criteria] Technical-Validation
+
+   **Weather-Data-Validation:**
+   - Temperature-Map Physical-Range-Checks [-50°C bis +60°C]
+   - Precipitation-Map Range-Validation [0-500mm Niederschlag]
+   - Wind-Map Velocity-Limit-Checks [0-200km/h Maximum]
+   - Humidity-Map Saturation-Limit-Validation [0-100% relative Feuchtigkeit]
+
+   **CFD-System-Validation:**
+   - Solver-Convergence-Monitoring für Wind-Field-Stability
+   - Mass-Conservation-Checks für Atmospheric-Moisture-Transport
+   - Energy-Conservation-Validation für Temperature-Heat-Balance
+   - Numerical-Stability-Checks für CFD-Iteration-Convergence
+
+   **Error-Recovery:**
+   - Invalid-Input-Recovery mit Default-Climate-Conditions
+   - CFD-Solver-Recovery bei Numerical-Instability mit Simplified-Physics
+   - Automatic Fallback bei Critical-Generation-Failures zu Linear-Climate-Model
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## ABHÄNGIGKEITEN UND OUTPUT
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Dependencies:**
+   - required_dependencies: ["heightmap", "shadowmap"] von terrain_tab
+   - Dependency-Validation erforderlich vor Generation
+   - Orographic-Data-Quality-Checks für realistische Climate-Effects
+
+   **Output für nachgelagerte Generatoren:**
+   - temp_map → biome_generator für Temperature-based Biome-Classification
+   - precip_map → water_generator für Precipitation-driven River-Generation
+   - precip_map → biome_generator für Whittaker-Biome-Classification
+   - wind_map → water_generator für Wind-driven Evaporation-Calculation
+   - humid_map → water_generator für Atmospheric-Moisture-Cycling
+   - Climate-Data → settlement_generator für Climate-Suitability-Analysis
+   """
 
 def water_tab():
-    """
-    Path: gui/tabs/water_tab.py
+   """
+   Path: gui/tabs/water_tab.py
+   Date Changed: 24.08.2025
 
-    Funktionsweise: Wassersystem mit River-Networks und Erosion
-    - Input: Heightmap, Precipitation, Rock-Hardness
-    - River-Generation durch Flow-Accumulation
-    - Lake-Placement und Water-Table Simulation
-    - Erosion-Simulation modifiziert Heightmap
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## ÜBERSICHT UND ZIELSETZUNG
+   ═══════════════════════════════════════════════════════════════════════════════
 
-    Kommunikationskanäle:
-    - Input: heightmap, precipitation_field, rock_hardness von data_manager
-    - Core: water_generator für Hydrologie
-    - Output: river_network, lakes, modified_heightmap → data_manager
-    """
+   WaterTab implementiert die Water-Generator UI mit BaseMapTab-Integration und
+   komplexer hydrologischer Simulation basierend auf Terrain-, Geology- und Weather-Input.
+   Erzeugt realistische Wassersysteme mit Erosion, Sedimentation und bidirektionaler
+   Terrain-Modifikation durch physikalisch korrekte Sediment-Transport-Simulation.
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## CORE-GENERATOR INTEGRATION
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **HydrologySystemGenerator Anbindung:**
+   ├ Core-Call: HydrologySystemGenerator.generate_hydrology_system(heightmap, hardness_map, precip_map, temp_map, wind_map, parameters, lod_level)
+   ├ Lake-Detection: Jump Flooding Algorithm für parallele Senken-Identifikation
+   ├ Flow-Network: Steepest Descent mit Upstream-Akkumulation für Flusssysteme
+   ├ Erosion-Simulation: Stream Power Erosion mit HjulstrÃ¶m-Sundborg Transport
+   ├ Terrain-Feedback: Bidirektionale heightmap-Modifikation durch Erosions-/Sedimentationsprozesse
+
+   **HydrologyData Output:**
+   ├ water_map: 2D numpy.float32 array, Gewässertiefen in m
+   ├ flow_map: 2D numpy.float32 array, Volumenstrom in m³/s
+   ├ flow_speed: 2D numpy.float32 array, Fließgeschwindigkeit in m/s
+   ├ soil_moist_map: 2D numpy.float32 array, Bodenfeuchtigkeit in %
+   ├ erosion_map: 2D numpy.float32 array, Erosionsrate in m/Jahr
+   ├ sedimentation_map: 2D numpy.float32 array, Sedimentationsrate in m/Jahr
+   ├ water_biomes_map: 2D numpy.uint8 array, Wasser-Klassifikation (0=kein Wasser, 1=Creek, 2=River, 3=Grand River, 4=Lake)
+   ├ heightmap_modified: 2D numpy.float32 array, durch Erosion/Sedimentation modifizierte Höhenkarte
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## UI-LAYOUT (erweitert BaseMapTab)
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Control Panel Parameter-Sektion:**
+
+   ├ Hydrology Base Parameters GroupBox:
+   ├── Lake Volume Threshold: ParameterSlider (value_default.WATER.LAKE_VOLUME_THRESHOLD) + suffix:"m"
+   ├── Rain Threshold: ParameterSlider (value_default.WATER.RAIN_THRESHOLD) + suffix:"gH2O/m²"
+   ├── Manning Coefficient: ParameterSlider (value_default.WATER.MANNING_COEFFICIENT) + suffix:"roughness"
+   ├── Flow Iterations: ParameterSlider (value_default.WATER.FLOW_ITERATIONS) + suffix:"cycles"
+
+   ├ Erosion & Sedimentation Parameters GroupBox:
+   ├── Erosion Strength: ParameterSlider (value_default.WATER.EROSION_STRENGTH) + suffix:"factor"
+   ├── Sediment Capacity Factor: ParameterSlider (value_default.WATER.SEDIMENT_CAPACITY_FACTOR) + suffix:"factor"
+   ├── Settling Velocity: ParameterSlider (value_default.WATER.SETTLING_VELOCITY) + suffix:"m/s"
+   ├── Transport Efficiency: ParameterSlider (value_default.WATER.TRANSPORT_EFFICIENCY) + suffix:"factor"
+
+   ├ Atmospheric Coupling Parameters GroupBox:
+   ├── Evaporation Base Rate: ParameterSlider (value_default.WATER.EVAPORATION_BASE_RATE) + suffix:"m/Tag"
+   ├── Diffusion Radius: ParameterSlider (value_default.WATER.DIFFUSION_RADIUS) + suffix:"pixel"
+   ├── Soil Moisture Factor: ParameterSlider (value_default.WATER.SOIL_MOISTURE_FACTOR) + suffix:"factor"
+   ├── Water Seed: ParameterSlider + RandomSeedButton (widgets.py)
+
+   ├ Generation Control GroupBox:
+   ├── "Berechnen"-Button: Manual Generation-Trigger
+   ├── Generation Progress: ProgressBar mit Hydrology-Phase-Details (Lake-Detection→Flow-Network→Erosion→Sedimentation)
+   ├── Input Dependencies: StatusIndicator für heightmap/hardness_map/precip_map-Verfügbarkeit
+   ├── Terrain Modification: StatusIndicator für heightmap-Änderungen durch Erosion
+
+   ├ Hydrology Statistics GroupBox:
+   ├── Water Coverage: Prozent der Karte mit Wasserkörpern, aufgeteilt nach Biome-Types
+   ├── Flow Statistics: Max/Mean Flow-Speed, Total Discharge, Longest River-Length
+   ├── Lake Statistics: Lake-Count, Total Lake-Area, Largest Lake-Size
+   ├── Erosion Impact: Total Eroded Volume, Max Erosion-Rate, Sedimentation Balance
+   ├── Soil Moisture: Min/Max/Mean Bodenfeuchtigkeit, Moisture-Distribution
+   ├── Performance Metrics: Jump-Flooding-Time, Flow-Iterations, Erosion-Cycles
+
+   **Canvas Visualization Controls:**
+
+   ├ Water-spezifische Controls (2D+3D):
+   ├── Water Depth/Flow Speed/Erosion/Soil Moisture: Radio-Buttons (exklusiv für Water-Modi)
+   ├── Water Biomes: Radio-Button (Creek/River/Grand River/Lake Classification-Display)
+
+   ├ Standard BaseMapTab Controls (2D+3D):
+   ├── Shadow: Checkbox (Overlay über alle Modi, nutzt Terrain-Shadowmap) + Shadow-Angle-Slider (0-6)
+   ├── Contour Lines: Checkbox (nutzt Original- oder Modified-Heightmap je nach Modus)
+   ├── Grid Overlay: Checkbox (für alle Modi)
+   ├── Flow Vectors: Checkbox (2D-Arrows für Flow-Direction, 3D-Animated-Rivers)
+   ├── Erosion Overlay: Checkbox (Red-Zones für aktive Erosion, Blue-Zones für Sedimentation)
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## GENERATION-WORKFLOW
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Generation-Flow:**
+   ├ Multi-Dependency-Check → heightmap/hardness_map/precip_map/temp_map/wind_map-Validation → "Berechnen"-Button
+   ├ generate_hydrology_system() → GenerationOrchestrator.request_generation("water")
+   ├ HydrologySystemGenerator.generate_hydrology_system() → Lake-Detection + Flow-Network + Erosion-Simulation
+   ├ LOD-Progression über GenerationOrchestrator mit steigender Hydrology-Komplexität
+   ├ DataLODManager.set_water_data_lod() + set_terrain_data_lod(modified_heightmap) → Dual-Signal-Emission
+   ├ Display-Update → Statistics-Update → Cross-Tab-Notification für Terrain-Modification
+
+   **LOD-System Integration:**
+   ├ LOD-Progression: Hydrology-Complexity skaliert automatisch bis map_size erreicht (entsprechend Terrain)
+   ├ LOD-Grid-Scaling: 32x32→64x64→128x128→256x256→512x512→1024x1024→2048x2048
+   ├ LOD-Level-Nummerierung: 1,2,3,4,5,6+ entsprechend verfügbaren Input-Dependencies-LODs
+   ├ Progressive Enhancement: Jump-Flooding-Precision, Flow-Iterations und Erosion-Cycles steigen mit LOD
+   ├ Performance-Scaling: Lake-Detection-Precision (3→5→7→10→15→20→25 Jump-Passes), Flow-Network-Detail steigt progressiv
+
+   **Terrain-Feedback-Workflow:**
+   ├ Original-Heightmap → Erosion-Calculation → Modified-Heightmap
+   ├ DataLODManager.set_terrain_data_lod("heightmap_original") → Backup für andere Generatoren
+   ├ DataLODManager.set_terrain_data_lod("heightmap_modified") → Updated für nachfolgende Systeme
+   ├ Version-Control: Biome/Settlement-Generatoren können Original oder Modified wählen
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## DEPENDENCY-MANAGEMENT
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Input Dependencies:**
+   ├ required_dependencies: ["heightmap", "hardness_map", "precip_map", "temp_map", "wind_map"]
+   ├ Primary-Dependencies: terrain_tab → heightmap/slopemap
+   ├ Secondary-Dependencies: geology_tab → hardness_map/rock_map
+   ├ Tertiary-Dependencies: weather_tab → precip_map/temp_map/wind_map
+   ├ check_input_dependencies(): Multi-Generator Cross-Validation mit Consistency-Checks
+
+   **Input-Validation:**
+   ├ heightmap Shape/Range/Hydrology-Suitability-Checks für Flow-Calculation
+   ├ hardness_map Geological-Consistency-Validation mit rock_map für Erosion-Resistance
+   ├ precip_map Precipitation-Range-Validation [0-500mm] für realistische Hydrology
+   ├ temp_map/wind_map Atmospheric-Data-Quality für Evaporation-Calculation
+   ├ Cross-Generator-Consistency: LOD-Level-Matching zwischen allen Input-Dependencies
+   ├ Physical-Plausibility: Erosion-Parameters vs. Geological-Hardness Consistency-Checks
+
+   **Complex-Dependency-Status-Display:**
+   ├ Multi-Generator-StatusIndicator mit Individual-Dependency-Status
+   ├ Data-Quality-Assessment pro Input-Dependency mit Recovery-Suggestions
+   ├ Cross-Validation-Results für Input-Consistency zwischen Generatoren
+   ├ LOD-Compatibility-Status zwischen verschiedenen Input-Sources
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## MANAGER-INTEGRATION
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Kommunikationskanäle:**
+   ├ Config: value_default.WATER für Parameter-Ranges, Hydrology-Defaults, Erosion-Settings
+   ├ Core: core/water_generator.py → HydrologySystemGenerator, LakeDetectionSystem, ErosionSedimentationSystem
+   ├ Multi-Input: DataLODManager.get_terrain_data() + get_geology_data() + get_weather_data()
+   ├ Dual-Output: DataLODManager.set_water_data_lod() + set_terrain_data_lod(modified) für Terrain-Feedback
+   ├ Manager: GenerationOrchestrator.request_generation("water") nach Multi-Dependency-Erfüllung
+   ├ Widgets: widgets.py für ParameterSlider, StatusIndicator, ProgressBar, RandomSeedButton
+
+   **Signal-Flow:**
+   ├ WaterTab.generate_requested("water")
+   ├ GenerationOrchestrator.request_generation("water", parameters)
+   ├ HydrologySystemGenerator.generate_hydrology_system()
+   ├ DataLODManager.set_water_data_lod() + set_terrain_data_lod(modified_heightmap)
+   ├ data_updated("water") + data_updated("terrain_modified") Signals
+   ├ WaterTab.on_data_updated() + Cross-Tab-Updates für Terrain-Modification
+   ├ WaterTab.update_display()
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## DISPLAY-MODI (erweitert BaseMapTab)
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Visualization Modes:**
+   ├ Water Depth Mode: water_map mit Color-Coding (Transparent=0m → Dunkelblau=20m Tiefe)
+   ├ Flow Speed Mode: flow_speed mit Velocity-Visualization (Blau=langsam → Rot=schnell)
+   ├ Erosion Rate Mode: erosion_map mit Erosion-Intensity (Grün=Sedimentation → Rot=Erosion)
+   ├ Soil Moisture Mode: soil_moist_map mit Feuchtigkeit-Gradienten (Gelb=trocken → Blau=feucht)
+   ├ Water Biomes Mode: water_biomes_map mit Biome-Classification-Color-Coding
+
+   **3D-Integration:**
+   ├ Animated Rivers: 3D-Flow-Vectors mit Movement-Animation basierend auf flow_speed
+   ├ Water-Surface-Rendering: Reflective Water-Surface über water_map-Areas
+   ├ Erosion-Visualization: Real-time Height-Changes durch Erosion/Sedimentation
+   ├ Terrain-Modification-Display: Original vs. Modified Heightmap Toggle-Option
+   ├ Lake-3D-Rendering: Realistic Water-Bodies mit Depth-based Transparency
+
+   **Overlay-System:**
+   ├ Shadow/Contour/Grid Overlays: Nutzen Original- oder Modified-Terrain-Data je nach User-Choice
+   ├ Flow-Vector-Overlay: 2D-Arrows für Flow-Direction, skaliert nach flow_map-Magnitude
+   ├ Erosion-Overlay: Color-coded Erosion/Sedimentation-Zones über alle Modi
+   ├ Multi-Layer-Rendering: Kombiniert Water-Data mit Original/Modified-Terrain-Base-Layer
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## ERROR-HANDLING UND VALIDATION
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Parameter-Validation:**
+   ├ Range-Checks über value_default.WATER Constraints
+   ├ Hydrology-Parameter [Lake-Threshold 0.1-10.0m, Manning 0.01-0.1] Physical-Validation
+   ├ Erosion-Parameter [Erosion-Strength 0.0-5.0, Sediment-Capacity 0.0-1.0] Geological-Plausibility
+   ├ Cross-Parameter-Constraints: Erosion-Strength vs. Hardness-Map-Values Consistency
+
+   **Multi-Input-Validation:**
+   ├ Heightmap Physical-Range-Checks für realistische Hydrology-Simulation
+   ├ Hardness-Map vs. Rock-Map Consistency-Validation für Erosion-Resistance
+   ├ Weather-Data Atmospheric-Plausibility für Evaporation-Calculation
+   ├ Multi-Generator LOD-Level-Consistency zwischen allen Input-Dependencies
+
+   **Hydrology-System-Validation:**
+   ├ Water-Mass-Conservation-Checks für Input/Output-Balance
+   ├ Flow-Network-Topology-Validation für physically-correct River-Systems
+   ├ Erosion-Stability-Monitoring für Numerical-Stability bei Terrain-Modification
+   ├ Lake-Detection-Consistency-Validation für Jump-Flooding-Algorithm-Results
+
+   **Advanced-Error-Recovery:**
+   ├ Multi-Input-Recovery mit Fallback-Strategies pro Dependency-Type
+   ├ Erosion-Stability-Recovery bei Numerical-Instabilities mit Simplified-Physics
+   ├ Flow-Network-Recovery bei Topology-Errors mit Alternative-Pathfinding
+   ├ Terrain-Modification-Rollback bei Critical-Heightmap-Corruption
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## ABHÄNGIGKEITEN UND OUTPUT
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Dependencies:**
+   ├ required_dependencies: ["heightmap", "hardness_map", "precip_map", "temp_map", "wind_map"]
+   ├ Complex-Multi-Generator-Dependencies: terrain + geology + weather
+   ├ Dependency-Validation erforderlich für alle Input-Sources vor Generation
+   ├ Cross-Generator-Consistency-Checks für realistic Hydrology-Simulation
+
+   **Output für nachgelagerte Generatoren:**
+   ├ water_map → biome_generator für Water-Proximity Biome-Classification
+   ├ soil_moist_map → biome_generator für Moisture-based Vegetation-Distribution
+   ├ water_biomes_map → settlement_generator für Water-Access Settlement-Suitability
+   ├ flow_map → settlement_generator für River-Transport-Route-Analysis
+   ├ heightmap_modified → biome_generator/settlement_generator für Updated-Terrain-Base
+   ├ erosion_map → settlement_generator für Geological-Stability-Assessment
+
+   **Bidirectional-Terrain-Feedback:**
+   ├ Original-Heightmap → Preserved für Generator-Compatibility
+   ├ Modified-Heightmap → Available für Realistic-Post-Erosion-Simulation
+   ├ Version-Control-System → Nachfolgende Generatoren können Original/Modified wählen
+   ├ Terrain-Change-Notification → Cross-Tab-Updates für Terrain-Modification-Awareness
+   """
 
 def biome_tab():
-    """
-    Path: gui/tabs/biome_tab.py
+   """
+   Path: gui/tabs/biome_tab.py
+   Date Changed: 24.08.2025
 
-    Funktionsweise: Finale Biome-Klassifizierung und Welt-Übersicht
-    - Input: Alle vorherigen Generator-Outputs
-    - Whittaker-Biome Classification (Temperature vs Precipitation)
-    - Integration aller Systeme in finale Welt-Darstellung
-    - Export-Funktionalität für komplette Welt
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## ÜBERSICHT UND ZIELSETZUNG
+   ═══════════════════════════════════════════════════════════════════════════════
 
-    Kommunikationskanäle:
-    - Input: heightmap, temperature_field, precipitation_field, settlements, water
-    - Core: biome_generator für Ecosystem-Classification
-    - Output: final_world_map mit allen Layern integriert
-    """
+   BiomeTab implementiert die Biome-Generator UI mit BaseMapTab-Integration und
+   komplexer Ökosystem-Klassifikation basierend auf allen vorherigen Generator-Outputs.
+   Erzeugt finale Biome-Verteilung durch 15 Base-Biome-Classification nach Whittaker-Diagramm
+   mit 11 Super-Biome-Override-System und 2x2 Supersampling für weiche Übergänge.
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## CORE-GENERATOR INTEGRATION
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **BiomeClassificationSystem Anbindung:**
+   ├ Core-Call: BiomeClassificationSystem.classify_biomes(heightmap, temp_map, precip_map, soil_moist_map, water_biomes_map, parameters, lod_level)
+   ├ Base-Biome-Classification: Gauß-basierte Klassifizierung von 15 Grundbiomen nach Klima/Höhe/Feuchtigkeit
+   ├ Super-Biome-Override: 11 spezielle Biome (Ocean, Lake, River, Cliff, Beach, Alpine, etc.) überschreiben Base-Biome
+   ├ Supersampling-System: 2x2 Supersampling mit diskretisierter Zufalls-Rotation für weiche Biome-Übergänge
+   ├ Proximity-Biome-System: Ufer-Biome (Beach, Lake Edge, River Bank) mit konfigurierbarem edge_softness
+
+   **BiomeData Output:**
+   ├ biome_map: 2D numpy.uint8 array, Index der dominantesten Biom-Klasse
+   ├ biome_map_super: 2D numpy.uint8 array, 2x supersampled zur Darstellung gemischter Biome
+   ├ super_biome_mask: 2D numpy.bool array, Maske welche Pixel von Super-Biomes überschrieben wurden
+   ├ biome_statistics: Dict mit Biome-Verteilungs-Prozenten und Ökosystem-Metriken
+   ├ climate_classification: 2D numpy.uint8 array, Whittaker-Klimazone-Zuordnung
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## UI-LAYOUT (erweitert BaseMapTab)
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Control Panel Parameter-Sektion:**
+
+   ├ Biome Classification Parameters GroupBox:
+   ├── Temperature Factor: ParameterSlider (value_default.BIOME.BIOME_TEMP_FACTOR) + suffix:"weight"
+   ├── Precipitation Factor: ParameterSlider (value_default.BIOME.BIOME_WETNESS_FACTOR) + suffix:"weight"
+   ├── Elevation Factor: ParameterSlider (value_default.BIOME.ELEVATION_FACTOR) + suffix:"weight"
+   ├── Soil Moisture Factor: ParameterSlider (value_default.BIOME.SOIL_MOISTURE_FACTOR) + suffix:"weight"
+
+   ├ Super-Biome Thresholds GroupBox:
+   ├── Sea Level: ParameterSlider (value_default.BIOME.SEA_LEVEL) + suffix:"m"
+   ├── Alpine Level: ParameterSlider (value_default.BIOME.ALPINE_LEVEL) + suffix:"m"
+   ├── Snow Level: ParameterSlider (value_default.BIOME.SNOW_LEVEL) + suffix:"m"
+   ├── Cliff Slope: ParameterSlider (value_default.BIOME.CLIFF_SLOPE) + suffix:"degrees"
+
+   ├ Transition Quality Parameters GroupBox:
+   ├── Edge Softness: ParameterSlider (value_default.BIOME.EDGE_SOFTNESS) + suffix:"factor"
+   ├── Bank Width: ParameterSlider (value_default.BIOME.BANK_WIDTH) + suffix:"pixel"
+   ├── Supersampling Quality: ParameterSlider (value_default.BIOME.SUPERSAMPLING_QUALITY) + suffix:"level"
+   ├── Biome Seed: ParameterSlider + RandomSeedButton (widgets.py)
+
+   ├ Generation Control GroupBox:
+   ├── "Berechnen"-Button: Manual Generation-Trigger
+   ├── Generation Progress: ProgressBar mit Biome-Phase-Details (Base-Classification→Super-Override→Supersampling→Statistics)
+   ├── Input Dependencies: StatusIndicator für heightmap/temp_map/precip_map/soil_moist_map/water_biomes_map-Verfügbarkeit
+   ├── Multi-Generator-Status: StatusIndicator für terrain+geology+weather+water Dependency-Chain
+
+   ├ Biome Distribution Statistics GroupBox:
+   ├── Base-Biome-Distribution: Progress-Bars für alle 15 Base-Biome mit Prozent-Anteilen
+   ├── Super-Biome-Coverage: Ocean/Lake/River/Alpine Coverage-Statistiken
+   ├── Climate-Zone-Distribution: Whittaker-Klimazone-Prozente (Arctic, Temperate, Tropical, etc.)
+   ├── Diversity-Metrics: Shannon-Diversity-Index, Biome-Richness, Transition-Smoothness
+   ├── Quality-Metrics: Supersampling-Effectiveness, Edge-Transition-Quality
+   ├── Performance-Stats: Classification-Time, Supersampling-Time, Memory-Usage
+
+   **Canvas Visualization Controls:**
+
+   ├ Biome-spezifische Controls (2D+3D):
+   ├── Base Biomes/Super Biomes/Mixed View: Radio-Buttons (exklusiv für Biome-Display-Modi)
+   ├── Climate Zones: Radio-Button (Whittaker-Klimazone-Display)
+   ├── Biome Transitions: Checkbox (Supersampled vs. Discrete Biome-Boundaries)
+
+   ├ Standard BaseMapTab Controls (2D+3D):
+   ├── Shadow: Checkbox (Overlay über alle Modi, nutzt Terrain-Shadowmap) + Shadow-Angle-Slider (0-6)
+   ├── Contour Lines: Checkbox (nutzt Original/Modified-Heightmap je nach Water-Tab-Status)
+   ├── Grid Overlay: Checkbox (für alle Modi)
+   ├── Water Overlay: Checkbox (Water-Biomes-Overlay über alle Biome-Modi)
+   ├── Settlement Overlay: Checkbox (Settlement-Points-Overlay für Ökosystem-Human-Interaction)
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## GENERATION-WORKFLOW
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Generation-Flow:**
+   ├ Complex-Multi-Dependency-Check → heightmap+temp_map+precip_map+soil_moist_map+water_biomes_map-Validation → "Berechnen"-Button
+   ├ generate_biome_system() → GenerationOrchestrator.request_generation("biome")
+   ├ BiomeClassificationSystem.classify_biomes() → Base-Classification + Super-Override + Supersampling + Statistics
+   ├ LOD-Progression über GenerationOrchestrator mit steigender Classification-Precision und Supersampling-Quality
+   ├ DataLODManager.set_biome_data_lod() → Signal-Emission
+   ├ Display-Update → Statistics-Update → Cross-Tab-Notification für Final-World-Assembly
+
+   **LOD-System Integration:**
+   ├ LOD-Progression: Biome-Classification-Precision skaliert automatisch bis map_size erreicht (entsprechend allen Input-Dependencies)
+   ├ LOD-Grid-Scaling: 32x32→64x64→128x128→256x256→512x512→1024x1024→2048x2048
+   ├ LOD-Level-Nummerierung: 1,2,3,4,5,6+ entsprechend verfügbaren Multi-Generator-Input-LODs
+   ├ Progressive Enhancement: Classification-Accuracy, Super-Biome-Detail und Supersampling-Quality steigen mit LOD
+   ├ Performance-Scaling: Gauß-Fitting-Precision (5→10→15→20→25→30 Samples), Super-Biome-Calculation-Detail steigt progressiv
+
+   **Final-Integration-Workflow:**
+   ├ Multi-Generator-Data-Assembly → Climate+Geological+Hydrological+Terrain-Integration
+   ├ Ecosystem-Coherence-Validation → Cross-System-Consistency-Checks
+   ├ Biome-Transition-Optimization → Natural-Boundary-Enhancement durch Supersampling
+   ├ Final-World-State-Preparation → Export-Ready Biome-Map für Overview-Tab
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## DEPENDENCY-MANAGEMENT
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Input Dependencies (komplexeste aller Generatoren):**
+   ├ required_dependencies: ["heightmap", "temp_map", "precip_map", "soil_moist_map", "water_biomes_map"]
+   ├ Primary-Dependencies: terrain_tab → heightmap für Elevation-based Biome-Classification
+   ├ Secondary-Dependencies: weather_tab → temp_map/precip_map für Whittaker-Climate-Classification
+   ├ Tertiary-Dependencies: water_tab → soil_moist_map/water_biomes_map für Moisture/Proximity-based Biome-Modulation
+   ├ Optional-Dependencies: geology_tab → rock_map für Geological-Biome-Influence (future enhancement)
+   ├ check_input_dependencies(): Most-Complex Multi-Generator Cross-Validation mit Climate-Geological-Hydrological-Consistency
+
+   **Input-Validation:**
+   ├ heightmap Elevation-Range-Validation für Alpine/Snow-Level-Classification
+   ├ temp_map/precip_map Climate-Data-Quality für Whittaker-Biome-Matrix-Classification
+   ├ soil_moist_map Moisture-Range-Validation [0-100%] für Wetland/Desert-Classification
+   ├ water_biomes_map Water-Body-Classification-Consistency für Proximity-Super-Biomes
+   ├ Cross-System-Physical-Plausibility: Temperature vs. Precipitation vs. Elevation Consistency
+   ├ Multi-Generator-LOD-Consistency: Matching LOD-Levels zwischen allen 4 Input-Sources
+
+   **Complex-Multi-Generator-Status-Display:**
+   ├ 4-Generator-Dependencies-StatusIndicator mit Individual-Input-Quality-Assessment
+   ├ Climate-Data-Quality-Matrix mit Temperature/Precipitation-Data-Validation
+   ├ Hydrological-Data-Consistency mit Water-System-Integration-Status
+   ├ Cross-System-Validation-Results für Physical-Plausibility zwischen allen Input-Systems
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## MANAGER-INTEGRATION
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Kommunikationskanäle:**
+   ├ Config: value_default.BIOME für Parameter-Ranges, Classification-Defaults, Supersampling-Settings
+   ├ Core: core/biome_generator.py → BiomeClassificationSystem, BaseBiomeClassifier, SuperBiomeOverrideSystem, SupersamplingManager
+   ├ Multi-Input: DataLODManager.get_terrain_data() + get_weather_data() + get_water_data() für Complete-Ecosystem-Data
+   ├ Final-Output: DataLODManager.set_biome_data_lod() für Final-World-State
+   ├ Manager: GenerationOrchestrator.request_generation("biome") nach All-Dependencies-Erfüllung
+   ├ Widgets: widgets.py für ParameterSlider, StatusIndicator, ProgressBar, RandomSeedButton
+
+   **Signal-Flow:**
+   ├ BiomeTab.generate_requested("biome")
+   ├ GenerationOrchestrator.request_generation("biome", parameters)
+   ├ BiomeClassificationSystem.classify_biomes()
+   ├ DataLODManager.set_biome_data_lod()
+   ├ data_updated("biome") Signal
+   ├ BiomeTab.on_data_updated() + Overview-Tab-Notification für Final-World-Assembly
+   ├ BiomeTab.update_display()
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## DISPLAY-MODI (erweitert BaseMapTab)
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Visualization Modes:**
+   ├ Base Biomes Mode: biome_map mit 15-Color-Coded Base-Biomes (Ice Cap, Tundra, Taiga, Desert, Rainforest, etc.)
+   ├ Super Biomes Mode: super_biome_mask mit 11-Color-Coded Override-Biomes (Ocean, Lake, River, Cliff, Beach, Alpine, etc.)
+   ├ Mixed View Mode: biome_map_super mit Supersampled-Blending zwischen Base- und Super-Biomes
+   ├ Climate Zones Mode: climate_classification mit Whittaker-Climate-Zone-Display (Arctic, Boreal, Temperate, Tropical, Arid)
+   ├ Biome Transitions Mode: Edge-Softness-Visualization mit Transition-Quality-Assessment
+
+   **3D-Integration:**
+   ├ 3D-Biome-Texturing: Realistic-Biome-Textures auf 3D-Terrain-Mesh basierend auf biome_map
+   ├ Vegetation-Height-Simulation: Biome-appropriate Vegetation-Height-Modulation (Forest=tall, Desert=low, etc.)
+   ├ Ecosystem-3D-Visualization: Biome-specific 3D-Elements (Trees, Grass, Rocks, Snow) als Procedural-Details
+   ├ Climate-3D-Effects: Temperature/Precipitation-based Visual-Effects (Snow, Rain, Mist) über 3D-Scene
+   ├ Supersampling-3D-Blending: Smooth-Biome-Transitions in 3D-Rendering durch biome_map_super
+
+   **Overlay-System:**
+   ├ Shadow/Contour/Grid Overlays: Nutzen Modified-Terrain-Data von Water-Tab für Post-Erosion-Display
+   ├ Water-System-Overlay: water_biomes_map-Integration für Water-Biome-Interaction-Display
+   ├ Settlement-Overlay: Settlement-Points für Human-Ecosystem-Interaction-Visualization
+   ├ Multi-Layer-Ecosystem-Rendering: Kombiniert Biome-Data mit allen anderen Generator-Outputs
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## ERROR-HANDLING UND VALIDATION
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Parameter-Validation:**
+   ├ Range-Checks über value_default.BIOME Constraints
+   ├ Classification-Factor-Parameter [0.0-3.0] für Temperature/Precipitation/Elevation-Weights
+   ├ Elevation-Threshold-Parameter [0-8000m] für Alpine/Snow-Level Physical-Plausibility
+   ├ Transition-Quality-Parameter [0.1-2.0] für Edge-Softness und Supersampling-Settings
+
+   **Multi-Input-Ecosystem-Validation:**
+   ├ Climate-Data Physical-Range-Validation für realistische Biome-Classification
+   ├ Elevation vs. Temperature Consistency-Checks für Alpine-Biome-Logic
+   ├ Precipitation vs. Soil-Moisture Hydrological-Consistency für Wetland/Desert-Classification
+   ├ Water-System vs. Proximity-Biome Consistency für Beach/Lake-Edge/River-Bank-Logic
+
+   **Biome-Classification-Validation:**
+   ├ Whittaker-Matrix-Consistency-Checks für Climate-Zone-Biome-Mapping
+   ├ Super-Biome-Override-Logic-Validation für Priority-System-Consistency
+   ├ Supersampling-Quality-Assessment für Transition-Smoothness-Metrics
+   ├ Ecosystem-Coherence-Validation für Cross-Biome-Boundary-Natural-Transitions
+
+   **Advanced-Ecosystem-Error-Recovery:**
+   ├ Multi-Input-Recovery mit Intelligent-Fallback pro Climate/Geological/Hydrological-Input
+   ├ Classification-Failure-Recovery mit Simplified-Biome-Mapping bei Complex-System-Failures
+   ├ Supersampling-Recovery mit Quality-Degradation bei Memory/Performance-Constraints
+   ├ Ecosystem-Consistency-Recovery mit Default-Biome-Distributions bei Cross-System-Conflicts
+
+   ═══════════════════════════════════════════════════════════════════════════════
+   ## ABHÄNGIGKEITEN UND OUTPUT
+   ═══════════════════════════════════════════════════════════════════════════════
+
+   **Dependencies (komplexeste aller Generatoren):**
+   ├ required_dependencies: ["heightmap", "temp_map", "precip_map", "soil_moist_map", "water_biomes_map"]
+   ├ Complete-Multi-Generator-Dependencies: terrain + weather + water (+ optional geology)
+   ├ Dependency-Validation erforderlich für alle 4-5 Input-Sources vor Final-Generation
+   ├ Cross-System-Ecosystem-Consistency-Checks für realistic Final-World-Assembly
+
+   **Output für nachgelagerte Systeme:**
+   ├ biome_map → settlement_generator für Biome-Suitability Settlement-Placement
+   ├ biome_map_super → overview_tab für High-Quality Final-World-Rendering
+   ├ climate_classification → settlement_generator für Climate-Zone-based Settlement-Types
+   ├ biome_statistics → overview_tab für World-Summary und Export-Metadata
+   ├ Final-Ecosystem-State → overview_tab für Complete-World-Export-Assembly
+
+   **Final-World-Integration:**
+   ├ Complete-Ecosystem-Assembly → Integration aller Generator-Outputs in coherent World-State
+   ├ Export-Ready-Data-Preparation → High-Quality-Biome-Maps für verschiedene Export-Formate
+   ├ World-Coherence-Validation → Final-Cross-System-Consistency für realistic World-Simulation
+   ├ Overview-Tab-Integration → Finale World-Visualization und Multi-Format-Export-Preparation
+   """
 
 def settlement_tab():
     """
@@ -2824,16 +3420,35 @@ def map_display_3d():
 def widgets():
     """
     Path: gui/widgets/widgets.py
+    date_changed: 24.08.2025
 
-    Funktionsweise: Wiederverwendbare UI-Komponenten
-    - BaseButton mit konfigurierbarem Styling
-    - ParameterSlider mit value_default.py Integration
-    - StatusIndicator für Input-Dependencies
-    - ProgressBar für Tab-Navigation
-    - AutoSimulationPanel für alle Tabs
+    Funktionsweise: Erweiterte wiederverwendbare UI-Komponenten für Manual-Only System
+    - Eliminiert Auto-Simulation Components (AutoSimulationPanel, ParameterUpdateManager)
+    - Standard-Widgets mit verbesserter User-Experience (No-Wheel-Events)
+    - Fokus auf wiederverwendbare Core-Components für alle Tabs
+
+    Kern-Widgets (aktiv verwendet):
+    - BaseButton mit konfigurierbarem Styling für alle Tabs
+    - ParameterSlider mit value_default.py Integration und No-Wheel-Events (Focus-Required)
+    - RandomSeedButton für alle Generator Seed-Parameter
+    - StatusIndicator für Input-Dependencies und Generation-Status
+    - ProgressBar für LOD-Progression Display
+    - QComboBox mit No-Wheel-Events (Focus-Required) für Dropdown-Selections
+
+    Spezielle Widgets:
+    - BiomeLegendDialog für alle 26 Biome-Typen Anzeige (15 Base + 11 Super)
+    - DisplayWrapper für einheitliche 2D/3D Display-API mit Fallback-Handling
+    - DependencyResolver für robuste Cross-Tab Dependency-Resolution
+
+    UI-Enhancement Features:
+    - Alle Parameter-Controls blockieren Mausrad-Events außer bei Focus
+    - Verhindert ungewollte Parameter-Änderungen beim Scrollen
+    - Einheitliche Styling-API über gui_default.py
+    - Memory-Management und Thread-Safety Verbesserungen
 
     Kommunikationskanäle:
     - Config: gui_default.py für Styling, value_default.py für Parameter-Ranges
-    - Signals: Standard Qt-Signals für Value-Changes
-    - Features: Consistent Styling, Validation, Error-States
+    - Signals: Standard Qt-Signals für Manual-Generation-Requests
+    - Manager-Integration: Direkte ParameterManager Kommunikation ohne Auto-Trigger
+    - Thread-Safety: QMutex-Protection für Background-Generation-Coordination
     """
