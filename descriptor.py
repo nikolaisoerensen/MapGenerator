@@ -3,21 +3,28 @@
     Descriptions for all scripts as methods (to find them faster)
 """
 
+
 def main():
     """
     Path: main.py
+    date_changed: 25.08.2025
 
-    Funktionsweise: Programm-Einstiegspunkt und Application-Setup
-    - Initialisiert QApplication mit optimalen Einstellungen
-    - Lädt globale Konfiguration und prüft Dependencies
+    Funktionsweise: Programm-Einstiegspunkt für QApplication-Setup
+    - Initialisiert QApplication mit Standard-Konfiguration
     - Startet MainMenuWindow als zentraler Entry-Point
-    - Error-Handling für kritische Startup-Fehler
-    - Später: Splash-Screen für lange Initialisierung
+    - Basic Error-Handling für kritische Startup-Fehler
+    - Clean Application-Exit nach Benutzer-Beendigung
 
     Kommunikationskanäle:
     - Config: gui_default.py für Application-Settings
-    - Direkte Instanziierung von MainMenuWindow und informiere navigation_manager.py
-    - Dependencies: Prüfung aller Core-Module und GUI-Dependencies
+    - UI: Direkte Instanziierung von MainMenuWindow
+    - Navigation: MainMenuWindow → NavigationManager für Tab-Navigation
+
+    Architektur-Prinzipien:
+    - Dependency-Checks erfolgen in den jeweiligen Core-Generatoren
+    - Manager werden lazy initialisiert bei erster Verwendung
+    - Fehlerbehandlung delegiert an error_handler.py
+    - Minimale Startup-Komplexität für schnellen Application-Start
     """
 
 def terrain_generator():
@@ -73,7 +80,8 @@ def terrain_generator():
     TerrainData
         Funktionsweise: Container für alle Terrain-Daten mit Validity-System und Cache-Management
         Aufgabe: Speichert Heightmap, Slopemap, Shadowmap mit LOD-Level, Validity-State und Parameter-Hash
-        Attribute: heightmap, slopemap, shadowmap, lod_level, actual_size, validity_state, parameter_hash, calculated_sun_angles, parameters
+        Attribute: heightmap, slopemap, shadowmap, lod_level, actual_size, validity_state, parameter_hash,
+        calculated_sun_angles, parameters
         Validity-Methods: is_valid(), invalidate(), validate_against_parameters(), get_validity_summary()
 
     BaseTerrainGenerator
@@ -134,6 +142,7 @@ def terrain_generator():
 def geology_generator():
     """
     Path: core/geology_generator.py
+    date_changed: 18.08.2025
 
     Funktionsweise: Geologische Schichten und Gesteinstypen mit DataLODManager-Integration und 3-stufigem Fallback-System
     - GeologyGenerator koordiniert geologische Simulation mit numerischem LOD-System
@@ -193,7 +202,8 @@ def geology_generator():
     GeologyGenerator
         Funktionsweise: Hauptklasse für geologische Schichten und Gesteinstyp-Verteilung
         Aufgabe: Koordiniert Gesteinsverteilung, Härte-Berechnung und Mass-Conservation
-        External-Interface: calculate_geology(heightmap, slopemap, parameters, lod_level) - wird von GenerationOrchestrator aufgerufen
+        External-Interface: calculate_geology(heightmap, slopemap, parameters, lod_level) - wird von
+        GenerationOrchestrator aufgerufen
         Internal-Methods: _coordinate_geology_generation(), _validate_input_data(), _create_geology_data()
         Dependencies: Prüft heightmap/slopemap-Verfügbarkeit und Shape-Consistency über DataLODManager
         Error-Handling: Graceful Degradation bei Input-Inconsistencies, vollständige Fallback-Kette
@@ -258,14 +268,40 @@ def settlement_generator():
     - Terrain-Suitability Analysis (Steigung, Höhe, Wasser-Nähe)
         Suitability-Map wird mit diesen Einflussgrößen erzeugt.
     - Locations: 
-        Settlements: Städte oder Dörfer die an bestimmten Orten vorkommen können (Täler, flache Hügel). Settlements verringern die Terrainverformung in der Nähe etwas. Je nach Radius (Siedlungsgröße) ist der Einfluss auf die Umgebung größer/kleiner. Die Form der Stadt soll zB Linsenförmig sein und über die Slopemap erzeugt werden. Zwischen Settlements gibt es einen Minimalabstand je nach map_size und Anzahl von Settlements. Innerhalb der Stadtgrenzen ist civ_map = 1, außerhalb nimmt der Einfluss ab.
-        Roads: Nachdem Settlements entstanden sind werden die ersten Wege zwischen den Ortschaften geplottet. Dazu soll der Weg des geringsten Widerstands gefunden werden (Pathfinding via slopemap-cost). Danach werden die Straßen etwas gebogen über sanfte Splineinterpolation zwischen zB jedem 3.Waypoint. Erzeugen sehr geringen Einfluss entlang der Wege (z.B. 0.3).
-        Roadsites: z.B. Taverne, Handelsposten, Wegschrein, Zollhaus, Galgenplatz, Markt, besondere Industrie. Entstehen in einem Bereich von 30%-70% Weglänge zwischen Settlements entlang von Roads. Der civ_map-Einfluss ist wesentlich geringer als der von Städten.
-        Landmarks: z.B. Burgen, Kloster, mystische Stätte etc. entstehen in Regionen mit einem civ_map value < thresholds (landmark_wilderness). Erzeugen einen ähnlich geringen Einfluss wie Roadsites. Außerdem werden beide nur in niedrigeren Höhen und Slopes generiert.
-        Wilderness: Bereiche unterhalb eines civ_map-Werts unterhalb von 0.2 werden genullt und als Wilderness deklariert. Hier spawnen keine Plotnodes. Hier sollen in der  späteren Spielentwicklung Questevents stattfinden.
-        civ_map-Logik: civ_map wird mit 0.0 initialisiert. Jeder Quellpunkt trägt akkumulativ zum civ-Wert bei. Einflussverteilung um Quellpunkt über radialen Decay-Kernel (z.B. Gauß, linear fallend oder benutzerdefinierte Kurve). Decay ist stärker an Hanglagen, so dass Zivilisation nicht auf Berge reicht. Decayradius und Initialwert abhängig von Location-Typ: Stadt-Grenzpunkte starten bei 0.8 (innerhalb der Stadt ist 1.0), Roadwaypoints addieren 0.2 bis max. 0.5, Roadsite/Landmarks 0.4. Optional bei sehr hohen Berechnungzeiten kann die Einflussverteilung mit GPU-Shadermasken erfolgen.
-        Plotnodes: Es wird eine feste Anzahl an Plotnodes generiert (plotnodes-parameter). Gleichmäßige Verteilung auf alle Bereiche außerhalb von Städten und Wilderness. Die Plotnodes verbinden sich mit mit Nachbarnodes über Delaunay-Triangulation. Dann verbinden sich die Delaunay-Dreiecke mit benachbarten Dreiecken zu Grundstücken. Die Plotnode-Civwerte werden zusammengerechnet und wenn sie einen Wert (plot-size-parameter) überschreiten ist die Größe erreicht. So werden Grundstücke in Region mit hohem Civ-wert kleiner. Über Abstoßungslogik können die Nodes "physisch" umarrangiert werden. Kanten mit geringem Winkel sollen sich glätten und die Zwischenpunkte können verschwinden. Sehr spitze Winkel lockern sich ebenso. Plotnode-Eigenschaften:
-            node_id, node_location, connector_id (list of nodes), connector_distance (x,y entfernung), connector_elevation (akkumulierter höhenunterschied zu connector), connector_movecost (movecost abhängig von biomes)
+        Settlements: Städte oder Dörfer die an bestimmten Orten vorkommen können (Täler, flache Hügel). Settlements
+        verringern die Terrainverformung in der Nähe etwas. Je nach Radius (Siedlungsgröße) ist der Einfluss auf die
+        Umgebung größer/kleiner. Die Form der Stadt soll zB Linsenförmig sein und über die Slopemap erzeugt werden.
+        Zwischen Settlements gibt es einen Minimalabstand je nach map_size und Anzahl von Settlements. Innerhalb der
+        Stadtgrenzen ist civ_map = 1, außerhalb nimmt der Einfluss ab.
+        Roads: Nachdem Settlements entstanden sind werden die ersten Wege zwischen den Ortschaften geplottet. Dazu soll
+        der Weg des geringsten Widerstands gefunden werden (Pathfinding via slopemap-cost). Danach werden die Straßen
+        etwas gebogen über sanfte Splineinterpolation zwischen zB jedem 3.Waypoint. Erzeugen sehr geringen Einfluss
+        entlang der Wege (z.B. 0.3).
+        Roadsites: z.B. Taverne, Handelsposten, Wegschrein, Zollhaus, Galgenplatz, Markt, besondere Industrie.
+        Entstehen in einem Bereich von 30%-70% Weglänge zwischen Settlements entlang von Roads. Der civ_map-Einfluss
+        ist wesentlich geringer als der von Städten.
+        Landmarks: z.B. Burgen, Kloster, mystische Stätte etc. entstehen in Regionen mit einem
+        civ_map value < thresholds (landmark_wilderness). Erzeugen einen ähnlich geringen Einfluss wie Roadsites.
+        Außerdem werden beide nur in niedrigeren Höhen und Slopes generiert.
+        Wilderness: Bereiche unterhalb eines civ_map-Werts unterhalb von 0.2 werden genullt und als Wilderness
+        deklariert. Hier spawnen keine Plotnodes. Hier sollen in der  späteren Spielentwicklung Questevents stattfinden.
+        civ_map-Logik: civ_map wird mit 0.0 initialisiert. Jeder Quellpunkt trägt akkumulativ zum civ-Wert bei.
+        Einflussverteilung um Quellpunkt über radialen Decay-Kernel (z.B. Gauß, linear fallend oder benutzerdefinierte
+        Kurve). Decay ist stärker an Hanglagen, so dass Zivilisation nicht auf Berge reicht. Decayradius und Initialwert
+        abhängig von Location-Typ: Stadt-Grenzpunkte starten bei 0.8 (innerhalb der Stadt ist 1.0), Roadwaypoints
+        addieren 0.2 bis max. 0.5, Roadsite/Landmarks 0.4. Optional bei sehr hohen Berechnungzeiten kann die
+        Einflussverteilung mit GPU-Shadermasken erfolgen.
+        Plotnodes: Es wird eine feste Anzahl an Plotnodes generiert (plotnodes-parameter). Gleichmäßige Verteilung auf
+        alle Bereiche außerhalb von Städten und Wilderness. Die Plotnodes verbinden sich mit mit Nachbarnodes über
+        Delaunay-Triangulation. Dann verbinden sich die Delaunay-Dreiecke mit benachbarten Dreiecken zu Grundstücken.
+        Die Plotnode-Civwerte werden zusammengerechnet und wenn sie einen Wert (plot-size-parameter) überschreiten ist
+        die Größe erreicht. So werden Grundstücke in Region mit hohem Civ-wert kleiner. Über Abstoßungslogik können die
+        Nodes "physisch" umarrangiert werden. Kanten mit geringem Winkel sollen sich glätten und die Zwischenpunkte
+        können verschwinden. Sehr spitze Winkel lockern sich ebenso.
+        Plotnode-Eigenschaften:
+            node_id, node_location, connector_id (list of nodes), connector_distance (x,y entfernung),
+            connector_elevation (akkumulierter höhenunterschied zu connector), connector_movecost (movecost
+            abhängig von biomes)
         Plots: Plots bestehend aus Plotnodes haben folgende Eigenschaften:
             biome_amount: akkumulierte Menge eines jeden Bioms in den Grenzen des Plots
             resource_amount: später im Spiel sich verändernde Menge an natürlichen Rohstoffen.
@@ -323,6 +359,7 @@ def settlement_generator():
 def weather_generator():
     """
     Path: core/weather_generator.py
+    date_changed: 25.08.2025
 
     Funktionsweise: Dynamisches Wetter- und Feuchtigkeitssystem
     - Terrain-basierte Temperaturberechnung (Altitude, Sonneneinstrahlung, Breitengrad (Input: heightmap, shade_map) der Luft.
@@ -332,7 +369,8 @@ def weather_generator():
         - Precipation durch Abkühlen/Aufsteigen der Luft
         - Evaporation durch Bodenfeuchtigkeit (Input: soil_moist_map)
         - OpenSimplex-Noise für  Variation in Temperatur-, Feuchte- und Luftdruck an Kartengrenze
-        - Regen wird ausgelöst durch Erreichen eines Feuchtigkeitsgrenzwertes von über 1.0. Dieser berechnet sich aus rho_max = 5*exp(0.06*T) mit T aus temp_map und der Luftfeuchtigkeit in der jeweiligen Zelle.
+        - Regen wird ausgelöst durch Erreichen eines Feuchtigkeitsgrenzwertes von über 1.0. Dieser berechnet sich aus
+        rho_max = 5*exp(0.06*T) mit T aus temp_map und der Luftfeuchtigkeit in der jeweiligen Zelle.
 
     Parameter Input:
     - air_temp_entry (Lufttemperatur bei Karteneintritt)
@@ -357,48 +395,103 @@ def weather_generator():
 
     Beschreibung der Berg-Wind-Simulation
     Schritt 1: Temperaturberechnung
-    Zunächst wird die Lufttemperatur für jede Zelle der Simulation basierend auf drei Hauptfaktoren berechnet. Die Altitude (z) führt zu einer starken Temperaturabnahme von 60°C pro Kilometer Höhe - das ist zehnmal stärker als in der Realität, um dramatischere Effekte zu erzielen. Die Sonneneinstrahlung I(x,y) wird aus einer speziell vorbereiteten Shademap importiert, die sechs verschiedene Sonnenwinkel über den Tag gewichtet kombiniert. Hohe Sonnenstände erhalten dabei mehr Gewichtung. Bei maximaler Sonneneinstrahlung (Wert 1) steigt die Temperatur um 10°C, bei minimaler Einstrahlung (Wert 0) fällt sie um 10°C. Der Breitengrad (y-Position) simuliert den Äquator-zu-Pol-Gradienten: An der Südseite der Karte (y=0) bleibt die Basistemperatur unverändert, während sie zur Nordseite hin (y=map_size) um 5°C ansteigt.
+    Zunächst wird die Lufttemperatur für jede Zelle der Simulation basierend auf drei Hauptfaktoren berechnet.
+    Die Altitude (z) führt zu einer starken Temperaturabnahme von 60°C pro Kilometer Höhe - das ist zehnmal stärker
+    als in der Realität, um dramatischere Effekte zu erzielen. Die Sonneneinstrahlung I(x,y) wird aus einer speziell
+    vorbereiteten Shademap importiert, die sechs verschiedene Sonnenwinkel über den Tag gewichtet kombiniert. Hohe
+    Sonnenstände erhalten dabei mehr Gewichtung. Bei maximaler Sonneneinstrahlung (Wert 1) steigt die Temperatur um
+    10°C, bei minimaler Einstrahlung (Wert 0) fällt sie um 10°C. Der Breitengrad (y-Position) simuliert den
+    Äquator-zu-Pol-Gradienten: An der Südseite der Karte (y=0) bleibt die Basistemperatur unverändert, während sie
+    zur Nordseite hin (y=map_size) um 5°C ansteigt.
 
     Schritt 2: Windfeld-Grundsimulation
-    Die eigentliche Windsimulation wird durch einen konstanten Druckgradienten von West nach Ost initialisiert. An der Westseite der Karte wird ein erhöhter Luftdruck angelegt, der nach Osten hin kontinuierlich abnimmt. Um natürlichere Strömungsmuster zu erzeugen, wird dieser Grunddruckgradient mit Simplex-Noise moduliert, wodurch turbulente Variationen entstehen. Die gesamte Welt wird in ein regelmäßiges Gitter von Simulationszellen unterteilt, wobei jede Zelle eine Luftsäule vom Gelände bis zur maximalen Simulationshöhe repräsentiert. Ein spezieller GPU-Shader berechnet dann für jede Zelle die Druckverteilung und die daraus resultierenden Windgeschwindigkeiten in alle drei Raumrichtungen.
+    Die eigentliche Windsimulation wird durch einen konstanten Druckgradienten von West nach Ost initialisiert. An
+    der Westseite der Karte wird ein erhöhter Luftdruck angelegt, der nach Osten hin kontinuierlich abnimmt. Um
+    natürlichere Strömungsmuster zu erzeugen, wird dieser Grunddruckgradient mit Simplex-Noise moduliert, wodurch
+    turbulente Variationen entstehen. Die gesamte Welt wird in ein regelmäßiges Gitter von Simulationszellen unterteilt,
+    wobei jede Zelle eine Luftsäule vom Gelände bis zur maximalen Simulationshöhe repräsentiert. Ein spezieller
+    GPU-Shader berechnet dann für jede Zelle die Druckverteilung und die daraus resultierenden Windgeschwindigkeiten
+    in alle drei Raumrichtungen.
 
     Schritt 3: Geländeinteraktion
-    Das Windfeld interagiert dynamisch mit der Geländetopographie. Düseneffekte entstehen automatisch in engen Tälern, wo die Windgeschwindigkeit aufgrund der Kontinuitätsgleichung zunimmt. Blockierungseffekte treten auf, wenn Luftmassen auf Berghänge treffen - der Wind wird dann entweder nach oben abgelenkt oder um die Hindernisse herumgeleitet. Orographische Hebung an Luvhängen führt zu Aufwinden, während Leewirbel auf der windabgewandten Seite von Bergen entstehen. Die Temperaturunterschiede zwischen sonnenexponierten und schattigen Hängen verstärken diese Effekte zusätzlich durch thermisch induzierte Hangwinde.
+    Das Windfeld interagiert dynamisch mit der Geländetopographie. Düseneffekte entstehen automatisch in engen Tälern,
+    wo die Windgeschwindigkeit aufgrund der Kontinuitätsgleichung zunimmt. Blockierungseffekte treten auf, wenn
+    Luftmassen auf Berghänge treffen - der Wind wird dann entweder nach oben abgelenkt oder um die Hindernisse
+    herumgeleitet. Orographische Hebung an Luvhängen führt zu Aufwinden, während Leewirbel auf der windabgewandten
+    Seite von Bergen entstehen. Die Temperaturunterschiede zwischen sonnenexponierten und schattigen Hängen verstärken
+    diese Effekte zusätzlich durch thermisch induzierte Hangwinde.
 
     Schritt 4: Numerische Integration
-    Die zeitliche Entwicklung des Windfeldes wird durch die Navier-Stokes-Gleichungen für inkompressible Strömungen gesteuert. Dabei werden Advektionsterme (Wind transportiert sich selbst), Druckgradientenkräfte und Viskositätseffekte berücksichtigt. Die Kontinuitätsgleichung sorgt dafür, dass die Massenerhaltung eingehalten wird, was besonders wichtig ist, um realistische Strömungsmuster um Geländehindernisse zu erzeugen. Jeder Simulationsschritt aktualisiert sowohl die Windgeschwindigkeiten als auch die Druckverteilung konsistent.
+    Die zeitliche Entwicklung des Windfeldes wird durch die Navier-Stokes-Gleichungen für inkompressible Strömungen
+    gesteuert. Dabei werden Advektionsterme (Wind transportiert sich selbst), Druckgradientenkräfte und
+    Viskositätseffekte berücksichtigt. Die Kontinuitätsgleichung sorgt dafür, dass die Massenerhaltung eingehalten wird,
+    was besonders wichtig ist, um realistische Strömungsmuster um Geländehindernisse zu erzeugen. Jeder
+    Simulationsschritt aktualisiert sowohl die Windgeschwindigkeiten als auch die Druckverteilung konsistent.
 
     Benötigte Shader für die Berg-Wind-Simulation
     Shader 1: Temperatur-Berechnung (temperatureCalculation.frag)
-    Dieser Shader berechnet die Lufttemperatur für jede Zelle basierend auf den Eingabeparametern. Er liest die Heightmap aus, um die Höhenabhängige Abkühlung (altitude_cooling) anzuwenden, sampelt die Shade-Map für die solare Erwärmung (solar_power) und berücksichtigt den Breitengrad-Gradienten über die Y-Position. OpenSimplex-Noise wird verwendet, um natürliche Temperaturschwankungen an den Kartengrenzen zu erzeugen. Der Shader gibt ein 2D-Temperaturfeld aus, das als Grundlage für alle thermischen Berechnungen dient.
+    Dieser Shader berechnet die Lufttemperatur für jede Zelle basierend auf den Eingabeparametern. Er liest die
+    Heightmap aus, um die Höhenabhängige Abkühlung (altitude_cooling) anzuwenden, sampelt die Shade-Map für die solare
+    Erwärmung (solar_power) und berücksichtigt den Breitengrad-Gradienten über die Y-Position. OpenSimplex-Noise wird
+    verwendet, um natürliche Temperaturschwankungen an den Kartengrenzen zu erzeugen. Der Shader gibt ein
+    2D-Temperaturfeld aus, das als Grundlage für alle thermischen Berechnungen dient.
 
     Shader 2: Windfeld-Basis (windFieldGeneration.frag)
-    Dieser Shader erzeugt das grundlegende Windfeld durch Druckgradienten von West nach Ost. Er berechnet Druckdifferenzen und konvertiert diese über den wind_speed_factor in Windgeschwindigkeiten. OpenSimplex-Noise moduliert die Druckverteilung für natürliche Turbulenz. Der Shader berücksichtigt Geländeablenkung durch die Slope-Map und den terrain_factor, wodurch Wind um Berge herumgeleitet und in Tälern beschleunigt wird. Die Ausgabe ist ein 2D-Vektorfeld mit horizontalen Windkomponenten.
+    Dieser Shader erzeugt das grundlegende Windfeld durch Druckgradienten von West nach Ost. Er berechnet
+    Druckdifferenzen und konvertiert diese über den wind_speed_factor in Windgeschwindigkeiten. OpenSimplex-Noise
+    moduliert die Druckverteilung für natürliche Turbulenz. Der Shader berücksichtigt Geländeablenkung durch die
+    Slope-Map und den terrain_factor, wodurch Wind um Berge herumgeleitet und in Tälern beschleunigt wird. Die
+    Ausgabe ist ein 2D-Vektorfeld mit horizontalen Windkomponenten.
 
     Shader 3: Thermische Konvektion (thermalConvection.frag)
-    Dieser Shader berechnet thermisch induzierte Windkomponenten basierend auf Temperaturdifferenzen. Er liest das Temperaturfeld aus dem vorherigen Shader und berechnet lokale Temperaturgradienten. Aufwinde entstehen über warmen Bereichen (hohe Shade-Map-Werte), Abwinde über kalten Bereichen. Der thermic_effect-Parameter steuert die Stärke dieser thermischen Verformung. Der Shader modifiziert das bestehende Windfeld durch Überlagerung der konvektiven Komponenten und erzeugt realistische Hangwind-Systeme.
+    Dieser Shader berechnet thermisch induzierte Windkomponenten basierend auf Temperaturdifferenzen. Er liest das
+    Temperaturfeld aus dem vorherigen Shader und berechnet lokale Temperaturgradienten. Aufwinde entstehen über warmen
+    Bereichen (hohe Shade-Map-Werte), Abwinde über kalten Bereichen. Der thermic_effect-Parameter steuert die Stärke
+    dieser thermischen Verformung. Der Shader modifiziert das bestehende Windfeld durch Überlagerung der konvektiven
+    Komponenten und erzeugt realistische Hangwind-Systeme.
 
     Shader 4: Feuchtigkeits-Transport (moistureTransport.frag)
-    Dieser Shader simuliert den Transport von Wasserdampf durch das Windfeld. Er liest die Soil-Moisture-Map für die Evaporation, das aktuelle Feuchtigkeitsfeld und das Windfeld für den Advektionstransport. Evaporation wird basierend auf Bodenfeuchte und lokaler Temperatur berechnet. Der Shader implementiert eine Advektionsgleichung, die Wasserdampf entsprechend der Windrichtung und -geschwindigkeit transportiert. Diffusionseffekte glätten extreme Feuchtigkeitsgradienten für realistische Verteilungen.
+    Dieser Shader simuliert den Transport von Wasserdampf durch das Windfeld. Er liest die Soil-Moisture-Map für die
+    Evaporation, das aktuelle Feuchtigkeitsfeld und das Windfeld für den Advektionstransport. Evaporation wird basierend
+    auf Bodenfeuchte und lokaler Temperatur berechnet. Der Shader implementiert eine Advektionsgleichung, die
+    Wasserdampf entsprechend der Windrichtung und -geschwindigkeit transportiert. Diffusionseffekte glätten extreme
+    Feuchtigkeitsgradienten für realistische Verteilungen.
 
     Shader 5: Niederschlags-Berechnung (precipitationCalculation.frag)
-    Dieser Shader bestimmt, wo und wie viel Niederschlag fällt. Er berechnet die maximale Wasserdampfdichte rho_max = 5*exp(0.06*T) für jede Zelle basierend auf der lokalen Temperatur. Wenn die relative Luftfeuchtigkeit den Wert 1.0 überschreitet, wird Niederschlag ausgelöst. Der Shader berücksichtigt orographische Hebung durch Windgeschwindigkeit und Geländesteigung. Latente Wärmefreisetzung bei der Kondensation wird zurück an den Temperatur-Shader gegeben. Die Ausgabe ist ein 2D-Niederschlagsfeld.
+    Dieser Shader bestimmt, wo und wie viel Niederschlag fällt. Er berechnet die maximale Wasserdampfdichte
+    rho_max = 5*exp(0.06*T) für jede Zelle basierend auf der lokalen Temperatur. Wenn die relative Luftfeuchtigkeit
+    den Wert 1.0 überschreitet, wird Niederschlag ausgelöst. Der Shader berücksichtigt orographische Hebung durch
+    Windgeschwindigkeit und Geländesteigung. Latente Wärmefreisetzung bei der Kondensation wird zurück an den
+    Temperatur-Shader gegeben. Die Ausgabe ist ein 2D-Niederschlagsfeld.
 
     Shader 6: Orographische Effekte (orographicEffects.frag)
-    Dieser spezialisierte Shader berechnet geländeinduzierte Wetterphänomene. Er analysiert Windrichtung relativ zur Geländeorientierung, um Luv- und Lee-Bereiche zu identifizieren. Staueffekte werden an Luvhängen durch verstärkte Aufwinde simuliert. Föhneffekte entstehen durch trockenadiabatische Erwärmung auf der Leeseite. Der Shader modifiziert sowohl Temperatur als auch Feuchtigkeit basierend auf der Geländeinteraktion und erzeugt charakteristische Regenschatten-Muster.
+    Dieser spezialisierte Shader berechnet geländeinduzierte Wetterphänomene. Er analysiert Windrichtung relativ zur
+    Geländeorientierung, um Luv- und Lee-Bereiche zu identifizieren. Staueffekte werden an Luvhängen durch verstärkte
+    Aufwinde simuliert. Föhneffekte entstehen durch trockenadiabatische Erwärmung auf der Leeseite. Der Shader
+    modifiziert sowohl Temperatur als auch Feuchtigkeit basierend auf der Geländeinteraktion und erzeugt
+    charakteristische Regenschatten-Muster.
 
     Shader 7: System-Integration (weatherIntegration.frag)
-    Dieser zentrale Shader führt alle Komponenten zusammen und berechnet die zeitliche Entwicklung des Wettersystems. Er implementiert Rückkopplungsschleifen zwischen Temperatur, Wind und Feuchtigkeit. Konvergenz- und Divergenzzonen werden identifiziert und verstärken lokale Wetterphänomene. Der Shader aktualisiert alle Felder konsistent und sorgt für Massenerhaltung bei Feuchtigkeit und Energieerhaltung bei thermischen Prozessen. Er koordiniert die Ausgabe der finalen wind_map, temp_map, precip_map und humid_map.
+    Dieser zentrale Shader führt alle Komponenten zusammen und berechnet die zeitliche Entwicklung des Wettersystems.
+    Er implementiert Rückkopplungsschleifen zwischen Temperatur, Wind und Feuchtigkeit. Konvergenz- und Divergenzzonen
+    werden identifiziert und verstärken lokale Wetterphänomene. Der Shader aktualisiert alle Felder konsistent und
+    sorgt für Massenerhaltung bei Feuchtigkeit und Energieerhaltung bei thermischen Prozessen. Er koordiniert die
+    Ausgabe der finalen wind_map, temp_map, precip_map und humid_map.
 
     Shader 8: Boundary-Conditions (boundaryConditions.frag)
-    Dieser Shader verwaltet die Randbedingungen an den Kartengrenzen. Er implementiert kontinuierliche Wetterfront-Einträge mit den konfigurierten Parametern (air_temp_entry, etc.). OpenSimplex-Noise erzeugt realistische Wetterfront-Variationen. Der Shader sorgt für konsistente Übergänge zwischen den Kartenrändern und dem Innenbereich und verhindert künstliche Artefakte an den Grenzen. Periodische Randbedingungen können für endlose Karten implementiert werden.
+    Dieser Shader verwaltet die Randbedingungen an den Kartengrenzen. Er implementiert kontinuierliche
+    Wetterfront-Einträge mit den konfigurierten Parametern (air_temp_entry, etc.). OpenSimplex-Noise erzeugt
+    realistische Wetterfront-Variationen. Der Shader sorgt für konsistente Übergänge zwischen den Kartenrändern und
+    dem Innenbereich und verhindert künstliche Artefakte an den Grenzen. Periodische Randbedingungen können für
+    endlose Karten implementiert werden.
 
     Zusätzliche Utility-Shader:
     Gradient-Berechnung (gradientCalculation.frag): Berechnet Höhen- und Temperaturgradienten für die anderen Shader
     Noise-Generation (noiseGeneration.frag): Erzeugt OpenSimplex-Noise-Felder für natürliche Variationen
     Debug-Visualisierung (debugVisualization.frag): Stellt verschiedene Datenfelder für die Entwicklung visuell dar
 
-    Alle Shader arbeiten im Ping-Pong-Verfahren zwischen mehreren Framebuffern, um zeitliche Entwicklung zu simulieren und Rückkopplungseffekte zu ermöglichen.
+    Alle Shader arbeiten im Ping-Pong-Verfahren zwischen mehreren Framebuffern, um zeitliche Entwicklung zu simulieren
+    und Rückkopplungseffekte zu ermöglichen.
 
     Klassen:
     WeatherSystemGenerator
@@ -430,145 +523,317 @@ def weather_generator():
 def water_generator():
     """
     Path: core/water_generator.py
+    date_changed: 25.08.2025
 
-    Funktionsweise: Dynamisches Hydrologiesystem mit Erosion und Sedimentation
+    Funktionsweise: Dynamisches Hydrologiesystem mit Erosion, Sedimentation und bidirektionaler Terrain-Modifikation
     - Lake-Detection durch Jump Flooding Algorithm für parallele Senken-Identifikation
     - Flussnetzwerk-Aufbau durch Steepest Descent mit Upstream-Akkumulation
     - Strömungsberechnung nach Manning-Gleichung mit adaptiven Querschnitten
     - Bodenfeuchtigkeit durch Gaussian-Diffusion von Gewässern
-    - Stream Power Erosion mit Hjulström-Sundborg Transport
-    - Realistische Sedimentation mit Transportkapazitäts-Überschreitung
-    - Evaporation nach Penman-Gleichung mit Wind- und Temperatureffekten
+    - Stream Power Erosion mit iterativer Terrain-Modifikation über LOD-Levels
+    - Realistische Sedimentation mit kumulative Akkumulation
+    - Evaporation basierend auf statischen Weather-Daten (temp_map, wind_map, humid_map)
 
     Parameter Input:
     - lake_volume_threshold (Mindestvolumen für Seebildung, default 0.1m)
     - rain_threshold (Niederschlagsschwelle für Quellbildung, default 5.0 gH2O/m²)
     - manning_coefficient (Rauheitskoeffizient für Fließgeschwindigkeit, default 0.03)
-    - erosion_strength (Erosionsintensität-Multiplikator, default 1.0)
+    - erosion_strength (Erosionsintensitäts-Multiplikator, default 1.0)
     - sediment_capacity_factor (Transportkapazitäts-Faktor, default 0.1)
     - evaporation_base_rate (Basis-Verdunstungsrate, default 0.002 m/Tag)
     - diffusion_radius (Bodenfeuchtigkeit-Ausbreitungsradius, default 5.0 Pixel)
     - settling_velocity (Sediment-Sinkgeschwindigkeit, default 0.01 m/s)
+    - erosion_iterations_per_lod (Anzahl Erosions-Zyklen pro LOD-Level, default 10)
+    - water_seed (Reproduzierbare Zufallsvariation)
 
-    data_manager Input:
-    - map_seed
-    - heightmap
-    - slopemap
-    - hardness_map (Gesteinshärte-Verteilung)
-    - rock_map (RGB-Feld, Gesteinsmassen - R=Sedimentary, G=Igneous, B=Metamorphic mit R+G+B=255)
-    - precip_map (2D-Feld, Niederschlag in gH2O/m²)
-    - temp_map (2D-Feld, Lufttemperatur in °C)
-    - wind_map (2D-Feld, Windvektoren in m/s)
-    - humid_map (2D-Feld, Luftfeuchtigkeit in gH2O/m³)
+    Dependencies (über DataLODManager):
+    - heightmap (von terrain_generator für Orographic-Effects und Flow-Pathfinding)
+    - hardness_map (von geology_generator für Erosions-Resistance)
+    - precip_map (von weather_generator für Precipitation-driven Water-Sources)
+    - temp_map (von weather_generator für Temperature-based Evaporation)
+    - wind_map (von weather_generator für Wind-enhanced Evaporation)
 
     Output:
-    - water_map (2D-Feld, Gewässertiefen) in m
-    - flow_map (2D-Feld, Volumenstrom) in m³/s
-    - flow_speed (2D-Feld, Fließgeschwindigkeit) in m/s
-    - cross_section (2D-Feld, Flusquerschnitt) in m²
-    - soil_moist_map (2D-Feld, Bodenfeuchtigkeit) in %
-    - erosion_map (2D-Feld, Erosionsrate) in m/Jahr
-    - sedimentation_map (2D-Feld, Sedimentationsrate) in m/Jahr
-    - rock_map_updated (RGB-Feld, Gesteinsmassen-Verteilung) - R=Sedimentary, G=Igneous, B=Metamorphic mit R+G+B=255
-    - evaporation_map (2D-Feld, Verdunstung) in gH2O/m²/Tag
-    - ocean_outflow (Skalär, Wasserabfluss ins Meer) in m³/s
-    - water_biomes_map (2D-Array mit Wasser-Klassifikation: 0=kein Wasser, 1=Creek, 2=River, 3=Grand River, 4=Lake)
+    - WaterData-Objekt mit water_map, flow_map, flow_speed, soil_moist_map, water_biomes_map, erosion_map, sedimentation_map, validity_state und LOD-Metadaten
+    - Bidirektionale Terrain-Integration: erosion_map und sedimentation_map für DataLODManager.composite_heightmap
+    - DataLODManager-Storage für nachfolgende Generatoren (biome, settlement)
 
-    Beschreibung der Hydrologischen Simulation
+    LOD-System (Numerisch mit iterativer Erosion):
+    - lod_level 1: map 32x32 → Erosion 10 Iterations für große Erosions-Effekte
+    - lod_level 2: map 64x64 → Erosion 10 Iterations mit Upsampling vorheriger Erosion-Daten
+    - lod_level 3: map 128x128 → Erosion 10 Iterations mit kumulative Erosions-Akkumulation
+    - lod_level 4: map 256x256 → Erosion 10 Iterations mit verfeinerte Flow-Pathfinding
+    - lod_level 5: map 512x512 → Erosion 10 Iterations mit detaillierte Sediment-Transport
+    - lod_level 6: map 1024x1024 → Erosion 10 Iterations mit hochauflösende Hydrologie
+    - lod_level 7: map 2048x2048 → Erosion 10 Iterations mit finale Erosions-Details
 
-    Schritt 1: Lake-Detection und Floodfill
-    Das System identifiziert zunächst alle lokalen Minima in der Heightmap als potenzielle Seestandorte. Der Jump Flooding Algorithm (JFA) wird verwendet, um diese Senken parallel zu füllen. JFA arbeitet in logarithmischer Zeit O(log n) und ist hochgradig parallelisierbar, da jeder Pixel unabhängig operiert. In der Initialisierungsphase markiert jedes lokale Minimum sich selbst als "Lake-Seed". In den folgenden Iterationen propagieren diese Seeds ihre Informationen mit exponentiell abnehmenden Sprungdistanzen (512, 256, 128, 64, ..., 1 Pixel). Jeder Pixel prüft dabei seine Nachbarn in der aktuellen Sprungdistanz und übernimmt den nächstgelegenen Seed, falls die Höhendifferenz positiv ist (Wasser kann dorthin fließen). Der lake_volume_threshold bestimmt dabei, wie viel Höhendifferenz nötig ist, um eine Senke als See zu klassifizieren.
+    Fallback-System (3-stufig):
+    - GPU-Shader (Optimal): Jump-Flooding, Flow-Network und Erosion-Simulation mit Compute-Shadern
+    - CPU-Fallback (Gut): Optimierte NumPy-Implementierung mit Multiprocessing für parallele Operations
+    - Simple-Fallback (Minimal): Vereinfachte Hydrologische Simulation ohne komplexe CFD-Berechnungen
 
-    Schritt 2: Flussnetzwerk-Aufbau durch Steepest Descent
-    Nach der See-Identifikation werden alle Niederschlagsquellen (Zellen mit precip > rain_threshold) mit ihren Zielen verknüpft. Der Steepest Descent Algorithmus folgt dabei dem steilsten Gradienten bergab bis zum nächsten lokalen Minimum oder Kartenrand. Anders als der klassische Dijkstra-Algorithmus ist diese Methode vollständig parallelisierbar, da jede Zelle unabhängig ihre optimale Fließrichtung berechnen kann. Die Upstream-Akkumulation wird iterativ berechnet: Zellen sammeln Wassermengen von allen Upstream-Zellen, die zu ihnen fließen. Dieser Prozess wird solange wiederholt, bis ein stabiler Zustand erreicht ist. Wasser, das die Kartenränder verlässt, wird als ocean_outflow akkumuliert und an den Biome Generator weitergegeben.
+    Graceful-Degradation-Strategy:
+    1. GPU-Memory-Exhaustion: Automatic CPU-Fallback für große Arrays und komplexe Berechnungen
+    2. Multi-Dependency-Input-Problems: Fallback zu vereinfachten Parametern bei fehlenden Weather/Geology-Daten
+    3. Erosion-Numerical-Instability: Simplified-Erosion-Model ohne komplexe Sediment-Transport
+    4. Flow-Pathfinding-Convergence-Failure: Static-Flow-Paths ohne dynamische Re-Pathfinding
+    5. Critical-Memory-Failures: Minimal-Water-System (statische Seen ohne Flow-Simulation)
 
-    Schritt 3: Manning-Strömungsberechnung mit adaptiven Querschnitten
-    Die Fließgeschwindigkeit wird nach der Manning-Gleichung berechnet: v = (1/n) * R^(2/3) * S^(1/2), wobei n der Manning-Koeffizient, R der hydraulische Radius und S die Sohlneigung ist. Für jeden Flussabschnitt wird der optimale Querschnitt durch iterative Lösung der Kontinuitätsgleichung Q = A * v ermittelt. Das System unterscheidet dabei zwischen verschiedenen Geländeformen: In engen Tälern entstehen tiefe, schmale Flüsse, während in weiten Ebenen breite, flache Gewässer entstehen. Die Tal-Breite wird durch Analyse der lokalen Höhenprofile bestimmt - das System sucht in alle Richtungen nach Geländeanstiegen und passt das Breite-zu-Tiefe-Verhältnis entsprechend an.
+    Error-Recovery-Mechanisms:
+    - Multi-Input-Validation: Konsistenz-Checks zwischen heightmap, hardness_map und Weather-Daten
+    - Erosion-Stability-Monitoring: Überwachung auf numerical instabilities mit Auto-Correction
+    - Flow-Network-Topology-Validation: Repair korrupter Flow-Paths mit alternative Pathfinding
+    - Mass-Conservation-Enforcement: Erhaltung der Wasser-Masse bei allen Berechnungen
+    - LOD-Upsampling-Validation: Konsistenz-Checks bei Erosion-Daten-Interpolation zwischen LOD-Levels
 
-    Schritt 4: Bodenfeuchtigkeit durch Gaussian-Diffusion
-    Die Bodenfeuchtigkeit wird durch realistische Diffusion von Gewässern in das umgebende Terrain berechnet. Zwei Gaussian-Filter verschiedener Größen simulieren dabei unterschiedliche Ausbreitungsmechanismen: Ein enger Filter (Radius 2-3 Pixel) repräsentiert kapillare Ausbreitung, ein weiter Filter (Radius 5-10 Pixel) simuliert Grundwasser-Effekte. Die finale Bodenfeuchtigkeit ist das Maximum aus beiden Filtern und der direkten Wasserpräsenz, wodurch Flussufer die maximale Feuchtigkeit erhalten, während die Feuchtigkeit zur Umgebung hin exponentiell abnimmt.
+    Performance-Characteristics:
+    - GPU-Accelerated: 15-40x speedup für Jump-Flooding und parallele Erosion-Simulation
+    - CPU-Optimized: Vectorized NumPy-Operations für Flow-Networks, optimierte SciPy für Erosion-Math
+    - Memory-Efficient: Progressive Erosion-Akkumulation, LOD-based Upsampling mit bicubic Interpolation
+    - Cache-Friendly: Composite-Heightmap-Caching im DataLODManager, Parameter-Hash-basierte Invalidation
 
-    Schritt 5: Stream Power Erosion
-    Die Erosion folgt dem Stream Power Gesetz: E = K * (τ - τc), wobei τ die Scherspannung und τc die kritische Scherspannung ist. Die Scherspannung wird berechnet als τ = ρ * g * h * S (Dichte * Gravitation * Wassertiefe * Sohlneigung). Die kritische Scherspannung hängt von der Gesteinshärte ab, die aus der hardness_map ausgelesen wird. Nur wenn die Scherspannung die kritische Schwelle überschreitet, findet Erosion statt. Die Erosionsrate ist proportional zur Überschuss-Energie und der Fließgeschwindigkeit im Quadrat, wird aber durch die Gesteinshärte dividiert.
+    Hydrologische Simulation-Pipeline:
 
-    Schritt 6: Gesteinsmassen-Transport mit Massenerhaltung
-    Das Erosions- und Sedimentationssystem arbeitet mit einem physikalisch korrekten Massentransport-Modell. Die rock_map speichert die Gesteinsmassen als RGB-Werte, wobei R+G+B immer 255 ergibt (normierte Massenerhaltung). Erosion transportiert Material proportional zu den lokalen Gesteinsanteilen - wenn an einer Stelle 60% Sedimentary, 30% Igneous und 10% Metamorphic vorhanden sind, wird erodiertes Material in genau diesem Verhältnis abtransportiert. Der Transport erfolgt entlang der Fließrichtungen mit einer distanz- und geschwindigkeitsabhängigen Transporteffizienz. Sedimentation lagert das transportierte Material an Stellen geringerer Transportkapazität ab, wobei die ursprünglichen Gesteinsverhältnisse erhalten bleiben. Nach jedem Zeitschritt wird die gesamte rock_map renormiert, so dass R+G+B=255 bleibt - dadurch kann Material weder verschwinden noch entstehen, sondern nur umverteilt werden.
+    Schritt 1: Multi-Dependency Input-Integration
+    Der Generator sammelt alle erforderlichen Input-Daten von verschiedenen Generatoren über DataLODManager.
+    Heightmap bildet die topographische Basis, hardness_map von Geology bestimmt Erosions-Resistance,
+    precip_map von Weather definiert Niederschlags-Quellen, temp_map/wind_map beeinflussen Evaporation.
+    Input-Validation prüft Konsistenz zwischen allen Datenquellen und LOD-Level-Kompatibilität.
 
-    Schritt 7: Atmosphärische Evaporation
-    Die Evaporation wird basierend auf atmosphärischen Bedingungen berechnet, nicht nach der Penman-Gleichung. Die Verdunstungsrate hängt von drei Hauptfaktoren ab: Luftfeuchtigkeit (feuchte Luft kann weniger Wasserdampf aufnehmen), Temperatur (warme Luft hat höhere Aufnahmekapazität) und Windgeschwindigkeit (Luftbewegung beschleunigt den Dampftransport). Die maximale Verdunstung ergibt sich aus der Sättigungsdampfdichte der Luft minus der aktuellen Feuchtigkeit. Wind verstärkt diesen Effekt durch verbesserten Dampftransport von der Wasseroberfläche weg. Die verfügbare Wasseroberfläche bestimmt schließlich, wie viel tatsächlich verdunsten kann.
+    Schritt 2: Lake-Detection durch Jump Flooding Algorithm
+    Jump Flooding Algorithm identifiziert alle lokalen Minima parallel in logarithmischer Zeit O(log n).
+    Initialisierung markiert jedes lokale Minimum als Lake-Seed mit lake_volume_threshold-Validation.
+    Propagation-Phase: Seeds propagieren exponentiell abnehmende Sprungdistanzen (512→256→128→...→1).
+    Flood-Fill erfolgt nur in Bereiche mit positiver Höhendifferenz zum Seed-Punkt.
+    See-Klassifikation basiert auf akkumuliertem Volumen und Verbindung zu Kartenrändern.
 
-    Benötigte Shader für die Hydrologische Simulation
+    Schritt 3: Flow-Network durch Steepest Descent
+    Alle Niederschlagsquellen (precip > rain_threshold) werden mit Zielen verknüpft über steepste Gradienten.
+    Steepest Descent folgt dem steilsten Gradienten bergab bis zum nächsten lokalen Minimum oder Kartenrand.
+    Upstream-Akkumulation sammelt Wassermengen iterativ von allen upstream-Zellen.
+    Flow-Paths sind vollständig parallelisierbar da jede Zelle unabhängig ihre Richtung berechnet.
+    Ocean-Outflow akkumuliert Wasser das Kartenränder verlässt für Biome-Generator-Integration.
+
+    Schritt 4: Manning-Strömungsberechnung mit adaptiven Querschnitten
+    Fließgeschwindigkeit nach Manning-Gleichung: v = (1/n) * R^(2/3) * S^(1/2).
+    Hydraulischer Radius R und Sohlneigung S aus lokaler Topographie und Flow-Accumulation.
+    Optimaler Querschnitt durch iterative Lösung der Kontinuitätsgleichung Q = A * v.
+    Gelände-Form-Analyse: enge Täler → tiefe schmale Flüsse, weite Ebenen → breite flache Gewässer.
+    Tal-Breite-Detection durch lokale Höhenprofile in alle Richtungen mit Gelände-Anstiegs-Suche.
+
+    Schritt 5: Iterative Erosion-Sedimentation über LOD-Levels
+    Pro LOD-Level: 10 Erosions-Iterationen für kumulative Landschafts-Modifikation.
+    Stream Power Erosion: E = K * (τ - τc) wobei τ = ρ * g * h * S (Scherspannung).
+    Kritische Scherspannung τc basiert auf hardness_map von Geology-Generator.
+    Sediment-Transport entlang Flow-Paths mit distanz-abhängiger Transport-Effizienz.
+    Sedimentation bei Transport-Kapazitäts-Überschreitung oder Geschwindigkeits-Reduktion.
+    Kumulative Akkumulation: erosion_map und sedimentation_map sammeln alle Änderungen über Iterationen.
+
+    Schritt 6: LOD-Progression mit Erosion-Upsampling
+    Nach LOD-Completion: Erosion/Sedimentation-Daten werden für nächstes LOD upgesampled.
+    Bicubic-Interpolation für glatte Erosions-Pattern-Erhaltung bei höherer Auflösung.
+    Keine Mass-Conservation-Skalierung erforderlich da Erosion Höhen-Änderungen in Metern repräsentiert.
+    Kombinierte Flow-Pathfinding: neue Slopemap basiert auf composite_heightmap (base + erosion + sedimentation).
+    Progressive Erosions-Enhancement: höhere LODs bauen auf bereits erodierte Landschaft auf.
+
+    Schritt 7: Bodenfeuchtigkeit durch Gaussian-Diffusion
+    Gaussian-Filter verschiedener Größen simulieren Ausbreitungs-Mechanismen um Gewässer.
+    Enger Filter (2-3 Pixel): kapillare Ausbreitung für direkte Ufer-Feuchtigkeit.
+    Weiter Filter (5-10 Pixel): Grundwasser-Effekte für regionale Feuchtigkeit.
+    Maximum aus beiden Filtern plus direkte Wasser-Präsenz für finale soil_moist_map.
+    Exponentieller Feuchtigkeits-Abfall mit Distanz zu Gewässern für realistische Verteilung.
+
+    Schritt 8: Water-Biomes-Klassifikation
+    Einfache regelbasierte Klassifikation: 0=kein Wasser, 1=Creek, 2=River, 3=Grand River, 4=Lake.
+    Klassifikation basiert auf water_depth und flow_rate: Seen sind statisch (flow_rate < 0.1).
+    Creek: flow_rate < 1.0, River: flow_rate 1.0-5.0, Grand River: flow_rate > 5.0.
+    Integration mit Lake-Detection-Results für konsistente Gewässer-Typisierung.
+
+    Schritt 9: Evaporation basierend auf statischen Weather-Daten
+    Evaporation verwendet statische Snapshots von temp_map, wind_map, humid_map.
+    Temperatur-abhängige maximale Wasserdampf-Kapazität nach Magnus-Formel.
+    Wind-verstärkte Evaporation durch verbesserten Dampf-Transport von Oberflächen.
+    Atmosphärische Sättigungs-Limits: feuchte Luft kann weniger zusätzlichen Wasserdampf aufnehmen.
+    Verfügbare Wasser-Oberfläche aus water_map bestimmt tatsächliche Evaporation-Rate.
+
+    Schritt 10: Bidirektionale Terrain-Integration
+    erosion_map und sedimentation_map werden an DataLODManager für composite_heightmap übertragen.
+    DataLODManager kombiniert automatisch: composite_heightmap = base_heightmap + erosion_map + sedimentation_map.
+    Alle nachfolgenden Generatoren erhalten transparent die composite_heightmap für realistische Post-Erosion-Simulation.
+    Signal-Emission: composite_heightmap_updated informiert abhängige Generatoren über Terrain-Änderungen.
+
+    Benötigte Shader für Hydrologische Simulation:
 
     Shader 1: Jump Flooding Lake Detection (jumpFloodLakes.frag)
-    Dieser Shader implementiert den Jump Flooding Algorithm für parallele Lake-Detection. In der Initialisierungsphase (u_pass_number = 0) identifiziert er lokale Minima durch Vergleich mit allen 8 Nachbarzellen. Nur Minima mit ausreichender Tiefe (lake_volume_threshold) werden als Lake-Seeds markiert. In den Propagationsphasen springen die Seeds mit exponentiell abnehmenden Distanzen und übertragen ihre Informationen an alle Zellen, die höher liegen und somit potentielle Einzugsgebiete darstellen. Der Shader gibt für jede Zelle die Position des nächstgelegenen Lake-Seeds und die Wassertiefe aus.
+    Implementiert parallelen Jump Flooding Algorithm für O(log n) Lake-Detection mit GPU-Optimierung.
+    Initialisierungs-Phase identifiziert lokale Minima durch 8-Nachbar-Vergleich mit lake_volume_threshold.
+    Propagations-Phasen: exponentiell abnehmende Sprung-Distanzen mit Lake-Seed-Information-Transfer.
+    Output: Lake-Position, Wasser-Tiefe und Einzugsgebiet-Zuordnung für jede Zelle.
 
     Shader 2: Steepest Descent Flow Network (steepestDescentFlow.frag)
-    Dieser Shader berechnet das Flussnetzwerk durch Steepest Descent Analyse. Für jede Zelle wird der steilste Gradient zu allen 8 Nachbarn berechnet und als Fließrichtung gespeichert. Niederschlagsquellen (precipitation > rain_threshold) erhalten eine initiale Wassermenge. Die Upstream-Akkumulation erfolgt iterativ: Jede Zelle sammelt Wasser von allen Nachbarzellen, deren Fließrichtung zu ihr zeigt. Lakes fungieren als Senken und akkumulieren Wasser ohne Weiterleitung. Der Shader trackt auch Wasser, das die Kartenränder verlässt.
+    Berechnet Flow-Network durch parallele Steepest Descent Analyse für jede Zelle.
+    Steilster Gradient zu allen 8 Nachbarn bestimmt Fließrichtung mit Niederschlags-Quellen-Integration.
+    Iterative Upstream-Akkumulation sammelt Wasser von allen upstream-Zellen über mehrere Pässe.
+    Lake-Integration: Seen fungieren als Senken ohne Weiterleitung, Ocean-Outflow-Tracking.
 
-    Shader 3: Manning Stream Flow Calculation (streamFlowCalculation.frag)
-    Dieser komplexe Shader löst die Manning-Gleichung für jeden Flussabschnitt. Er berechnet zunächst eine erste Schätzung für Breite und Tiefe basierend auf dem Volumenstrom, dann iteriert er zur optimalen Lösung unter Berücksichtigung des hydraulischen Radius. Die Geländekonfinierung wird durch Analyse der lokalen Höhenprofile bestimmt - der Shader sucht in alle Richtungen nach Geländeanstiegen und passt das Breite-zu-Tiefe-Verhältnis entsprechend an. Die finale Ausgabe umfasst Fließgeschwindigkeit, Querschnittsfläche, Breite und Tiefe.
+    Shader 3: Manning Flow Calculation (manningFlowCalculation.frag)
+    Löst Manning-Gleichung für optimale Fließgeschwindigkeit und Querschnitt-Geometrie.
+    Gelände-Konfinierung-Analyse: lokale Höhenprofile bestimmen Tal-Breite für Breite-zu-Tiefe-Verhältnis.
+    Iterative Optimierung von Breite/Tiefe unter Berücksichtigung hydraulischen Radius.
+    Output: Fließgeschwindigkeit, Querschnittsfläche, Kanal-Geometrie für realistische Strömung.
 
-    Shader 4: Gaussian Soil Moisture Diffusion (soilMoistureCalculation.frag)
-    Dieser Shader berechnet die Bodenfeuchtigkeit durch gewichtete Gaussian-Diffusion von allen Gewässern in der Umgebung. Er implementiert einen variablen Radius-Filter, der für jeden Pixel die Beiträge aller Gewässer im Diffusionsradius summiert. Die Gewichtung folgt einer Gaussian-Funktion exp(-0.5 * (d/σ)²), wobei d die Distanz und σ die Standardabweichung ist. Direkte Wasserpräsenz (Flüsse, Seen) erhält maximale Feuchtigkeit, während die Umgebung graduell abnimmt.
+    Shader 4: Stream Power Erosion (streamPowerErosion.frag)
+    Implementiert Stream Power Erosion-Model mit Scherspannung-basierter Erosions-Rate.
+    Hardness-Map-Integration: kritische Scherspannung basiert auf geologischer Gesteins-Härte.
+    Erosions-Rate-Berechnung: E = K * (τ - τc) * v² mit Geschwindigkeits-Abhängigkeit.
+    Kumulative Erosions-Akkumulation über mehrere Iterationen pro LOD-Level.
 
-    Shader 5: Stream Power Erosion (erosionCalculation.frag)
-    Dieser Shader implementiert das Stream Power Erosionsmodell. Er berechnet die Scherspannung τ = ρ * g * h * S für jede Zelle und vergleicht sie mit der gesteinsspezifischen kritischen Scherspannung aus der hardness_map. Die Erosionsrate folgt der Formel E = K * (τ - τc) * v², ist aber auf realistische Maximalwerte begrenzt. Der Shader berücksichtigt auch eine Minimalgeschwindigkeit für Erosion - sehr langsame Flüsse erodieren nicht, unabhängig von ihrer Größe.
+    Shader 5: Sediment Transport (sedimentTransport.frag)
+    Simuliert Sediment-Transport entlang Flow-Paths mit Transport-Kapazitäts-Berechnung.
+    HjulstrÖm-inspirierte Transport-Kapazität: Kapazität ∝ v^2.5 für realistische Sediment-Limits.
+    Sedimentation bei Kapazitäts-Überschreitung oder Geschwindigkeits-Reduktion in Fluss-Biegungen.
+    Distanz-abhängige Transport-Effizienz für realistische Sediment-Ablagerung-Patterns.
 
-    Shader 6: Hjulström Sedimentation (sedimentationCalculation.frag)
-    Dieser Shader simuliert Sedimenttransport und -ablagerung nach dem Hjulström-Diagramm. Er sammelt Sediment von allen Upstream-Zellen und berechnet die lokale Transportkapazität als Funktion der Fließgeschwindigkeit (Kapazität ∝ v^2.5). Wenn die Sedimentlast die Kapazität überschreitet oder die Geschwindigkeit zu gering wird, erfolgt Sedimentation. Der Shader implementiert auch bevorzugte Sedimentation in Flussbiegungen und Konfluenzen durch Analyse der lokalen Strömungsgeometrie.
+    Shader 6: Gaussian Soil Moisture (soilMoistureGaussian.frag)
+    Berechnet Bodenfeuchtigkeit durch gewichtete Gaussian-Diffusion von allen Gewässern.
+    Multipler-Radius-Filter: enge Filter für kapillare Effekte, weite Filter für Grundwasser.
+    Gaussian-Gewichtung: exp(-0.5 * (d/σ)²) mit Distanz d und Standard-Abweichung σ.
+    Maximum-Kombination verschiedener Filter plus direkte Wasser-Präsenz für finale Feuchtigkeit.
 
-    Shader 8: Gesteinsmassen-Transport (rockMassTransport.frag)
-    Dieser Shader berechnet den physikalisch korrekten Transport von Gesteinsmassen durch das Flusssystem. Er liest die aktuellen Gesteinsmassen aus der rock_map (RGB-Format) und berechnet Erosion proportional zu den lokalen Anteilen. Das erodierte Material wird entlang der Fließrichtungen transportiert, wobei die Transporteffizienz von Distanz und Fließgeschwindigkeit abhängt. Der Shader sammelt Material von allen Upstream-Zellen und berechnet die lokale Sedimentation. Die Ausgabe sind Delta-Werte für jeden Gesteinstyp, die in einem zweiten Shader zur Massenerhaltung normiert werden.
+    Shader 7: Water Biomes Classification (waterBiomesClassification.frag)
+    Regelbasierte Klassifikation von Gewässer-Types basierend auf Tiefe und Fließgeschwindigkeit.
+    Lake-Detection-Integration für konsistente statische Gewässer-Identifikation.
+    Flow-Rate-Thresholds für Creek/River/Grand River-Unterscheidung mit Konsistenz-Checks.
 
-    Shader 9: Gesteinsmassen-Normierung (rockMassNormalization.frag)
-    Dieser kritische Shader stellt die Massenerhaltung im Gesteinssystem sicher. Er wendet die berechneten Delta-Werte auf die aktuelle rock_map an, verhindert negative Gesteinsmassen und normiert alle RGB-Werte so, dass ihre Summe immer 255 ergibt. Dies garantiert, dass Gesteinsmasse weder verloren geht noch neu entsteht, sondern nur zwischen den Pixeln umverteilt wird. Bei vollständiger Erosion wird eine Gleichverteilung (85, 85, 85) als Fallback verwendet.
+    Shader 8: Atmospheric Evaporation (atmosphericEvaporation.frag)
+    Berechnet Evaporation basierend auf statischen Weather-Daten mit Magnus-Formel für Sättigung.
+    Wind-Enhanced-Evaporation: lineare Wind-Verstärkung für verbesserten Dampf-Transport.
+    Temperatur-Exponential-Abhängigkeit für realistische Evaporation-Rates.
+    Verfügbare Wasser-Oberfläche limitiert tatsächliche Evaporation unabhängig von Atmosphäre.
 
-    Shader 7: Atmosphärische Evaporation (atmosphericEvaporation.frag)
-    Dieser Shader berechnet die Evaporation basierend auf atmosphärischen Sättigungseffekten. Er liest humid_map, temp_map und wind_map vom data_manager und berechnet die maximale Wasserdampfdichte nach der Magnus-Formel. Die aktuelle Luftfeuchtigkeit bestimmt die verbleibende Aufnahmekapazität, die Temperatur erhöht die maximale Kapazität exponentiell, und der Wind beschleunigt den Massentransfer linear. Die verfügbare Wasseroberfläche wird aus Stream- und Lake-Daten ermittelt. Der Shader gibt die tatsächliche Verdunstungsrate zurück, die physikalisch durch die Atmosphäre begrenzt ist.
+    Shader 9: Erosion Data Upsampling (erosionUpsampling.frag)
+    Spezialisiert auf bicubic Interpolation von Erosion/Sedimentation-Daten zwischen LOD-Levels.
+    Pattern-Preservation: Erhaltung von Erosions-Strukturen bei Auflösungs-Verdopplung.
+    Keine Mass-Conservation-Skalierung da Erosion absolute Höhen-Änderungen repräsentiert.
 
     Zusätzliche Utility-Shader:
-    Terrain Confinement Analysis (terrainConfinement.frag): Analysiert lokale Talformen für realistische Flussquerschnitte
-    Sediment Gaussian Distribution (sedimentDistribution.frag): Verteilt abgelagertes Sediment realistisch über die Umgebung
-    Flow Accumulation Convergence (flowConvergence.frag): Überprüft Konvergenz der iterativen Upstream-Akkumulation
-    Hydraulic Geometry Optimization (hydraulicGeometry.frag): Optimiert Breite-zu-Tiefe-Verhältnis basierend auf Geländeform
+    Composite Heightmap Generator (compositeHeightmap.frag): Kombiniert base + erosion + sedimentation
+    Flow Pathfinding Convergence (flowPathfindingConvergence.frag): Überwacht Upstream-Akkumulation-Konvergenz
+    Terrain Modification Validator (terrainModificationValidator.frag): Validiert Erosions-Plausibilität
 
-    Alle Shader arbeiten im Multi-Pass-Verfahren mit Ping-Pong-Buffering für iterative Berechnungen und zeitliche Entwicklung des hydrologischen Systems.
+    Alle Shader arbeiten im Multi-Pass-Verfahren mit Ping-Pong-Buffering für iterative Erosions-Zyklen
+    und koordinierte LOD-Progression mit automatischer Upsampling-Integration.
 
     Klassen:
     HydrologySystemGenerator
-        Funktionsweise: Hauptklasse für dynamisches Hydrologiesystem mit Erosion und Sedimentation
-        Aufgabe: Koordiniert alle hydrologischen Prozesse und Massentransport
-        Methoden: generate_hydrology_system(), simulate_water_cycle(), update_erosion_sedimentation()
+        Funktionsweise: Hauptklasse für komplexes hydrologisches System mit bidirektionaler Terrain-Integration
+        Aufgabe: Koordiniert Lake-Detection, Flow-Networks, Erosion-Sedimentation und Weather-Coupling
+        External-Interface: calculate_water_system(heightmap, hardness_map, precip_map, temp_map, wind_map, parameters, lod_level)
+        Internal-Methods: _coordinate_hydrology_generation(), _validate_multi_input_data(), _create_water_data()
+        Erosion-Management: Iterative Erosion-Cycles pro LOD mit kumulative Akkumulation und Upsampling
+        Error-Handling: Graceful Degradation bei Multi-Input-Failures, vollständige 3-stufige Fallback-Kette
 
     LakeDetectionSystem
-        Funktionsweise: Identifiziert Seen durch Jump Flooding Algorithm für parallele Senken-Identifikation
-        Aufgabe: Findet alle potentiellen Seestandorte und deren Einzugsgebiete
-        Methoden: detect_local_minima(), apply_jump_flooding(), classify_lake_basins()
+        Funktionsweise: Jump Flooding Algorithm für parallele See-Identifikation mit GPU-Optimierung
+        Aufgabe: Findet lokale Minima, klassifiziert Seen und bestimmt Einzugsgebiete
+        Methoden: detect_local_minima(), apply_jump_flooding_passes(), classify_lake_basins(), validate_lake_topology()
+        Optimization: Logarithmische Zeit-Komplexität O(log n) durch exponentiell abnehmende Sprung-Distanzen
+        Spezifische Fallbacks:
+          - GPU-Optimal: Parallele Jump-Flooding mit Compute-Shadern für alle Sprung-Phasen
+          - CPU-Fallback: Optimierte NumPy-Implementierung mit Multiprocessing für Parallelisierung
+          - Simple-Fallback: Direkte lokale Minima-Suche ohne komplexe Flood-Fill-Algorithmus
 
     FlowNetworkBuilder
-        Funktionsweise: Baut Flussnetzwerk durch Steepest Descent mit Upstream-Akkumulation
-        Aufgabe: Erstellt flow_map und water_biomes_map mit realistischen Flusssystemen
-        Methoden: calculate_steepest_descent(), accumulate_upstream_flow(), classify_water_bodies()
+        Funktionsweise: Steepest Descent Flow-Network mit Upstream-Akkumulation für realistische Flusssysteme
+        Aufgabe: Erstellt flow_map und water_biomes_map durch topographie-basierte Flow-Pathfinding
+        Methoden: calculate_steepest_descent(), accumulate_upstream_flow(), classify_water_bodies(), track_ocean_outflow()
+        Integration: Precipitation-Sources von Weather-Generator, Lake-Sinks von Lake-Detection-System
+        Spezifische Fallbacks:
+          - GPU-Optimal: Parallele Steepest-Descent mit simultaner Upstream-Akkumulation
+          - CPU-Fallback: Vectorized NumPy-Operations für Flow-Direction-Berechnung
+          - Simple-Fallback: Vereinfachte Drainage-Network ohne komplexe Upstream-Akkumulation
 
     ManningFlowCalculator
-        Funktionsweise: Berechnet Strömung nach Manning-Gleichung mit adaptiven Querschnitten
-        Aufgabe: Erstellt flow_speed und cross_section für realistische Fließgeschwindigkeiten
-        Methoden: solve_manning_equation(), optimize_channel_geometry(), calculate_hydraulic_radius()
+        Funktionsweise: Manning-Gleichungs-Solver mit adaptiven Querschnitten für realistische Strömungs-Simulation
+        Aufgabe: Berechnet flow_speed und cross_section für physikalisch korrekte Fließgeschwindigkeiten
+        Methoden: solve_manning_equation(), optimize_channel_geometry(), calculate_hydraulic_radius(), analyze_terrain_confinement()
+        Gelände-Integration: Tal-Breite-Analysis für natürliche Breite-zu-Tiefe-Verhältnisse
+        Spezifische Fallbacks:
+          - GPU-Optimal: Parallele Manning-Gleichungs-Lösung mit iterativer Querschnitt-Optimierung
+          - CPU-Fallback: SciPy-Optimization für Kanal-Geometrie mit vectorized Berechnungen
+          - Simple-Fallback: Fixed Breite-zu-Tiefe-Verhältnisse ohne Gelände-spezifische Optimierung
 
     ErosionSedimentationSystem
-        Funktionsweise: Simuliert Stream Power Erosion mit Hjulström-Sundborg Transport
-        Aufgabe: Modifiziert heightmap und rock_map durch realistische Erosions-/Sedimentationsprozesse
-        Methoden: calculate_stream_power(), transport_sediment(), apply_mass_conservation()
+        Funktionsweise: Stream Power Erosion mit iterativen Terrain-Modifikationen über LOD-Levels
+        Aufgabe: Modifiziert Landschaft durch erosion_map und sedimentation_map mit realistischem Sediment-Transport
+        Methoden: calculate_stream_power(), simulate_erosion_iterations(), transport_sediment(), apply_sedimentation(), accumulate_terrain_changes()
+        Iteration-Management: 10 Erosions-Zyklen pro LOD mit kumulative Landschafts-Veränderung
+        Spezifische Fallbacks:
+          - GPU-Optimal: Parallele Stream-Power-Berechnung mit simultaner Erosion-Sedimentation
+          - CPU-Fallback: NumPy-vectorized Erosion-Math mit optimierten Sediment-Transport-Algorithmen
+          - Simple-Fallback: Vereinfachte Erosion ohne komplexe Transport-Kapazitäts-Berechnungen
 
     SoilMoistureCalculator
-        Funktionsweise: Berechnet Bodenfeuchtigkeit durch Gaussian-Diffusion von Gewässern
-        Aufgabe: Erstellt soil_moist_map für Biome-System und Weather-Evaporation
-        Methoden: apply_gaussian_diffusion(), calculate_groundwater_effects(), integrate_moisture_sources()
+        Funktionsweise: Gaussian-Diffusion-basierte Bodenfeuchtigkeit mit Multi-Radius-Filter-System
+        Aufgabe: Erstellt soil_moist_map durch realistische Feuchtigkeits-Ausbreitung von Gewässern
+        Methoden: apply_gaussian_diffusion(), combine_multi_radius_filters(), calculate_groundwater_effects(), integrate_direct_water_presence()
+        Filter-System: Kombiniert kapillare und Grundwasser-Effekte für natürliche Feuchtigkeits-Verteilung
+        Spezifische Fallbacks:
+          - GPU-Optimal: Parallele Multi-Radius Gaussian-Filter mit optimierten Convolution-Operationen
+          - CPU-Fallback: SciPy-Gaussian-Filter mit optimierten Multi-Pass-Verfahren
+          - Simple-Fallback: Lineare Distanz-basierte Feuchtigkeit ohne Gaussian-Diffusion-Komplexität
 
     EvaporationCalculator
-        Funktionsweise: Berechnet Evaporation nach atmosphärischen Bedingungen
-        Aufgabe: Erstellt evaporation_map basierend auf temp_map, humid_map und wind_map
-        Methoden: calculate_atmospheric_evaporation(), apply_wind_effects(), limit_by_available_water()
+        Funktionsweise: Atmosphäre-gekoppelte Evaporation basierend auf statischen Weather-Daten
+        Aufgabe: Berechnet evaporation_map durch Integration von temp_map, wind_map und humid_map
+        Methoden: calculate_atmospheric_evaporation(), apply_magnus_formula(), enhance_wind_effects(), limit_by_available_water()
+        Weather-Integration: Statische Snapshots ohne Real-time-Kopplung für Performance-Optimierung
+        Spezifische Fallbacks:
+          - GPU-Optimal: Parallele Magnus-Formel-Berechnung mit Wind-Enhancement-Integration
+          - CPU-Fallback: Vectorized Atmospheric-Calculations mit optimierten Sättigungs-Berechnungen
+          - Simple-Fallback: Fixed Evaporation-Rate ohne atmosphärische Komplexität
+
+    BiDirectionalTerrainIntegrator
+        Funktionsweise: Koordiniert bidirektionale Terrain-Modifikation zwischen Water-Generator und DataLODManager
+        Aufgabe: Überträgt erosion_map/sedimentation_map für composite_heightmap-Erstellung
+        Methoden: transfer_erosion_data(), coordinate_composite_heightmap_updates(), validate_terrain_modifications(), signal_terrain_changes()
+        Integration: Transparente composite_heightmap-Bereitstellung für nachfolgende Generatoren
+        DataLODManager-Coordination: Automatische Cache-Invalidation und Signal-Emission bei Terrain-Änderungen
+
+    LODProgressionManager
+        Funktionsweise: Verwaltet LOD-Progression mit Erosion-Upsampling und kumulative Akkumulation
+        Aufgabe: Koordiniert Erosion-Iterationen pro LOD und Upsampling für nächstes LOD
+        Methoden: manage_lod_progression(), upsample_erosion_data(), accumulate_cumulative_changes(), validate_lod_consistency()
+        Upsampling-Strategy: Bicubic-Interpolation für glatte Erosions-Pattern-Erhaltung
+        Performance-Optimization: Minimiert Memory-Usage durch progressive Erosion-Akkumulation
+
+    Integration und Datenfluss:
+    GenerationOrchestrator → HydrologySystemGenerator.calculate_water_system(multi_input_data, parameters, lod_level)
+                          → LakeDetectionSystem.detect_lakes() → ShaderManager-Request
+                          → FlowNetworkBuilder.build_flow_network() → ShaderManager-Request
+                          → ManningFlowCalculator.calculate_flow_speeds() → ShaderManager-Request
+                          → ErosionSedimentationSystem.simulate_erosion_iterations() → ShaderManager-Request (10x per LOD)
+                          → SoilMoistureCalculator.calculate_soil_moisture() → ShaderManager-Request
+                          → EvaporationCalculator.calculate_evaporation() → ShaderManager-Request
+                          → BiDirectionalTerrainIntegrator.transfer_terrain_modifications()
+                          → LODProgressionManager.manage_lod_progression()
+                          → WaterData-Assembly → DataLODManager.set_water_data_lod() + composite_heightmap_update
+
+    Output-Datenstrukturen:
+    - water_map: 2D numpy.float32 array, Gewässertiefen in Metern
+    - flow_map: 2D numpy.float32 array, Volumenstrom in m³/s
+    - flow_speed: 2D numpy.float32 array, Fließgeschwindigkeit in m/s
+    - soil_moist_map: 2D numpy.float32 array, Bodenfeuchtigkeit in Prozent
+    - water_biomes_map: 2D numpy.uint8 array, Gewässer-Klassifikation (0-4)
+    - erosion_map: 2D numpy.float32 array, kumulative Erosion in Metern (negative Werte)
+    - sedimentation_map: 2D numpy.float32 array, kumulative Sedimentation in Metern (positive Werte)
+    - evaporation_map: 2D numpy.float32 array, Verdunstungsrate in gH2O/m²/Tag
+    - WaterData: Validity-State, Parameter-Hash, LOD-Metadata, Erosion-Statistics, Performance-Stats
+
+    Spezielle Herausforderungen (für spätere Lösung):
+    - Dynamic Flow-Pathfinding: Flow-Paths müssen sich während Erosion-Iterationen anpassen da sich die Topographie ändert
+    - Cross-LOD Erosion-Balance: Parameter-Tuning erforderlich damit niedrige LODs nicht gesamte Landschaft erodieren
+    - Performance-Optimization: 10 Erosion-Iterations × 7 LOD-Levels = 70 komplexe Berechnungs-Zyklen pro Generation
     """
 
 def biome_generator():
@@ -803,7 +1068,7 @@ def value_default():
     class TERRAIN:
         SIZE = {"min": 32, "max": 2048, "default": 256, "step": 32}
         HEIGHT = {"min": 0, "max": 400, "default": 100, "step": 10, "suffix": "m"}
-        OCTAVES = {"min": 1, "max": 10, "default": 4}
+        OCTAVES = {"min": 1, "max": 10, "default": 4}1
         # etc.
 
     class GEOLOGY:
