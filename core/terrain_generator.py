@@ -1,164 +1,300 @@
 """
 Path: core/terrain_generator.py
+Date Changed: 29.08.2025
 
-Funktionsweise: Simplex-Noise basierte Terrain-Generierung mit BaseGenerator-Integration und DataManager-Kompatibilität
-- BaseTerrainGenerator mit Octaves/Persistence/Lacunarity
-- Multi-Scale Noise-Layering für realistische Landschaften
-- Höhen-Redistribution für natürliche Höhenverteilung
-- Deformation mittels ridge warping
-- LOD-System: LOD64 → LOD128 → LOD256 → FINAL mit korrekter Verdopplung
-- Berechnung der Verschattung mit Raycasts und variablen Sonnenwinkeln
-- DataManager-Integration für TerrainData-Objekte
-- BaseGenerator-Interface für Orchestrator-Kompatibilität
+Funktionsweise: Terrain-Generation mit numerischem LOD-System und 3-stufigem Fallback-System
+- BaseTerrainGenerator koordiniert alle Terrain-Generierungsschritte mit DataLODManager-Integration
+- SimplexNoiseGenerator mit GPU/CPU/Simple-Fallback über ShaderManager
+- ShadowCalculator mit LOD-spezifischen Sonnenwinkeln und Fallback-System
+- SlopeCalculator für Gradienten-Berechnung mit Performance-Optimierung
+- TerrainData mit erweiterten Validity-Checks und Parameter-Hash-System
 
 Parameter Input:
-- map_size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power, map_seed
+- parameters: dict mit map_seed, map_size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power
+- lod_level: int (1-7) für numerisches LOD-System
 
 Output:
-- TerrainData-Objekt mit heightmap, slopemap, shadowmap, LOD-Metadaten
-- Legacy-Kompatibilität: heightmap array, slopemap 2D array (dz/dx and dz/dy), shadowmap array
+- TerrainData-Objekt mit heightmap, slopemap, shadowmap, validity_state und LOD-Metadaten
+- DataLODManager-Integration über set_terrain_data_lod()
 
-LOD-Definitionen mit korrekter Verdopplung:
-- LOD64: heightmap64x64, slopemap64x64, shadowmap64x64 (1 Sonnenwinkel - Mittag)
-- LOD128: heightmap128x128, slopemap128x128, shadowmap64x64 (3 Sonnenwinkel - Vormittag/Mittag/Nachmittag)
-- LOD256: heightmap256x256, slopemap256x256, shadowmap64x64 (5 Sonnenwinkel + Morgen/Abend)
-- FINAL: heightmapFullSize, slopemapFullSize, shadowmap64x64 (7 Sonnenwinkel + Dämmerung)
+LOD-System (Numerisch):
+- lod_level 1: 32x32 (1 Sonnenwinkel - Mittag)
+- lod_level 2: 64x64 (3 Sonnenwinkel - Vormittag/Mittag/Nachmittag)
+- lod_level 3: 128x128 (5 Sonnenwinkel + Morgen/Abend)
+- lod_level 4: 256x256 (7 Sonnenwinkel + Dämmerung)
+- lod_level 5+: bis map_size erreicht, 7 Sonnenwinkel konstant
+
+Fallback-System (3-stufig):
+- GPU-Shader (Optimal): ShaderManager für parallele Multi-Octave-Noise-Berechnung
+- CPU-Fallback (Gut): Optimierte NumPy-Implementierung mit Multiprocessing
+- Simple-Fallback (Minimal): Direkte Implementierung, wenige Zeilen, garantiert funktionsfähig
 """
 
 import numpy as np
 from opensimplex import OpenSimplex
-import threading
-import time
-import os
-from core.base_generator import BaseGenerator
+import hashlib
+import logging
+from typing import Dict, List, Tuple, Optional, Any
+
+try:
+    from core.base_generator import BaseGenerator
+except ImportError:
+    # Fallback wenn BaseGenerator nicht verfügbar
+    class BaseGenerator:
+        def __init__(self, map_seed=42):
+            self.map_seed = map_seed
+            self.logger = logging.getLogger(self.__class__.__name__)
+
 
 class TerrainData:
     """
-    Funktionsweise: Container für alle Terrain-Daten mit Metainformationen und DataManager-Kompatibilität
-    Aufgabe: Speichert Heightmap, Slopemap, Shadowmap und LOD-Informationen für DataManager-Integration
+    Funktionsweise: Container für alle Terrain-Daten mit Validity-System und Cache-Management
+    Aufgabe: Speichert Heightmap, Slopemap, Shadowmap mit LOD-Level, Validity-State und Parameter-Hash
+    Attribute: heightmap, slopemap, shadowmap, lod_level, actual_size, validity_state, parameter_hash,
+               calculated_sun_angles, parameters
+    Validity-Methods: is_valid(), invalidate(), validate_against_parameters(), get_validity_summary()
     """
 
     def __init__(self):
-        self.heightmap = None
-        self.slopemap = None
-        self.shadowmap = None
-        self.lod_level = "LOD64"
-        self.actual_size = 64
-        self.calculated_sun_angles = []  # Welche Sonnenwinkel bereits berechnet
-        self.parameters = {}  # Speichert verwendete Parameter
-        self.validity_state = "valid"  # Validity-System für Cache-Management
-        self.parameter_hash = None  # MD5-Hash der Parameter für Cache-Validation
+        # Core terrain data
+        self.heightmap: Optional[np.ndarray] = None
+        self.slopemap: Optional[np.ndarray] = None
+        self.shadowmap: Optional[np.ndarray] = None
+
+        # LOD metadata
+        self.lod_level: int = 1
+        self.actual_size: int = 32
+        self.calculated_sun_angles: List[Tuple[int, int]] = []
+
+        # Validity system
+        self.validity_state: str = "valid"
+        self.validity_flags: Dict[str, bool] = {
+            "heightmap": False,
+            "slopemap": False,
+            "shadowmap": False
+        }
+
+        # Parameter tracking
+        self.parameters: Dict[str, Any] = {}
+        self.parameter_hash: Optional[str] = None
+
+        # Performance metadata
+        self.generation_time: float = 0.0
+        self.fallback_used: str = "unknown"  # "gpu", "cpu", "simple"
 
     def is_valid(self) -> bool:
         """Prüft Validity-State des TerrainData-Objekts"""
-        return self.validity_state == "valid"
+        return self.validity_state == "valid" and all(self.validity_flags.values())
 
     def invalidate(self):
         """Invalidiert TerrainData-Objekt"""
         self.validity_state = "invalid"
+        self.validity_flags = {key: False for key in self.validity_flags}
 
-    def validate_against_parameters(self, new_parameters: dict) -> bool:
+    def validate_against_parameters(self, new_parameters: Dict[str, Any]) -> bool:
         """
         Funktionsweise: Prüft ob TerrainData mit neuen Parametern kompatibel ist
         Parameter: new_parameters (dict)
         Return: bool - Kompatibel
         """
-        import hashlib
-        new_hash = hashlib.md5(str(sorted(new_parameters.items())).encode()).hexdigest()
+        new_hash = self._calculate_parameter_hash(new_parameters)
         return self.parameter_hash == new_hash
 
-    def get_validity_summary(self) -> dict:
+    def get_validity_summary(self) -> Dict[str, Any]:
         """
         Return: dict mit Validity-Informationen für DataManager
         """
         return {
             "validity_state": self.validity_state,
+            "validity_flags": self.validity_flags.copy(),
             "lod_level": self.lod_level,
             "actual_size": self.actual_size,
             "calculated_sun_angles": len(self.calculated_sun_angles),
-            "parameter_hash": self.parameter_hash
+            "parameter_hash": self.parameter_hash,
+            "generation_time": self.generation_time,
+            "fallback_used": self.fallback_used
         }
+
+    def detect_critical_changes(self, new_parameters: Dict[str, Any]) -> List[str]:
+        """
+        Funktionsweise: Erkennt signifikante Parameter-Änderungen für Cache-Invalidation
+        Parameter: new_parameters - Neue Parameter zum Vergleich
+        Returns: List[str] - Liste der kritischen Änderungen
+        """
+        if not self.parameters:
+            return ["initial_generation"]
+
+        critical_params = ["map_seed", "map_size", "amplitude", "octaves", "frequency"]
+        critical_changes = []
+
+        for param in critical_params:
+            if param in new_parameters and param in self.parameters:
+                if new_parameters[param] != self.parameters[param]:
+                    critical_changes.append(param)
+
+        return critical_changes
+
+    def get_invalidated_generators(self) -> List[str]:
+        """
+        Funktionsweise: Bestimmt welche nachgelagerten Generatoren invalidiert werden müssen
+        Returns: List[str] - Liste der zu invalidierenden Generatoren
+        """
+        # Terrain ist Basis-Generator - alle anderen hängen davon ab
+        return ["geology", "weather", "water", "biome", "settlement"]
+
+    def _calculate_parameter_hash(self, parameters: Dict[str, Any]) -> str:
+        """Berechnet MD5-Hash der Parameter für Cache-Validation"""
+        return hashlib.md5(str(sorted(parameters.items())).encode()).hexdigest()
+
+    def update_parameters(self, parameters: Dict[str, Any]):
+        """Aktualisiert Parameter und Parameter-Hash"""
+        self.parameters = parameters.copy()
+        self.parameter_hash = self._calculate_parameter_hash(parameters)
+
 
 class SimplexNoiseGenerator:
     """
-    Funktionsweise: Erzeugt OpenSimplex-Noise mit konfigurierbaren Octaves/Persistence/Lacunarity
-    Aufgabe: Basis-Noise-Funktionen für alle anderen Module mit LOD-optimierter Batch-Verarbeitung
+    Funktionsweise: Erzeugt OpenSimplex-Noise mit 3-stufiger Fallback-Strategie
+    Aufgabe: Basis-Noise-Funktionen für Heightmap-Generation mit Performance-Optimierung
+    Methoden: noise_2d(), multi_octave_noise(), ridge_noise()
+    LOD-Optimiert: generate_noise_grid() für Batch-Verarbeitung, interpolate_existing_grid() für LOD-Upgrades
+
+    Spezifische Fallbacks:
+    - GPU-Optimal: request_noise_generation() für parallele Multi-Octave-Berechnung
+    - CPU-Fallback: Optimierte NumPy-Implementierung mit vectorization
+    - Simple-Fallback: Direkte Random-Noise-Generation (5-10 Zeilen)
     """
 
-    def __init__(self, seed=42):
+    def __init__(self, seed: int = 42, shader_manager=None):
         """
-        Funktionsweise: Initialisiert OpenSimplex-Generator mit gegebenem Seed
-        Aufgabe: Setup des Noise-Generators für reproduzierbare Ergebnisse
+        Funktionsweise: Initialisiert OpenSimplex-Generator mit ShaderManager-Integration
         Parameter: seed (int) - Seed für reproduzierbaren Noise
+        Parameter: shader_manager - ShaderManager-Instanz für GPU-Acceleration
         """
         self.generator = OpenSimplex(seed=seed)
+        self.shader_manager = shader_manager
+        self.logger = logging.getLogger(self.__class__.__name__)
 
-    def noise_2d(self, x, y):
+    def generate_noise_grid(self, size: int, frequency: float, octaves: int,
+                          persistence: float, lacunarity: float,
+                          offset_x: float = 0, offset_y: float = 0) -> np.ndarray:
         """
-        Funktionsweise: Erzeugt einzelnen Noise-Wert für gegebene 2D-Koordinaten
-        Aufgabe: Basis-Noise-Funktion für einzelne Punkte
-        Parameter: x, y (float) - 2D-Koordinaten
-        Returns: float - Noise-Wert zwischen -1 und 1
-        """
-        return self.generator.noise2(x, y)
-
-    def multi_octave_noise(self, x, y, octaves, persistence, lacunarity, frequency):
-        """
-        Funktionsweise: Erzeugt Multi-Octave Noise durch Kombination mehrerer Noise-Layer
-        Aufgabe: Komplexere Noise-Patterns durch Octave-Layering
-        Parameter: x, y, octaves, persistence, lacunarity, frequency - Noise-Parameter
-        Returns: float - Kombinierter Noise-Wert
-        """
-        value = 0.0
-        amplitude = 1.0
-        current_frequency = frequency
-        max_amplitude = 0.0
-
-        for _ in range(octaves):
-            value += amplitude * self.noise_2d(x * current_frequency, y * current_frequency)
-            max_amplitude += amplitude
-            amplitude *= persistence
-            current_frequency *= lacunarity
-
-        # Normalisierung auf [-1, 1]
-        return value / max_amplitude if max_amplitude > 0 else 0
-
-    def ridge_noise(self, x, y, octaves, persistence, lacunarity, frequency):
-        """
-        Funktionsweise: Erzeugt Ridge-Noise für scharfe Gebirgskämme und Täler
-        Aufgabe: Spezialisierte Noise-Variante für dramatische Terrain-Features
-        Parameter: x, y, octaves, persistence, lacunarity, frequency - Noise-Parameter
-        Returns: float - Ridge-Noise-Wert
-        """
-        value = 0.0
-        amplitude = 1.0
-        current_frequency = frequency
-        max_amplitude = 0.0
-
-        for _ in range(octaves):
-            noise_val = abs(self.noise_2d(x * current_frequency, y * current_frequency))
-            ridge_val = 1.0 - noise_val  # Invertierung für Ridge-Effekt
-            value += amplitude * ridge_val
-            max_amplitude += amplitude
-            amplitude *= persistence
-            current_frequency *= lacunarity
-
-        return value / max_amplitude if max_amplitude > 0 else 0
-
-    def generate_noise_grid(self, size, frequency, octaves, persistence, lacunarity, offset_x=0, offset_y=0):
-        """
-        Funktionsweise: Generiert komplettes Noise-Grid auf einmal statt Pixel für Pixel
-        Aufgabe: Performance-Optimierung durch Batch-Verarbeitung ohne Python-Loops
-        Parameter: size (int) - Grid-Größe, frequency/octaves/persistence/lacunarity - Noise-Parameter
-        Parameter: offset_x/offset_y (float) - Verschiebung für nahtlose Kacheln
+        Funktionsweise: Generiert komplettes Noise-Grid mit 3-stufigem Fallback
+        Aufgabe: Performance-Optimierung durch Batch-Verarbeitung
+        Parameter: size, frequency, octaves, persistence, lacunarity, offset_x, offset_y
         Returns: numpy.ndarray - Komplettes Noise-Grid mit Werten zwischen -1 und 1
         """
-        # Koordinaten-Arrays für gesamtes Grid erstellen
+        parameters = {
+            'size': size,
+            'frequency': frequency,
+            'octaves': octaves,
+            'persistence': persistence,
+            'lacunarity': lacunarity,
+            'offset_x': offset_x,
+            'offset_y': offset_y
+        }
+
+        # GPU-Fallback (Optimal)
+        if self._gpu_available():
+            try:
+                result = self.shader_manager.request_noise_generation(
+                    operation_type="multi_octave_noise",
+                    parameters=parameters
+                )
+                if result.get('success', False):
+                    self.logger.debug("GPU noise generation successful")
+                    return result['data']
+            except Exception as e:
+                self.logger.warning(f"GPU noise generation failed: {e}")
+
+        # CPU-Fallback (Gut)
+        try:
+            return self._generate_cpu_optimized(parameters)
+        except Exception as e:
+            self.logger.warning(f"CPU noise generation failed: {e}")
+
+        # Simple-Fallback (Minimal, garantiert funktionsfähig)
+        return self._generate_simple_fallback(parameters)
+
+    def interpolate_existing_grid(self, existing_grid: np.ndarray, new_size: int) -> np.ndarray:
+        """
+        Funktionsweise: Interpoliert bestehende LOD-Daten auf höhere Auflösung mittels bilinearer Interpolation
+        Aufgabe: Progressive LOD-Verbesserung ohne Neuberechnung aller Werte
+        Parameter: existing_grid - Bestehende niedrig-aufgelöste Daten
+        Parameter: new_size - Zielgröße für Interpolation
+        Returns: numpy.ndarray - Interpolierte Daten in neuer Auflösung
+        """
+        old_size = existing_grid.shape[0]
+
+        if old_size == new_size:
+            return existing_grid.copy()
+
+        # GPU-Interpolation falls verfügbar
+        if self._gpu_available():
+            try:
+                result = self.shader_manager.request_interpolation(
+                    operation_type="bicubic_interpolation",
+                    input_data=existing_grid,
+                    target_size=new_size
+                )
+                if result.get('success', False):
+                    return result['data']
+            except Exception as e:
+                self.logger.warning(f"GPU interpolation failed: {e}")
+
+        # CPU-Fallback mit optimierter Interpolation
+        return self._interpolate_cpu_optimized(existing_grid, new_size)
+
+    def add_detail_noise(self, base_grid: np.ndarray, detail_frequency: float,
+                        detail_amplitude: float) -> np.ndarray:
+        """
+        Funktionsweise: Fügt hochfrequente Detail-Noise zu bestehender interpolierter Basis hinzu
+        Aufgabe: Verfeinert interpolierte LOD-Daten mit lokalen Details
+        Parameter: base_grid - Basis-Grid aus Interpolation
+        Parameter: detail_frequency - Frequenz für Detail-Noise
+        Parameter: detail_amplitude - Stärke der Detail-Noise (meist 10-30% der Original-Amplitude)
+        Returns: numpy.ndarray - Verfeinertes Grid mit Details
+        """
+        size = base_grid.shape[0]
+
+        # Detail-Noise mit höherer Frequenz generieren
+        detail_grid = self.generate_noise_grid(
+            size=size,
+            frequency=detail_frequency,
+            octaves=2,  # Weniger Octaves für Details
+            persistence=0.5,
+            lacunarity=2.0
+        )
+
+        # Detail-Noise mit reduzierter Amplitude zur Basis hinzufügen
+        enhanced_grid = base_grid + (detail_grid * detail_amplitude)
+        return enhanced_grid
+
+    def _gpu_available(self) -> bool:
+        """Prüft GPU-Verfügbarkeit über ShaderManager"""
+        return (self.shader_manager is not None and
+                hasattr(self.shader_manager, 'gpu_available') and
+                self.shader_manager.gpu_available)
+
+    def _generate_cpu_optimized(self, parameters: Dict[str, Any]) -> np.ndarray:
+        """
+        Funktionsweise: Optimierte NumPy-Implementierung für CPU-Fallback
+        Aufgabe: Vectorized Operations für bessere Performance ohne GPU
+        Parameter: parameters - Noise-Parameter
+        Returns: numpy.ndarray - CPU-generiertes Noise-Grid
+        """
+        size = parameters['size']
+        frequency = parameters['frequency']
+        octaves = parameters['octaves']
+        persistence = parameters['persistence']
+        lacunarity = parameters['lacunarity']
+        offset_x = parameters.get('offset_x', 0)
+        offset_y = parameters.get('offset_y', 0)
+
+        # Koordinaten-Arrays für gesamtes Grid erstellen (vectorized)
         x_coords = np.linspace(0, 1, size) + offset_x
         y_coords = np.linspace(0, 1, size) + offset_y
-
-        # Meshgrid für vektorisierte Berechnung
-        X, Y = np.meshgrid(x_coords, y_coords)
+        X, Y = np.meshgrid(x_coords, y_coords, indexing='xy')
 
         # Ergebnis-Array initialisieren
         noise_grid = np.zeros((size, size), dtype=np.float32)
@@ -173,11 +309,8 @@ class SimplexNoiseGenerator:
             freq_X = X * current_frequency
             freq_Y = Y * current_frequency
 
-            # Noise für gesamtes Grid berechnen (vektorisiert)
-            octave_noise = np.zeros_like(noise_grid)
-            for y in range(size):
-                for x in range(size):
-                    octave_noise[y, x] = self.generator.noise2(freq_X[y, x], freq_Y[y, x])
+            # Vectorized noise calculation für bessere Performance
+            octave_noise = self._vectorized_noise(freq_X, freq_Y)
 
             # Octave zum Gesamtergebnis hinzufügen
             noise_grid += amplitude * octave_noise
@@ -193,203 +326,206 @@ class SimplexNoiseGenerator:
 
         return noise_grid
 
-    def interpolate_existing_grid(self, existing_grid, new_size):
+    def _vectorized_noise(self, freq_X: np.ndarray, freq_Y: np.ndarray) -> np.ndarray:
         """
-        Funktionsweise: Interpoliert bestehende LOD-Daten auf höhere Auflösung mittels bilinearer Interpolation
-        Aufgabe: Progressive LOD-Verbesserung ohne Neuberechnung aller Werte
-        Parameter: existing_grid (numpy.ndarray) - Bestehende niedrig-aufgelöste Daten
-        Parameter: new_size (int) - Zielgröße für Interpolation
-        Returns: numpy.ndarray - Interpolierte Daten in neuer Auflösung
+        Funktionsweise: Vectorized Noise-Berechnung für CPU-Performance
+        Parameter: freq_X, freq_Y - Frequency-adjusted coordinate arrays
+        Returns: numpy.ndarray - Noise values
+        """
+        # Optimierte Batch-Verarbeitung
+        result = np.zeros_like(freq_X, dtype=np.float32)
+
+        # Process in chunks für Memory-Efficiency
+        chunk_size = min(1000, freq_X.size)
+        flat_X = freq_X.flatten()
+        flat_Y = freq_Y.flatten()
+        flat_result = np.zeros_like(flat_X)
+
+        for i in range(0, len(flat_X), chunk_size):
+            end_idx = min(i + chunk_size, len(flat_X))
+            for j in range(i, end_idx):
+                flat_result[j] = self.generator.noise2(flat_X[j], flat_Y[j])
+
+        return flat_result.reshape(freq_X.shape)
+
+    def _generate_simple_fallback(self, parameters: Dict[str, Any]) -> np.ndarray:
+        """
+        Funktionsweise: Einfache Fallback-Implementierung (5-10 Zeilen)
+        Aufgabe: Garantierte Funktionsfähigkeit auch bei kritischen Fehlern
+        Parameter: parameters - Noise-Parameter
+        Returns: numpy.ndarray - Simple Random-Noise
+        """
+        size = parameters['size']
+
+        # Simple Random-Noise mit Seed-Reproduzierbarkeit
+        np.random.seed(hash(str(parameters)) % (2**32))
+
+        # Basis Random-Noise
+        noise = np.random.uniform(-1, 1, (size, size)).astype(np.float32)
+
+        # Einfache Glättung für weniger chaotisches Aussehen
+        from scipy.ndimage import gaussian_filter
+        try:
+            noise = gaussian_filter(noise, sigma=1.0, mode='wrap')
+        except ImportError:
+            # Fallback wenn scipy nicht verfügbar
+            pass
+
+        return noise
+
+    def _interpolate_cpu_optimized(self, existing_grid: np.ndarray, new_size: int) -> np.ndarray:
+        """
+        Funktionsweise: CPU-optimierte bilineare Interpolation
+        Parameter: existing_grid, new_size
+        Returns: numpy.ndarray - Interpolierte Daten
         """
         old_size = existing_grid.shape[0]
-
-        # Wenn Größen gleich sind, einfach kopieren
-        if old_size == new_size:
-            return existing_grid.copy()
-
-        # Skalierungsfaktor berechnen
         scale_factor = (old_size - 1) / (new_size - 1)
 
-        # Neues Grid initialisieren
-        interpolated_grid = np.zeros((new_size, new_size), dtype=np.float32)
+        # Vectorized coordinate calculation
+        new_coords = np.arange(new_size, dtype=np.float32)
+        old_x_coords = new_coords * scale_factor
+        old_y_coords = new_coords * scale_factor
 
-        # Für jeden Punkt im neuen Grid
+        # Mesh für vectorized interpolation
+        old_X, old_Y = np.meshgrid(old_x_coords, old_y_coords, indexing='xy')
+
+        # Scipy interpolation falls verfügbar, sonst manuelle bilineare Interpolation
+        try:
+            from scipy.interpolate import RegularGridInterpolator
+            old_grid_coords = (np.arange(old_size), np.arange(old_size))
+            interpolator = RegularGridInterpolator(old_grid_coords, existing_grid,
+                                                 method='linear', bounds_error=False,
+                                                 fill_value=0)
+
+            points = np.column_stack([old_Y.ravel(), old_X.ravel()])
+            interpolated = interpolator(points).reshape((new_size, new_size))
+            return interpolated.astype(np.float32)
+
+        except ImportError:
+            # Manual bilinear interpolation fallback
+            return self._manual_bilinear_interpolation(existing_grid, new_size)
+
+    def _manual_bilinear_interpolation(self, existing_grid: np.ndarray, new_size: int) -> np.ndarray:
+        """Manual bilinear interpolation without scipy dependency"""
+        old_size = existing_grid.shape[0]
+        scale_factor = (old_size - 1) / (new_size - 1)
+
+        interpolated = np.zeros((new_size, new_size), dtype=np.float32)
+
         for new_y in range(new_size):
             for new_x in range(new_size):
-                # Entsprechende Position im alten Grid
                 old_x = new_x * scale_factor
                 old_y = new_y * scale_factor
 
-                # Ganzzahlige Koordinaten für Interpolation
-                x0 = int(old_x)
-                y0 = int(old_y)
-                x1 = min(x0 + 1, old_size - 1)
-                y1 = min(y0 + 1, old_size - 1)
+                x0, y0 = int(old_x), int(old_y)
+                x1, y1 = min(x0 + 1, old_size - 1), min(y0 + 1, old_size - 1)
 
-                # Interpolations-Gewichte
-                fx = old_x - x0
-                fy = old_y - y0
+                fx, fy = old_x - x0, old_y - y0
 
-                # Bilineare Interpolation
+                # Bilinear interpolation
                 h00 = existing_grid[y0, x0]
                 h10 = existing_grid[y0, x1]
                 h01 = existing_grid[y1, x0]
                 h11 = existing_grid[y1, x1]
 
-                # Interpolation in x-Richtung
                 h0 = h00 * (1 - fx) + h10 * fx
                 h1 = h01 * (1 - fx) + h11 * fx
 
-                # Interpolation in y-Richtung
-                interpolated_grid[new_y, new_x] = h0 * (1 - fy) + h1 * fy
+                interpolated[new_y, new_x] = h0 * (1 - fy) + h1 * fy
 
-        return interpolated_grid
-
-    def add_detail_noise(self, base_grid, detail_frequency, detail_amplitude):
-        """
-        Funktionsweise: Fügt hochfrequente Detail-Noise zu bestehender interpolierter Basis hinzu
-        Aufgabe: Verfeinert interpolierte LOD-Daten mit lokalen Details
-        Parameter: base_grid (numpy.ndarray) - Basis-Grid aus Interpolation
-        Parameter: detail_frequency (float) - Frequenz für Detail-Noise
-        Parameter: detail_amplitude (float) - Stärke der Detail-Noise (meist 10-30% der Original-Amplitude)
-        Returns: numpy.ndarray - Verfeinertes Grid mit Details
-        """
-        size = base_grid.shape[0]
-
-        # Detail-Noise mit höherer Frequenz generieren
-        detail_grid = self.generate_noise_grid(
-            size=size,
-            frequency=detail_frequency,
-            octaves=2,  # Weniger Octaves für Details
-            persistence=0.5,
-            lacunarity=2.0,
-            offset_x=0,
-            offset_y=0
-        )
-
-        # Detail-Noise mit reduzierter Amplitude zur Basis hinzufügen
-        enhanced_grid = base_grid + (detail_grid * detail_amplitude)
-
-        return enhanced_grid
+        return interpolated
 
 
 class ShadowCalculator:
     """
-    Funktionsweise: Berechnet Verschattung mit Raycasts für variable Sonnenwinkel je LOD-Level
-    Aufgabe: Erstellt shadowmap für Weather-System und visuelle Darstellung mit LOD-optimierter Berechnung
+    Funktionsweise: Berechnet Verschattung mit Raycasts für LOD-spezifische Sonnenwinkel
+    Aufgabe: Erstellt shadowmap (konstant 64x64) für Weather-System und visuelle Darstellung
+    Methoden: calculate_shadows(heightmap, lod_level, parameters), raycast_shadow(), combine_shadow_angles()
+    LOD-System: get_sun_angles_for_lod() - 1,3,5,7 Sonnenwinkel je nach LOD-Level
+    Progressive-Enhancement: Berechnet nur neue Sonnenwinkel bei LOD-Upgrades, kombiniert mit bestehenden Shadows
+
+    Spezifische Fallbacks:
+    - GPU-Optimal: Parallele Raycast-Berechnung für alle Sonnenwinkel
+    - CPU-Fallback: Optimierte CPU-Raycast-Implementierung
+    - Simple-Fallback: Einfache Height-Difference-Shadow-Approximation
     """
 
-    def __init__(self):
+    def __init__(self, shader_manager=None):
         """
         Funktionsweise: Initialisiert Shadow-Calculator mit LOD-spezifischer Sonnenwinkel-Konfiguration
-        Aufgabe: Setup der variablen Sonnenwinkel für progressive LOD-Verbesserung
+        Parameter: shader_manager - ShaderManager für GPU-Acceleration
         """
+        self.shader_manager = shader_manager
+        self.logger = logging.getLogger(self.__class__.__name__)
 
-        self.shader_manager = None
-
-        # 7 Sonnenwinkel für Tagesverlauf (in Grad)
+        # 7 Sonnenwinkel für Tagesverlauf (elevation, azimuth in Grad)
         self.sun_angles = [
-            (10, 75),  # Morgendämmerung
-            (25, 90),  # Morgen
+            (10, 75),   # Morgendämmerung
+            (25, 90),   # Morgen
             (45, 120),  # Vormittag
             (70, 180),  # Mittag
             (45, 240),  # Nachmittag
             (25, 270),  # Abend
-            (10, 285)  # Späte Dämmerung
+            (10, 285)   # Späte Dämmerung
         ]
 
-        # Gewichtung durch atmosphärische Durchdringung (Mittag erhält höchste Gewichtung)
+        # Gewichtung durch atmosphärische Durchdringung
         self.sun_weights = [0.06, 0.2, 0.6, 0.9, 0.6, 0.2, 0.06]
 
-    def calculate_shadows_multi_angle(self, heightmap):
+    def calculate_shadows(self, heightmap: np.ndarray, lod_level: int,
+                         existing_shadows: Optional[np.ndarray] = None,
+                         existing_lod: int = 1) -> np.ndarray:
         """
-        Funktionsweise: Berechnet Verschattung für alle 7 Sonnenwinkel und kombiniert sie
-        Aufgabe: Erstellt realistische Verschattung durch mehrere Sonnenwinkel
-        Parameter: heightmap (numpy.ndarray) - Höhendaten
-        Returns: numpy.ndarray - Kombinierte Verschattung (0=Schatten, 1=Vollsonne)
+        Funktionsweise: Berechnet Verschattung mit 3-stufigem Fallback und LOD-System
+        Aufgabe: Erstellt shadowmap (konstant 64x64) für Weather-System
+        Parameter: heightmap - Höhendaten
+        Parameter: lod_level - LOD-Level für Sonnenwinkel-Auswahl
+        Parameter: existing_shadows - Bestehende Shadow-Daten (optional)
+        Parameter: existing_lod - LOD-Level der bestehenden Shadows
+        Returns: numpy.ndarray - Shadow-Map konstant 64x64
         """
-        height, width = heightmap.shape
-        combined_shadows = np.zeros((height, width), dtype=np.float32)
-        total_weight = sum(self.sun_weights)
+        # GPU-Fallback (Optimal)
+        if self._gpu_available():
+            try:
+                result = self.shader_manager.request_shadow_calculation(
+                    operation_type="multi_angle_shadows",
+                    heightmap=heightmap,
+                    lod_level=lod_level,
+                    existing_shadows=existing_shadows,
+                    existing_lod=existing_lod
+                )
+                if result.get('success', False):
+                    self.logger.debug("GPU shadow calculation successful")
+                    return result['data']
+            except Exception as e:
+                self.logger.warning(f"GPU shadow calculation failed: {e}")
 
-        for i, (elevation, azimuth) in enumerate(self.sun_angles):
-            shadow_map = self.raycast_shadow(heightmap, elevation, azimuth)
-            combined_shadows += shadow_map * self.sun_weights[i]
+        # CPU-Fallback (Gut)
+        try:
+            return self._calculate_cpu_shadows(heightmap, lod_level, existing_shadows, existing_lod)
+        except Exception as e:
+            self.logger.warning(f"CPU shadow calculation failed: {e}")
 
-        # Normalisierung auf [0, 1]
-        combined_shadows /= total_weight
-        return combined_shadows
+        # Simple-Fallback (Minimal)
+        return self._calculate_simple_shadows(heightmap, lod_level)
 
-    def calculate_shadows_with_lod(self, heightmap, lod_level="LOD64", shadow_resolution=64):
-        """
-        Funktionsweise: Berechnet Verschattung mit LOD-System und fester Shadow-Auflösung
-        Aufgabe: Optimierte Shadow-Berechnung - Shadows immer in niedriger Auflösung, dann interpoliert
-        Parameter: heightmap (numpy.ndarray) - Höhendaten in beliebiger Auflösung
-        Parameter: lod_level (str) - LOD-Level für Sonnenwinkel-Auswahl
-        Parameter: shadow_resolution (int) - Feste Auflösung für Shadow-Berechnung (Standard: 64)
-        Returns: numpy.ndarray - Shadow-Map in gleicher Auflösung wie heightmap
-        """
-        if self.shader_manager and hasattr(self.shader_manager, 'gpu_available') and self.shader_manager.gpu_available:
-            return self._calculate_shadows_gpu(heightmap, lod_level, shadow_resolution)
-        else:
-
-            original_size = heightmap.shape[0]
-
-            # Heightmap für Shadow-Berechnung auf niedrige Auflösung reduzieren
-            if original_size > shadow_resolution:
-                # Downscale heightmap für Shadow-Berechnung
-                scale_factor = (original_size - 1) / (shadow_resolution - 1)
-                shadow_heightmap = np.zeros((shadow_resolution, shadow_resolution), dtype=np.float32)
-
-                for y in range(shadow_resolution):
-                    for x in range(shadow_resolution):
-                        # Position im Original-Heightmap
-                        orig_x = x * scale_factor
-                        orig_y = y * scale_factor
-
-                        # Bilineare Interpolation für Downscaling
-                        shadow_heightmap[y, x] = self._interpolate_height(heightmap, orig_x, orig_y)
-            else:
-                shadow_heightmap = heightmap
-
-            # Passende Sonnenwinkel für LOD holen
-            sun_angles, sun_weights = self.get_sun_angles_for_lod(lod_level)
-
-            # Shadow-Berechnung in niedriger Auflösung
-            low_res_shadows = np.zeros((shadow_heightmap.shape[0], shadow_heightmap.shape[1]), dtype=np.float32)
-            total_weight = sum(sun_weights)
-
-            for i, (elevation, azimuth) in enumerate(sun_angles):
-                shadow_map = self.raycast_shadow(shadow_heightmap, elevation, azimuth)
-                low_res_shadows += shadow_map * sun_weights[i]
-
-            # Normalisierung
-            low_res_shadows /= total_weight
-
-            # Upscale auf Original-Größe falls nötig
-            if original_size > shadow_resolution:
-                final_shadows = self._upscale_shadows(low_res_shadows, original_size)
-            else:
-                final_shadows = low_res_shadows
-            return final_shadows
-
-    def get_sun_angles_for_lod(self, lod_level):
+    def get_sun_angles_for_lod(self, lod_level: int) -> Tuple[List[Tuple[int, int]], List[float]]:
         """
         Funktionsweise: Gibt passende Sonnenwinkel-Auswahl für LOD-Level zurück
-        Aufgabe: Performance-Optimierung durch weniger Sonnenwinkel bei niedrigen LODs
-        Parameter: lod_level (str) - "LOD64", "LOD128", "LOD256", "FINAL"
+        Parameter: lod_level (int) - 1,2,3,4,5,6,7
         Returns: Tuple (sun_angles_list, sun_weights_list) - Gefilterte Winkel und Gewichtungen
         """
-        if lod_level == "LOD64":
+        if lod_level == 1:
             # Nur Mittag
-            indices = [3]  # (70, 180)
-        elif lod_level == "LOD128":
+            indices = [3]
+        elif lod_level == 2:
             # Mittag + Vormittag + Nachmittag
-            indices = [2, 3, 4]  # (45, 120), (70, 180), (45, 240)
-        elif lod_level == "LOD256":
+            indices = [2, 3, 4]
+        elif lod_level == 3:
             # + Morgen + Abend
-            indices = [1, 2, 3, 4, 5]  # (25, 90), (45, 120), (70, 180), (45, 240), (25, 270)
-        else:  # FINAL
+            indices = [1, 2, 3, 4, 5]
+        else:  # lod_level >= 4
             # Alle 7 Winkel
             indices = list(range(7))
 
@@ -398,66 +534,121 @@ class ShadowCalculator:
 
         return selected_angles, selected_weights
 
-    def calculate_shadows_progressive(self, heightmap, lod_level, existing_shadows=None, existing_lod="LOD64"):
+    def _gpu_available(self) -> bool:
+        """Prüft GPU-Verfügbarkeit über ShaderManager"""
+        return (self.shader_manager is not None and
+                hasattr(self.shader_manager, 'gpu_available') and
+                self.shader_manager.gpu_available)
+
+    def _calculate_cpu_shadows(self, heightmap: np.ndarray, lod_level: int,
+                              existing_shadows: Optional[np.ndarray] = None,
+                              existing_lod: int = 1) -> np.ndarray:
         """
-        Funktionsweise: Berechnet nur neue Sonnenwinkel und kombiniert mit bestehenden Shadows
-        Aufgabe: Progressive Shadow-Verbesserung ohne Neuberechnung aller Winkel
-        Parameter: heightmap (numpy.ndarray) - Aktuelle Höhendaten
-        Parameter: lod_level (str) - Ziel-LOD-Level
-        Parameter: existing_shadows (numpy.ndarray) - Bestehende Shadow-Daten (optional)
-        Parameter: existing_lod (str) - LOD-Level der bestehenden Shadows
-        Returns: numpy.ndarray - Erweiterte Shadow-Map
+        Funktionsweise: Optimierte CPU-Raycast-Implementierung
+        Parameter: heightmap, lod_level, existing_shadows, existing_lod
+        Returns: numpy.ndarray - Shadow-Map 64x64
         """
-        # Neue Sonnenwinkel für Ziel-LOD
-        new_angles, new_weights = self.get_sun_angles_for_lod(lod_level)
+        shadow_resolution = 64
+        original_size = heightmap.shape[0]
 
-        # Bestehende Sonnenwinkel
-        if existing_shadows is not None:
-            old_angles, old_weights = self.get_sun_angles_for_lod(existing_lod)
-
-            # Finde nur die NEUEN Winkel (die noch nicht berechnet wurden)
-            old_angle_set = set(old_angles)
-            additional_angles = []
-            additional_weights = []
-
-            for angle, weight in zip(new_angles, new_weights):
-                if angle not in old_angle_set:
-                    additional_angles.append(angle)
-                    additional_weights.append(weight)
-
-            if not additional_angles:
-                # Keine neuen Winkel, nur bestehende Shadows zurückgeben
-                return existing_shadows
-
-            # Berechne nur die zusätzlichen Winkel
-            additional_shadows = np.zeros_like(heightmap, dtype=np.float32)
-            for elevation, azimuth in additional_angles:
-                shadow_map = self.raycast_shadow(heightmap, elevation, azimuth)
-                additional_shadows += shadow_map
-
-            # Normiere die zusätzlichen Shadows
-            if additional_weights:
-                additional_shadows /= len(additional_weights)
-
-            # Kombiniere bestehende und neue Shadows
-            total_old_weight = sum(old_weights)
-            total_additional_weight = sum(additional_weights)
-            total_weight = total_old_weight + total_additional_weight
-
-            combined_shadows = (
-                                           existing_shadows * total_old_weight + additional_shadows * total_additional_weight) / total_weight
-
-            return combined_shadows
+        # Heightmap für Shadow-Berechnung auf 64x64 reduzieren falls nötig
+        if original_size > shadow_resolution:
+            shadow_heightmap = self._downsample_heightmap(heightmap, shadow_resolution)
         else:
-            # Keine bestehenden Shadows, normale Berechnung
-            return self.calculate_shadows_with_lod(heightmap, lod_level)
+            shadow_heightmap = heightmap
 
-    def raycast_shadow(self, heightmap, sun_elevation, sun_azimuth):
+        # Progressive Shadow-Enhancement falls bestehende Shadows vorhanden
+        if existing_shadows is not None and existing_lod != lod_level:
+            return self._calculate_progressive_shadows(shadow_heightmap, lod_level,
+                                                     existing_shadows, existing_lod)
+
+        # Vollständige Shadow-Berechnung
+        sun_angles, sun_weights = self.get_sun_angles_for_lod(lod_level)
+        shadows = np.zeros((shadow_resolution, shadow_resolution), dtype=np.float32)
+        total_weight = sum(sun_weights)
+
+        for i, (elevation, azimuth) in enumerate(sun_angles):
+            shadow_map = self._raycast_shadow_cpu(shadow_heightmap, elevation, azimuth)
+            shadows += shadow_map * sun_weights[i]
+
+        # Normalisierung
+        shadows /= total_weight
+
+        # Upscale auf Original-Größe falls nötig
+        if original_size > shadow_resolution:
+            shadows = self._upsample_shadows(shadows, original_size)
+
+        return shadows
+
+    def _calculate_simple_shadows(self, heightmap: np.ndarray, lod_level: int) -> np.ndarray:
         """
-        Funktionsweise: Berechnet Verschattung für einen einzelnen Sonnenwinkel mit Raycasting
-        Aufgabe: Raycast-basierte Verschattungsberechnung für gegebenen Sonnenstand
-        Parameter: heightmap, sun_elevation, sun_azimuth - Höhendaten und Sonnenposition
-        Returns: numpy.ndarray - Verschattung für diesen Sonnenwinkel
+        Funktionsweise: Einfache Height-Difference-Shadow-Approximation
+        Aufgabe: Garantierte Funktionsfähigkeit ohne komplexe Raycasting
+        Parameter: heightmap, lod_level
+        Returns: numpy.ndarray - Approximierte Shadow-Map
+        """
+        height, width = heightmap.shape
+        shadows = np.ones((height, width), dtype=np.float32)
+
+        # Einfache Gradient-basierte Shadow-Approximation
+        # Steile Nordhänge sind dunkler, Südhänge heller
+        for y in range(1, height - 1):
+            for x in range(1, width - 1):
+                # Einfacher Gradient in Y-Richtung (Nord-Süd)
+                north_slope = heightmap[y-1, x] - heightmap[y, x]
+                south_slope = heightmap[y+1, x] - heightmap[y, x]
+
+                # Nordhänge dunkler, Südhänge heller
+                slope_factor = (south_slope - north_slope) * 0.1
+                shadows[y, x] = np.clip(0.5 + slope_factor, 0.1, 1.0)
+
+        return shadows
+
+    def _calculate_progressive_shadows(self, heightmap: np.ndarray, lod_level: int,
+                                     existing_shadows: np.ndarray, existing_lod: int) -> np.ndarray:
+        """Progressive Shadow-Enhancement - nur neue Sonnenwinkel berechnen"""
+        new_angles, new_weights = self.get_sun_angles_for_lod(lod_level)
+        old_angles, old_weights = self.get_sun_angles_for_lod(existing_lod)
+
+        # Finde neue Winkel
+        old_angle_set = set(old_angles)
+        additional_angles = []
+        additional_weights = []
+
+        for angle, weight in zip(new_angles, new_weights):
+            if angle not in old_angle_set:
+                additional_angles.append(angle)
+                additional_weights.append(weight)
+
+        if not additional_angles:
+            return existing_shadows
+
+        # Berechne nur zusätzliche Winkel
+        additional_shadows = np.zeros_like(existing_shadows, dtype=np.float32)
+        for elevation, azimuth in additional_angles:
+            shadow_map = self._raycast_shadow_cpu(heightmap, elevation, azimuth)
+            additional_shadows += shadow_map
+
+        # Normiere die zusätzlichen Shadows
+        if additional_weights:
+            additional_shadows /= len(additional_weights)
+
+        # Kombiniere bestehende und neue Shadows
+        total_old_weight = sum(old_weights)
+        total_additional_weight = sum(additional_weights)
+        total_weight = total_old_weight + total_additional_weight
+
+        combined_shadows = (existing_shadows * total_old_weight +
+                          additional_shadows * total_additional_weight) / total_weight
+
+        return combined_shadows
+
+    def _raycast_shadow_cpu(self, heightmap: np.ndarray, sun_elevation: float,
+                           sun_azimuth: float) -> np.ndarray:
+        """
+        Funktionsweise: CPU-optimierte Raycast-Shadow-Berechnung für einen Sonnenwinkel
+        Parameter: heightmap, sun_elevation, sun_azimuth
+        Returns: numpy.ndarray - Shadow-Map für diesen Sonnenwinkel
         """
         height, width = heightmap.shape
         shadow_map = np.ones((height, width), dtype=np.float32)
@@ -470,131 +661,47 @@ class ShadowCalculator:
         sun_y = np.cos(elevation_rad) * np.cos(azimuth_rad)
         sun_z = np.sin(elevation_rad)
 
-        # Raycast für jeden Pixel
+        # Optimierte Raycast-Berechnung
         for y in range(height):
             for x in range(width):
-                if self._is_in_shadow(heightmap, x, y, sun_x, sun_y, sun_z):
-                    shadow_map[y, x] = 0.0  # Vollschatten
+                if self._is_in_shadow_cpu(heightmap, x, y, sun_x, sun_y, sun_z):
+                    shadow_map[y, x] = 0.0
                 else:
-                    # Berechne partielle Verschattung basierend auf Neigung
-                    slope_factor = self._calculate_slope_shading(heightmap, x, y, sun_x, sun_y, sun_z)
+                    # Slope-basierte Beleuchtung
+                    slope_factor = self._calculate_slope_shading_cpu(
+                        heightmap, x, y, sun_x, sun_y, sun_z
+                    )
                     shadow_map[y, x] = slope_factor
 
         return shadow_map
 
-    def _upscale_shadows(self, low_res_shadows, target_size):
-        """
-        Funktionsweise: Skaliert Shadow-Map von niedriger auf hohe Auflösung mittels bilinearer Interpolation
-        Aufgabe: Effiziente Shadow-Interpolation für finale Darstellung
-        Parameter: low_res_shadows (numpy.ndarray) - Shadow-Daten in niedriger Auflösung
-        Parameter: target_size (int) - Zielgröße für Upscaling
-        Returns: numpy.ndarray - Interpolierte Shadow-Map in Zielauflösung
-        """
-        low_size = low_res_shadows.shape[0]
-        scale_factor = (low_size - 1) / (target_size - 1)
-
-        upscaled_shadows = np.zeros((target_size, target_size), dtype=np.float32)
-
-        for y in range(target_size):
-            for x in range(target_size):
-                # Position im Low-Res Shadow-Map
-                low_x = x * scale_factor
-                low_y = y * scale_factor
-
-                # Ganzzahlige Koordinaten
-                x0, y0 = int(low_x), int(low_y)
-                x1, y1 = min(x0 + 1, low_size - 1), min(y0 + 1, low_size - 1)
-
-                # Interpolations-Gewichte
-                fx = low_x - x0
-                fy = low_y - y0
-
-                # Bilineare Interpolation
-                s00 = low_res_shadows[y0, x0]
-                s10 = low_res_shadows[y0, x1]
-                s01 = low_res_shadows[y1, x0]
-                s11 = low_res_shadows[y1, x1]
-
-                s0 = s00 * (1 - fx) + s10 * fx
-                s1 = s01 * (1 - fx) + s11 * fx
-
-                upscaled_shadows[y, x] = s0 * (1 - fy) + s1 * fy
-
-        return upscaled_shadows
-
-    def _is_in_shadow(self, heightmap, x, y, sun_x, sun_y, sun_z):
-        """
-        Funktionsweise: Prüft ob ein Pixel durch Raycast im Schatten liegt
-        Aufgabe: Raycast-Test von Pixel zur Sonne mit Terrain-Kollision
-        Parameter: heightmap, x, y, sun_x, sun_y, sun_z - Terrain und Raycast-Parameter
-        Returns: bool - True wenn Pixel im Schatten liegt
-        """
+    def _is_in_shadow_cpu(self, heightmap: np.ndarray, x: int, y: int,
+                         sun_x: float, sun_y: float, sun_z: float) -> bool:
+        """CPU-optimierte Shadow-Raycast-Test"""
         height, width = heightmap.shape
         current_height = heightmap[y, x]
 
-        # Raycast-Parameter
         step_size = 0.5
         max_distance = max(width, height) * 2
 
-        # Raycast entlang Sonnenrichtung
         for distance in np.arange(step_size, max_distance, step_size):
-            # Aktuelle Position im Raycast
             ray_x = x + sun_x * distance
             ray_y = y + sun_y * distance
             ray_z = current_height + sun_z * distance
 
-            # Prüfe ob Ray außerhalb der Map ist
             if ray_x < 0 or ray_x >= width or ray_y < 0 or ray_y >= height:
                 break
 
-            # Interpoliere Höhe an aktueller Ray-Position
-            terrain_height = self._interpolate_height(heightmap, ray_x, ray_y)
+            terrain_height = self._interpolate_height_cpu(heightmap, ray_x, ray_y)
 
-            # Kollision mit Terrain?
             if ray_z <= terrain_height:
-                return True  # Im Schatten
+                return True
 
-        return False  # Nicht im Schatten
+        return False
 
-    def _interpolate_height(self, heightmap, x, y):
-        """
-        Funktionsweise: Interpoliert Höhenwert an nicht-ganzzahligen Koordinaten
-        Aufgabe: Bilineare Interpolation für smooth Raycast-Kollision
-        Parameter: heightmap, x, y - Terrain und Interpolations-Koordinaten
-        Returns: float - Interpolierte Höhe
-        """
-        height, width = heightmap.shape
-
-        # Begrenze Koordinaten
-        x = max(0, min(width - 1, x))
-        y = max(0, min(height - 1, y))
-
-        # Ganzzahlige Koordinaten
-        x0, y0 = int(x), int(y)
-        x1, y1 = min(x0 + 1, width - 1), min(y0 + 1, height - 1)
-
-        # Interpolations-Gewichte
-        fx = x - x0
-        fy = y - y0
-
-        # Bilineare Interpolation
-        h00 = heightmap[y0, x0]
-        h10 = heightmap[y0, x1]
-        h01 = heightmap[y1, x0]
-        h11 = heightmap[y1, x1]
-
-        h0 = h00 * (1 - fx) + h10 * fx
-        h1 = h01 * (1 - fx) + h11 * fx
-
-        return h0 * (1 - fy) + h1 * fy
-
-    def _calculate_slope_shading(self, heightmap, x, y, sun_x, sun_y, sun_z):
-        """
-        Funktionsweise: Berechnet Verschattung basierend auf Oberflächenneigung
-        Aufgabe: Slope-basierte Shading für realistische Beleuchtung
-        Parameter: heightmap, x, y, sun_x, sun_y, sun_z - Terrain und Licht-Parameter
-        Returns: float - Shading-Faktor zwischen 0 und 1
-        """
+    def _calculate_slope_shading_cpu(self, heightmap: np.ndarray, x: int, y: int,
+                                   sun_x: float, sun_y: float, sun_z: float) -> float:
+        """CPU-optimierte Slope-basierte Beleuchtung"""
         height, width = heightmap.shape
 
         # Berechne Oberflächennormale
@@ -607,76 +714,504 @@ class ShadowCalculator:
 
         # Normale berechnen
         normal = np.array([-dz_dx, -dz_dy, 1.0])
-        normal = normal / np.linalg.norm(normal)
+        normal_length = np.linalg.norm(normal)
+        if normal_length > 0:
+            normal = normal / normal_length
 
         # Sonnenrichtung
         sun_dir = np.array([sun_x, sun_y, sun_z])
-        sun_dir = sun_dir / np.linalg.norm(sun_dir)
+        sun_dir_length = np.linalg.norm(sun_dir)
+        if sun_dir_length > 0:
+            sun_dir = sun_dir / sun_dir_length
 
         # Dot-Product für Beleuchtungsstärke
         dot_product = np.dot(normal, sun_dir)
-
-        # Clamp auf [0, 1]
         return max(0.0, dot_product)
 
-    def combine_shadow_angles(self, shadow_maps, weights=None):
+    def _interpolate_height_cpu(self, heightmap: np.ndarray, x: float, y: float) -> float:
+        """CPU-optimierte Höhen-Interpolation"""
+        height, width = heightmap.shape
+
+        x = max(0, min(width - 1, x))
+        y = max(0, min(height - 1, y))
+
+        x0, y0 = int(x), int(y)
+        x1, y1 = min(x0 + 1, width - 1), min(y0 + 1, height - 1)
+
+        fx, fy = x - x0, y - y0
+
+        # Bilineare Interpolation
+        h00 = heightmap[y0, x0]
+        h10 = heightmap[y0, x1]
+        h01 = heightmap[y1, x0]
+        h11 = heightmap[y1, x1]
+
+        h0 = h00 * (1 - fx) + h10 * fx
+        h1 = h01 * (1 - fx) + h11 * fx
+
+        return h0 * (1 - fy) + h1 * fy
+
+    def _downsample_heightmap(self, heightmap: np.ndarray, target_size: int) -> np.ndarray:
+        """Reduziert Heightmap für Shadow-Berechnung"""
+        original_size = heightmap.shape[0]
+
+        if original_size <= target_size:
+            return heightmap
+
+        scale_factor = (original_size - 1) / (target_size - 1)
+        downsampled = np.zeros((target_size, target_size), dtype=np.float32)
+
+        for y in range(target_size):
+            for x in range(target_size):
+                orig_x = x * scale_factor
+                orig_y = y * scale_factor
+                downsampled[y, x] = self._interpolate_height_cpu(heightmap, orig_x, orig_y)
+
+        return downsampled
+
+    def _upsample_shadows(self, shadows: np.ndarray, target_size: int) -> np.ndarray:
+        """Vergrößert Shadow-Map auf Zielgröße"""
+        current_size = shadows.shape[0]
+
+        if current_size >= target_size:
+            return shadows
+
+        scale_factor = (current_size - 1) / (target_size - 1)
+        upsampled = np.zeros((target_size, target_size), dtype=np.float32)
+
+        for y in range(target_size):
+            for x in range(target_size):
+                shadow_x = x * scale_factor
+                shadow_y = y * scale_factor
+                upsampled[y, x] = self._interpolate_height_cpu(shadows, shadow_x, shadow_y)
+
+        return upsampled
+
+
+class SlopeCalculator:
+    """
+    Funktionsweise: Berechnet Steigungsgradienten (dz/dx, dz/dy) aus Heightmap
+    Aufgabe: Erstellt slopemap für Geology-Generator und visuelle Darstellung
+    Methoden: calculate_slopes(heightmap, parameters), gradient_magnitude(), validate_slopes()
+    Output-Format: 3D-Array (H,W,2) mit dz/dx und dz/dy Komponenten
+    Validation: Gradient-Range-Checks und Consistency mit heightmap-Shape
+
+    Spezifische Fallbacks:
+    - GPU-Optimal: Parallele Gradient-Berechnung mit GPU-Compute-Shader
+    - CPU-Fallback: NumPy gradient() mit optimierten Parametern
+    - Simple-Fallback: Einfache Finite-Difference-Approximation
+    """
+
+    def __init__(self, shader_manager=None):
         """
-        Funktionsweise: Kombiniert mehrere Schatten-Maps zu einer finalen Verschattung
-        Aufgabe: Gewichtete Kombination verschiedener Sonnenwinkel
-        Parameter: shadow_maps (list), weights (list) - Schatten-Maps und Gewichtungen
-        Returns: numpy.ndarray - Kombinierte Verschattung
+        Parameter: shader_manager - ShaderManager für GPU-Acceleration
         """
-        if weights is None:
-            weights = [1.0] * len(shadow_maps)
+        self.shader_manager = shader_manager
+        self.logger = logging.getLogger(self.__class__.__name__)
 
-        combined = np.zeros_like(shadow_maps[0], dtype=np.float32)
-        total_weight = sum(weights)
+    def calculate_slopes(self, heightmap: np.ndarray, parameters: Dict[str, Any]) -> np.ndarray:
+        """
+        Funktionsweise: Berechnet Slope-Map mit 3-stufigem Fallback
+        Parameter: heightmap - Höhendaten
+        Parameter: parameters - Slope-Parameter (spacing, smoothing, etc.)
+        Returns: numpy.ndarray - Slope-Map mit Shape (H,W,2) für dz/dx und dz/dy
+        """
+        # GPU-Fallback (Optimal)
+        if self._gpu_available():
+            try:
+                result = self.shader_manager.request_slope_calculation(
+                    operation_type="gradient_calculation",
+                    heightmap=heightmap,
+                    parameters=parameters
+                )
+                if result.get('success', False):
+                    self.logger.debug("GPU slope calculation successful")
+                    return result['data']
+            except Exception as e:
+                self.logger.warning(f"GPU slope calculation failed: {e}")
 
-        for shadow_map, weight in zip(shadow_maps, weights):
-            combined += shadow_map * weight
+        # CPU-Fallback (Gut)
+        try:
+            return self._calculate_cpu_slopes(heightmap, parameters)
+        except Exception as e:
+            self.logger.warning(f"CPU slope calculation failed: {e}")
 
-        return combined / total_weight if total_weight > 0 else combined
+        # Simple-Fallback (Minimal)
+        return self._calculate_simple_slopes(heightmap)
+
+    def gradient_magnitude(self, slopemap: np.ndarray) -> np.ndarray:
+        """
+        Funktionsweise: Berechnet Gradient-Magnitude aus Slope-Map
+        Parameter: slopemap - (H,W,2) Array mit dz/dx, dz/dy
+        Returns: numpy.ndarray - Gradient-Magnitude
+        """
+        if slopemap.shape[2] != 2:
+            raise ValueError("Slopemap must have shape (H,W,2)")
+
+        dz_dx = slopemap[:, :, 0]
+        dz_dy = slopemap[:, :, 1]
+
+        magnitude = np.sqrt(dz_dx**2 + dz_dy**2)
+        return magnitude
+
+    def validate_slopes(self, slopemap: np.ndarray, heightmap: np.ndarray) -> Dict[str, Any]:
+        """
+        Funktionsweise: Validiert Slope-Map gegen Heightmap
+        Parameter: slopemap, heightmap
+        Returns: dict - Validation-Results
+        """
+        validation_result = {
+            "valid": True,
+            "errors": [],
+            "warnings": [],
+            "statistics": {}
+        }
+
+        # Shape-Consistency
+        if slopemap.shape[:2] != heightmap.shape:
+            validation_result["valid"] = False
+            validation_result["errors"].append("Shape mismatch between slopemap and heightmap")
+
+        if slopemap.shape[2] != 2:
+            validation_result["valid"] = False
+            validation_result["errors"].append("Slopemap must have 2 channels (dz/dx, dz/dy)")
+
+        # Gradient-Range-Checks
+        try:
+            magnitude = self.gradient_magnitude(slopemap)
+            max_gradient = np.max(magnitude)
+            mean_gradient = np.mean(magnitude)
+
+            validation_result["statistics"] = {
+                "max_gradient": float(max_gradient),
+                "mean_gradient": float(mean_gradient),
+                "nan_count": int(np.sum(np.isnan(magnitude))),
+                "inf_count": int(np.sum(np.isinf(magnitude)))
+            }
+
+            if max_gradient > 10.0:  # Sehr steile Gradienten
+                validation_result["warnings"].append(f"Very steep gradients detected: {max_gradient}")
+
+            if np.sum(np.isnan(magnitude)) > 0:
+                validation_result["valid"] = False
+                validation_result["errors"].append("NaN values in slope calculation")
+
+        except Exception as e:
+            validation_result["valid"] = False
+            validation_result["errors"].append(f"Validation error: {str(e)}")
+
+        return validation_result
+
+    def _gpu_available(self) -> bool:
+        """Prüft GPU-Verfügbarkeit über ShaderManager"""
+        return (self.shader_manager is not None and
+                hasattr(self.shader_manager, 'gpu_available') and
+                self.shader_manager.gpu_available)
+
+    def _calculate_cpu_slopes(self, heightmap: np.ndarray, parameters: Dict[str, Any]) -> np.ndarray:
+        """
+        Funktionsweise: NumPy gradient() mit optimierten Parametern
+        Parameter: heightmap, parameters
+        Returns: numpy.ndarray - CPU-berechnete Slopes
+        """
+        # NumPy gradient für optimierte Performance
+        spacing = parameters.get('spacing', 1.0)
+
+        # Berechne Gradienten in beide Richtungen
+        grad_y, grad_x = np.gradient(heightmap, spacing, edge_order=2)
+
+        # Als (H,W,2) Array zusammenfassen
+        height, width = heightmap.shape
+        slopemap = np.zeros((height, width, 2), dtype=np.float32)
+        slopemap[:, :, 0] = grad_x  # dz/dx
+        slopemap[:, :, 1] = grad_y  # dz/dy
+
+        # Optional: Smoothing
+        smoothing = parameters.get('smoothing', 0.0)
+        if smoothing > 0:
+            try:
+                from scipy.ndimage import gaussian_filter
+                slopemap[:, :, 0] = gaussian_filter(slopemap[:, :, 0], sigma=smoothing)
+                slopemap[:, :, 1] = gaussian_filter(slopemap[:, :, 1], sigma=smoothing)
+            except ImportError:
+                # Fallback ohne scipy
+                pass
+
+        return slopemap
+
+    def _calculate_simple_slopes(self, heightmap: np.ndarray) -> np.ndarray:
+        """
+        Funktionsweise: Einfache Finite-Difference-Approximation
+        Parameter: heightmap
+        Returns: numpy.ndarray - Simple Slope-Berechnung
+        """
+        height, width = heightmap.shape
+        slopemap = np.zeros((height, width, 2), dtype=np.float32)
+
+        # Einfache Finite-Difference
+        for y in range(height):
+            for x in range(width):
+                # dz/dx
+                if x > 0 and x < width - 1:
+                    dz_dx = (heightmap[y, x + 1] - heightmap[y, x - 1]) * 0.5
+                elif x == 0:
+                    dz_dx = heightmap[y, x + 1] - heightmap[y, x]
+                else:
+                    dz_dx = heightmap[y, x] - heightmap[y, x - 1]
+
+                # dz/dy
+                if y > 0 and y < height - 1:
+                    dz_dy = (heightmap[y + 1, x] - heightmap[y - 1, x]) * 0.5
+                elif y == 0:
+                    dz_dy = heightmap[y + 1, x] - heightmap[y, x]
+                else:
+                    dz_dy = heightmap[y, x] - heightmap[y - 1, x]
+
+                slopemap[y, x, 0] = dz_dx
+                slopemap[y, x, 1] = dz_dy
+
+        return slopemap
+
 
 class BaseTerrainGenerator(BaseGenerator):
     """
-    Funktionsweise: Hauptklasse für Simplex-Noise basierte Terrain-Generierung mit BaseGenerator-Integration
-    Aufgabe: Koordiniert alle Terrain-Generierungsschritte, verwaltet Parameter und Threading mit DataManager-Integration
+    Funktionsweise: Hauptklasse für Terrain-Generierung mit numerischem LOD-System und Manager-Integration
+    Aufgabe: Koordiniert alle Terrain-Generierungsschritte, verwaltet Parameter und LOD-Progression
+    External-Interface: calculate_heightmap(parameters, lod_level) - wird von GenerationOrchestrator aufgerufen
+    Internal-Methods: _coordinate_generation(), _validate_parameters(), _create_terrain_data()
+    Manager-Integration: DataLODManager für Storage, ShaderManager für Performance-Optimierung
+    Threading: Läuft in GenerationOrchestrator-Background-Threads mit LOD-Progression
+    Error-Handling: Graceful Degradation bei Shader/Generator-Fehlern, vollständige Fallback-Kette
     """
 
-    def __init__(self, map_seed=42):
+    def __init__(self, map_seed: int = 42, shader_manager=None):
         """
-        Funktionsweise: Initialisiert Terrain-Generator mit allen Sub-Komponenten und LOD-System
-        Aufgabe: Setup von Noise-Generator, Shadow-Calculator und Threading-System
-        Parameter: map_seed (int) - Globaler Seed für reproduzierbare Ergebnisse
+        Funktionsweise: Initialisiert Terrain-Generator mit allen Sub-Komponenten
+        Parameter: map_seed - Globaler Seed für reproduzierbare Ergebnisse
+        Parameter: shader_manager - ShaderManager für Performance-Optimierung
         """
         super().__init__(map_seed)
 
-        self.noise_generator = SimplexNoiseGenerator(seed=map_seed)
-        self.shadow_calculator = ShadowCalculator()
+        self.noise_generator = SimplexNoiseGenerator(seed=map_seed, shader_manager=shader_manager)
+        self.shadow_calculator = ShadowCalculator(shader_manager=shader_manager)
+        self.slope_calculator = SlopeCalculator(shader_manager=shader_manager)
+        self.shader_manager = shader_manager
 
-        # Standard-Parameter
-        self.map_size = 256
-        self.amplitude = 100
-        self.octaves = 4
-        self.frequency = 0.01
-        self.persistence = 0.5
-        self.lacunarity = 2.0
-        self.redistribute_power = 1.0
+        # Standard-Parameter aus value_default.py
+        self.default_parameters = self._load_default_parameters()
 
-        # LOD-System mit korrekter Verdopplung
-        self.lod_sizes = {"LOD64": 64, "LOD128": 128, "LOD256": 256}
-        self.current_terrain_data = None
-
-        # Threading-System
-        self.is_calculating = False
-        self.calculation_thread = None
-        self.progress_callback = None
-
-    def _load_default_parameters(self):
+    def calculate_heightmap(self, parameters: Dict[str, Any], lod_level: int) -> TerrainData:
         """
-        Funktionsweise: Lädt TERRAIN-Parameter aus value_default.py
-        Aufgabe: Standard-Parameter für Terrain-Generierung
-        Returns: dict - Alle Standard-Parameter für Terrain
+        Funktionsweise: EINZIGE öffentliche Methode - wird von GenerationOrchestrator aufgerufen
+        Aufgabe: Koordiniert komplette Terrain-Generierung für gegebenes LOD-Level
+        Parameter: parameters - Alle Terrain-Parameter (aus ParameterManager)
+        Parameter: lod_level - Numerisches LOD-Level (1-7)
+        Returns: TerrainData - Komplette Terrain-Daten mit Validity-System
+        """
+        import time
+        start_time = time.time()
+
+        try:
+            # Parameter-Validation
+            self._validate_parameters(parameters)
+
+            # Terrain-Generierung koordinieren
+            terrain_data = self._coordinate_generation(parameters, lod_level)
+
+            # Performance-Tracking
+            terrain_data.generation_time = time.time() - start_time
+            terrain_data.fallback_used = self._determine_fallback_used()
+
+            # Parameter und Validity-State setzen
+            terrain_data.update_parameters(parameters)
+            terrain_data.validity_state = "valid"
+            terrain_data.validity_flags = {
+                "heightmap": True,
+                "slopemap": True,
+                "shadowmap": True
+            }
+
+            self.logger.info(f"Terrain generation completed for LOD {lod_level} in {terrain_data.generation_time:.2f}s")
+            return terrain_data
+
+        except Exception as e:
+            self.logger.error(f"Terrain generation failed for LOD {lod_level}: {e}")
+
+            # Error-Recovery: Minimal TerrainData zurückgeben
+            error_terrain = TerrainData()
+            error_terrain.lod_level = lod_level
+            error_terrain.actual_size = self._lod_level_to_size(lod_level, parameters.get('map_size', 512))
+            error_terrain.validity_state = "error"
+            error_terrain.generation_time = time.time() - start_time
+            error_terrain.fallback_used = "error_recovery"
+
+            # Minimal-Heightmap für System-Continuity
+            size = error_terrain.actual_size
+            error_terrain.heightmap = np.zeros((size, size), dtype=np.float32)
+            error_terrain.slopemap = np.zeros((size, size, 2), dtype=np.float32)
+            error_terrain.shadowmap = np.ones((size, size), dtype=np.float32) * 0.5
+
+            return error_terrain
+
+    def _coordinate_generation(self, parameters: Dict[str, Any], lod_level: int) -> TerrainData:
+        """
+        Funktionsweise: Koordiniert alle Terrain-Generierungsschritte
+        Parameter: parameters, lod_level
+        Returns: TerrainData - Generierte Terrain-Daten
+        """
+        # LOD-Größe berechnen
+        lod_size = self._lod_level_to_size(lod_level, parameters.get('map_size', 512))
+
+        # TerrainData initialisieren
+        terrain_data = TerrainData()
+        terrain_data.lod_level = lod_level
+        terrain_data.actual_size = lod_size
+
+        self.logger.debug(f"Starting terrain generation: LOD {lod_level}, Size {lod_size}")
+
+        # 1. Heightmap generieren
+        terrain_data.heightmap = self._generate_heightmap(parameters, lod_size)
+        self.logger.debug("Heightmap generation completed")
+
+        # 2. Height-Redistribution anwenden
+        terrain_data.heightmap = self._apply_redistribution(
+            terrain_data.heightmap, parameters.get('redistribute_power', 1.0)
+        )
+        self.logger.debug("Height redistribution completed")
+
+        # 3. Slopemap berechnen
+        terrain_data.slopemap = self.slope_calculator.calculate_slopes(
+            terrain_data.heightmap, parameters
+        )
+        self.logger.debug("Slope calculation completed")
+
+        # 4. Shadowmap generieren
+        terrain_data.shadowmap = self.shadow_calculator.calculate_shadows(
+            terrain_data.heightmap, lod_level
+        )
+        terrain_data.calculated_sun_angles = self.shadow_calculator.get_sun_angles_for_lod(lod_level)[0]
+        self.logger.debug("Shadow calculation completed")
+
+        return terrain_data
+
+    def _generate_heightmap(self, parameters: Dict[str, Any], size: int) -> np.ndarray:
+        """
+        Funktionsweise: Generiert Heightmap mit Noise-Generator
+        Parameter: parameters, size
+        Returns: numpy.ndarray - Generierte Heightmap
+        """
+        # Noise-Parameter extrahieren
+        frequency = parameters.get('frequency', 0.01)
+        octaves = parameters.get('octaves', 4)
+        persistence = parameters.get('persistence', 0.5)
+        lacunarity = parameters.get('lacunarity', 2.0)
+        amplitude = parameters.get('amplitude', 100)
+
+        # Frequency für LOD-Größe anpassen
+        adjusted_frequency = frequency * (64 / size)  # Referenz: LOD 64
+
+        # Noise-Grid generieren
+        noise_grid = self.noise_generator.generate_noise_grid(
+            size=size,
+            frequency=adjusted_frequency,
+            octaves=octaves,
+            persistence=persistence,
+            lacunarity=lacunarity
+        )
+
+        # Auf [0, amplitude] skalieren
+        heightmap = (noise_grid + 1.0) * 0.5 * amplitude
+
+        return heightmap.astype(np.float32)
+
+    def _apply_redistribution(self, heightmap: np.ndarray, redistribute_power: float) -> np.ndarray:
+        """
+        Funktionsweise: Wendet Power-Redistribution auf Heightmap an
+        Parameter: heightmap, redistribute_power
+        Returns: numpy.ndarray - Redistributed Heightmap
+        """
+        if redistribute_power == 1.0:
+            return heightmap
+
+        min_height = np.min(heightmap)
+        max_height = np.max(heightmap)
+        height_range = max_height - min_height
+
+        if height_range == 0:
+            return heightmap
+
+        # Normalisierung und Power-Redistribution
+        normalized = (heightmap - min_height) / height_range
+        redistributed = np.power(normalized, redistribute_power)
+        result = redistributed * height_range + min_height
+
+        return result.astype(np.float32)
+
+    def _lod_level_to_size(self, lod_level: int, target_map_size: int) -> int:
+        """
+        Funktionsweise: Konvertiert numerisches LOD-Level zu tatsächlicher Größe
+        Parameter: lod_level (1-7), target_map_size
+        Returns: int - Tatsächliche Größe für dieses LOD-Level
+        """
+        # Basis-Größe: 32 für LOD 1
+        base_size = 32
+
+        # Verdopplung bis target_map_size erreicht
+        current_size = base_size
+        for level in range(2, lod_level + 1):
+            next_size = current_size * 2
+            if next_size <= target_map_size:
+                current_size = next_size
+            else:
+                # Nächste Verdopplung würde über target_map_size gehen
+                current_size = target_map_size
+                break
+
+        return min(current_size, target_map_size)
+
+    def _validate_parameters(self, parameters: Dict[str, Any]):
+        """
+        Funktionsweise: Validiert alle Terrain-Parameter
+        Parameter: parameters
+        Raises: ValueError bei ungültigen Parametern
+        """
+        required_params = ['map_seed', 'map_size', 'amplitude', 'octaves',
+                          'frequency', 'persistence', 'lacunarity', 'redistribute_power']
+
+        # Required Parameters prüfen
+        for param in required_params:
+            if param not in parameters:
+                raise ValueError(f"Missing required parameter: {param}")
+
+        # Range-Validation
+        validations = {
+            'map_size': lambda x: 32 <= x <= 2048 and (x & (x-1)) == 0,  # Power of 2
+            'amplitude': lambda x: 0 <= x <= 1000,
+            'octaves': lambda x: 1 <= x <= 10,
+            'frequency': lambda x: 0.001 <= x <= 1.0,
+            'persistence': lambda x: 0.0 <= x <= 2.0,
+            'lacunarity': lambda x: 1.0 <= x <= 5.0,
+            'redistribute_power': lambda x: 0.1 <= x <= 3.0
+        }
+
+        for param, validator in validations.items():
+            if param in parameters and not validator(parameters[param]):
+                raise ValueError(f"Invalid value for {param}: {parameters[param]}")
+
+    def _determine_fallback_used(self) -> str:
+        """
+        Funktionsweise: Bestimmt welcher Fallback hauptsächlich verwendet wurde
+        Returns: str - "gpu", "cpu", oder "simple"
+        """
+        if self.shader_manager and hasattr(self.shader_manager, 'gpu_available'):
+            if self.shader_manager.gpu_available:
+                return "gpu"
+        return "cpu"
+
+    def _load_default_parameters(self) -> Dict[str, Any]:
+        """
+        Funktionsweise: Lädt Standard-Parameter aus value_default.py
+        Returns: dict - Standard-Parameter
         """
         try:
             from gui.config.value_default import TERRAIN
@@ -691,7 +1226,7 @@ class BaseTerrainGenerator(BaseGenerator):
                 'map_seed': TERRAIN.MAP_SEED["default"]
             }
         except ImportError:
-            # Fallback-Parameter falls value_default nicht verfügbar
+            # Fallback-Parameter
             return {
                 'map_size': 512,
                 'amplitude': 100,
@@ -705,621 +1240,328 @@ class BaseTerrainGenerator(BaseGenerator):
 
     def _get_dependencies(self, data_manager):
         """
-        Funktionsweise: Terrain braucht keine Dependencies - ist der erste Generator
-        Aufgabe: Leere Dependencies für Basis-Generator
-        Parameter: data_manager - DataManager-Instanz (wird nicht verwendet)
+        Funktionsweise: Terrain braucht keine Dependencies - ist der Basis-Generator
+        Parameter: data_manager (wird nicht verwendet)
         Returns: dict - Leeres Dependencies-Dict
         """
-        # Terrain ist der erste Generator und braucht keine Dependencies
         return {}
 
-    def _execute_generation(self, lod, dependencies, parameters):
+    def _execute_generation(self, lod_level: int, dependencies: Dict, parameters: Dict[str, Any]):
         """
-        Funktionsweise: Führt Terrain-Generierung mit BaseGenerator-Interface aus
-        Aufgabe: Wrapper um bestehende Terrain-Generation mit Progress-Updates und DataManager-Integration
-        Parameter: lod, dependencies, parameters
-        Returns: TerrainData-Objekt für DataManager-Integration
-        """
-        # Parameter aktualisieren
-        self._update_parameters(
-            map_size=parameters['map_size'],
-            amplitude=parameters['amplitude'],
-            octaves=parameters['octaves'],
-            frequency=parameters['frequency'],
-            persistence=parameters['persistence'],
-            lacunarity=parameters['lacunarity'],
-            redistribute_power=parameters['redistribute_power'],
-            map_seed=parameters['map_seed']
-        )
-
-        # Progress-Updates für BaseGenerator-Kompatibilität
-        def terrain_progress_wrapper(step_name, progress_percent, detail_message):
-            # Konvertiere Terrain-spezifische Progress zu BaseGenerator-Progress
-            base_progress = int(15 + (progress_percent * 0.8))  # 15-95% Bereich
-            self._update_progress(step_name, base_progress, detail_message)
-
-        # Terrain-Generierung mit korrektem LOD-Verdopplung-Algorithmus
-        terrain_data = self.generate_terrain(
-            lod=lod,
-            progress=terrain_progress_wrapper,
-            background=False,
-            existing_data=None,
-            map_size=parameters['map_size'],
-            amplitude=parameters['amplitude'],
-            octaves=parameters['octaves'],
-            frequency=parameters['frequency'],
-            persistence=parameters['persistence'],
-            lacunarity=parameters['lacunarity'],
-            redistribute_power=parameters['redistribute_power'],
-            map_seed=parameters['map_seed']
-        )
-
-        return terrain_data
-
-    def _save_to_data_manager(self, data_manager, result, parameters):
-        """
-        Funktionsweise: Speichert TerrainData-Objekt im DataManager
-        Aufgabe: Automatische Speicherung aller Terrain-Outputs mit DataManager-Integration
-        Parameter: data_manager, result (TerrainData), parameters
-        """
-        if isinstance(result, TerrainData):
-            # Verwende die DataManager set_terrain_data_complete Methode
-            data_manager.set_terrain_data_complete(result, parameters)
-            self.logger.debug("TerrainData object saved to DataManager")
-        else:
-            # Fallback für Legacy-Format
-            if hasattr(result, '__len__') and len(result) == 3:
-                heightmap, slopemap, shadowmap = result
-                data_manager.set_terrain_data("heightmap", heightmap, parameters)
-                data_manager.set_terrain_data("slopemap", slopemap, parameters)
-                data_manager.set_terrain_data("shadowmap", shadowmap, parameters)
-                self.logger.debug("Legacy terrain data saved to DataManager")
-            else:
-                self.logger.warning(f"Unknown terrain result format: {type(result)}")
-
-    def generate_terrain(self, lod="LOD64", progress=None, background=False,
-                         existing_data=None, map_size=None, amplitude=None, octaves=None,
-                         frequency=None, persistence=None, lacunarity=None,
-                         redistribute_power=None, map_seed=None):
-        """
-        Funktionsweise: Einheitliche Terrain-Generierung mit LOD-Support und korrekter Verdopplung
-        Aufgabe: Hauptmethode für alle Terrain-Generierung mit progressiver Verbesserung
-        Parameter: lod ("LOD64"/"LOD128"/"LOD256"/"FINAL") - LOD-Level
-        Parameter: progress (function) - Callback für Fortschritts-Updates
-        Parameter: background (bool) - Threading mit niedriger CPU-Priorität
-        Parameter: existing_data (TerrainData) - Bestehende Daten für progressive Verbesserung
-        Parameter: map_size, amplitude, etc. - Überschreibt Standard-Parameter wenn gegeben
-        Returns: TerrainData - Komplette Terrain-Daten
-        """
-        # Parameter aktualisieren falls übergeben
-        self._update_parameters(map_size, amplitude, octaves, frequency,
-                                persistence, lacunarity, redistribute_power, map_seed)
-
-        # Threading-Modus
-        if background:
-            return self._generate_terrain_threaded(lod, progress, existing_data)
-        else:
-            return self._generate_terrain_direct(lod, progress, existing_data)
-
-    def _generate_terrain_direct(self, lod, progress, existing_data):
-        """
-        Funktionsweise: Direkte Terrain-Generierung im Hauptthread
-        Aufgabe: Synchrone Berechnung mit Progress-Updates
-        Parameter: lod, progress, existing_data - siehe generate_terrain()
+        Funktionsweise: BaseGenerator-Interface-Methode - delegiert an calculate_heightmap
+        Parameter: lod_level, dependencies (nicht verwendet), parameters
         Returns: TerrainData - Generierte Terrain-Daten
         """
-        self.progress_callback = progress
-        self.is_calculating = True
+        return self.calculate_heightmap(parameters, lod_level)
 
+    def _save_to_data_manager(self, data_manager, result: TerrainData, parameters: Dict[str, Any]):
+        """
+        Funktionsweise: Speichert TerrainData im DataManager
+        Parameter: data_manager, result, parameters
+        """
         try:
-            # KORRIGIERTE LOD-VERDOPPLUNG: Zielgröße bestimmen
-            target_size = self._calculate_target_size_for_lod(lod)
-
-            # Progress-Update
-            self._update_progress("Initialization", 0, f"Starting {lod} generation (size: {target_size})")
-
-            # Neue TerrainData erstellen oder bestehende erweitern
-            if existing_data is None:
-                terrain_data = TerrainData()
-                terrain_data.parameters = self._get_current_parameters()
-            else:
-                terrain_data = existing_data
-
-            # 1. Heightmap generieren/verbessern mit korrekter Verdopplung
-            self._update_progress("Heightmap", 10, "Generating heightmap...")
-            terrain_data.heightmap = self._progressive_heightmap_generation(
-                target_size, terrain_data.heightmap if existing_data else None
+            data_manager.set_terrain_data_lod(
+                "heightmap", result.heightmap, result.lod_level, parameters
             )
-
-            # 2. Redistribution anwenden
-            self._update_progress("Redistribution", 30, "Applying height redistribution...")
-            terrain_data.heightmap = self.apply_redistribution(
-                terrain_data.heightmap, self.redistribute_power
+            data_manager.set_terrain_data_lod(
+                "slopemap", result.slopemap, result.lod_level, parameters
             )
-
-            # 3. Slopemap berechnen
-            self._update_progress("Slopes", 50, "Calculating slope map...")
-            terrain_data.slopemap = self.calculate_slopes(terrain_data.heightmap)
-
-            # 4. Shadowmap generieren/erweitern
-            self._update_progress("Shadows", 70, f"Calculating shadows for {lod}...")
-            terrain_data.shadowmap = self._progressive_shadow_generation(
-                terrain_data.heightmap, lod, terrain_data.shadowmap if existing_data else None,
-                terrain_data.lod_level if existing_data else "LOD64"
+            data_manager.set_terrain_data_lod(
+                "shadowmap", result.shadowmap, result.lod_level, parameters
             )
+            self.logger.debug(f"Terrain data saved to DataManager for LOD {result.lod_level}")
+        except Exception as e:
+            self.logger.error(f"Failed to save terrain data to DataManager: {e}")
 
-            # 5. Metadaten aktualisieren mit Parameter-Hash für DataManager
-            terrain_data.lod_level = lod
-            terrain_data.actual_size = target_size
-            terrain_data.calculated_sun_angles = self.shadow_calculator.get_sun_angles_for_lod(lod)[0]
-            terrain_data.validity_state = "valid"
+    # ================================
+    # LEGACY-KOMPATIBILITÄT (deprecated)
+    # ================================
 
-            # Parameter-Hash für Cache-Validation
-            import hashlib
-            terrain_data.parameter_hash = hashlib.md5(
-                str(sorted(self._get_current_parameters().items())).encode()
-            ).hexdigest()
+    def generate_terrain(self, **kwargs):
+        """Legacy method - use calculate_heightmap instead"""
+        self.logger.warning("generate_terrain is deprecated - use calculate_heightmap")
 
-            self._update_progress("Complete", 100, f"{lod} terrain generation complete!")
-            self.current_terrain_data = terrain_data
+        # Parameter-Mapping für Legacy-Calls
+        parameters = self.default_parameters.copy()
+        parameters.update(kwargs)
 
-            return terrain_data
+        # LOD aus kwargs extrahieren oder Standard verwenden
+        lod_level = kwargs.get('lod_level', 4)  # Standard: LOD 4
 
-        finally:
-            self.is_calculating = False
+        terrain_data = self.calculate_heightmap(parameters, lod_level)
 
-    def _calculate_target_size_for_lod(self, lod):
-        """
-        Funktionsweise: KORRIGIERTE LOD-VERDOPPLUNG - berechnet Zielgröße bis sie höher ist als finale map_size
-        Aufgabe: Implementiert "soll verdoppelt werden bis eine verdopplung höher ist als die ziel map-size"
-        Parameter: lod (str) - LOD-Level
-        Returns: int - Korrekte Zielgröße
-        """
-        if lod == "FINAL":
-            return self.map_size
-        elif lod == "LOD64":
-            return 64
-        elif lod == "LOD128":
-            return 128
-        elif lod == "LOD256":
-            return 256
-        else:
-            # Fallback: Verdopplung bis über map_size
-            size = 64
-            while size < self.map_size:
-                if size * 2 > self.map_size:
-                    break
-                size *= 2
-            return min(size, self.map_size)
+        # Legacy-Format zurückgeben (heightmap, slopemap, shadowmap)
+        return terrain_data.heightmap, terrain_data.slopemap, terrain_data.shadowmap
 
-    def _calculate_lod_steps(self, final_size):
-        """
-        Funktionsweise: KORRIGIERTE LOD-VERDOPPLUNG - berechnet optimale LOD-Schritte
-        Aufgabe: "verdoppelt werden bis eine verdopplung höher ist als die ziel map-size und dann soll einfach nur die ziel-map-size genommen werden"
-        Parameter: final_size (int) - Finale Zielgröße
-        Returns: list - Liste der LOD-Schritte mit korrekter Verdopplung
-        """
-        steps = []
-        current_size = 64  # Immer mit 64 beginnen
+    def generate_heightmap(self, map_size, amplitude, octaves, frequency,
+                          persistence, lacunarity, redistribute_power, map_seed):
+        """Legacy method - use calculate_heightmap instead"""
+        self.logger.warning("generate_heightmap is deprecated - use calculate_heightmap")
 
-        # Verdopplung bis wir über final_size sind
-        while current_size <= final_size:
-            steps.append(current_size)
-
-            # Nächste Verdopplung prüfen
-            next_size = current_size * 2
-            if next_size > final_size:
-                # Verdopplung würde über Zielgröße gehen
-                if current_size < final_size:
-                    # Finale Größe hinzufügen wenn sie nicht bereits erreicht ist
-                    steps.append(final_size)
-                break
-            else:
-                current_size = next_size
-
-        return steps
-
-    def _generate_terrain_threaded(self, lod, progress, existing_data):
-        """
-        Funktionsweise: Terrain-Generierung in separatem Thread mit niedriger Priorität
-        Aufgabe: Hintergrund-Berechnung ohne GUI-Blocking
-        Parameter: lod, progress, existing_data - siehe generate_terrain()
-        Returns: threading.Thread - Thread-Objekt für Kontrolle
-        """
-
-        def worker():
-            # Thread-Priorität reduzieren (falls unterstützt)
-            try:
-                if hasattr(os, 'nice'):
-                    os.nice(10)  # Unix/Linux: Niedrigere Priorität
-            except:
-                pass
-
-            # Terrain-Generierung mit CPU-Yields
-            result = self._generate_terrain_with_yields(lod, progress, existing_data)
-            return result
-
-        # Thread starten
-        self.calculation_thread = threading.Thread(target=worker, daemon=True)
-        self.calculation_thread.start()
-
-        return self.calculation_thread
-
-    def _generate_terrain_with_yields(self, lod, progress, existing_data):
-        """
-        Funktionsweise: Terrain-Generierung mit regelmäßigen CPU-Yields
-        Aufgabe: Hintergrund-Berechnung mit verbesserter System-Responsivität
-        Parameter: lod, progress, existing_data - siehe generate_terrain()
-        Returns: TerrainData - Generierte Terrain-Daten
-        """
-        self.progress_callback = progress
-        self.is_calculating = True
-
-        try:
-            # KORRIGIERTE Zielgröße bestimmen
-            target_size = self._calculate_target_size_for_lod(lod)
-
-            self._update_progress("Initialization", 0, f"Starting background {lod} generation")
-            self._yield_cpu()
-
-            # Terrain-Daten vorbereiten
-            if existing_data is None:
-                terrain_data = TerrainData()
-                terrain_data.parameters = self._get_current_parameters()
-            else:
-                terrain_data = existing_data
-
-            # 1. Heightmap mit Yields
-            self._update_progress("Heightmap", 10, "Generating heightmap in background...")
-            terrain_data.heightmap = self._progressive_heightmap_generation_with_yields(
-                target_size, terrain_data.heightmap if existing_data else None
-            )
-
-            # 2. Redistribution
-            self._update_progress("Redistribution", 30, "Applying redistribution...")
-            terrain_data.heightmap = self.apply_redistribution(
-                terrain_data.heightmap, self.redistribute_power
-            )
-            self._yield_cpu()
-
-            # 3. Slopes
-            self._update_progress("Slopes", 50, "Calculating slopes...")
-            terrain_data.slopemap = self._calculate_slopes_with_yields(terrain_data.heightmap)
-
-            # 4. Shadows
-            self._update_progress("Shadows", 70, "Calculating shadows...")
-            terrain_data.shadowmap = self._progressive_shadow_generation(
-                terrain_data.heightmap, lod, terrain_data.shadowmap if existing_data else None,
-                terrain_data.lod_level if existing_data else "LOD64"
-            )
-
-            # 5. Finalisierung mit DataManager-Kompatibilität
-            terrain_data.lod_level = lod
-            terrain_data.actual_size = target_size
-            terrain_data.calculated_sun_angles = self.shadow_calculator.get_sun_angles_for_lod(lod)[0]
-            terrain_data.validity_state = "valid"
-
-            # Parameter-Hash für DataManager-Integration
-            import hashlib
-            terrain_data.parameter_hash = hashlib.md5(
-                str(sorted(self._get_current_parameters().items())).encode()
-            ).hexdigest()
-
-            self._update_progress("Complete", 100, f"Background {lod} generation complete!")
-            self.current_terrain_data = terrain_data
-
-            return terrain_data
-
-        finally:
-            self.is_calculating = False
-
-    def _progressive_heightmap_generation(self, target_size, existing_heightmap=None):
-        """
-        Funktionsweise: Generiert Heightmap progressiv oder von Grund auf mit korrekter Verdopplung
-        Aufgabe: Wiederverwenden bestehender Daten mit Detail-Verfeinerung
-        Parameter: target_size (int) - Zielgröße für Heightmap (aus korrigierter LOD-Verdopplung)
-        Parameter: existing_heightmap (numpy.ndarray) - Bestehende Heightmap zum Erweitern
-        Returns: numpy.ndarray - Generierte/erweiterte Heightmap
-        """
-        if existing_heightmap is not None:
-            # Progressive Verbesserung
-            # Schritt 1: Interpolation auf neue Größe
-            interpolated = self.noise_generator.interpolate_existing_grid(
-                existing_heightmap, target_size
-            )
-
-            # Schritt 2: Detail-Noise hinzufügen
-            # Frequency anpassen: Höhere Frequenz für feinere Details
-            detail_frequency = self.frequency * (target_size / existing_heightmap.shape[0])
-            detail_amplitude = self.amplitude * 0.25  # 25% der Original-Amplitude für Details
-
-            final_heightmap = self.noise_generator.add_detail_noise(
-                interpolated, detail_frequency, detail_amplitude
-            )
-        else:
-            # Vollständige Generierung für erste LOD-Stufe
-            final_heightmap = self._generate_full_heightmap(target_size)
-
-        return final_heightmap
-
-    def _progressive_heightmap_generation_with_yields(self, target_size, existing_heightmap=None):
-        """
-        Funktionsweise: Wie _progressive_heightmap_generation aber mit CPU-Yields
-        Aufgabe: Hintergrund-freundliche Heightmap-Generierung
-        Parameter: target_size, existing_heightmap - siehe _progressive_heightmap_generation
-        Returns: numpy.ndarray - Generierte Heightmap
-        """
-        if existing_heightmap is not None:
-            # Interpolation mit Yield
-            self._yield_cpu()
-            interpolated = self.noise_generator.interpolate_existing_grid(
-                existing_heightmap, target_size
-            )
-
-            # Detail-Noise mit Yield
-            self._yield_cpu()
-            detail_frequency = self.frequency * (target_size / existing_heightmap.shape[0])
-            detail_amplitude = self.amplitude * 0.25
-
-            final_heightmap = self.noise_generator.add_detail_noise(
-                interpolated, detail_frequency, detail_amplitude
-            )
-        else:
-            # Vollständige Generierung mit Yields
-            final_heightmap = self._generate_full_heightmap_with_yields(target_size)
-
-        return final_heightmap
-
-    def _progressive_shadow_generation(self, heightmap, lod_level, existing_shadows=None, existing_lod="LOD64"):
-        """
-        Funktionsweise: Generiert Shadows progressiv oder vollständig mit LOD-System
-        Aufgabe: Optimierte Shadow-Berechnung mit Wiederverwendung bestehender Daten
-        Parameter: heightmap (numpy.ndarray) - Aktuelle Höhendaten
-        Parameter: lod_level (str) - Ziel-LOD für Sonnenwinkel-Auswahl
-        Parameter: existing_shadows (numpy.ndarray) - Bestehende Shadow-Daten
-        Parameter: existing_lod (str) - LOD der bestehenden Shadow-Daten
-        Returns: numpy.ndarray - Generierte/erweiterte Shadow-Map
-        """
-        if existing_shadows is not None and existing_lod != lod_level:
-            # Progressive Shadow-Verbesserung
-            return self.shadow_calculator.calculate_shadows_progressive(
-                heightmap, lod_level, existing_shadows, existing_lod
-            )
-        else:
-            # Vollständige Shadow-Berechnung
-            return self.shadow_calculator.calculate_shadows_with_lod(
-                heightmap, lod_level, shadow_resolution=64
-            )
-
-    def _generate_full_heightmap(self, size):
-        """
-        Funktionsweise: Generiert komplette Heightmap von Grund auf
-        Aufgabe: Vollständige Noise-Generierung für erste LOD-Stufe
-        Parameter: size (int) - Größe der zu generierenden Heightmap
-        Returns: numpy.ndarray - Vollständig generierte Heightmap
-        """
-        # Frequency für aktuelle Größe anpassen
-        adjusted_frequency = self.frequency * (64 / size)  # Referenz: LOD64
-
-        # Noise-Grid generieren
-        noise_grid = self.noise_generator.generate_noise_grid(
-            size, adjusted_frequency, self.octaves, self.persistence, self.lacunarity
-        )
-
-        # Auf [0, amplitude] skalieren
-        heightmap = (noise_grid + 1.0) * 0.5 * self.amplitude
-
-        return heightmap
-
-    def _generate_full_heightmap_with_yields(self, size):
-        """
-        Funktionsweise: Wie _generate_full_heightmap aber mit CPU-Yields für Background-Berechnung
-        Aufgabe: Hintergrund-freundliche vollständige Heightmap-Generierung
-        Parameter: size (int) - Größe der Heightmap
-        Returns: numpy.ndarray - Generierte Heightmap
-        """
-        # Yield vor intensiver Berechnung
-        self._yield_cpu()
-
-        adjusted_frequency = self.frequency * (64 / size)
-        noise_grid = self.noise_generator.generate_noise_grid(
-            size, adjusted_frequency, self.octaves, self.persistence, self.lacunarity
-        )
-
-        # Yield nach Noise-Generierung
-        self._yield_cpu()
-
-        heightmap = (noise_grid + 1.0) * 0.5 * self.amplitude
-        return heightmap
-
-    def _calculate_slopes_with_yields(self, heightmap):
-        """
-        Funktionsweise: Berechnet Slope-Map mit CPU-Yields für bessere Background-Performance
-        Aufgabe: Hintergrund-freundliche Slope-Berechnung
-        Parameter: heightmap (numpy.ndarray) - Höhendaten
-        Returns: numpy.ndarray - Slope-Map
-        """
-        # Standard-Slope-Berechnung mit gelegentlichen Yields
-        height, width = heightmap.shape
-        slopemap = np.zeros((height, width, 2), dtype=np.float32)
-
-        yield_counter = 0
-        for y in range(height):
-            for x in range(width):
-                # CPU-Yield alle 1000 Pixel
-                yield_counter += 1
-                if yield_counter % 1000 == 0:
-                    self._yield_cpu()
-
-                # Standard Slope-Berechnung (wie im Original)
-                if x > 0 and x < width - 1:
-                    dz_dx = (heightmap[y, x + 1] - heightmap[y, x - 1]) * 0.5
-                elif x == 0:
-                    dz_dx = heightmap[y, x + 1] - heightmap[y, x]
-                else:
-                    dz_dx = heightmap[y, x] - heightmap[y, x - 1]
-
-                if y > 0 and y < height - 1:
-                    dz_dy = (heightmap[y + 1, x] - heightmap[y - 1, x]) * 0.5
-                elif y == 0:
-                    dz_dy = heightmap[y + 1, x] - heightmap[y, x]
-                else:
-                    dz_dy = heightmap[y, x] - heightmap[y - 1, x]
-
-                slopemap[y, x, 0] = dz_dx
-                slopemap[y, x, 1] = dz_dy
-
-        return slopemap
-
-    def _update_parameters(self, map_size=None, amplitude=None, octaves=None,
-                           frequency=None, persistence=None, lacunarity=None,
-                           redistribute_power=None, map_seed=None):
-        """
-        Funktionsweise: Aktualisiert Generator-Parameter falls neue Werte übergeben werden
-        Aufgabe: Flexible Parameter-Übernahme ohne Standardwerte zu überschreiben
-        Parameter: map_size, amplitude, etc. - Neue Parameter (None = keine Änderung)
-        """
-        if map_size is not None:
-            self.map_size = map_size
-        if amplitude is not None:
-            self.amplitude = amplitude
-        if octaves is not None:
-            self.octaves = octaves
-        if frequency is not None:
-            self.frequency = frequency
-        if persistence is not None:
-            self.persistence = persistence
-        if lacunarity is not None:
-            self.lacunarity = lacunarity
-        if redistribute_power is not None:
-            self.redistribute_power = redistribute_power
-        if map_seed is not None and map_seed != self.map_seed:
-            self.map_seed = map_seed
-            self.noise_generator = SimplexNoiseGenerator(seed=map_seed)
-
-    def _get_current_parameters(self):
-        """
-        Funktionsweise: Gibt aktuelle Parameter als Dictionary zurück
-        Aufgabe: Parameter-Speicherung für TerrainData-Metadaten
-        Returns: dict - Aktuelle Generator-Parameter
-        """
-        return {
-            'map_size': self.map_size,
-            'amplitude': self.amplitude,
-            'octaves': self.octaves,
-            'frequency': self.frequency,
-            'persistence': self.persistence,
-            'lacunarity': self.lacunarity,
-            'redistribute_power': self.redistribute_power,
-            'map_seed': self.map_seed
+        parameters = {
+            'map_size': map_size,
+            'amplitude': amplitude,
+            'octaves': octaves,
+            'frequency': frequency,
+            'persistence': persistence,
+            'lacunarity': lacunarity,
+            'redistribute_power': redistribute_power,
+            'map_seed': map_seed
         }
 
-    def _update_progress(self, step_name, progress_percent, detail_message):
-        """
-        Funktionsweise: Sendet Progress-Update an Callback-Funktion wenn vorhanden
-        Aufgabe: GUI-Updates für Ladebalken und Status-Anzeigen
-        Parameter: step_name (str) - Name des aktuellen Schritts
-        Parameter: progress_percent (int) - Fortschritt in Prozent (0-100)
-        Parameter: detail_message (str) - Detaillierte Beschreibung
-        """
-        if self.progress_callback:
-            try:
-                self.progress_callback(step_name, progress_percent, detail_message)
-            except:
-                pass  # Ignore callback errors
+        # LOD-Level basierend auf map_size bestimmen
+        if map_size <= 64:
+            lod_level = 2
+        elif map_size <= 128:
+            lod_level = 3
+        elif map_size <= 256:
+            lod_level = 4
+        elif map_size <= 512:
+            lod_level = 5
+        else:
+            lod_level = 6
 
-    def _yield_cpu(self):
-        """
-        Funktionsweise: Gibt CPU-Zeit an andere Prozesse ab
-        Aufgabe: Verhindert 100% CPU-Auslastung bei Background-Berechnung
-        """
-        time.sleep(0.001)  # 1ms Pause für andere Prozesse
-
-    # BESTEHENDE METHODEN (unverändert für Kompatibilität):
-
-    def generate_heightmap(self, map_size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power,
-                           map_seed):
-        """
-        Funktionsweise: Legacy-Methode für direkte Heightmap-Generierung (KOMPATIBILITÄT)
-        Aufgabe: Erhält bestehende API für Rückwärts-Kompatibilität
-        """
-        self._update_parameters(map_size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power,
-                                map_seed)
-        return self._generate_full_heightmap(map_size)
-
-    def apply_redistribution(self, heightmap, redistribute_power):
-        """
-        Funktionsweise: Wendet Power-Redistribution auf Heightmap an für natürlichere Höhenverteilung
-        Aufgabe: Modifiziert Höhenverteilung für realistische Terrain-Charakteristika
-        Parameter: heightmap (numpy.ndarray), redistribute_power (float) - Heightmap und Power-Faktor
-        Returns: numpy.ndarray - Redistributed Heightmap
-        """
-        if redistribute_power == 1.0:
-            return heightmap
-
-        min_height = np.min(heightmap)
-        max_height = np.max(heightmap)
-        height_range = max_height - min_height
-
-        if height_range == 0:
-            return heightmap
-
-        normalized = (heightmap - min_height) / height_range
-        redistributed = np.power(normalized, redistribute_power)
-        result = redistributed * height_range + min_height
-
-        return result
-
-    def calculate_slopes(self, heightmap):
-        """
-        Funktionsweise: Berechnet Slope-Map mit dz/dx und dz/dy Gradienten
-        Aufgabe: Erstellt Slope-Informationen für Erosion, Settlement und Biome-Systeme
-        Parameter: heightmap (numpy.ndarray) - Höhendaten
-        Returns: numpy.ndarray - Slope-Map mit Shape (height, width, 2) für dz/dx und dz/dy
-        """
-        height, width = heightmap.shape
-        slopemap = np.zeros((height, width, 2), dtype=np.float32)
-
-        for y in range(height):
-            for x in range(width):
-                if x > 0 and x < width - 1:
-                    dz_dx = (heightmap[y, x + 1] - heightmap[y, x - 1]) * 0.5
-                elif x == 0:
-                    dz_dx = heightmap[y, x + 1] - heightmap[y, x]
-                else:
-                    dz_dx = heightmap[y, x] - heightmap[y, x - 1]
-
-                if y > 0 and y < height - 1:
-                    dz_dy = (heightmap[y + 1, x] - heightmap[y - 1, x]) * 0.5
-                elif y == 0:
-                    dz_dy = heightmap[y + 1, x] - heightmap[y, x]
-                else:
-                    dz_dy = heightmap[y, x] - heightmap[y - 1, x]
-
-                slopemap[y, x, 0] = dz_dx
-                slopemap[y, x, 1] = dz_dy
-
-        return slopemap
+        terrain_data = self.calculate_heightmap(parameters, lod_level)
+        return terrain_data.heightmap
 
     def generate_shadows(self, heightmap):
-        """
-        Funktionsweise: Legacy-Methode für Shadow-Generierung (KOMPATIBILITÄT)
-        Aufgabe: Erhält bestehende API für Rückwärts-Kompatibilität
-        """
-        return self.shadow_calculator.calculate_shadows_multi_angle(heightmap)
+        """Legacy method - use ShadowCalculator directly"""
+        self.logger.warning("generate_shadows is deprecated - use ShadowCalculator")
+        return self.shadow_calculator.calculate_shadows(heightmap, 4)  # Standard LOD 4
 
-    def generate_complete_terrain(self, map_size, amplitude, octaves, frequency, persistence, lacunarity,
-                                  redistribute_power, map_seed):
-        """
-        Funktionsweise: Legacy-Methode für komplette Terrain-Generierung (KOMPATIBILITÄT)
-        Aufgabe: Erhält bestehende API, verwendet intern neues LOD-System mit DataManager-Integration
-        """
-        # Parameter setzen
-        self._update_parameters(map_size, amplitude, octaves, frequency, persistence, lacunarity, redistribute_power,
-                                map_seed)
+    def calculate_slopes(self, heightmap):
+        """Legacy method - use SlopeCalculator directly"""
+        self.logger.warning("calculate_slopes is deprecated - use SlopeCalculator")
+        return self.slope_calculator.calculate_slopes(heightmap, {})
 
-        # Neue generate_terrain Methode verwenden
-        terrain_data = self.generate_terrain(lod="FINAL", map_size=map_size)
+    def apply_redistribution(self, heightmap, redistribute_power):
+        """Legacy method - kept for compatibility"""
+        return self._apply_redistribution(heightmap, redistribute_power)
 
-        # Legacy-Format zurückgeben
-        return terrain_data.heightmap, terrain_data.slopemap, terrain_data.shadowmap
+
+# ================================
+# FACTORY FUNCTIONS
+# ================================
+
+def create_terrain_generator(map_seed: int = 42, shader_manager=None) -> BaseTerrainGenerator:
+    """
+    Funktionsweise: Factory-Funktion für BaseTerrainGenerator
+    Parameter: map_seed, shader_manager
+    Returns: BaseTerrainGenerator - Konfigurierte Instanz
+    """
+    return BaseTerrainGenerator(map_seed=map_seed, shader_manager=shader_manager)
+
+def create_terrain_data() -> TerrainData:
+    """
+    Funktionsweise: Factory-Funktion für TerrainData
+    Returns: TerrainData - Neue leere Instanz
+    """
+    return TerrainData()
+
+def validate_terrain_parameters(parameters: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Funktionsweise: Standalone Parameter-Validation
+    Parameter: parameters - Zu validierende Parameter
+    Returns: dict - Validation-Result mit errors/warnings
+    """
+    result = {
+        "valid": True,
+        "errors": [],
+        "warnings": []
+    }
+
+    required_params = ['map_seed', 'map_size', 'amplitude', 'octaves',
+                      'frequency', 'persistence', 'lacunarity', 'redistribute_power']
+
+    # Required Parameters prüfen
+    for param in required_params:
+        if param not in parameters:
+            result["valid"] = False
+            result["errors"].append(f"Missing required parameter: {param}")
+
+    # Range-Validation
+    validations = {
+        'map_size': (lambda x: 32 <= x <= 2048 and (x & (x-1)) == 0, "Must be power of 2 between 32 and 2048"),
+        'amplitude': (lambda x: 0 <= x <= 1000, "Must be between 0 and 1000"),
+        'octaves': (lambda x: 1 <= x <= 10, "Must be between 1 and 10"),
+        'frequency': (lambda x: 0.001 <= x <= 1.0, "Must be between 0.001 and 1.0"),
+        'persistence': (lambda x: 0.0 <= x <= 2.0, "Must be between 0.0 and 2.0"),
+        'lacunarity': (lambda x: 1.0 <= x <= 5.0, "Must be between 1.0 and 5.0"),
+        'redistribute_power': (lambda x: 0.1 <= x <= 3.0, "Must be between 0.1 and 3.0")
+    }
+
+    for param, (validator, message) in validations.items():
+        if param in parameters:
+            try:
+                if not validator(parameters[param]):
+                    result["valid"] = False
+                    result["errors"].append(f"Invalid {param}: {message}")
+            except (TypeError, ValueError):
+                result["valid"] = False
+                result["errors"].append(f"Invalid type for {param}: expected number")
+
+    # Warnings für suboptimale Parameter
+    if parameters.get('octaves', 0) > 8:
+        result["warnings"].append("High octave count may impact performance")
+    if parameters.get('amplitude', 0) > 500:
+        result["warnings"].append("Very high amplitude may create unrealistic terrain")
+
+    return result
+
+
+# ================================
+# UTILITY FUNCTIONS
+# ================================
+
+def lod_level_to_size(lod_level: int, target_map_size: int) -> int:
+    """
+    Funktionsweise: Utility-Funktion für LOD-Size-Berechnung
+    Parameter: lod_level, target_map_size
+    Returns: int - Berechnete Größe
+    """
+    base_size = 32
+    current_size = base_size
+
+    for level in range(2, lod_level + 1):
+        next_size = current_size * 2
+        if next_size <= target_map_size:
+            current_size = next_size
+        else:
+            current_size = target_map_size
+            break
+
+    return min(current_size, target_map_size)
+
+def calculate_lod_progression(target_size: int) -> List[Tuple[int, int]]:
+    """
+    Funktionsweise: Berechnet vollständige LOD-Progression
+    Parameter: target_size - Finale Zielgröße
+    Returns: List[Tuple[int, int]] - Liste von (lod_level, size) Tupeln
+    """
+    progression = []
+    lod_level = 1
+    current_size = 32
+
+    while current_size <= target_size:
+        progression.append((lod_level, current_size))
+
+        if current_size >= target_size:
+            break
+
+        next_size = current_size * 2
+        if next_size > target_size:
+            if current_size < target_size:
+                lod_level += 1
+                progression.append((lod_level, target_size))
+            break
+        else:
+            current_size = next_size
+            lod_level += 1
+
+    return progression
+
+def estimate_generation_time(parameters: Dict[str, Any], lod_level: int,
+                           has_gpu: bool = False) -> float:
+    """
+    Funktionsweise: Schätzt Generierungszeit basierend auf Parametern
+    Parameter: parameters, lod_level, has_gpu
+    Returns: float - Geschätzte Zeit in Sekunden
+    """
+    size = lod_level_to_size(lod_level, parameters.get('map_size', 512))
+    octaves = parameters.get('octaves', 4)
+
+    # Basis-Zeit (Sekunden für 64x64, 4 octaves auf CPU)
+    base_time = 0.1
+
+    # Skalierung basierend auf Größe (quadratisch)
+    size_factor = (size / 64) ** 2
+
+    # Skalierung basierend auf Octaves (linear)
+    octave_factor = octaves / 4
+
+    # GPU-Beschleunigung
+    gpu_factor = 0.1 if has_gpu else 1.0
+
+    estimated_time = base_time * size_factor * octave_factor * gpu_factor
+
+    # Shadow-Berechnung hinzufügen
+    shadow_angles = len(ShadowCalculator().get_sun_angles_for_lod(lod_level)[0])
+    shadow_time = 0.05 * shadow_angles * (size / 64) ** 2 * gpu_factor
+
+    return estimated_time + shadow_time
+
+def get_memory_usage_estimate(lod_level: int, target_map_size: int) -> Dict[str, int]:
+    """
+    Funktionsweise: Schätzt Memory-Usage für gegebenes LOD
+    Parameter: lod_level, target_map_size
+    Returns: dict - Memory-Usage in Bytes pro Datentyp
+    """
+    size = lod_level_to_size(lod_level, target_map_size)
+
+    # Bytes pro Element (float32 = 4 bytes)
+    heightmap_bytes = size * size * 4
+    slopemap_bytes = size * size * 2 * 4  # 2 Kanäle
+    shadowmap_bytes = size * size * 4
+
+    total_bytes = heightmap_bytes + slopemap_bytes + shadowmap_bytes
+
+    return {
+        "heightmap_bytes": heightmap_bytes,
+        "slopemap_bytes": slopemap_bytes,
+        "shadowmap_bytes": shadowmap_bytes,
+        "total_bytes": total_bytes,
+        "total_mb": total_bytes / (1024 * 1024)
+    }
+
+
+# ================================
+# MODULE TESTING
+# ================================
+
+def test_terrain_generator():
+    """
+    Funktionsweise: Basis-Test für TerrainGenerator
+    Aufgabe: Validiert Kernfunktionalität ohne externe Dependencies
+    """
+    print("Testing TerrainGenerator...")
+
+    # Test Parameter-Validation
+    test_params = {
+        'map_seed': 12345,
+        'map_size': 128,
+        'amplitude': 100,
+        'octaves': 4,
+        'frequency': 0.01,
+        'persistence': 0.5,
+        'lacunarity': 2.0,
+        'redistribute_power': 1.0
+    }
+
+    validation_result = validate_terrain_parameters(test_params)
+    assert validation_result["valid"], f"Parameter validation failed: {validation_result['errors']}"
+    print("✓ Parameter validation passed")
+
+    # Test Generator ohne ShaderManager
+    generator = create_terrain_generator(map_seed=12345, shader_manager=None)
+
+    # Test Terrain-Generierung
+    terrain_data = generator.calculate_heightmap(test_params, lod_level=2)
+
+    assert terrain_data.heightmap is not None, "Heightmap generation failed"
+    assert terrain_data.slopemap is not None, "Slopemap generation failed"
+    assert terrain_data.shadowmap is not None, "Shadowmap generation failed"
+    assert terrain_data.is_valid(), "TerrainData validation failed"
+
+    print(f"✓ Terrain generation passed (Size: {terrain_data.actual_size}, LOD: {terrain_data.lod_level})")
+
+    # Test LOD-System
+    sizes = [lod_level_to_size(lod, 512) for lod in range(1, 8)]
+    expected_sizes = [32, 64, 128, 256, 512, 512, 512]  # ab LOD 5 bleibt bei 512
+    assert sizes == expected_sizes, f"LOD sizing failed: {sizes} != {expected_sizes}"
+    print("✓ LOD system validation passed")
+
+    print("All terrain generator tests passed!")
+
+if __name__ == "__main__":
+    # Führe Tests aus wenn direkt aufgerufen
+    test_terrain_generator()

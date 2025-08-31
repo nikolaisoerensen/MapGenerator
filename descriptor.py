@@ -1103,7 +1103,7 @@ def gui_default():
 def data_lod_manager():
     """
     Path: gui/managers/data_lod_manager.py
-    date_changed: 18.08.2025
+    date_changed: 25.08.2025
 
     =========================================================================================
     DATA LOD MANAGER - INTEGRIERTE DATENVERWALTUNG UND RESOURCE-MANAGEMENT
@@ -1119,6 +1119,7 @@ def data_lod_manager():
     - Signal-Hub für Tab-Kommunikation und Dependency-Management
     - Resource-Tracker für Memory-Leak-Prevention und automatisches Cleanup
     - Display-Manager für optimierte UI-Updates mit Change-Detection
+    - Combined-Heightmap-System für bidirektionale Terrain-Modifikation
 
     LOD-System (Numerisch):
     - lod_level 1: map_size_min (default 32x32)
@@ -1137,6 +1138,20 @@ def data_lod_manager():
         "biome": ["terrain", "weather", "water", "geology"], # vollständige Umwelt-Dependencies
         "settlement": ["terrain", "geology", "water", "biome"] # alle Dependencies für Settlement-Planning
     }
+
+    COMBINED-HEIGHTMAP-SYSTEM:
+    ---------------------------
+    - heightmap (original): Nur von terrain_generator erstellt, unveränderlich
+    - heightmap_combined: heightmap + erosion_map + sedimentation_map für alle anderen Generatoren
+    - Automatische Erstellung nach terrain_data_lod oder water_data_lod Updates
+    - LOD-Progression mit Upscaling von niedrigeren Erosions-/Sedimentations-LODs
+
+    Combined-Heightmap-Logic:
+    1. terrain_generator → heightmap_lod_n
+    2. _update_combined_heightmap(lod_n) → heightmap_combined_lod_n = heightmap_lod_n (keine erosion vorhanden)
+    3. water_generator → erosion_map_lod_n + sedimentation_map_lod_n
+    4. _update_combined_heightmap(lod_n) → heightmap_combined_lod_n = heightmap_lod_n + erosion_lod_n + sedimentation_lod_n
+    5. Alle anderen Generatoren verwenden heightmap_combined über get_terrain_data_combined()
 
     Dependency-Resolution:
     - check_dependencies(generator_type, lod_level): Validiert alle Required-Dependencies
@@ -1176,6 +1191,18 @@ def data_lod_manager():
     - cache_invalidated(generator_type): Cache-Management
     - lod_data_stored(generator_type, lod_level, data_keys): Neue LOD-Daten
 
+    COMBINED-HEIGHTMAP METHODS:
+    ---------------------------
+    - _update_combined_heightmap(lod_level): Erstellt/aktualisiert heightmap_combined für gegebenes LOD
+    - _get_best_erosion_sedimentation_lod(target_lod): Findet bestes verfügbares Erosions-LOD für Upscaling
+    - _upscale_erosion_data(erosion_map, sedimentation_map, from_size, to_size): Bicubic-Interpolation
+    - get_terrain_data_combined(data_key, lod_level=None): Neue API für heightmap_combined Zugriff
+
+    Combined-Heightmap-Trigger:
+    - Nach set_terrain_data_lod(): Erstellt heightmap_combined ohne Erosion
+    - Nach set_water_data_lod(): Aktualisiert heightmap_combined mit Erosions-/Sedimentations-Daten
+    - Automatisches Upscaling bei LOD-Mismatch zwischen terrain und water
+
     Klassen:
     --------
 
@@ -1183,6 +1210,7 @@ def data_lod_manager():
         Funktionsweise: Zentrale Koordination aller vier Subsysteme mit einheitlicher API
         Aufgabe: Datenverwaltung, Signal-Hub, Resource-Tracking, Display-Optimierung
         Methoden: set_*_data_lod(), get_*_data(), connect_tab_to_hub(), check_dependencies()
+        Combined-Heightmap: get_terrain_data_combined(), _update_combined_heightmap(), _upscale_erosion_data()
         LOD-Integration: Numerische LOD-Level für alle Generator-Typen, proportionale Skalierung
         Memory-Management: Integrierte Resource-Tracker mit automatischem Cleanup
         Threading: Thread-safe Operations durch QMutex, Signal-basierte Tab-Communication
@@ -1192,6 +1220,7 @@ def data_lod_manager():
         Aufgabe: Effiziente Speicherung und Abruf von Generator-Daten nach LOD-Level
         Methoden: store_data(), get_data(), get_available_lods(), cleanup_old_lods()
         Data-Structure: nested dict {generator_type: {lod_level: {data_key: array}}}
+        Combined-Heightmap-Storage: Erweitert um heightmap_combined Speicherung
         Cache-Management: Parameter-Hash-basierte Invalidation, Memory-Usage-Tracking
 
     CommunicationHub
@@ -1240,6 +1269,10 @@ def data_lod_manager():
 
     # LOD-basierte Data-Storage
     data_lod_manager.set_terrain_data_lod("heightmap", heightmap_array, lod_level=3, parameters)
+    # → Automatic combined_heightmap creation
+
+    # Combined-Heightmap-Retrieval für alle anderen Generatoren
+    heightmap_combined = data_lod_manager.get_terrain_data_combined("heightmap", lod_level=3)
 
     # Legacy-kompatible Data-Retrieval
     heightmap = data_lod_manager.get_terrain_data("heightmap")  # höchstes verfügbares LOD
@@ -2776,7 +2809,7 @@ def geology_tab():
     ## CORE-GENERATOR INTEGRATION
 
     **GeologyGenerator Anbindung:**
-    - Core-Call: GeologyGenerator.calculate_geology(heightmap, slopemap, parameters, lod_level)
+    - Core-Call: GeologyGenerator.calculate_geology(heightmap_combined, slopemap, parameters, lod_level)
     - Rock-Classification: Sedimentary/Igneous/Metamorphic mit Mass-Conservation (R+G+B=255)
     - Geological-Zones: Multi-Zone Simplex-Noise für realistische Gesteinsverteilung
     - Tectonic-Deformation: Ridge/Bevel-Warping, Metamorphic-Foliation/Folding, Igneous-Flowing
@@ -2822,7 +2855,7 @@ def geology_tab():
     ## GENERATION-WORKFLOW
 
     **Generation-Flow:**
-    1. Dependency-Check → heightmap/slopemap-Validation → "Berechnen"-Button
+    1. Dependency-Check → heightmap_combined/slopemap-Validation → "Berechnen"-Button
     2. generate_geology_system() → GenerationOrchestrator.request_generation("geology")
     3. GeologyGenerator.calculate_geology() → Rock-Classification + Mass-Conservation + Hardness-Calculation
     4. LOD-Progression über GenerationOrchestrator entsprechend Terrain-LODs
@@ -2838,12 +2871,12 @@ def geology_tab():
     ## DEPENDENCY-MANAGEMENT
 
     **Input Dependencies:**
-    - required_dependencies: ["heightmap", "slopemap"] von terrain_tab
+    - required_dependencies: ["heightmap_combined", "slopemap"] von terrain_tab
     - check_input_dependencies(): Prüft Terrain-Data-Verfügbarkeit, Shape-Consistency, Data-Quality
     - Dependency-Status-Display: StatusIndicator mit missing/invalid Inputs und Recovery-Suggestions
 
     **Input-Validation:**
-    - heightmap/slopemap Shape/Range/Consistency-Checks
+    - heightmap_combined/slopemap Shape/Range/Consistency-Checks
     - Data-Quality-Validation (NaN-Detection, Range-Validation)
     - LOD-Level-Consistency zwischen Terrain- und Geology-Data
 
@@ -2860,7 +2893,7 @@ def geology_tab():
     **Kommunikationskanäle:**
     - Config: value_default.GEOLOGY für Parameter-Ranges, Hardness-Defaults, Validation-Rules
     - Core: core/geology_generator.py → GeologyGenerator, RockTypeClassifier, MassConservationManager
-    - Input: DataLODManager.get_terrain_data("heightmap/slopemap") für Basis-Terrain-Daten
+    - Input: DataLODManager.get_terrain_data("heightmap_combined/slopemap") für Basis-Terrain-Daten
     - Output: DataLODManager.set_geology_data_lod() für rock_map/hardness_map zu water_generator
     - Manager: GenerationOrchestrator.request_generation("geology") nach Dependency-Erfüllung
     - Widgets: widgets.py für ParameterSlider, StatusIndicator, ProgressBar
@@ -2877,7 +2910,7 @@ def geology_tab():
     ## DISPLAY-MODI (erweitert BaseMapTab)
 
     **Visualization Modes:**
-    - Height Mode: Terrain-Heightmap als Basis-Layer
+    - Height Mode: Terrain-heightmap_combined als Basis-Layer
     - Rock Types Mode: RGB rock_map mit Color-Coding (Rot=Sedimentary, Grün=Igneous, Blau=Metamorphic)
     - Hardness Mode: Hardness-Map mit Grayscale/Color-Coding (Blau=weich, Rot=hart)
     - 3D Terrain Overlay: Kombiniert Rock-Classification mit 3D-Terrain-Rendering
@@ -2906,7 +2939,7 @@ def geology_tab():
     ## ABHÄNGIGKEITEN UND OUTPUT
 
     **Dependencies:**
-    - required_dependencies: ["heightmap", "slopemap"] von terrain_tab
+    - required_dependencies: ["heightmap_combined", "slopemap"] von Terrain Generator / DataLODManager
     - Dependency-Validation erforderlich vor Generation
 
     **Output für nachgelagerte Generatoren:**
@@ -2934,7 +2967,7 @@ def weather_tab():
    ═══════════════════════════════════════════════════════════════════════════════
 
    **WeatherSystemGenerator Anbindung:**
-   - Core-Call: WeatherSystemGenerator.generate_weather_system(heightmap, shadowmap, parameters, lod_level)
+   - Core-Call: WeatherSystemGenerator.generate_weather_system(heightmap_combined, shadowmap, parameters, lod_level)
    - Climate-Modeling: Terrain-basierte Temperaturberechnung mit Altitude/Solar/Latitude-Effekten
    - Wind-Field-Simulation: CFD-basierte Luftströmung mit Berg-Ablenkung und Düseneffekten
    - Orographischer Niederschlag: Luv-/Lee-Effekte mit Feuchtigkeitstransport
@@ -2972,7 +3005,7 @@ def weather_tab():
    Generation Control GroupBox:
    ├── "Berechnen"-Button: Manual Generation-Trigger
    ├── Generation Progress: ProgressBar mit CFD-Iteration-Details
-   └── Input Dependencies: StatusIndicator für heightmap/shadowmap-Verfügbarkeit
+   └── Input Dependencies: StatusIndicator für heightmap_combined/shadowmap-Verfügbarkeit
 
    Climate Statistics GroupBox:
    ├── Temperature Range: Min/Max/Mean/StdDev in °C
@@ -2988,7 +3021,7 @@ def weather_tab():
 
    Standard BaseMapTab Controls (2D+3D):
    ├── Shadow: Checkbox (Overlay über alle Modi, nutzt Terrain-Shadowmap) + Shadow-Angle-Slider (0-6)
-   ├── Contour Lines: Checkbox (Overlay mit Heightmap für alle Weather-Modi)
+   ├── Contour Lines: Checkbox (Overlay mit heightmap_combined für alle Weather-Modi)
    ├── Grid Overlay: Checkbox (für alle Modi)
    └── Wind Vectors: Checkbox (3D-Arrows über Terrain in allen Modi)
 
@@ -2998,7 +3031,7 @@ def weather_tab():
    ═══════════════════════════════════════════════════════════════════════════════
 
    **Generation-Flow:**
-   1. Dependency-Check → heightmap/shadowmap-Validation → "Berechnen"-Button
+   1. Dependency-Check → heightmap_combined/shadowmap-Validation → "Berechnen"-Button
    2. generate_weather_system() → GenerationOrchestrator.request_generation("weather")
    3. WeatherSystemGenerator.generate_weather_system() → CFD-Simulation + Climate-Modeling
    4. LOD-Progression über GenerationOrchestrator mit steigender CFD-Komplexität
@@ -3017,18 +3050,18 @@ def weather_tab():
    ═══════════════════════════════════════════════════════════════════════════════
 
    **Input Dependencies:**
-   - required_dependencies: ["heightmap", "shadowmap"] von terrain_tab
+   - required_dependencies: ["heightmap_combined", "shadowmap"] von terrain_tab
    - check_input_dependencies(): Prüft Terrain-Data-Verfügbarkeit, Orographic-Data-Quality, Solar-Data-Consistency
    - Dependency-Status-Display: StatusIndicator mit missing/invalid Inputs und Recovery-Suggestions
 
    **Input-Validation:**
-   - heightmap Shape/Range/Orographic-Suitability-Checks für Wind-Deflection
+   - heightmap_combined Shape/Range/Orographic-Suitability-Checks für Wind-Deflection
    - shadowmap Solar-Data-Quality-Validation für Temperature-Calculation
    - Data-Quality-Validation (NaN-Detection, Physical-Range-Validation)
    - LOD-Level-Consistency zwischen Terrain- und Weather-Data
 
    **Orographic Effects Integration:**
-   - Terrain-Height → Altitude-Cooling (6°C/100m default)
+   - Terrain-heightmap_combined → Altitude-Cooling (6°C/100m default)
    - Terrain-Slope → Wind-Deflection und Orographic-Lifting
    - Shadow-Data → Solar-Heating-Variation über Tagesverlauf
    - Valley-Detection → Wind-Channeling und Temperature-Inversion
@@ -3040,7 +3073,7 @@ def weather_tab():
    **Kommunikationskanäle:**
    - Config: value_default.WEATHER für Parameter-Ranges, Climate-Defaults, CFD-Settings
    - Core: core/weather_generator.py → WeatherSystemGenerator, TemperatureCalculator, WindFieldSimulator
-   - Input: DataLODManager.get_terrain_data("heightmap/shadowmap") für Orographic-Base-Data
+   - Input: DataLODManager.get_terrain_data("heightmap_combined/shadowmap") für Orographic-Base-Data
    - Output: DataLODManager.set_weather_data_lod() für temp_map/precip_map/wind_map zu water_generator
    - Manager: GenerationOrchestrator.request_generation("weather") nach Dependency-Erfüllung
    - Widgets: widgets.py für ParameterSlider, StatusIndicator, ProgressBar, RandomSeedButton
@@ -3107,7 +3140,7 @@ def weather_tab():
    ═══════════════════════════════════════════════════════════════════════════════
 
    **Dependencies:**
-   - required_dependencies: ["heightmap", "shadowmap"] von terrain_tab
+   - required_dependencies: ["heightmap_combined", "shadowmap"] von Terrain Generator / DataLODManager
    - Dependency-Validation erforderlich vor Generation
    - Orographic-Data-Quality-Checks für realistische Climate-Effects
 
@@ -3123,7 +3156,7 @@ def weather_tab():
 def water_tab():
    """
    Path: gui/tabs/water_tab.py
-   Date Changed: 24.08.2025
+   Date Changed: 25.08.2025
 
    ═══════════════════════════════════════════════════════════════════════════════
    ## ÜBERSICHT UND ZIELSETZUNG
@@ -3139,10 +3172,10 @@ def water_tab():
    ═══════════════════════════════════════════════════════════════════════════════
 
    **HydrologySystemGenerator Anbindung:**
-   ├ Core-Call: HydrologySystemGenerator.generate_hydrology_system(heightmap, hardness_map, precip_map, temp_map, wind_map, parameters, lod_level)
+   ├ Core-Call: HydrologySystemGenerator.generate_hydrology_system(heightmap_combined, hardness_map, precip_map, temp_map, wind_map, parameters, lod_level)
    ├ Lake-Detection: Jump Flooding Algorithm für parallele Senken-Identifikation
    ├ Flow-Network: Steepest Descent mit Upstream-Akkumulation für Flusssysteme
-   ├ Erosion-Simulation: Stream Power Erosion mit HjulstrÃ¶m-Sundborg Transport
+   ├ Erosion-Simulation: Stream Power Erosion mit Hjulström-Sundborg Transport
    ├ Terrain-Feedback: Bidirektionale heightmap-Modifikation durch Erosions-/Sedimentationsprozesse
 
    **HydrologyData Output:**
@@ -3153,7 +3186,6 @@ def water_tab():
    ├ erosion_map: 2D numpy.float32 array, Erosionsrate in m/Jahr
    ├ sedimentation_map: 2D numpy.float32 array, Sedimentationsrate in m/Jahr
    ├ water_biomes_map: 2D numpy.uint8 array, Wasser-Klassifikation (0=kein Wasser, 1=Creek, 2=River, 3=Grand River, 4=Lake)
-   ├ heightmap_modified: 2D numpy.float32 array, durch Erosion/Sedimentation modifizierte Höhenkarte
 
    ═══════════════════════════════════════════════════════════════════════════════
    ## UI-LAYOUT (erweitert BaseMapTab)
@@ -3182,8 +3214,7 @@ def water_tab():
    ├ Generation Control GroupBox:
    ├── "Berechnen"-Button: Manual Generation-Trigger
    ├── Generation Progress: ProgressBar mit Hydrology-Phase-Details (Lake-Detection→Flow-Network→Erosion→Sedimentation)
-   ├── Input Dependencies: StatusIndicator für heightmap/hardness_map/precip_map-Verfügbarkeit
-   ├── Terrain Modification: StatusIndicator für heightmap-Änderungen durch Erosion
+   ├── Input Dependencies: StatusIndicator für heightmap_combined/hardness_map/precip_map-Verfügbarkeit
 
    ├ Hydrology Statistics GroupBox:
    ├── Water Coverage: Prozent der Karte mit Wasserkörpern, aufgeteilt nach Biome-Types
@@ -3201,7 +3232,7 @@ def water_tab():
 
    ├ Standard BaseMapTab Controls (2D+3D):
    ├── Shadow: Checkbox (Overlay über alle Modi, nutzt Terrain-Shadowmap) + Shadow-Angle-Slider (0-6)
-   ├── Contour Lines: Checkbox (nutzt Original- oder Modified-Heightmap je nach Modus)
+   ├── Contour Lines: Checkbox (nutzt heightmap_combined)
    ├── Grid Overlay: Checkbox (für alle Modi)
    ├── Flow Vectors: Checkbox (2D-Arrows für Flow-Direction, 3D-Animated-Rivers)
    ├── Erosion Overlay: Checkbox (Red-Zones für aktive Erosion, Blue-Zones für Sedimentation)
@@ -3211,12 +3242,12 @@ def water_tab():
    ═══════════════════════════════════════════════════════════════════════════════
 
    **Generation-Flow:**
-   ├ Multi-Dependency-Check → heightmap/hardness_map/precip_map/temp_map/wind_map-Validation → "Berechnen"-Button
+   ├ Multi-Dependency-Check → heightmap_combined/hardness_map/precip_map/temp_map/wind_map-Validation → "Berechnen"-Button
    ├ generate_hydrology_system() → GenerationOrchestrator.request_generation("water")
    ├ HydrologySystemGenerator.generate_hydrology_system() → Lake-Detection + Flow-Network + Erosion-Simulation
    ├ LOD-Progression über GenerationOrchestrator mit steigender Hydrology-Komplexität
-   ├ DataLODManager.set_water_data_lod() + set_terrain_data_lod(modified_heightmap) → Dual-Signal-Emission
-   ├ Display-Update → Statistics-Update → Cross-Tab-Notification für Terrain-Modification
+   ├ DataLODManager.set_water_data_lod() → Signal-Emission
+   ├ Display-Update → Statistics-Update → Cross-Tab-Notification
 
    **LOD-System Integration:**
    ├ LOD-Progression: Hydrology-Complexity skaliert automatisch bis map_size erreicht (entsprechend Terrain)
@@ -3225,25 +3256,19 @@ def water_tab():
    ├ Progressive Enhancement: Jump-Flooding-Precision, Flow-Iterations und Erosion-Cycles steigen mit LOD
    ├ Performance-Scaling: Lake-Detection-Precision (3→5→7→10→15→20→25 Jump-Passes), Flow-Network-Detail steigt progressiv
 
-   **Terrain-Feedback-Workflow:**
-   ├ Original-Heightmap → Erosion-Calculation → Modified-Heightmap
-   ├ DataLODManager.set_terrain_data_lod("heightmap_original") → Backup für andere Generatoren
-   ├ DataLODManager.set_terrain_data_lod("heightmap_modified") → Updated für nachfolgende Systeme
-   ├ Version-Control: Biome/Settlement-Generatoren können Original oder Modified wählen
-
    ═══════════════════════════════════════════════════════════════════════════════
    ## DEPENDENCY-MANAGEMENT
    ═══════════════════════════════════════════════════════════════════════════════
 
    **Input Dependencies:**
-   ├ required_dependencies: ["heightmap", "hardness_map", "precip_map", "temp_map", "wind_map"]
-   ├ Primary-Dependencies: terrain_tab → heightmap/slopemap
+   ├ required_dependencies: ["heightmap_combined", "hardness_map", "precip_map", "temp_map", "wind_map"]
+   ├ Primary-Dependencies: terrain_tab → heightmap_combined/slopemap
    ├ Secondary-Dependencies: geology_tab → hardness_map/rock_map
    ├ Tertiary-Dependencies: weather_tab → precip_map/temp_map/wind_map
    ├ check_input_dependencies(): Multi-Generator Cross-Validation mit Consistency-Checks
 
    **Input-Validation:**
-   ├ heightmap Shape/Range/Hydrology-Suitability-Checks für Flow-Calculation
+   ├ heightmap_combined Shape/Range/Hydrology-Suitability-Checks für Flow-Calculation
    ├ hardness_map Geological-Consistency-Validation mit rock_map für Erosion-Resistance
    ├ precip_map Precipitation-Range-Validation [0-500mm] für realistische Hydrology
    ├ temp_map/wind_map Atmospheric-Data-Quality für Evaporation-Calculation
@@ -3263,8 +3288,8 @@ def water_tab():
    **Kommunikationskanäle:**
    ├ Config: value_default.WATER für Parameter-Ranges, Hydrology-Defaults, Erosion-Settings
    ├ Core: core/water_generator.py → HydrologySystemGenerator, LakeDetectionSystem, ErosionSedimentationSystem
-   ├ Multi-Input: DataLODManager.get_terrain_data() + get_geology_data() + get_weather_data()
-   ├ Dual-Output: DataLODManager.set_water_data_lod() + set_terrain_data_lod(modified) für Terrain-Feedback
+   ├ Multi-Input: DataLODManager.get_terrain_data_combined() + get_geology_data() + get_weather_data()
+   ├ Output: DataLODManager.set_water_data_lod() für Water-Data-Storage
    ├ Manager: GenerationOrchestrator.request_generation("water") nach Multi-Dependency-Erfüllung
    ├ Widgets: widgets.py für ParameterSlider, StatusIndicator, ProgressBar, RandomSeedButton
 
@@ -3272,9 +3297,9 @@ def water_tab():
    ├ WaterTab.generate_requested("water")
    ├ GenerationOrchestrator.request_generation("water", parameters)
    ├ HydrologySystemGenerator.generate_hydrology_system()
-   ├ DataLODManager.set_water_data_lod() + set_terrain_data_lod(modified_heightmap)
-   ├ data_updated("water") + data_updated("terrain_modified") Signals
-   ├ WaterTab.on_data_updated() + Cross-Tab-Updates für Terrain-Modification
+   ├ DataLODManager.set_water_data_lod()
+   ├ data_updated("water") Signal
+   ├ WaterTab.on_data_updated()
    ├ WaterTab.update_display()
 
    ═══════════════════════════════════════════════════════════════════════════════
@@ -3292,14 +3317,13 @@ def water_tab():
    ├ Animated Rivers: 3D-Flow-Vectors mit Movement-Animation basierend auf flow_speed
    ├ Water-Surface-Rendering: Reflective Water-Surface über water_map-Areas
    ├ Erosion-Visualization: Real-time Height-Changes durch Erosion/Sedimentation
-   ├ Terrain-Modification-Display: Original vs. Modified Heightmap Toggle-Option
    ├ Lake-3D-Rendering: Realistic Water-Bodies mit Depth-based Transparency
 
    **Overlay-System:**
-   ├ Shadow/Contour/Grid Overlays: Nutzen Original- oder Modified-Terrain-Data je nach User-Choice
+   ├ Shadow/Contour/Grid Overlays: Nutzen heightmap_combined für alle Modi
    ├ Flow-Vector-Overlay: 2D-Arrows für Flow-Direction, skaliert nach flow_map-Magnitude
    ├ Erosion-Overlay: Color-coded Erosion/Sedimentation-Zones über alle Modi
-   ├ Multi-Layer-Rendering: Kombiniert Water-Data mit Original/Modified-Terrain-Base-Layer
+   ├ Multi-Layer-Rendering: Kombiniert Water-Data mit heightmap_combined-Base-Layer
 
    ═══════════════════════════════════════════════════════════════════════════════
    ## ERROR-HANDLING UND VALIDATION
@@ -3312,7 +3336,7 @@ def water_tab():
    ├ Cross-Parameter-Constraints: Erosion-Strength vs. Hardness-Map-Values Consistency
 
    **Multi-Input-Validation:**
-   ├ Heightmap Physical-Range-Checks für realistische Hydrology-Simulation
+   ├ Heightmap_combined Physical-Range-Checks für realistische Hydrology-Simulation
    ├ Hardness-Map vs. Rock-Map Consistency-Validation für Erosion-Resistance
    ├ Weather-Data Atmospheric-Plausibility für Evaporation-Calculation
    ├ Multi-Generator LOD-Level-Consistency zwischen allen Input-Dependencies
@@ -3327,14 +3351,13 @@ def water_tab():
    ├ Multi-Input-Recovery mit Fallback-Strategies pro Dependency-Type
    ├ Erosion-Stability-Recovery bei Numerical-Instabilities mit Simplified-Physics
    ├ Flow-Network-Recovery bei Topology-Errors mit Alternative-Pathfinding
-   ├ Terrain-Modification-Rollback bei Critical-Heightmap-Corruption
 
    ═══════════════════════════════════════════════════════════════════════════════
    ## ABHÄNGIGKEITEN UND OUTPUT
    ═══════════════════════════════════════════════════════════════════════════════
 
    **Dependencies:**
-   ├ required_dependencies: ["heightmap", "hardness_map", "precip_map", "temp_map", "wind_map"]
+   ├ required_dependencies: ["heightmap_combined", "hardness_map", "precip_map", "temp_map", "wind_map"]
    ├ Complex-Multi-Generator-Dependencies: terrain + geology + weather
    ├ Dependency-Validation erforderlich für alle Input-Sources vor Generation
    ├ Cross-Generator-Consistency-Checks für realistic Hydrology-Simulation
@@ -3344,14 +3367,8 @@ def water_tab():
    ├ soil_moist_map → biome_generator für Moisture-based Vegetation-Distribution
    ├ water_biomes_map → settlement_generator für Water-Access Settlement-Suitability
    ├ flow_map → settlement_generator für River-Transport-Route-Analysis
-   ├ heightmap_modified → biome_generator/settlement_generator für Updated-Terrain-Base
-   ├ erosion_map → settlement_generator für Geological-Stability-Assessment
-
-   **Bidirectional-Terrain-Feedback:**
-   ├ Original-Heightmap → Preserved für Generator-Compatibility
-   ├ Modified-Heightmap → Available für Realistic-Post-Erosion-Simulation
-   ├ Version-Control-System → Nachfolgende Generatoren können Original/Modified wählen
-   ├ Terrain-Change-Notification → Cross-Tab-Updates für Terrain-Modification-Awareness
+   ├ erosion_map → DataLODManager für Combined-Heightmap-Update
+   ├ sedimentation_map → DataLODManager für Combined-Heightmap-Update
    """
 
 def biome_tab():
@@ -3589,18 +3606,244 @@ def biome_tab():
 def settlement_tab():
     """
     Path: gui/tabs/settlement_tab.py
+    Date Changed: 29.08.2025
 
-    Funktionsweise: Settlement-Platzierung mit Terrain-Integration
-    - Input: Heightmap, optional Rock-Map für Suitability
-    - Intelligent Settlement-Placement (Steigung, Wasser-Nähe)
-    - 3D-Markers für Villages/Landmarks auf Terrain
-    - Road-Network Visualization
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+    ## ÜBERSICHT UND ZIELSETZUNG
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-    Kommunikationskanäle:
-    - Input: heightmap, rock_map von data_manager
-    - Core: settlement_generator für Placement-Algorithm
-    - Output: settlement_positions, road_network → data_manager
+    SettlementTab implementiert die Settlement-Generator UI mit BaseMapTab-Integration und
+    intelligenter Siedlungsplatzierung basierend auf Multi-Generator-Input. Erzeugt realistische
+    Zivilisationsstrukturen mit Settlements, Straßennetzen, Landmarks und Grundstückssystem
+    durch Terrain-Suitability-Analysis und Civilization-Influence-Mapping.
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+    ## CORE-GENERATOR INTEGRATION
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+    **SettlementGenerator Anbindung:**
+    ├ Core-Call: SettlementGenerator.generate_settlements(heightmap_combined, slopemap, water_biomes_map, biome_map, parameters, lod_level)
+    ├ Terrain-Suitability-Analysis: Multi-Criteria-Evaluation (Steigung, Höhe, Wasser-Nähe, Biome-Eignung)
+    ├ Settlement-Placement: Intelligente Platzierung von Cities/Villages mit Mindestabständen und Suitability-Optimierung
+    ├ Road-Network-Generation: Pathfinding-basierte Straßenverbindungen mit Spline-Interpolation und Cost-Optimization
+    ├ Civilization-Influence-Mapping: Radiale Decay-Kernel um Settlements für realistische Zivilisations-Ausbreitung
+    ├ Plot-System: Delaunay-Triangulation für Grundstücksgrenzen mit Civ-Value-basierter Größenbestimmung
+
+    **SettlementData Output:**
+    ├ settlement_map: 2D numpy.uint8 array, Settlement-Classification (0=Wilderness, 1=Village, 2=Town, 3=City)
+    ├ road_network_map: 2D numpy.uint8 array, Straßennetz mit Road-Density-Values [0-255]
+    ├ civ_influence_map: 2D numpy.float32 array, Zivilisations-Einfluss-Werte [0.0-1.0]
+    ├ plot_boundaries_map: 2D numpy.uint16 array, Plot-ID pro Pixel für Grundstücksgrenzen
+    ├ landmark_positions: List[(x,y,type)], Landmark-Koordinaten mit Type-Classification
+    ├ settlement_statistics: Dict mit Settlement-Count, Road-Length, Coverage-Percentage
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+    ## UI-LAYOUT (erweitert BaseMapTab)
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+    **Control Panel Parameter-Sektion:**
+
+    ├ Settlement Density Parameters GroupBox:
+    ├── Settlement Count: ParameterSlider (value_default.SETTLEMENT.SETTLEMENT_COUNT) + suffix:"settlements"
+    ├── City Ratio: ParameterSlider (value_default.SETTLEMENT.CITY_RATIO) + suffix:"factor"
+    ├── Village Distribution: ParameterSlider (value_default.SETTLEMENT.VILLAGE_DISTRIBUTION) + suffix:"spacing"
+    ├── Minimum Distance: ParameterSlider (value_default.SETTLEMENT.MIN_DISTANCE) + suffix:"km"
+
+    ├ Terrain Suitability Parameters GroupBox:
+    ├── Slope Tolerance: ParameterSlider (value_default.SETTLEMENT.SLOPE_TOLERANCE) + suffix:"degrees"
+    ├── Elevation Preference: ParameterSlider (value_default.SETTLEMENT.ELEVATION_PREFERENCE) + suffix:"m"
+    ├── Water Proximity Factor: ParameterSlider (value_default.SETTLEMENT.WATER_PROXIMITY_FACTOR) + suffix:"weight"
+    ├── Biome Suitability Weight: ParameterSlider (value_default.SETTLEMENT.BIOME_SUITABILITY_WEIGHT) + suffix:"factor"
+
+    ├ Road Network Parameters GroupBox:
+    ├── Road Density: ParameterSlider (value_default.SETTLEMENT.ROAD_DENSITY) + suffix:"factor"
+    ├── Path Optimization: ParameterSlider (value_default.SETTLEMENT.PATH_OPTIMIZATION) + suffix:"cost-weight"
+    ├── Road Smoothing: ParameterSlider (value_default.SETTLEMENT.ROAD_SMOOTHING) + suffix:"spline-factor"
+    ├── Bridge Generation: ParameterSlider (value_default.SETTLEMENT.BRIDGE_GENERATION) + suffix:"threshold"
+
+    ├ Civilization Influence Parameters GroupBox:
+    ├── Influence Decay Radius: ParameterSlider (value_default.SETTLEMENT.INFLUENCE_DECAY_RADIUS) + suffix:"km"
+    ├── Landmark Density: ParameterSlider (value_default.SETTLEMENT.LANDMARK_DENSITY) + suffix:"per-100km²"
+    ├── Wilderness Threshold: ParameterSlider (value_default.SETTLEMENT.WILDERNESS_THRESHOLD) + suffix:"civ-value"
+    ├── Settlement Seed: ParameterSlider + RandomSeedButton (widgets.py)
+
+    ├ Generation Control GroupBox:
+    ├── "Berechnen"-Button: Manual Generation-Trigger
+    ├── Generation Progress: ProgressBar mit Settlement-Phase-Details (Suitability→Placement→Roads→Influence→Plots)
+    ├── Input Dependencies: StatusIndicator für heightmap_combined/slopemap/water_biomes_map/biome_map-Verfügbarkeit
+    ├── Multi-Generator-Status: StatusIndicator für terrain+water+biome Dependency-Chain-Completion
+
+    ├ Settlement Statistics GroupBox:
+    ├── Settlement Distribution: Progress-Bars für Village/Town/City-Count mit Prozent-Anteilen der Kartenabdeckung
+    ├── Road Network Stats: Total Road-Length in km, Network-Connectivity-Percentage, Bridge-Count
+    ├── Civilization Coverage: Civilized/Wilderness-Area-Percentage, Average-Civ-Influence-Level
+    ├── Plot System Stats: Total-Plot-Count, Average-Plot-Size, Plot-Size-Distribution (Small/Medium/Large)
+    ├── Landmark Distribution: Landmark-Count per Type (Castle/Monastery/Shrine/Market/etc.)
+    ├── Performance Metrics: Pathfinding-Time, Suitability-Analysis-Time, Plot-Generation-Time
+
+    **Canvas Visualization Controls:**
+
+    ├ Settlement-spezifische Controls (2D+3D):
+    ├── Settlements/Roads/Civ-Influence/Plot-Boundaries: Radio-Buttons (exklusiv für Settlement-Display-Modi)
+    ├── Suitability Analysis: Radio-Button (Terrain-Suitability-Heatmap für Settlement-Placement-Preview)
+    ├── Landmark Types: Checkbox-Group (Castle/Monastery/Market/Shrine einzeln ein/ausblendbar)
+
+    ├ Standard BaseMapTab Controls (2D+3D):
+    ├── Shadow: Checkbox (Overlay über alle Modi, nutzt Terrain-Shadowmap) + Shadow-Angle-Slider (0-6)
+    ├── Contour Lines: Checkbox (nutzt heightmap_combined für topographische Kontext-Information)
+    ├── Grid Overlay: Checkbox (für alle Modi mit Maßstabs-Referenz)
+    ├── Biome Overlay: Checkbox (Biome-Grundlage-Display für Settlement-Suitability-Kontext)
+    ├── Water Overlay: Checkbox (Water-Bodies-Display für Settlement-Water-Access-Visualization)
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+    ## GENERATION-WORKFLOW
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+    **Generation-Flow:**
+    ├ Multi-Dependency-Check → heightmap_combined/slopemap/water_biomes_map/biome_map-Validation → "Berechnen"-Button
+    ├ generate_settlement_system() → GenerationOrchestrator.request_generation("settlement")
+    ├ SettlementGenerator.generate_settlements() → Suitability-Analysis + Settlement-Placement + Road-Generation + Plot-Creation
+    ├ LOD-Progression über GenerationOrchestrator mit steigender Settlement-Komplexität und Road-Network-Detail
+    ├ DataLODManager.set_settlement_data_lod() → Signal-Emission
+    ├ Display-Update → Statistics-Update → Final-World-Completion-Notification für Overview-Tab
+
+    **LOD-System Integration:**
+    ├ LOD-Progression: Settlement-Complexity skaliert automatisch bis map_size erreicht (entsprechend allen Input-Dependencies)
+    ├ LOD-Grid-Scaling: 32x32→64x64→128x128→256x256→512x512→1024x1024→2048x2048
+    ├ LOD-Level-Nummerierung: 1,2,3,4,5,6+ entsprechend verfügbaren Multi-Generator-Input-LODs
+    ├ Progressive Enhancement: Settlement-Count, Road-Network-Detail und Plot-System-Complexity steigen mit LOD-Level
+    ├ Performance-Scaling: Pathfinding-Algorithm-Complexity (A*-Heuristics 3→5→7→10→15→20→25 Search-Depth), Suitability-Analysis-Precision steigt progressiv
+
+    **Settlement-Placement-Workflow:**
+    ├ Terrain-Suitability-Analysis → Multi-Criteria-Evaluation basierend auf Slope/Elevation/Water/Biome-Input
+    ├ Settlement-Candidate-Generation → Grid-based Candidate-Points mit Minimum-Distance-Constraints
+    ├ Suitability-Scoring → Weighted-Sum aller Suitability-Factors für jeden Candidate-Point
+    ├ Settlement-Selection → Best-Candidates bis Settlement-Count erreicht mit Type-Classification (Village/Town/City)
+    ├ Road-Network-Generation → A*-Pathfinding zwischen Settlements mit Terrain-Cost-Integration
+    ├ Civilization-Influence-Mapping → Radiale Decay-Kernel-Application um alle Settlements
+    ├ Plot-Boundary-Generation → Delaunay-Triangulation in Non-Wilderness-Areas mit Civ-Value-based Plot-Size-Determination
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+    ## DEPENDENCY-MANAGEMENT
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+    **Input Dependencies:**
+    ├ required_dependencies: ["heightmap_combined", "slopemap", "water_biomes_map", "biome_map"]
+    ├ Primary-Dependencies: terrain_tab → heightmap_combined/slopemap für Terrain-Suitability-Analysis
+    ├ Secondary-Dependencies: water_tab → water_biomes_map für Water-Proximity Settlement-Suitability
+    ├ Tertiary-Dependencies: biome_tab → biome_map für Biome-Suitability Settlement-Type-Determination
+    ├ check_input_dependencies(): Multi-Generator Cross-Validation mit Settlement-Suitability-Quality-Assessment
+
+    **Input-Validation:**
+    ├ heightmap_combined/slopemap Terrain-Suitability-Data-Quality für Settlement-Placement-Algorithm
+    ├ water_biomes_map Water-Access-Consistency für Settlement-Water-Proximity-Calculations
+    ├ biome_map Ecosystem-Suitability-Validation für Settlement-Type-Classification (Desert=Oasis-Towns, Forest=Logging-Villages)
+    ├ Cross-Generator-Physical-Plausibility: Terrain vs. Water vs. Biome Consistency für realistic Settlement-Scenarios
+    ├ Multi-Generator-LOD-Consistency: Matching LOD-Levels zwischen allen 4 Input-Sources
+
+    **Complex-Multi-Generator-Status-Display:**
+    ├ 4-Generator-Dependencies-StatusIndicator mit Individual-Input-Quality-Assessment
+    ├ Settlement-Suitability-Matrix mit Terrain/Water/Biome-Data-Cross-Validation
+    ├ Cross-System-Integration-Status für Settlement-Ecosystem-Interaction-Quality
+    ├ Final-World-Readiness-Status für Complete-World-Export-Preparation
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+    ## MANAGER-INTEGRATION
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+    **Kommunikationskanäle:**
+    ├ Config: value_default.SETTLEMENT für Parameter-Ranges, Settlement-Defaults, Pathfinding-Settings
+    ├ Core: core/settlement_generator.py → SettlementGenerator, TerrainSuitabilityAnalyzer, PathfindingSystem, CivilizationInfluenceMapper
+    ├ Multi-Input: DataLODManager.get_terrain_data_combined() + get_water_data() + get_biome_data() für Complete-World-Context
+    ├ Final-Output: DataLODManager.set_settlement_data_lod() für Final-Civilization-Layer
+    ├ Manager: GenerationOrchestrator.request_generation("settlement") nach All-Dependencies-Erfüllung
+    ├ Widgets: widgets.py für ParameterSlider, StatusIndicator, ProgressBar, RandomSeedButton
+
+    **Signal-Flow:**
+    ├ SettlementTab.generate_requested("settlement")
+    ├ GenerationOrchestrator.request_generation("settlement", parameters)
+    ├ SettlementGenerator.generate_settlements()
+    ├ DataLODManager.set_settlement_data_lod()
+    ├ data_updated("settlement") Signal
+    ├ SettlementTab.on_data_updated() + Overview-Tab-Notification für Final-World-Completion
+    ├ SettlementTab.update_display()
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+    ## DISPLAY-MODI (erweitert BaseMapTab)
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+    **Visualization Modes:**
+    ├ Settlements Mode: settlement_map mit Color-Coded Settlement-Types (Grün=Village, Blau=Town, Rot=City)
+    ├ Road Network Mode: road_network_map mit Road-Density-Visualization (Schwarz=Main-Roads, Grau=Secondary-Roads)
+    ├ Civilization Influence Mode: civ_influence_map mit Influence-Gradient (Rot=High-Civ, Grün=Wilderness)
+    ├ Plot Boundaries Mode: plot_boundaries_map mit Plot-Boundary-Lines und Plot-Size-Color-Coding
+    ├ Suitability Analysis Mode: Terrain-Suitability-Heatmap mit Settlement-Placement-Preview (Rot=High-Suitable, Blau=Unsuitable)
+
+    **3D-Integration:**
+    ├ 3D-Settlement-Markers: Procedural-Settlement-Models (Village-Huts, Town-Buildings, City-Towers) auf 3D-Terrain-Mesh
+    ├ 3D-Road-Network: Elevated-Road-Meshes mit Bridge-Generation über Water-Bodies und Terrain-Depression
+    ├ Landmark-3D-Models: Castle/Monastery/Market-3D-Representations mit Biome-appropriate Texturing
+    ├ Civilization-3D-Influence: Terrain-Texture-Blending basierend auf civ_influence_map (Cultivated vs. Wild-Areas)
+    ├ Plot-Boundary-3D-Visualization: 3D-Fence-Lines und Agricultural-Field-Texturing in High-Civ-Areas
+
+    **Overlay-System:**
+    ├ Shadow/Contour/Grid Overlays: Nutzen heightmap_combined für alle Settlement-Modi mit Topographic-Context
+    ├ Biome-Base-Overlay: Biome-Classification als Background für Settlement-Suitability-Context
+    ├ Water-Access-Overlay: Water-Bodies-Highlighting für Settlement-Water-Proximity-Visualization
+    ├ Multi-Layer-Settlement-Rendering: Kombiniert Settlement-Data mit allen anderen Generator-Outputs für Complete-World-Context
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+    ## ERROR-HANDLING UND VALIDATION
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+    **Parameter-Validation:**
+    ├ Range-Checks über value_default.SETTLEMENT Constraints
+    ├ Settlement-Count-Parameter [1-100] für Map-Size-appropriate Settlement-Density
+    ├ Suitability-Weight-Parameter [0.0-5.0] für realistic Settlement-Placement-Priorities
+    ├ Road-Network-Parameter [0.0-2.0] für physically-plausible Road-Generation
+
+    **Multi-Input-Settlement-Validation:**
+    ├ Terrain-Suitability Physical-Range-Validation für realistic Settlement-Placement
+    ├ Water-Access vs. Settlement-Placement Consistency-Checks für Water-Dependent Settlement-Types
+    ├ Biome-Suitability vs. Settlement-Type Ecological-Consistency für realistic Civilization-Ecosystem-Integration
+    ├ Multi-Generator LOD-Level-Consistency zwischen allen Settlement-Input-Dependencies
+
+    **Settlement-System-Validation:**
+    ├ Settlement-Distribution-Logic-Validation für realistic Settlement-Spacing und Size-Hierarchy
+    ├ Road-Network-Topology-Validation für connected Settlement-Network ohne Isolated-Settlements
+    ├ Civilization-Influence-Consistency-Validation für realistic Civ-Decay und Wilderness-Preservation
+    ├ Plot-System-Coherence-Validation für realistic Land-Use-Patterns um Settlements
+
+    **Advanced-Settlement-Error-Recovery:**
+    ├ Multi-Input-Recovery mit Intelligent-Fallback pro Terrain/Water/Biome-Input-Quality
+    ├ Settlement-Placement-Recovery bei Suitability-Analysis-Failures mit Simplified-Placement-Algorithm
+    ├ Road-Network-Recovery bei Pathfinding-Failures mit Alternative-Routing-Strategies
+    ├ Civilization-System-Recovery mit Default-Settlement-Distributions bei Complex-System-Conflicts
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+    ## ABHÄNGIGKEITEN UND OUTPUT
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+    **Dependencies (finale Civilization-Layer):**
+    ├ required_dependencies: ["heightmap_combined", "slopemap", "water_biomes_map", "biome_map"]
+    ├ Complete-Multi-Generator-Dependencies: terrain + water + biome für Complete-World-Context
+    ├ Dependency-Validation erforderlich für alle 4 Input-Sources vor Final-Settlement-Generation
+    ├ Cross-System-World-Consistency-Checks für realistic Final-Civilization-Integration
+
+    **Output für Final-World-Assembly:**
+    ├ settlement_map → overview_tab für Final-World-Civilization-Layer
+    ├ road_network_map → overview_tab für Infrastructure-Visualization
+    ├ civ_influence_map → overview_tab für Civilization vs. Wilderness-Boundaries
+    ├ settlement_statistics → overview_tab für World-Summary und Export-Metadata
+    ├ Complete-Civilization-State → overview_tab für Final-Export-Ready-World-Assembly
+
+    **Final-World-Integration:**
+    ├ Complete-Civilization-Assembly → Integration aller Generator-Outputs in Final-Playable-World-State
+    ├ Export-Ready-Settlement-Data → High-Quality-Settlement-Maps für Game-Engine-Export oder Image-Export
+    ├ World-Completion-Validation → Final-Cross-System-Consistency für Complete-Realistic-World-Simulation
+    ├ Overview-Tab-Integration → Finale World-Visualization mit Complete-Civilization-Infrastructure-Layer
     """
+
 
 def overview_tab():
     """
