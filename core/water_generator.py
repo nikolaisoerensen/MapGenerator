@@ -1,96 +1,53 @@
 """
 Path: core/water_generator.py
 
-Funktionsweise: Dynamisches Hydrologiesystem mit Erosion und Sedimentation
+Funktionsweise: Dynamisches Hydrologiesystem mit Erosion, Sedimentation und bidirektionaler Terrain-Modifikation
 - Lake-Detection durch Jump Flooding Algorithm für parallele Senken-Identifikation
 - Flussnetzwerk-Aufbau durch Steepest Descent mit Upstream-Akkumulation
 - Strömungsberechnung nach Manning-Gleichung mit adaptiven Querschnitten
 - Bodenfeuchtigkeit durch Gaussian-Diffusion von Gewässern
-- Stream Power Erosion mit Hjulström-Sundborg Transport
-- Realistische Sedimentation mit Transportkapazitäts-Überschreitung
-- Evaporation nach Penman-Gleichung mit Wind- und Temperatureffekten
+- Stream Power Erosion mit iterativer Terrain-Modifikation über LOD-Levels
+- Realistische Sedimentation mit kumulative Akkumulation
+- Evaporation basierend auf statischen Weather-Daten (temp_map, wind_map, humid_map)
 
 Parameter Input:
 - lake_volume_threshold (Mindestvolumen für Seebildung, default 0.1m)
 - rain_threshold (Niederschlagsschwelle für Quellbildung, default 5.0 gH2O/m²)
 - manning_coefficient (Rauheitskoeffizient für Fließgeschwindigkeit, default 0.03)
-- erosion_strength (Erosionsintensität-Multiplikator, default 1.0)
+- erosion_strength (Erosionsintensitäts-Multiplikator, default 1.0)
 - sediment_capacity_factor (Transportkapazitäts-Faktor, default 0.1)
 - evaporation_base_rate (Basis-Verdunstungsrate, default 0.002 m/Tag)
 - diffusion_radius (Bodenfeuchtigkeit-Ausbreitungsradius, default 5.0 Pixel)
 - settling_velocity (Sediment-Sinkgeschwindigkeit, default 0.01 m/s)
+- erosion_iterations_per_lod (Anzahl Erosions-Zyklen pro LOD-Level, default 10)
+- water_seed (Reproduzierbare Zufallsvariation)
 
-data_manager Input:
-- map_seed
-- heightmap
-- slopemap
-- hardness_map (Gesteinshärte-Verteilung)
-- rock_map (RGB-Feld, Gesteinsmassen - R=Sedimentary, G=Igneous, B=Metamorphic mit R+G+B=255)
-- precip_map (2D-Feld, Niederschlag in gH2O/m²)
-- temp_map (2D-Feld, Lufttemperatur in °C)
-- wind_map (2D-Feld, Windvektoren in m/s)
-- humid_map (2D-Feld, Luftfeuchtigkeit in gH2O/m³)
+Dependencies (über DataLODManager):
+- heightmap (von terrain_generator für Orographic-Effects und Flow-Pathfinding)
+- hardness_map (von geology_generator für Erosions-Resistance)
+- precip_map (von weather_generator für Precipitation-driven Water-Sources)
+- temp_map (von weather_generator für Temperature-based Evaporation)
+- wind_map (von weather_generator für Wind-enhanced Evaporation)
 
 Output:
-- water_map (2D-Feld, Gewässertiefen) in m
-- flow_map (2D-Feld, Volumenstrom) in m³/s
-- flow_speed (2D-Feld, Fließgeschwindigkeit) in m/s
-- cross_section (2D-Feld, Flusquerschnitt) in m²
-- soil_moist_map (2D-Feld, Bodenfeuchtigkeit) in %
-- erosion_map (2D-Feld, Erosionsrate) in m/Jahr
-- sedimentation_map (2D-Feld, Sedimentationsrate) in m/Jahr
-- rock_map_updated (RGB-Feld, Gesteinsmassen-Verteilung) - R=Sedimentary, G=Igneous, B=Metamorphic mit R+G+B=255
-- evaporation_map (2D-Feld, Verdunstung) in gH2O/m²/Tag
-- ocean_outflow (Skalär, Wasserabfluss ins Meer) in m³/s
-- water_biomes_map (2D-Array mit Wasser-Klassifikation: 0=kein Wasser, 1=Creek, 2=River, 3=Grand River, 4=Lake)
-
-Klassen:
-HydrologySystemGenerator
-    Funktionsweise: Hauptklasse für dynamisches Hydrologiesystem mit Erosion und Sedimentation
-    Aufgabe: Koordiniert alle hydrologischen Prozesse und Massentransport
-    Methoden: generate_hydrology_system(), simulate_water_cycle(), update_erosion_sedimentation()
-
-LakeDetectionSystem
-    Funktionsweise: Identifiziert Seen durch Jump Flooding Algorithm für parallele Senken-Identifikation
-    Aufgabe: Findet alle potentiellen Seestandorte und deren Einzugsgebiete
-    Methoden: detect_local_minima(), apply_jump_flooding(), classify_lake_basins()
-
-FlowNetworkBuilder
-    Funktionsweise: Baut Flussnetzwerk durch Steepest Descent mit Upstream-Akkumulation
-    Aufgabe: Erstellt flow_map und water_biomes_map mit realistischen Flusssystemen
-    Methoden: calculate_steepest_descent(), accumulate_upstream_flow(), classify_water_bodies()
-
-ManningFlowCalculator
-    Funktionsweise: Berechnet Strömung nach Manning-Gleichung mit adaptiven Querschnitten
-    Aufgabe: Erstellt flow_speed und cross_section für realistische Fließgeschwindigkeiten
-    Methoden: solve_manning_equation(), optimize_channel_geometry(), calculate_hydraulic_radius()
-
-ErosionSedimentationSystem
-    Funktionsweise: Simuliert Stream Power Erosion mit Hjulström-Sundborg Transport
-    Aufgabe: Modifiziert heightmap und rock_map durch realistische Erosions-/Sedimentationsprozesse
-    Methoden: calculate_stream_power(), transport_sediment(), apply_mass_conservation()
-
-SoilMoistureCalculator
-    Funktionsweise: Berechnet Bodenfeuchtigkeit durch Gaussian-Diffusion von Gewässern
-    Aufgabe: Erstellt soil_moist_map für Biome-System und Weather-Evaporation
-    Methoden: apply_gaussian_diffusion(), calculate_groundwater_effects(), integrate_moisture_sources()
-
-EvaporationCalculator
-    Funktionsweise: Berechnet Evaporation nach atmosphärischen Bedingungen
-    Aufgabe: Erstellt evaporation_map basierend auf temp_map, humid_map und wind_map
-    Methoden: calculate_atmospheric_evaporation(), apply_wind_effects(), limit_by_available_water()
+- WaterData-Objekt mit water_map, flow_map, flow_speed, soil_moist_map, water_biomes_map,
+  erosion_map, sedimentation_map, validity_state und LOD-Metadaten
+- Bidirektionale Terrain-Integration: erosion_map und sedimentation_map für DataLODManager.composite_heightmap
+- DataLODManager-Storage für nachfolgende Generatoren (biome, settlement)
 """
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
+from scipy.spatial import distance_matrix
 from collections import deque
 import heapq
+import logging
 from core.base_generator import BaseGenerator
 
 class WaterData:
     """
-    Funktionsweise: Container für alle Water-Daten mit Metainformationen
-    Aufgabe: Speichert alle 11 Hydrologie-Outputs und LOD-Informationen
+    Funktionsweise: Container für alle Water-Daten mit Metainformationen und LOD-System
+    Aufgabe: Speichert alle 11 Hydrologie-Outputs mit LOD-Level und Validity-State
     """
     def __init__(self):
         self.water_map = None              # (height, width) - Gewässertiefen in m
@@ -100,12 +57,15 @@ class WaterData:
         self.soil_moist_map = None         # (height, width) - Bodenfeuchtigkeit in %
         self.erosion_map = None            # (height, width) - Erosionsrate in m/Jahr
         self.sedimentation_map = None      # (height, width) - Sedimentationsrate in m/Jahr
-        self.rock_map_updated = None       # (height, width, 3) - Aktualisierte Gesteinsmassen RGB
         self.evaporation_map = None        # (height, width) - Verdunstung in gH2O/m²/Tag
         self.ocean_outflow = None          # Scalar - Wasserabfluss ins Meer in m³/s
         self.water_biomes_map = None       # (height, width) - Wasser-Klassifikation 0-4
+
+        # LOD-System Integration
         self.lod_level = "LOD64"           # Aktueller LOD-Level
         self.actual_size = 64              # Tatsächliche Kartengröße
+        self.validity_state = "valid"      # Validity-State für Cache-Management
+        self.parameter_hash = None         # Parameter-Hash für Cache-Invalidation
         self.parameters = {}               # Verwendete Parameter für Cache-Management
 
 class LakeDetectionSystem:
@@ -114,40 +74,90 @@ class LakeDetectionSystem:
     Aufgabe: Findet alle potentiellen Seestandorte und deren Einzugsgebiete
     """
 
-    def __init__(self, lake_volume_threshold=0.1):
-        """
-        Funktionsweise: Initialisiert Lake-Detection-System mit Volumen-Schwellwert
-        Aufgabe: Setup der See-Identifikation
-        Parameter: lake_volume_threshold (float) - Mindestvolumen für Seebildung
-        """
+    def __init__(self, lake_volume_threshold=0.1, shader_manager=None):
         self.lake_volume_threshold = lake_volume_threshold
+        self.shader_manager = shader_manager
 
-    def detect_local_minima(self, heightmap):
+    def detect_lakes(self, heightmap, parameters):
         """
-        Funktionsweise: Identifiziert alle lokalen Minima als potentielle See-Seeds
-        Aufgabe: Findet alle Senken in der Heightmap für Jump Flooding
-        Parameter: heightmap (numpy.ndarray) - Höhendaten
-        Returns: List[Tuple] - Liste der lokalen Minima-Koordinaten
+        Funktionsweise: GPU-accelerated Lake-Detection mit Fallback-Strategie
+        Aufgabe: 3-stufiges Fallback-System für robuste Lake-Detection
         """
+        # GPU-Shader (Optimal)
+        if self.shader_manager:
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    "water", "jumpFloodLakes",
+                    {"heightmap": heightmap, "lake_volume_threshold": self.lake_volume_threshold},
+                    parameters
+                )
+                if result.get("success"):
+                    return result["lake_map"], result["valid_lakes"]
+            except Exception as e:
+                logging.warning(f"GPU lake detection failed: {e}, falling back to CPU")
+
+        # CPU-Fallback (Gut)
+        try:
+            return self._cpu_lake_detection(heightmap)
+        except Exception as e:
+            logging.warning(f"CPU lake detection failed: {e}, using simple fallback")
+
+        # Simple-Fallback (Minimal)
+        return self._simple_lake_detection(heightmap)
+
+    def _cpu_lake_detection(self, heightmap):
+        """CPU-optimierte Lake-Detection mit Jump Flooding Algorithm"""
+        height, width = heightmap.shape
+
+        # Lokale Minima finden
+        local_minima = self._detect_local_minima(heightmap)
+        if not local_minima:
+            return np.full((height, width), -1, dtype=np.int32), []
+
+        # Jump Flooding Algorithm
+        lake_map = self._apply_jump_flooding(heightmap, local_minima)
+
+        # Lake-Klassifikation
+        filtered_lake_map, valid_lakes = self._classify_lake_basins(heightmap, lake_map, local_minima)
+
+        return filtered_lake_map, valid_lakes
+
+    def _simple_lake_detection(self, heightmap):
+        """Simple-Fallback: Basis Lake-Detection ohne komplexe Algorithmen"""
+        height, width = heightmap.shape
+        lake_map = np.full((height, width), -1, dtype=np.int32)
+
+        # Sehr einfache Senken-Detection
+        for y in range(1, height-1):
+            for x in range(1, width-1):
+                current = heightmap[y, x]
+                neighbors = [
+                    heightmap[y-1, x], heightmap[y+1, x],
+                    heightmap[y, x-1], heightmap[y, x+1]
+                ]
+                if all(current < neighbor for neighbor in neighbors):
+                    lake_map[y, x] = 0
+
+        return lake_map, [{"seed": (width//2, height//2), "volume": 1.0}]
+
+    def _detect_local_minima(self, heightmap):
+        """Identifiziert alle lokalen Minima als potentielle See-Seeds"""
         height, width = heightmap.shape
         local_minima = []
 
         for y in range(1, height - 1):
             for x in range(1, width - 1):
                 current_height = heightmap[y, x]
-
-                # Prüfe alle 8 Nachbarn
                 is_minimum = True
+
                 for dy in [-1, 0, 1]:
                     for dx in [-1, 0, 1]:
                         if dx == 0 and dy == 0:
                             continue
-
                         neighbor_height = heightmap[y + dy, x + dx]
                         if neighbor_height <= current_height:
                             is_minimum = False
                             break
-
                     if not is_minimum:
                         break
 
@@ -156,13 +166,8 @@ class LakeDetectionSystem:
 
         return local_minima
 
-    def apply_jump_flooding(self, heightmap, lake_seeds):
-        """
-        Funktionsweise: Jump Flooding Algorithm für parallele Senken-Füllung
-        Aufgabe: Bestimmt Einzugsgebiete für alle See-Seeds in O(log n) Zeit
-        Parameter: heightmap, lake_seeds - Höhendaten und See-Seed-Positionen
-        Returns: numpy.ndarray - Lake-ID für jeden Pixel (-1 = kein See)
-        """
+    def _apply_jump_flooding(self, heightmap, lake_seeds):
+        """Jump Flooding Algorithm für parallele Senken-Füllung in O(log n) Zeit"""
         height, width = heightmap.shape
         lake_map = np.full((height, width), -1, dtype=np.int32)
 
@@ -203,7 +208,6 @@ class LakeDetectionSystem:
                                     # Kann Wasser zu diesem Seed fließen?
                                     if current_height >= seed_height:
                                         distance = np.sqrt((x - seed_x) ** 2 + (y - seed_y) ** 2)
-
                                         if distance < closest_distance:
                                             closest_distance = distance
                                             closest_seed = neighbor_seed
@@ -215,25 +219,19 @@ class LakeDetectionSystem:
 
         return lake_map
 
-    def classify_lake_basins(self, heightmap, lake_map, lake_seeds):
-        """
-        Funktionsweise: Klassifiziert See-Becken nach Volumen und validiert Threshold
-        Aufgabe: Filtert See-Kandidaten nach Mindestvolumen
-        Parameter: heightmap, lake_map, lake_seeds - Höhen, Lake-Map und Seeds
-        Returns: Tuple (filtered_lake_map, valid_lakes) - Gefilterte Seen
-        """
+    def _classify_lake_basins(self, heightmap, lake_map, lake_seeds):
+        """Klassifiziert See-Becken nach Volumen und validiert Threshold"""
         height, width = heightmap.shape
         filtered_lake_map = np.full((height, width), -1, dtype=np.int32)
         valid_lakes = []
 
         for lake_id, (seed_x, seed_y) in enumerate(lake_seeds):
-            # Berechne Einzugsgebiet-Volumen
             lake_pixels = np.where(lake_map == lake_id)
 
             if len(lake_pixels[0]) == 0:
                 continue
 
-            # Volumen-Berechnung: Differenz zwischen Wasserstand und Terrain
+            # Volumen-Berechnung
             seed_height = heightmap[seed_y, seed_x]
             total_volume = 0.0
 
@@ -245,7 +243,6 @@ class LakeDetectionSystem:
 
             # Volume-Threshold prüfen
             if total_volume >= self.lake_volume_threshold:
-                # See ist gültig
                 for py, px in zip(lake_pixels[0], lake_pixels[1]):
                     filtered_lake_map[py, px] = len(valid_lakes)
 
@@ -264,40 +261,86 @@ class FlowNetworkBuilder:
     Aufgabe: Erstellt flow_map und water_biomes_map mit realistischen Flusssystemen
     """
 
-    def __init__(self, rain_threshold=5.0):
-        """
-        Funktionsweise: Initialisiert Flow-Network-Builder mit Niederschlags-Schwellwert
-        Aufgabe: Setup der Flussnetzwerk-Erstellung
-        Parameter: rain_threshold (float) - Niederschlagsschwelle für Quellbildung
-        """
+    def __init__(self, rain_threshold=5.0, shader_manager=None):
         self.rain_threshold = rain_threshold
+        self.shader_manager = shader_manager
 
-    def calculate_steepest_descent(self, heightmap):
+    def build_flow_network(self, heightmap, precip_map, lake_map, parameters, lod_iterations):
         """
-        Funktionsweise: Berechnet Steepest Descent Flow-Richtungen für jeden Pixel
-        Aufgabe: Bestimmt optimale Fließrichtung zu steilstem Nachbarn
-        Parameter: heightmap (numpy.ndarray) - Höhendaten
-        Returns: numpy.ndarray - Flow-Richtungen (8-directional encoding)
+        Funktionsweise: GPU-accelerated Flow-Network mit LOD-optimierten Iterationen
+        Aufgabe: 3-stufiges Fallback-System für robuste Flow-Network-Generation
         """
+        # GPU-Shader (Optimal)
+        if self.shader_manager:
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    "water", "steepestDescentFlow",
+                    {
+                        "heightmap": heightmap,
+                        "precip_map": precip_map,
+                        "lake_map": lake_map,
+                        "rain_threshold": self.rain_threshold,
+                        "max_iterations": lod_iterations["flow"]
+                    },
+                    parameters
+                )
+                if result.get("success"):
+                    flow_accumulation = result["flow_accumulation"]
+                    water_biomes_map = self._classify_water_bodies(flow_accumulation, lake_map)
+                    return flow_accumulation, water_biomes_map
+            except Exception as e:
+                logging.warning(f"GPU flow network failed: {e}, falling back to CPU")
+
+        # CPU-Fallback (Gut)
+        try:
+            return self._cpu_flow_network(heightmap, precip_map, lake_map, lod_iterations)
+        except Exception as e:
+            logging.warning(f"CPU flow network failed: {e}, using simple fallback")
+
+        # Simple-Fallback (Minimal)
+        return self._simple_flow_network(heightmap, precip_map, lake_map)
+
+    def _cpu_flow_network(self, heightmap, precip_map, lake_map, lod_iterations):
+        """CPU-optimierte Flow-Network-Generation"""
+        # Steepest Descent berechnen
+        flow_directions = self._calculate_steepest_descent(heightmap)
+
+        # Upstream-Akkumulation mit LOD-optimierten Iterationen
+        flow_accumulation = self._accumulate_upstream_flow(
+            flow_directions, precip_map, lake_map, lod_iterations["flow"]
+        )
+
+        # Water-Biomes klassifizieren
+        water_biomes_map = self._classify_water_bodies(flow_accumulation, lake_map)
+
+        return flow_accumulation, water_biomes_map
+
+    def _simple_flow_network(self, heightmap, precip_map, lake_map):
+        """Simple-Fallback: Basis Flow-Network ohne komplexe Akkumulation"""
+        height, width = heightmap.shape
+        flow_accumulation = np.where(precip_map > self.rain_threshold, precip_map, 0)
+        water_biomes_map = np.zeros((height, width), dtype=np.uint8)
+        water_biomes_map[lake_map >= 0] = 4  # Lake
+        return flow_accumulation, water_biomes_map
+
+    def _calculate_steepest_descent(self, heightmap):
+        """Berechnet Steepest Descent Flow-Richtungen für jeden Pixel"""
         height, width = heightmap.shape
         flow_directions = np.zeros((height, width), dtype=np.int8)
 
-        # 8-Richtungs-Encoding: 0=E, 1=SE, 2=S, 3=SW, 4=W, 5=NW, 6=N, 7=NE
         direction_offsets = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 
         for y in range(height):
             for x in range(width):
                 current_height = heightmap[y, x]
                 steepest_gradient = 0.0
-                steepest_direction = -1  # -1 = Senke/keine Richtung
+                steepest_direction = -1
 
                 for direction, (dx, dy) in enumerate(direction_offsets):
                     nx, ny = x + dx, y + dy
 
                     if 0 <= nx < width and 0 <= ny < height:
                         neighbor_height = heightmap[ny, nx]
-
-                        # Gradient berechnen (Höhendifferenz / Distanz)
                         height_diff = current_height - neighbor_height
                         distance = np.sqrt(dx ** 2 + dy ** 2)
                         gradient = height_diff / distance
@@ -310,1087 +353,17 @@ class FlowNetworkBuilder:
 
         return flow_directions
 
-    def accumulate_upstream_flow(self, flow_directions, precip_map, lake_map):
-        """
-        Funktionsweise: Akkumuliert Upstream-Flow iterativ für Flussnetzwerk-Aufbau
-        Aufgabe: Berechnet Wassermengen durch Upstream-Akkumulation
-        Parameter: flow_directions, precip_map, lake_map - Flow-Richtungen, Niederschlag, Seen
-        Returns: numpy.ndarray - Akkumulierte Flow-Mengen
-        """
+    def _accumulate_upstream_flow(self, flow_directions, precip_map, lake_map, max_iterations):
+        """LOD-optimierte Upstream-Akkumulation mit begrenzten Iterationen"""
         height, width = flow_directions.shape
         flow_accumulation = np.zeros((height, width), dtype=np.float32)
 
-        # Initiale Wassermengen: Niederschlag über Schwellwert
-        initial_water = np.where(precip_map > self.rain_threshold, precip_map, 0)
-        flow_accumulation = np.copy(initial_water)
-
-        # Iterative Akkumulation (bis Konvergenz)
-        direction_offsets = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
-
-        max_iterations = height * width // 10
-        for iteration in range(max_iterations):
-            new_accumulation = np.copy(flow_accumulation)
-            changed = False
-
-            for y in range(height):
-                for x in range(width):
-                    # Sammle Wasser von allen Zellen die hierher fließen
-                    incoming_water = 0.0
-
-                    # Prüfe alle Nachbarn
-                    for source_dir, (dx, dy) in enumerate(direction_offsets):
-                        sx, sy = x - dx, y - dy  # Source-Position
-
-                        if 0 <= sx < width and 0 <= sy < height:
-                            source_flow_dir = flow_directions[sy, sx]
-
-                            # Fließt Source-Zelle zu aktueller Position?
-                            if source_flow_dir == source_dir:
-                                incoming_water += flow_accumulation[sy, sx]
-
-                    # See-Handling: Seen akkumulieren Wasser ohne Weiterleitung
-                    if lake_map[y, x] >= 0:
-                        new_accumulation[y, x] = initial_water[y, x] + incoming_water
-                    else:
-                        new_accumulation[y, x] = initial_water[y, x] + incoming_water
-
-                    if abs(new_accumulation[y, x] - flow_accumulation[y, x]) > 0.01:
-                        changed = True
-
-            flow_accumulation = new_accumulation
-
-            if not changed:
-                break
-
-        return flow_accumulation
-
-    def classify_water_bodies(self, flow_accumulation, lake_map):
-        """
-        Funktionsweise: Klassifiziert Wasserkörper basierend auf Flussgröße
-        Aufgabe: Erstellt water_biomes_map mit verschiedenen Gewässertypen
-        Parameter: flow_accumulation, lake_map - Flow-Mengen und Seen
-        Returns: numpy.ndarray - Water-Biomes (0=kein Wasser, 1=Creek, 2=River, 3=Grand River, 4=Lake)
-        """
-        height, width = flow_accumulation.shape
-        water_biomes_map = np.zeros((height, width), dtype=np.uint8)
-
-        # Seen zuerst markieren
-        water_biomes_map[lake_map >= 0] = 4  # Lake
-
-        # Flow-basierte Klassifikation
-        for y in range(height):
-            for x in range(width):
-                if lake_map[y, x] >= 0:
-                    continue  # Bereits als See markiert
-
-                flow_amount = flow_accumulation[y, x]
-
-                if flow_amount >= 100.0:  # Grand River
-                    water_biomes_map[y, x] = 3
-                elif flow_amount >= 20.0:  # River
-                    water_biomes_map[y, x] = 2
-                elif flow_amount >= 5.0:  # Creek
-                    water_biomes_map[y, x] = 1
-                # else: 0 = kein Wasser
-
-        return water_biomes_map
-
-
-class ManningFlowCalculator:
-    """
-    Funktionsweise: Berechnet Strömung nach Manning-Gleichung mit adaptiven Querschnitten
-    Aufgabe: Erstellt flow_speed und cross_section für realistische Fließgeschwindigkeiten
-    """
-
-    def __init__(self, manning_coefficient=0.03):
-        """
-        Funktionsweise: Initialisiert Manning-Flow-Calculator mit Rauheitskoeffizient
-        Aufgabe: Setup der Manning-Gleichungs-Berechnung
-        Parameter: manning_coefficient (float) - Rauheitskoeffizient für Fließgeschwindigkeit
-        """
-        self.manning_n = manning_coefficient
-
-    def solve_manning_equation(self, flow_accumulation, slopemap, heightmap):
-        """
-        Funktionsweise: Löst Manning-Gleichung für Fließgeschwindigkeit v = (1/n) * R^(2/3) * S^(1/2)
-        Aufgabe: Berechnet realistische Fließgeschwindigkeiten
-        Parameter: flow_accumulation, slopemap, heightmap - Flow-Mengen, Slopes, Höhen
-        Returns: Tuple (flow_speed, cross_section) - Geschwindigkeit und Querschnitt
-        """
-        height, width = flow_accumulation.shape
-        flow_speed = np.zeros((height, width), dtype=np.float32)
-        cross_section = np.zeros((height, width), dtype=np.float32)
-
-        for y in range(height):
-            for x in range(width):
-                flow_rate = flow_accumulation[y, x]  # m³/s
-
-                if flow_rate < 1.0:  # Zu wenig Wasser für Manning-Berechnung
-                    continue
-
-                # Slope-Magnitude berechnen
-                slope_x = slopemap[y, x, 0] if x < slopemap.shape[1] else 0
-                slope_y = slopemap[y, x, 1] if y < slopemap.shape[0] else 0
-                slope = np.sqrt(slope_x ** 2 + slope_y ** 2)
-                slope = max(0.001, slope)  # Minimum-Slope für Berechnung
-
-                # Optimaler Querschnitt durch iterative Lösung
-                optimal_area, hydraulic_radius = self.optimize_channel_geometry(
-                    flow_rate, slope, heightmap, x, y
-                )
-
-                # Manning-Geschwindigkeit berechnen
-                if hydraulic_radius > 0:
-                    velocity = (1.0 / self.manning_n) * (hydraulic_radius ** (2.0 / 3.0)) * (slope ** 0.5)
-
-                    # Kontinuitätsgleichung: Q = A * v
-                    if velocity > 0:
-                        required_area = flow_rate / velocity
-                        cross_section[y, x] = required_area
-                        flow_speed[y, x] = velocity
-
-        return flow_speed, cross_section
-
-    def optimize_channel_geometry(self, flow_rate, slope, heightmap, x, y):
-        """
-        Funktionsweise: Optimiert Kanal-Geometrie für gegebene Bedingungen
-        Aufgabe: Bestimmt optimale Breite-zu-Tiefe-Verhältnis basierend auf Geländeform
-        Parameter: flow_rate, slope, heightmap, x, y - Flow-Rate, Slope und Position
-        Returns: Tuple (area, hydraulic_radius) - Optimaler Querschnitt
-        """
-        # Tal-Breite analysieren
-        valley_width = self._analyze_valley_width(heightmap, x, y)
-
-        # Breite-zu-Tiefe-Verhältnis basierend auf Tal-Konfinierung
-        if valley_width < 5:  # Enges Tal
-            width_to_depth_ratio = 2.0  # Tiefe, schmale Flüsse
-        elif valley_width < 20:  # Mittleres Tal
-            width_to_depth_ratio = 5.0
-        else:  # Weites Tal/Ebene
-            width_to_depth_ratio = 10.0  # Breite, flache Flüsse
-
-        # Iterative Optimierung für hydraulisch optimale Form
-        best_area = 0
-        best_hydraulic_radius = 0
-
-        for depth in np.linspace(0.1, 5.0, 20):
-            width = depth * width_to_depth_ratio
-            area = width * depth
-            wetted_perimeter = width + 2 * depth
-            hydraulic_radius = area / wetted_perimeter if wetted_perimeter > 0 else 0
-
-            # Manning-Geschwindigkeit für diese Geometrie
-            velocity = (1.0 / self.manning_n) * (hydraulic_radius ** (2.0 / 3.0)) * (slope ** 0.5)
-            theoretical_flow = area * velocity
-
-            # Optimum: Geometrie die am besten zu gegebenem Flow passt
-            if abs(theoretical_flow - flow_rate) < abs(best_area * velocity - flow_rate):
-                best_area = area
-                best_hydraulic_radius = hydraulic_radius
-
-        return best_area, best_hydraulic_radius
-
-    def calculate_hydraulic_radius(self, width, depth):
-        """
-        Funktionsweise: Berechnet hydraulischen Radius R = A / P
-        Aufgabe: Standard hydraulischer Radius für rechteckigen Querschnitt
-        Parameter: width, depth - Breite und Tiefe des Kanals
-        Returns: float - Hydraulischer Radius
-        """
-        area = width * depth
-        wetted_perimeter = width + 2 * depth
-
-        if wetted_perimeter > 0:
-            return area / wetted_perimeter
-        else:
-            return 0.0
-
-    def _analyze_valley_width(self, heightmap, center_x, center_y):
-        """
-        Funktionsweise: Analysiert Tal-Breite durch Suche nach Geländeanstiegen
-        Aufgabe: Bestimmt Konfinierung des Flusses durch Topographie
-        """
-        height, width = heightmap.shape
-
-        if center_x < 0 or center_x >= width or center_y < 0 or center_y >= height:
-            return 10.0  # Default-Breite
-
-        center_height = heightmap[center_y, center_x]
-        height_threshold = center_height + 20.0  # 20m Anstieg als Tal-Grenze
-
-        # Suche in alle Richtungen nach Tal-Rändern
-        max_distance = 0
-
-        for angle in np.linspace(0, 2 * np.pi, 16):  # 16 Richtungen
-            dx = np.cos(angle)
-            dy = np.sin(angle)
-
-            distance = 0
-            for step in range(1, 50):  # Max 50 Pixel Suchradius
-                test_x = center_x + int(dx * step)
-                test_y = center_y + int(dy * step)
-
-                if test_x < 0 or test_x >= width or test_y < 0 or test_y >= height:
-                    break
-
-                test_height = heightmap[test_y, test_x]
-                if test_height > height_threshold:
-                    distance = step
-                    break
-
-            max_distance = max(max_distance, distance)
-
-        return max_distance * 2  # Tal-Breite = 2 * Radius
-
-
-class SoilMoistureCalculator:
-    """
-    Funktionsweise: Berechnet Bodenfeuchtigkeit durch Gaussian-Diffusion von Gewässern
-    Aufgabe: Erstellt soil_moist_map für Biome-System und Weather-Evaporation
-    """
-
-    def __init__(self, diffusion_radius=5.0):
-        """
-        Funktionsweise: Initialisiert Soil-Moisture-Calculator mit Diffusions-Radius
-        Aufgabe: Setup der Bodenfeuchtigkeit-Berechnung
-        Parameter: diffusion_radius (float) - Ausbreitungsradius der Bodenfeuchtigkeit
-        """
-        self.diffusion_radius = diffusion_radius
-
-    def apply_gaussian_diffusion(self, water_biomes_map, flow_accumulation):
-        """
-        Funktionsweise: Wendet Gaussian-Diffusion von Gewässern in Umgebung an
-        Aufgabe: Simuliert kapillare Ausbreitung und Grundwasser-Effekte
-        Parameter: water_biomes_map, flow_accumulation - Wasser-Klassifikation und Flow-Mengen
-        Returns: numpy.ndarray - Bodenfeuchtigkeit in %
-        """
-        height, width = water_biomes_map.shape
-        soil_moisture = np.zeros((height, width), dtype=np.float32)
-
-        # Direkte Wasserpräsenz: maximale Feuchtigkeit
-        water_mask = water_biomes_map > 0
-        soil_moisture[water_mask] = 100.0
-
-        # Kapillare Ausbreitung (enger Filter)
-        capillary_source = np.zeros_like(soil_moisture)
-        capillary_source[water_mask] = 100.0
-        capillary_moisture = gaussian_filter(capillary_source, sigma=2.0)
-
-        # Grundwasser-Effekte (weiter Filter)
-        groundwater_source = np.zeros_like(soil_moisture)
-
-        # Gewichte basierend auf Wasser-Typ
-        for y in range(height):
-            for x in range(width):
-                water_type = water_biomes_map[y, x]
-                flow_amount = flow_accumulation[y, x]
-
-                if water_type == 4:  # Lake
-                    groundwater_source[y, x] = 80.0
-                elif water_type == 3:  # Grand River
-                    groundwater_source[y, x] = 60.0 + min(20.0, flow_amount * 0.1)
-                elif water_type == 2:  # River
-                    groundwater_source[y, x] = 40.0 + min(20.0, flow_amount * 0.2)
-                elif water_type == 1:  # Creek
-                    groundwater_source[y, x] = 20.0 + min(10.0, flow_amount * 0.3)
-
-        groundwater_moisture = gaussian_filter(groundwater_source, sigma=self.diffusion_radius)
-
-        # Kombiniere beide Effekte (Maximum)
-        combined_moisture = np.maximum(capillary_moisture, groundwater_moisture)
-
-        # Direkte Wasserpräsenz überschreibt alles
-        combined_moisture[water_mask] = 100.0
-
-        return combined_moisture
-
-    def calculate_groundwater_effects(self, heightmap, water_biomes_map):
-            """
-            Funktionsweise: Berechnet Grundwasser-Effekte basierend auf Topographie
-            Aufgabe: Simuliert Grundwasser-Strömung in niedrigere Bereiche
-            Parameter: heightmap, water_biomes_map - Höhen und Wasser-Klassifikation
-            Returns: numpy.ndarray - Grundwasser-Beitrag zur Bodenfeuchtigkeit
-            """
-            height, width = heightmap.shape
-            groundwater_effect = np.zeros((height, width), dtype=np.float32)
-
-            # Finde alle Wasser-Quellen
-            water_sources = np.where(water_biomes_map > 0)
-
-            for water_y, water_x in zip(water_sources[0], water_sources[1]):
-                water_height = heightmap[water_y, water_x]
-                water_type = water_biomes_map[water_y, water_x]
-
-                # Grundwasser-Stärke basierend auf Wasser-Typ
-                if water_type == 4:  # Lake
-                    base_strength = 50.0
-                elif water_type == 3:  # Grand River
-                    base_strength = 30.0
-                elif water_type == 2:  # River
-                    base_strength = 20.0
-                else:  # Creek
-                    base_strength = 10.0
-
-                # Ausbreitung in niedrigere Bereiche
-                for y in range(max(0, water_y - 20), min(height, water_y + 21)):
-                    for x in range(max(0, water_x - 20), min(width, water_x + 21)):
-                        target_height = heightmap[y, x]
-
-                        # Nur wenn Ziel niedriger liegt
-                        if target_height <= water_height:
-                            distance = np.sqrt((x - water_x)**2 + (y - water_y)**2)
-                            height_diff = water_height - target_height
-
-                            if distance > 0:
-                                # Grundwasser-Intensität durch Distanz und Höhendifferenz
-                                intensity = base_strength * (height_diff / max(1.0, distance))
-                                intensity = min(intensity, base_strength)  # Cap maximum
-
-                                groundwater_effect[y, x] = max(groundwater_effect[y, x], intensity)
-
-            return groundwater_effect
-
-    def integrate_moisture_sources(self, base_moisture, precipitation_moisture, groundwater_moisture):
-        """
-        Funktionsweise: Integriert alle Feuchtigkeits-Quellen zu finaler soil_moist_map
-        Aufgabe: Kombiniert Wasser-Diffusion, Niederschlag und Grundwasser
-        Parameter: base_moisture, precipitation_moisture, groundwater_moisture - Verschiedene Feuchtigkeits-Quellen
-        Returns: numpy.ndarray - Finale Bodenfeuchtigkeit
-        """
-        # Kombiniere alle Quellen (additiv bis Maximum 100%)
-        total_moisture = base_moisture + precipitation_moisture * 0.1 + groundwater_moisture
-
-        # Begrenze auf [0, 100]%
-        total_moisture = np.clip(total_moisture, 0, 100)
-
-        return total_moisture
-
-
-class EvaporationCalculator:
-    """
-    Funktionsweise: Berechnet Evaporation nach atmosphärischen Bedingungen
-    Aufgabe: Erstellt evaporation_map basierend auf temp_map, humid_map und wind_map
-    """
-    
-    def __init__(self, evaporation_base_rate=0.002):
-        """
-        Funktionsweise: Initialisiert Evaporation-Calculator mit Basis-Verdunstungsrate
-        Aufgabe: Setup der Evaporations-Berechnung
-        Parameter: evaporation_base_rate (float) - Basis-Verdunstungsrate in m/Tag
-        """
-        self.base_rate = evaporation_base_rate
-    
-    def calculate_atmospheric_evaporation(self, temp_map, humid_map, wind_map, water_biomes_map):
-        """
-        Funktionsweise: Berechnet Evaporation basierend auf atmosphärischen Sättigungseffekten
-        Aufgabe: Realistische Verdunstung abhängig von Luftfeuchtigkeit, Temperatur und Wind
-        Parameter: temp_map, humid_map, wind_map, water_biomes_map - Atmosphärische Bedingungen und Wasser
-        Returns: numpy.ndarray - Evaporation in gH2O/m²/Tag
-        """
-        height, width = temp_map.shape
-        evaporation_map = np.zeros((height, width), dtype=np.float32)
-        
-        for y in range(height):
-            for x in range(width):
-                # Nur an Wasseroberflächen
-                if water_biomes_map[y, x] == 0:
-                    continue
-                
-                temperature = temp_map[y, x]
-                humidity = humid_map[y, x]
-                wind_speed = np.sqrt(wind_map[y, x, 0]**2 + wind_map[y, x, 1]**2)
-                
-                # Maximale Wasserdampfdichte (Magnus-Formel)
-                max_vapor_density = 5.0 * np.exp(0.06 * temperature)
-                
-                # Aktuelle relative Feuchtigkeit
-                if max_vapor_density > 0:
-                    relative_humidity = humidity / max_vapor_density
-                    relative_humidity = min(1.0, relative_humidity)
-                else:
-                    relative_humidity = 1.0
-                
-                # Evaporation reduziert sich mit steigender Luftfeuchtigkeit
-                humidity_factor = 1.0 - relative_humidity
-                
-                # Temperatur-Faktor (exponentiell mit Temperatur)
-                temp_factor = np.exp(temperature / 20.0) if temperature > 0 else 0.1
-                
-                # Wind-Faktor (lineare Verstärkung)
-                wind_factor = 1.0 + wind_speed * 0.2
-                
-                # Basis-Evaporation
-                evaporation_rate = self.base_rate * humidity_factor * temp_factor * wind_factor * 1000  # Conversion zu gH2O/m²/Tag
-                
-                evaporation_map[y, x] = evaporation_rate
-        
-        return evaporation_map
-    
-    def apply_wind_effects(self, base_evaporation, wind_map):
-        """
-        Funktionsweise: Wendet Wind-Verstärkung auf Evaporation an
-        Aufgabe: Wind beschleunigt Dampftransport von Wasseroberfläche
-        Parameter: base_evaporation, wind_map - Basis-Evaporation und Wind-Daten
-        Returns: numpy.ndarray - Wind-verstärkte Evaporation
-        """
-        height, width = base_evaporation.shape
-        wind_enhanced_evap = np.copy(base_evaporation)
-        
-        for y in range(height):
-            for x in range(width):
-                if base_evaporation[y, x] > 0:
-                    wind_speed = np.sqrt(wind_map[y, x, 0]**2 + wind_map[y, x, 1]**2)
-                    
-                    # Wind-Verstärkung: +20% pro m/s Wind
-                    wind_enhancement = 1.0 + wind_speed * 0.2
-                    wind_enhanced_evap[y, x] *= wind_enhancement
-        
-        return wind_enhanced_evap
-    
-    def limit_by_available_water(self, evaporation_map, water_biomes_map, flow_accumulation):
-        """
-        Funktionsweise: Begrenzt Evaporation durch verfügbare Wasseroberfläche
-        Aufgabe: Physikalische Begrenzung der Verdunstung durch Wasserverfügbarkeit
-        Parameter: evaporation_map, water_biomes_map, flow_accumulation - Evaporation, Wasser-Typ, Flow-Mengen
-        Returns: numpy.ndarray - Begrenzte Evaporation
-        """
-        height, width = evaporation_map.shape
-        limited_evaporation = np.copy(evaporation_map)
-        
-        for y in range(height):
-            for x in range(width):
-                water_type = water_biomes_map[y, x]
-                potential_evap = evaporation_map[y, x]
-                
-                if water_type == 0:  # Kein Wasser
-                    limited_evaporation[y, x] = 0.0
-                elif water_type == 1:  # Creek
-                    # Kleine Gewässer: begrenzte Oberfläche
-                    max_evap = min(potential_evap, 50.0)
-                    limited_evaporation[y, x] = max_evap
-                elif water_type == 2:  # River
-                    max_evap = min(potential_evap, 100.0)
-                    limited_evaporation[y, x] = max_evap
-                elif water_type == 3:  # Grand River
-                    max_evap = min(potential_evap, 200.0)
-                    limited_evaporation[y, x] = max_evap
-                else:  # Lake
-                    # Seen: große Oberfläche, keine Begrenzung
-                    limited_evaporation[y, x] = potential_evap
-        
-        return limited_evaporation
-
-
-class ErosionSedimentationSystem:
-    """
-    Funktionsweise: Simuliert Stream Power Erosion mit Hjulström-Sundborg Transport
-    Aufgabe: Modifiziert heightmap und rock_map durch realistische Erosions-/Sedimentationsprozesse
-    """
-    
-    def __init__(self, erosion_strength=1.0, sediment_capacity_factor=0.1, settling_velocity=0.01):
-        """
-        Funktionsweise: Initialisiert Erosion-Sedimentation-System mit Erosions-Parametern
-        Aufgabe: Setup der Erosions- und Sedimentations-Berechnung
-        Parameter: erosion_strength, sediment_capacity_factor, settling_velocity - Erosions-Parameter
-        """
-        self.erosion_strength = erosion_strength
-        self.capacity_factor = sediment_capacity_factor
-        self.settling_velocity = settling_velocity
-    
-    def calculate_stream_power(self, flow_accumulation, flow_speed, slopemap, hardness_map):
-        """
-        Funktionsweise: Berechnet Stream Power Erosion E = K * (τ - τc)
-        Aufgabe: Erosionsrate basierend auf Scherspannung und Gesteinshärte
-        Parameter: flow_accumulation, flow_speed, slopemap, hardness_map - Flow-Daten und Gesteinshärte
-        Returns: numpy.ndarray - Erosionsrate in m/Jahr
-        """
-        height, width = flow_accumulation.shape
-        erosion_map = np.zeros((height, width), dtype=np.float32)
-        
-        # Konstanten
-        rho_water = 1000.0  # kg/m³
-        gravity = 9.81      # m/s²
-        
-        for y in range(height):
-            for x in range(width):
-                flow_rate = flow_accumulation[y, x]
-                velocity = flow_speed[y, x]
-                
-                if flow_rate < 1.0 or velocity < 0.1:  # Zu wenig Wasser/Geschwindigkeit
-                    continue
-                
-                # Scherspannung τ = ρ * g * h * S
-                slope_x = slopemap[y, x, 0] if x < slopemap.shape[1] else 0
-                slope_y = slopemap[y, x, 1] if y < slopemap.shape[0] else 0
-                slope = np.sqrt(slope_x**2 + slope_y**2)
-                
-                # Approximiere Wassertiefe aus Flow-Rate und Geschwindigkeit
-                if velocity > 0:
-                    water_depth = flow_rate / (velocity * 10.0)  # Angenommene Breite: 10m
-                else:
-                    water_depth = 0
-                
-                # Scherspannung
-                shear_stress = rho_water * gravity * water_depth * slope
-                
-                # Kritische Scherspannung basierend auf Gesteinshärte
-                hardness = hardness_map[y, x] if x < hardness_map.shape[1] and y < hardness_map.shape[0] else 50.0
-                critical_shear = hardness * 10.0  # Pa (empirisch)
-                
-                # Erosion nur wenn Scherspannung kritischen Wert überschreitet
-                if shear_stress > critical_shear:
-                    excess_stress = shear_stress - critical_shear
-                    
-                    # Stream Power Erosion: E = K * (τ - τc) * v²
-                    erosion_rate = self.erosion_strength * excess_stress * (velocity**2) / hardness
-                    
-                    # Begrenzung auf realistische Werte (max 0.1 m/Jahr)
-                    erosion_rate = min(erosion_rate * 1e-6, 0.1)  # Skalierung
-                    
-                    erosion_map[y, x] = erosion_rate
-        
-        return erosion_map
-    
-    def transport_sediment(self, erosion_map, flow_speed, flow_directions, flow_accumulation):
-        """
-        Funktionsweise: Transportiert Sediment entlang Fließrichtungen mit Hjulström-Diagramm
-        Aufgabe: Sediment-Transport und Kapazitäts-basierte Ablagerung
-        Parameter: erosion_map, flow_speed, flow_directions, flow_accumulation - Erosion und Flow-Daten
-        Returns: numpy.ndarray - Sedimentationsrate in m/Jahr
-        """
-        height, width = erosion_map.shape
-        sedimentation_map = np.zeros((height, width), dtype=np.float32)
-        sediment_load = np.zeros((height, width), dtype=np.float32)
-        
-        # Transport-Kapazität berechnen (Hjulström-Diagramm vereinfacht)
-        transport_capacity = np.zeros((height, width), dtype=np.float32)
-        
-        for y in range(height):
-            for x in range(width):
-                velocity = flow_speed[y, x]
-                
-                # Transportkapazität ∝ v^2.5 (nach Hjulström)
-                if velocity > 0.1:  # Mindestgeschwindigkeit für Transport
-                    transport_capacity[y, x] = self.capacity_factor * (velocity ** 2.5)
-        
-        # Upstream-zu-Downstream Transport simulation
-        direction_offsets = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
-        
-        # Mehrere Iterationen für Sediment-Transport
-        for iteration in range(10):
-            new_sediment_load = np.copy(sediment_load)
-            
-            for y in range(height):
-                for x in range(width):
-                    # Erosion fügt Sediment hinzu
-                    new_sediment_load[y, x] += erosion_map[y, x]
-                    
-                    # Transport zu Downstream-Zelle
-                    flow_dir = flow_directions[y, x]
-                    
-                    if 0 <= flow_dir < 8:
-                        dx, dy = direction_offsets[flow_dir]
-                        nx, ny = x + dx, y + dy
-                        
-                        if 0 <= nx < width and 0 <= ny < height:
-                            # Transport-Effizienz basierend auf Geschwindigkeit
-                            velocity = flow_speed[y, x]
-                            if velocity > 0.1:
-                                transport_efficiency = min(1.0, velocity / 2.0)  # 100% bei 2 m/s
-                                
-                                transported_sediment = new_sediment_load[y, x] * transport_efficiency
-                                new_sediment_load[y, x] -= transported_sediment
-                                new_sediment_load[ny, nx] += transported_sediment
-                    
-                    # Sedimentation wenn Transportkapazität überschritten
-                    current_load = new_sediment_load[y, x]
-                    capacity = transport_capacity[y, x]
-                    
-                    if current_load > capacity:
-                        excess_sediment = current_load - capacity
-                        settling_rate = excess_sediment * self.settling_velocity
-                        
-                        sedimentation_map[y, x] += settling_rate
-                        new_sediment_load[y, x] -= settling_rate
-            
-            sediment_load = new_sediment_load
-        
-        return sedimentation_map
-    
-    def apply_mass_conservation(self, rock_map, erosion_map, sedimentation_map):
-        """
-        Funktionsweise: Wendet Massenerhaltung auf rock_map an (R+G+B=255)
-        Aufgabe: Erhält Gesteinsmassen-Verhältnisse bei Erosion/Sedimentation
-        Parameter: rock_map, erosion_map, sedimentation_map - Gesteine und Erosions-/Sedimentations-Änderungen
-        Returns: numpy.ndarray - Aktualisierte rock_map mit Massenerhaltung
-        """
-        height, width = rock_map.shape[:2]
-        updated_rock_map = np.copy(rock_map).astype(np.float32)
-        
-        for y in range(height):
-            for x in range(width):
-                erosion_rate = erosion_map[y, x]
-                sedimentation_rate = sedimentation_map[y, x]
-                
-                # Net-Änderung: Sedimentation - Erosion
-                net_change = sedimentation_rate - erosion_rate
-                
-                if net_change != 0:
-                    # Aktuelle Gesteinsverhältnisse
-                    current_rocks = updated_rock_map[y, x, :].copy()
-                    total_mass = np.sum(current_rocks)
-                    
-                    if total_mass > 0:
-                        # Verhältnisse erhalten
-                        ratios = current_rocks / total_mass
-                        
-                        # Änderung proportional anwenden
-                        change_amount = net_change * 10.0  # Skalierung für sichtbare Effekte
-                        updated_rocks = current_rocks + ratios * change_amount
-                        
-                        # Negative Werte verhindern
-                        updated_rocks = np.maximum(updated_rocks, 1.0)
-                        
-                        # Re-normalisierung auf 255
-                        new_total = np.sum(updated_rocks)
-                        if new_total > 0:
-                            normalized_rocks = (updated_rocks / new_total) * 255
-                            updated_rock_map[y, x, :] = normalized_rocks
-        
-        return updated_rock_map.astype(np.uint8)
-
-
-class HydrologySystemGenerator(BaseGenerator):
-    """
-    Funktionsweise: Hauptklasse für dynamisches Hydrologiesystem mit BaseGenerator-API
-    Aufgabe: Koordiniert alle hydrologischen Prozesse mit LOD-System und 8-facher Dependency-Resolution
-    """
-
-    def __init__(self, map_seed=42):
-        """
-        Funktionsweise: Initialisiert Hydrologie-System mit BaseGenerator und optimierten Sub-Komponenten
-        Aufgabe: Setup aller hydrologischen Systeme mit LOD-bewussten Parametern
-        Parameter: map_seed (int) - Globaler Seed für reproduzierbare Hydrologie
-        """
-        super().__init__(map_seed)
-
-        # Standard-Parameter (werden durch _load_default_parameters überschrieben)
-        self.lake_volume_threshold = 0.1
-        self.rain_threshold = 5.0
-        self.manning_coefficient = 0.03
-        self.erosion_strength = 1.0
-        self.sediment_capacity_factor = 0.1
-        self.evaporation_base_rate = 0.002
-        self.diffusion_radius = 5.0
-        self.settling_velocity = 0.01
-
-    def _load_default_parameters(self):
-        """
-        Funktionsweise: Lädt WATER-Parameter aus value_default.py
-        Aufgabe: Standard-Parameter für Hydrologie-Generierung
-        Returns: dict - Alle Standard-Parameter für Water
-        """
-        from gui.config.value_default import WATER
-
-        return {
-            'lake_volume_threshold': WATER.LAKE_VOLUME_THRESHOLD["default"],
-            'rain_threshold': WATER.RAIN_THRESHOLD["default"],
-            'manning_coefficient': WATER.MANNING_COEFFICIENT["default"],
-            'erosion_strength': WATER.EROSION_STRENGTH["default"],
-            'sediment_capacity_factor': WATER.SEDIMENT_CAPACITY_FACTOR["default"],
-            'evaporation_base_rate': WATER.EVAPORATION_BASE_RATE["default"],
-            'diffusion_radius': WATER.DIFFUSION_RADIUS["default"],
-            'settling_velocity': WATER.SETTLING_VELOCITY["default"]
-        }
-
-    def _get_dependencies(self, data_manager):
-        """
-        Funktionsweise: Holt alle 8 benötigten Dependencies aus DataManager
-        Aufgabe: Komplexeste Dependency-Resolution aller Generatoren
-        Parameter: data_manager - DataManager-Instanz
-        Returns: dict - Alle 8 benötigten Input-Arrays
-        """
-        if not data_manager:
-            raise Exception("DataManager required for Water generation")
-
-        dependencies = {}
-
-        # Terrain-Dependencies (2)
-        heightmap = data_manager.get_terrain_data("heightmap")
-        slopemap = data_manager.get_terrain_data("slopemap")
-
-        if heightmap is None:
-            raise Exception("Heightmap dependency not available - run Terrain generator first")
-        if slopemap is None:
-            raise Exception("Slopemap dependency not available - run Terrain generator first")
-
-        dependencies['heightmap'] = heightmap
-        dependencies['slopemap'] = slopemap
-
-        # Geology-Dependencies (2)
-        hardness_map = data_manager.get_geology_data("hardness_map")
-        rock_map = data_manager.get_geology_data("rock_map")
-
-        if hardness_map is None:
-            raise Exception("Hardness_map dependency not available - run Geology generator first")
-        if rock_map is None:
-            raise Exception("Rock_map dependency not available - run Geology generator first")
-
-        dependencies['hardness_map'] = hardness_map
-        dependencies['rock_map'] = rock_map
-
-        # Weather-Dependencies (4)
-        precip_map = data_manager.get_weather_data("precip_map")
-        temp_map = data_manager.get_weather_data("temp_map")
-        wind_map = data_manager.get_weather_data("wind_map")
-        humid_map = data_manager.get_weather_data("humid_map")
-
-        if precip_map is None:
-            raise Exception("Precip_map dependency not available - run Weather generator first")
-        if temp_map is None:
-            raise Exception("Temp_map dependency not available - run Weather generator first")
-        if wind_map is None:
-            raise Exception("Wind_map dependency not available - run Weather generator first")
-        if humid_map is None:
-            raise Exception("Humid_map dependency not available - run Weather generator first")
-
-        dependencies['precip_map'] = precip_map
-        dependencies['temp_map'] = temp_map
-        dependencies['wind_map'] = wind_map
-        dependencies['humid_map'] = humid_map
-
-        self.logger.debug(f"All 8 Water dependencies loaded successfully")
-
-        return dependencies
-
-    def _execute_generation(self, lod, dependencies, parameters):
-        """
-        Funktionsweise: Führt Water-Generierung mit LOD-optimierten Algorithmen aus
-        Aufgabe: Kernlogik der Hydrologie-Generierung mit 6 Hauptphasen und Performance-Optimierung
-        Parameter: lod, dependencies, parameters
-        Returns: WaterData-Objekt mit allen 11 Hydrologie-Outputs
-        """
-        # Dependencies extrahieren
-        heightmap = dependencies['heightmap']
-        slopemap = dependencies['slopemap']
-        hardness_map = dependencies['hardness_map']
-        rock_map = dependencies['rock_map']
-        precip_map = dependencies['precip_map']
-        temp_map = dependencies['temp_map']
-        wind_map = dependencies['wind_map']
-        humid_map = dependencies['humid_map']
-
-        # Parameter aktualisieren
-        self.lake_volume_threshold = parameters['lake_volume_threshold']
-        self.rain_threshold = parameters['rain_threshold']
-        self.manning_coefficient = parameters['manning_coefficient']
-        self.erosion_strength = parameters['erosion_strength']
-        self.sediment_capacity_factor = parameters['sediment_capacity_factor']
-        self.evaporation_base_rate = parameters['evaporation_base_rate']
-        self.diffusion_radius = parameters['diffusion_radius']
-        self.settling_velocity = parameters['settling_velocity']
-
-        # LOD-Größe bestimmen
-        target_size = self._get_lod_size(lod, heightmap.shape[0])
-
-        # Alle Arrays auf Zielgröße interpolieren
-        heightmap = self._interpolate_array(heightmap, target_size)
-        slopemap = self._interpolate_array(slopemap, target_size)
-        hardness_map = self._interpolate_array(hardness_map, target_size)
-        rock_map = self._interpolate_array(rock_map, target_size)
-        precip_map = self._interpolate_array(precip_map, target_size)
-        temp_map = self._interpolate_array(temp_map, target_size)
-        wind_map = self._interpolate_array(wind_map, target_size)
-        humid_map = self._interpolate_array(humid_map, target_size)
-
-        # LOD-spezifische Iterationsanzahl
-        lod_iterations = self._get_lod_iterations(lod)
-
-        # Phase 1: Lake Detection (0% - 15%)
-        self._update_progress("Lake Detection", 5, "Detecting local minima...")
-        lake_system = LakeDetectionSystem(self.lake_volume_threshold)
-        lake_seeds = lake_system.detect_local_minima(heightmap)
-
-        self._update_progress("Lake Detection", 10, "Applying jump flooding algorithm...")
-        lake_map = lake_system.apply_jump_flooding(heightmap, lake_seeds)
-
-        self._update_progress("Lake Detection", 15, "Classifying lake basins...")
-        filtered_lake_map, valid_lakes = lake_system.classify_lake_basins(heightmap, lake_map, lake_seeds)
-
-        # Phase 2: Flow Network Building (15% - 40%)
-        self._update_progress("Flow Network", 20, "Calculating steepest descent...")
-        flow_builder = FlowNetworkBuilder(self.rain_threshold)
-        flow_directions = flow_builder.calculate_steepest_descent(heightmap)
-
-        self._update_progress("Flow Network", 30,
-                              f"Accumulating upstream flow ({lod_iterations['flow']} iterations)...")
-        flow_accumulation = self._accumulate_upstream_flow_optimized(
-            flow_directions, precip_map, filtered_lake_map, lod_iterations['flow']
-        )
-
-        self._update_progress("Flow Network", 38, "Classifying water bodies...")
-        water_biomes_map = flow_builder.classify_water_bodies(flow_accumulation, filtered_lake_map)
-
-        # Phase 3: Manning Flow Calculation (40% - 60%)
-        self._update_progress("Manning Flow", 45, "Solving Manning equation...")
-        manning_calc = ManningFlowCalculator(self.manning_coefficient)
-        flow_speed, cross_section = self._solve_manning_optimized(
-            manning_calc, flow_accumulation, slopemap, heightmap, lod_iterations['manning']
-        )
-
-        # Phase 4: Erosion-Sedimentation (60% - 85%)
-        self._update_progress("Erosion-Sedimentation", 65, "Calculating stream power...")
-        erosion_system = ErosionSedimentationSystem(
-            self.erosion_strength, self.sediment_capacity_factor, self.settling_velocity
-        )
-        erosion_map = erosion_system.calculate_stream_power(
-            flow_accumulation, flow_speed, slopemap, hardness_map
-        )
-
-        self._update_progress("Erosion-Sedimentation", 75,
-                              f"Transporting sediment ({lod_iterations['sediment']} iterations)...")
-        sedimentation_map = self._transport_sediment_optimized(
-            erosion_system, erosion_map, flow_speed, flow_directions,
-            flow_accumulation, lod_iterations['sediment']
-        )
-
-        self._update_progress("Erosion-Sedimentation", 82, "Applying mass conservation...")
-        rock_map_updated = erosion_system.apply_mass_conservation(rock_map, erosion_map, sedimentation_map)
-
-        # Phase 5: Soil Moisture (85% - 95%)
-        self._update_progress("Soil Moisture", 88, "Calculating gaussian diffusion...")
-        moisture_calc = SoilMoistureCalculator(self.diffusion_radius)
-        base_soil_moisture = moisture_calc.apply_gaussian_diffusion(water_biomes_map, flow_accumulation)
-
-        self._update_progress("Soil Moisture", 92, "Calculating groundwater effects...")
-        groundwater_moisture = moisture_calc.calculate_groundwater_effects(heightmap, water_biomes_map)
-        precipitation_moisture = precip_map * 0.5
-        soil_moist_map = moisture_calc.integrate_moisture_sources(
-            base_soil_moisture, precipitation_moisture, groundwater_moisture
-        )
-
-        # Phase 6: Evaporation (95% - 100%)
-        self._update_progress("Evaporation", 96, "Calculating atmospheric evaporation...")
-        evap_calc = EvaporationCalculator(self.evaporation_base_rate)
-        base_evaporation = evap_calc.calculate_atmospheric_evaporation(
-            temp_map, humid_map, wind_map, water_biomes_map
-        )
-        wind_enhanced_evap = evap_calc.apply_wind_effects(base_evaporation, wind_map)
-        evaporation_map = evap_calc.limit_by_available_water(
-            wind_enhanced_evap, water_biomes_map, flow_accumulation
-        )
-
-        # Finale Berechnungen
-        self._update_progress("Finalization", 98, "Creating water depth map...")
-        water_map = self._create_water_depth_map(water_biomes_map, flow_accumulation, cross_section)
-        ocean_outflow = self._calculate_ocean_outflow(flow_accumulation, flow_directions, heightmap.shape)
-
-        # WaterData-Objekt erstellen
-        water_data = WaterData()
-        water_data.water_map = water_map
-        water_data.flow_map = flow_accumulation
-        water_data.flow_speed = flow_speed
-        water_data.cross_section = cross_section
-        water_data.soil_moist_map = soil_moist_map
-        water_data.erosion_map = erosion_map
-        water_data.sedimentation_map = sedimentation_map
-        water_data.rock_map_updated = rock_map_updated
-        water_data.evaporation_map = evaporation_map
-        water_data.ocean_outflow = ocean_outflow
-        water_data.water_biomes_map = water_biomes_map
-        water_data.lod_level = lod
-        water_data.actual_size = target_size
-        water_data.parameters = parameters.copy()
-
-        self.logger.debug(f"Water generation complete - LOD: {lod}, size: {target_size}")
-
-        return water_data
-
-    def _save_to_data_manager(self, data_manager, result, parameters):
-        """
-        Funktionsweise: Speichert alle 11 Water-Outputs im DataManager
-        Aufgabe: Automatische Speicherung aller Hydrologie-Outputs mit Parameter-Tracking
-        Parameter: data_manager, result (WaterData), parameters
-        """
-        if isinstance(result, WaterData):
-            # WaterData-Objekt in einzelne Arrays aufteilen für DataManager
-            data_manager.set_water_data("water_map", result.water_map, parameters)
-            data_manager.set_water_data("flow_map", result.flow_map, parameters)
-            data_manager.set_water_data("flow_speed", result.flow_speed, parameters)
-            data_manager.set_water_data("cross_section", result.cross_section, parameters)
-            data_manager.set_water_data("soil_moist_map", result.soil_moist_map, parameters)
-            data_manager.set_water_data("erosion_map", result.erosion_map, parameters)
-            data_manager.set_water_data("sedimentation_map", result.sedimentation_map, parameters)
-            data_manager.set_water_data("rock_map_updated", result.rock_map_updated, parameters)
-            data_manager.set_water_data("evaporation_map", result.evaporation_map, parameters)
-            data_manager.set_water_data("ocean_outflow", result.ocean_outflow, parameters)
-            data_manager.set_water_data("water_biomes_map", result.water_biomes_map, parameters)
-
-            self.logger.debug("WaterData object with 11 outputs saved to DataManager")
-        else:
-            self.logger.warning(f"Unknown water result format: {type(result)}")
-
-    def update_seed(self, new_seed):
-        """
-        Funktionsweise: Aktualisiert Seed für alle Water-Komponenten
-        Aufgabe: Seed-Update für reproduzierbare Hydrologie
-        Parameter: new_seed (int) - Neuer Seed
-        """
-        if new_seed != self.map_seed:
-            super().update_seed(new_seed)
-
-    def _get_lod_size(self, lod, original_size):
-        """
-        Funktionsweise: Bestimmt Zielgröße basierend auf LOD-Level
-        Aufgabe: LOD-System für Water mit gleicher Logik wie andere Generatoren
-        """
-        lod_sizes = {"LOD64": 64, "LOD128": 128, "LOD256": 256}
-
-        if lod == "FINAL":
-            return original_size
-        else:
-            return lod_sizes.get(lod, 64)
-
-    def _get_lod_iterations(self, lod):
-        """
-        Funktionsweise: Bestimmt LOD-spezifische Iterationsanzahl für Performance-Optimierung
-        Aufgabe: Drastische Performance-Verbesserung durch weniger Iterationen bei niedrigen LODs
-        Parameter: lod (str) - LOD-Level
-        Returns: dict - Iterationsanzahl für verschiedene Algorithmen
-        """
-        if lod == "LOD64":
-            return {
-                'flow': 50,  # Statt height*width//10 (409)
-                'sediment': 3,  # Statt 10
-                'manning': 5  # Statt 20
-            }
-        elif lod == "LOD128":
-            return {
-                'flow': 100,  # Statt 1638
-                'sediment': 5,  # Statt 10
-                'manning': 10  # Statt 20
-            }
-        elif lod == "LOD256":
-            return {
-                'flow': 200,  # Statt 6553
-                'sediment': 7,  # Statt 10
-                'manning': 15  # Statt 20
-            }
-        else:  # FINAL
-            return {
-                'flow': 400,  # Vernünftige Grenze statt //10
-                'sediment': 10,  # Original
-                'manning': 20  # Original
-            }
-
-    def _interpolate_array(self, array, target_size):
-        """
-        Funktionsweise: Interpoliert Arrays aller Typen auf neue Größe
-        Aufgabe: Universelle Interpolation für 2D, 3D und spezielle Array-Formate
-        """
-        if array is None:
-            return None
-
-        if len(array.shape) == 2:
-            # 2D Array (heightmap, temp_map, etc.)
-            return self._interpolate_2d(array, target_size)
-        elif len(array.shape) == 3:
-            if array.shape[2] == 2:
-                # 3D Array mit 2 Kanälen (wind_map, slopemap)
-                result = np.zeros((target_size, target_size, 2), dtype=array.dtype)
-                result[:, :, 0] = self._interpolate_2d(array[:, :, 0], target_size)
-                result[:, :, 1] = self._interpolate_2d(array[:, :, 1], target_size)
-                return result
-            elif array.shape[2] == 3:
-                # 3D Array mit 3 Kanälen (rock_map RGB)
-                result = np.zeros((target_size, target_size, 3), dtype=array.dtype)
-                for channel in range(3):
-                    result[:, :, channel] = self._interpolate_2d(array[:, :, channel], target_size)
-
-                # Massenerhaltung für rock_map: R+G+B=255
-                if array.dtype == np.uint8:  # Vermutlich rock_map
-                    result = self._ensure_mass_conservation(result)
-
-                return result
-
-        raise ValueError(f"Unsupported array shape for interpolation: {array.shape}")
-
-    def _interpolate_2d(self, array, target_size):
-        """
-        Funktionsweise: Bilineare Interpolation für 2D-Arrays
-        Aufgabe: Smooth Upscaling ohne Artefakte
-        """
-        old_size = array.shape[0]
-        if old_size == target_size:
-            return array.copy()
-
-        scale_factor = (old_size - 1) / (target_size - 1)
-        interpolated = np.zeros((target_size, target_size), dtype=array.dtype)
-
-        for new_y in range(target_size):
-            for new_x in range(target_size):
-                old_x = new_x * scale_factor
-                old_y = new_y * scale_factor
-
-                x0, y0 = int(old_x), int(old_y)
-                x1, y1 = min(x0 + 1, old_size - 1), min(y0 + 1, old_size - 1)
-
-                fx, fy = old_x - x0, old_y - y0
-
-                # Bilineare Interpolation
-                h00, h10 = array[y0, x0], array[y0, x1]
-                h01, h11 = array[y1, x0], array[y1, x1]
-
-                h0 = h00 * (1 - fx) + h10 * fx
-                h1 = h01 * (1 - fx) + h11 * fx
-
-                interpolated[new_y, new_x] = h0 * (1 - fy) + h1 * fy
-
-        return interpolated
-
-    def _ensure_mass_conservation(self, rock_map):
-        """
-        Funktionsweise: Stellt sicher dass R+G+B=255 für rock_map nach Interpolation
-        Aufgabe: Massenerhaltung wie bei Geology-Generator
-        Parameter: rock_map (numpy.ndarray) - RGB rock_map
-        Returns: numpy.ndarray - Massenerhaltende rock_map
-        """
-        height, width = rock_map.shape[:2]
-        conserved_map = np.copy(rock_map).astype(np.float32)
-
-        for y in range(height):
-            for x in range(width):
-                r, g, b = conserved_map[y, x, :]
-                total = r + g + b
-
-                if total > 0:
-                    # Normalisierung auf 255
-                    conserved_map[y, x, 0] = (r / total) * 255
-                    conserved_map[y, x, 1] = (g / total) * 255
-                    conserved_map[y, x, 2] = (b / total) * 255
-                else:
-                    # Gleichverteilung bei total=0
-                    conserved_map[y, x, :] = [85, 85, 85]
-
-        return conserved_map.astype(np.uint8)
-
-    # LOD-optimierte Algorithmen
-
-    def _accumulate_upstream_flow_optimized(self, flow_directions, precip_map, lake_map, max_iterations):
-        """
-        Funktionsweise: LOD-optimierte Flow-Accumulation mit begrenzten Iterationen
-        Aufgabe: Drastische Performance-Verbesserung durch intelligente Iteration-Limits
-        """
-        height, width = flow_directions.shape
-        flow_accumulation = np.zeros((height, width), dtype=np.float32)
-
-        # Initiale Wassermengen: Niederschlag über Schwellwert
+        # Initiale Wassermengen
         initial_water = np.where(precip_map > self.rain_threshold, precip_map, 0)
         flow_accumulation = np.copy(initial_water)
 
         direction_offsets = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 
-        # LOD-spezifische Iterationsanzahl (viel niedriger!)
         for iteration in range(max_iterations):
             new_accumulation = np.copy(flow_accumulation)
             changed = False
@@ -1421,16 +394,81 @@ class HydrologySystemGenerator(BaseGenerator):
             flow_accumulation = new_accumulation
 
             if not changed:
-                self.logger.debug(f"Flow accumulation converged after {iteration + 1} iterations")
                 break
 
         return flow_accumulation
 
-    def _solve_manning_optimized(self, manning_calc, flow_accumulation, slopemap, heightmap, depth_tests):
+    def _classify_water_bodies(self, flow_accumulation, lake_map):
+        """Klassifiziert Wasserkörper basierend auf Flussgröße"""
+        height, width = flow_accumulation.shape
+        water_biomes_map = np.zeros((height, width), dtype=np.uint8)
+
+        # Seen zuerst markieren
+        water_biomes_map[lake_map >= 0] = 4  # Lake
+
+        # Flow-basierte Klassifikation
+        for y in range(height):
+            for x in range(width):
+                if lake_map[y, x] >= 0:
+                    continue
+
+                flow_amount = flow_accumulation[y, x]
+
+                if flow_amount >= 100.0:  # Grand River
+                    water_biomes_map[y, x] = 3
+                elif flow_amount >= 20.0:  # River
+                    water_biomes_map[y, x] = 2
+                elif flow_amount >= 5.0:  # Creek
+                    water_biomes_map[y, x] = 1
+
+        return water_biomes_map
+
+
+class ManningFlowCalculator:
+    """
+    Funktionsweise: Berechnet Strömung nach Manning-Gleichung mit adaptiven Querschnitten
+    Aufgabe: Erstellt flow_speed und cross_section für realistische Fließgeschwindigkeiten
+    """
+
+    def __init__(self, manning_coefficient=0.03, shader_manager=None):
+        self.manning_n = manning_coefficient
+        self.shader_manager = shader_manager
+
+    def calculate_flow_properties(self, flow_accumulation, slopemap, heightmap, parameters, lod_iterations):
         """
-        Funktionsweise: LOD-optimierte Manning-Gleichung mit reduzierten Iterationen
-        Aufgabe: Performance-Optimierung durch weniger Depth-Tests
+        Funktionsweise: GPU-accelerated Manning-Flow mit adaptiven Querschnitten
+        Aufgabe: 3-stufiges Fallback-System für realistische Fließgeschwindigkeiten
         """
+        # GPU-Shader (Optimal)
+        if self.shader_manager:
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    "water", "manningFlowCalculation",
+                    {
+                        "flow_accumulation": flow_accumulation,
+                        "slopemap": slopemap,
+                        "heightmap": heightmap,
+                        "manning_n": self.manning_n,
+                        "depth_tests": lod_iterations["manning"]
+                    },
+                    parameters
+                )
+                if result.get("success"):
+                    return result["flow_speed"], result["cross_section"]
+            except Exception as e:
+                logging.warning(f"GPU Manning calculation failed: {e}, falling back to CPU")
+
+        # CPU-Fallback (Gut)
+        try:
+            return self._cpu_manning_calculation(flow_accumulation, slopemap, heightmap, lod_iterations)
+        except Exception as e:
+            logging.warning(f"CPU Manning calculation failed: {e}, using simple fallback")
+
+        # Simple-Fallback (Minimal)
+        return self._simple_flow_calculation(flow_accumulation)
+
+    def _cpu_manning_calculation(self, flow_accumulation, slopemap, heightmap, lod_iterations):
+        """CPU-optimierte Manning-Gleichung mit adaptiven Querschnitten"""
         height, width = flow_accumulation.shape
         flow_speed = np.zeros((height, width), dtype=np.float32)
         cross_section = np.zeros((height, width), dtype=np.float32)
@@ -1448,14 +486,14 @@ class HydrologySystemGenerator(BaseGenerator):
                 slope = np.sqrt(slope_x ** 2 + slope_y ** 2)
                 slope = max(0.001, slope)
 
-                # Optimaler Querschnitt mit reduzierten Iterationen
-                optimal_area, hydraulic_radius = self._optimize_channel_geometry_lod(
-                    flow_rate, slope, heightmap, x, y, depth_tests
+                # Optimaler Querschnitt
+                optimal_area, hydraulic_radius = self._optimize_channel_geometry(
+                    flow_rate, slope, heightmap, x, y, lod_iterations["manning"]
                 )
 
                 # Manning-Geschwindigkeit
                 if hydraulic_radius > 0:
-                    velocity = (1.0 / manning_calc.manning_n) * (hydraulic_radius ** (2.0 / 3.0)) * (slope ** 0.5)
+                    velocity = (1.0 / self.manning_n) * (hydraulic_radius ** (2.0 / 3.0)) * (slope ** 0.5)
 
                     if velocity > 0:
                         required_area = flow_rate / velocity
@@ -1464,13 +502,16 @@ class HydrologySystemGenerator(BaseGenerator):
 
         return flow_speed, cross_section
 
-    def _optimize_channel_geometry_lod(self, flow_rate, slope, heightmap, x, y, depth_tests):
-        """
-        Funktionsweise: LOD-optimierte Kanal-Geometrie-Optimierung
-        Aufgabe: Weniger Iterationen für bessere Performance
-        """
-        # Tal-Breite analysieren (vereinfacht)
-        valley_width = self._analyze_valley_width_simple(heightmap, x, y)
+    def _simple_flow_calculation(self, flow_accumulation):
+        """Simple-Fallback: Basis Fließgeschwindigkeits-Approximation"""
+        height, width = flow_accumulation.shape
+        flow_speed = np.sqrt(flow_accumulation + 1e-6) * 0.1  # Vereinfachte Geschwindigkeit
+        cross_section = flow_accumulation * 0.01  # Vereinfachter Querschnitt
+        return flow_speed, cross_section
+
+    def _optimize_channel_geometry(self, flow_rate, slope, heightmap, x, y, depth_tests):
+        """LOD-optimierte Kanal-Geometrie-Optimierung"""
+        valley_width = self._analyze_valley_width(heightmap, x, y)
 
         if valley_width < 5:
             width_to_depth_ratio = 2.0
@@ -1479,17 +520,16 @@ class HydrologySystemGenerator(BaseGenerator):
         else:
             width_to_depth_ratio = 10.0
 
-        # Reduzierte Iterationen basierend auf LOD
         best_area = 0
         best_hydraulic_radius = 0
 
-        for depth in np.linspace(0.1, 5.0, depth_tests):  # LOD-spezifische Anzahl
+        for depth in np.linspace(0.1, 5.0, depth_tests):
             width = depth * width_to_depth_ratio
             area = width * depth
             wetted_perimeter = width + 2 * depth
             hydraulic_radius = area / wetted_perimeter if wetted_perimeter > 0 else 0
 
-            velocity = (1.0 / self.manning_coefficient) * (hydraulic_radius ** (2.0 / 3.0)) * (slope ** 0.5)
+            velocity = (1.0 / self.manning_n) * (hydraulic_radius ** (2.0 / 3.0)) * (slope ** 0.5)
             theoretical_flow = area * velocity
 
             if abs(theoretical_flow - flow_rate) < abs(best_area * velocity - flow_rate):
@@ -1498,11 +538,8 @@ class HydrologySystemGenerator(BaseGenerator):
 
         return best_area, best_hydraulic_radius
 
-    def _analyze_valley_width_simple(self, heightmap, center_x, center_y):
-        """
-        Funktionsweise: Vereinfachte Tal-Breite-Analyse für bessere Performance
-        Aufgabe: Schnellere Tal-Erkennung mit weniger Richtungen
-        """
+    def _analyze_valley_width(self, heightmap, center_x, center_y):
+        """Vereinfachte Tal-Breite-Analyse für bessere Performance"""
         height, width = heightmap.shape
 
         if center_x < 0 or center_x >= width or center_y < 0 or center_y >= height:
@@ -1513,13 +550,12 @@ class HydrologySystemGenerator(BaseGenerator):
 
         max_distance = 0
 
-        # Nur 8 Richtungen statt 16 für Performance
         for angle in np.linspace(0, 2 * np.pi, 8):
             dx = np.cos(angle)
             dy = np.sin(angle)
 
             distance = 0
-            for step in range(1, 25):  # Reduzierter Suchradius für Performance
+            for step in range(1, 25):
                 test_x = center_x + int(dx * step)
                 test_y = center_y + int(dy * step)
 
@@ -1535,12 +571,145 @@ class HydrologySystemGenerator(BaseGenerator):
 
         return max_distance * 2
 
-    def _transport_sediment_optimized(self, erosion_system, erosion_map, flow_speed, flow_directions,
-                                      flow_accumulation, sediment_iterations):
+
+class ErosionSedimentationSystem:
+    """
+    Funktionsweise: Simuliert Stream Power Erosion mit iterativen Terrain-Modifikationen
+    Aufgabe: Modifiziert Landschaft durch erosion_map und sedimentation_map mit realistischem Sediment-Transport
+    """
+
+    def __init__(self, erosion_strength=1.0, sediment_capacity_factor=0.1, settling_velocity=0.01, shader_manager=None):
+        self.erosion_strength = erosion_strength
+        self.capacity_factor = sediment_capacity_factor
+        self.settling_velocity = settling_velocity
+        self.shader_manager = shader_manager
+
+    def simulate_erosion_sedimentation(self, flow_accumulation, flow_speed, flow_directions, hardness_map, parameters, lod_iterations):
         """
-        Funktionsweise: LOD-optimierte Sediment-Transport mit reduzierten Iterationen
-        Aufgabe: Performance-Optimierung durch weniger Transport-Iterationen
+        Funktionsweise: GPU-accelerated Erosion-Sedimentation mit iterativen Terrain-Modifikationen
+        Aufgabe: 3-stufiges Fallback-System für realistische Landschafts-Evolution
         """
+        # GPU-Shader (Optimal)
+        if self.shader_manager:
+            try:
+                erosion_result = self.shader_manager.request_shader_operation(
+                    "water", "streamPowerErosion",
+                    {
+                        "flow_accumulation": flow_accumulation,
+                        "flow_speed": flow_speed,
+                        "hardness_map": hardness_map,
+                        "erosion_strength": self.erosion_strength
+                    },
+                    parameters
+                )
+
+                if erosion_result.get("success"):
+                    erosion_map = erosion_result["erosion_map"]
+
+                    transport_result = self.shader_manager.request_shader_operation(
+                        "water", "sedimentTransport",
+                        {
+                            "erosion_map": erosion_map,
+                            "flow_speed": flow_speed,
+                            "flow_directions": flow_directions,
+                            "flow_accumulation": flow_accumulation,
+                            "capacity_factor": self.capacity_factor,
+                            "settling_velocity": self.settling_velocity,
+                            "iterations": lod_iterations["sediment"]
+                        },
+                        parameters
+                    )
+
+                    if transport_result.get("success"):
+                        return erosion_map, transport_result["sedimentation_map"]
+
+            except Exception as e:
+                logging.warning(f"GPU erosion simulation failed: {e}, falling back to CPU")
+
+        # CPU-Fallback (Gut)
+        try:
+            return self._cpu_erosion_sedimentation(flow_accumulation, flow_speed, flow_directions, hardness_map, lod_iterations)
+        except Exception as e:
+            logging.warning(f"CPU erosion simulation failed: {e}, using simple fallback")
+
+        # Simple-Fallback (Minimal)
+        return self._simple_erosion_sedimentation(flow_accumulation, hardness_map)
+
+    def _cpu_erosion_sedimentation(self, flow_accumulation, flow_speed, flow_directions, hardness_map, lod_iterations):
+        """CPU-optimierte Erosion-Sedimentation mit Stream Power"""
+        # Stream Power Erosion berechnen
+        erosion_map = self._calculate_stream_power_erosion(flow_accumulation, flow_speed, hardness_map)
+
+        # Sediment-Transport mit LOD-optimierten Iterationen
+        sedimentation_map = self._transport_sediment_optimized(
+            erosion_map, flow_speed, flow_directions, flow_accumulation, lod_iterations["sediment"]
+        )
+
+        return erosion_map, sedimentation_map
+
+    def _simple_erosion_sedimentation(self, flow_accumulation, hardness_map):
+        """Simple-Fallback: Basis Erosion ohne komplexe Transport-Berechnungen"""
+        height, width = flow_accumulation.shape
+        erosion_map = np.zeros((height, width), dtype=np.float32)
+        sedimentation_map = np.zeros((height, width), dtype=np.float32)
+
+        # Sehr vereinfachte Erosion basierend auf Flow-Stärke
+        erosion_factor = self.erosion_strength * 0.001
+        for y in range(height):
+            for x in range(width):
+                flow_strength = flow_accumulation[y, x]
+                hardness = hardness_map[y, x] if x < hardness_map.shape[1] and y < hardness_map.shape[0] else 50.0
+
+                if flow_strength > 10.0:
+                    erosion_rate = erosion_factor * flow_strength / max(hardness, 1.0)
+                    erosion_map[y, x] = min(erosion_rate, 0.1)  # Max 0.1m/Jahr
+
+                    # Einfache Sedimentation in niedrigeren Bereichen
+                    if y < height - 1 and flow_strength > 5.0:
+                        sedimentation_map[y + 1, x] = erosion_rate * 0.5
+
+        return erosion_map, sedimentation_map
+
+    def _calculate_stream_power_erosion(self, flow_accumulation, flow_speed, hardness_map):
+        """Stream Power Erosion: E = K * (τ - τc) mit Scherspannung"""
+        height, width = flow_accumulation.shape
+        erosion_map = np.zeros((height, width), dtype=np.float32)
+
+        rho_water = 1000.0  # kg/m³
+        gravity = 9.81      # m/s²
+
+        for y in range(height):
+            for x in range(width):
+                flow_rate = flow_accumulation[y, x]
+                velocity = flow_speed[y, x]
+
+                if flow_rate < 1.0 or velocity < 0.1:
+                    continue
+
+                # Approximiere Wassertiefe aus Flow-Rate und Geschwindigkeit
+                water_depth = flow_rate / (velocity * 10.0) if velocity > 0 else 0
+
+                # Vereinfachte Slope-Schätzung
+                slope = velocity / 10.0  # Grobe Approximation
+
+                # Scherspannung
+                shear_stress = rho_water * gravity * water_depth * slope
+
+                # Kritische Scherspannung basierend auf Gesteinshärte
+                hardness = hardness_map[y, x] if x < hardness_map.shape[1] and y < hardness_map.shape[0] else 50.0
+                critical_shear = hardness * 10.0
+
+                # Erosion nur wenn Scherspannung kritischen Wert überschreitet
+                if shear_stress > critical_shear:
+                    excess_stress = shear_stress - critical_shear
+                    erosion_rate = self.erosion_strength * excess_stress * (velocity**2) / hardness
+                    erosion_rate = min(erosion_rate * 1e-6, 0.1)  # Skalierung und Begrenzung
+                    erosion_map[y, x] = erosion_rate
+
+        return erosion_map
+
+    def _transport_sediment_optimized(self, erosion_map, flow_speed, flow_directions, flow_accumulation, sediment_iterations):
+        """LOD-optimierte Sediment-Transport mit reduzierten Iterationen"""
         height, width = erosion_map.shape
         sedimentation_map = np.zeros((height, width), dtype=np.float32)
         sediment_load = np.zeros((height, width), dtype=np.float32)
@@ -1552,11 +721,11 @@ class HydrologySystemGenerator(BaseGenerator):
             for x in range(width):
                 velocity = flow_speed[y, x]
                 if velocity > 0.1:
-                    transport_capacity[y, x] = erosion_system.capacity_factor * (velocity ** 2.5)
+                    transport_capacity[y, x] = self.capacity_factor * (velocity ** 2.5)
 
         direction_offsets = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 
-        # LOD-spezifische Iterationen (3-10 statt immer 10)
+        # LOD-spezifische Iterationen
         for iteration in range(sediment_iterations):
             new_sediment_load = np.copy(sediment_load)
 
@@ -1576,7 +745,6 @@ class HydrologySystemGenerator(BaseGenerator):
                             velocity = flow_speed[y, x]
                             if velocity > 0.1:
                                 transport_efficiency = min(1.0, velocity / 2.0)
-
                                 transported_sediment = new_sediment_load[y, x] * transport_efficiency
                                 new_sediment_load[y, x] -= transported_sediment
                                 new_sediment_load[ny, nx] += transported_sediment
@@ -1587,8 +755,7 @@ class HydrologySystemGenerator(BaseGenerator):
 
                     if current_load > capacity:
                         excess_sediment = current_load - capacity
-                        settling_rate = excess_sediment * erosion_system.settling_velocity
-
+                        settling_rate = excess_sediment * self.settling_velocity
                         sedimentation_map[y, x] += settling_rate
                         new_sediment_load[y, x] -= settling_rate
 
@@ -1596,11 +763,629 @@ class HydrologySystemGenerator(BaseGenerator):
 
         return sedimentation_map
 
+
+class SoilMoistureCalculator:
+    """
+    Funktionsweise: Berechnet Bodenfeuchtigkeit durch Gaussian-Diffusion von Gewässern
+    Aufgabe: Erstellt soil_moist_map für Biome-System und Weather-Evaporation
+    """
+
+    def __init__(self, diffusion_radius=5.0, shader_manager=None):
+        self.diffusion_radius = diffusion_radius
+        self.shader_manager = shader_manager
+
+    def calculate_soil_moisture(self, water_biomes_map, flow_accumulation, parameters):
+        """
+        Funktionsweise: GPU-accelerated Soil-Moisture mit Multi-Radius-Filter
+        Aufgabe: 3-stufiges Fallback-System für realistische Feuchtigkeits-Verteilung
+        """
+        # GPU-Shader (Optimal)
+        if self.shader_manager:
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    "water", "soilMoistureGaussian",
+                    {
+                        "water_biomes_map": water_biomes_map,
+                        "flow_accumulation": flow_accumulation,
+                        "diffusion_radius": self.diffusion_radius
+                    },
+                    parameters
+                )
+                if result.get("success"):
+                    return result["soil_moisture"]
+            except Exception as e:
+                logging.warning(f"GPU soil moisture calculation failed: {e}, falling back to CPU")
+
+        # CPU-Fallback (Gut)
+        try:
+            return self._cpu_soil_moisture_calculation(water_biomes_map, flow_accumulation)
+        except Exception as e:
+            logging.warning(f"CPU soil moisture calculation failed: {e}, using simple fallback")
+
+        # Simple-Fallback (Minimal)
+        return self._simple_soil_moisture_calculation(water_biomes_map)
+
+    def _cpu_soil_moisture_calculation(self, water_biomes_map, flow_accumulation):
+        """CPU-optimierte Gaussian-Diffusion mit Multi-Radius-Filter"""
+        height, width = water_biomes_map.shape
+        soil_moisture = np.zeros((height, width), dtype=np.float32)
+
+        # Direkte Wasserpräsenz: maximale Feuchtigkeit
+        water_mask = water_biomes_map > 0
+        soil_moisture[water_mask] = 100.0
+
+        # Kapillare Ausbreitung (enger Filter)
+        capillary_source = np.zeros_like(soil_moisture)
+        capillary_source[water_mask] = 100.0
+        capillary_moisture = gaussian_filter(capillary_source, sigma=2.0)
+
+        # Grundwasser-Effekte (weiter Filter)
+        groundwater_source = np.zeros_like(soil_moisture)
+
+        for y in range(height):
+            for x in range(width):
+                water_type = water_biomes_map[y, x]
+                flow_amount = flow_accumulation[y, x]
+
+                if water_type == 4:  # Lake
+                    groundwater_source[y, x] = 80.0
+                elif water_type == 3:  # Grand River
+                    groundwater_source[y, x] = 60.0 + min(20.0, flow_amount * 0.1)
+                elif water_type == 2:  # River
+                    groundwater_source[y, x] = 40.0 + min(20.0, flow_amount * 0.2)
+                elif water_type == 1:  # Creek
+                    groundwater_source[y, x] = 20.0 + min(10.0, flow_amount * 0.3)
+
+        groundwater_moisture = gaussian_filter(groundwater_source, sigma=self.diffusion_radius)
+
+        # Kombiniere beide Effekte (Maximum)
+        combined_moisture = np.maximum(capillary_moisture, groundwater_moisture)
+        combined_moisture[water_mask] = 100.0
+
+        return combined_moisture
+
+    def _simple_soil_moisture_calculation(self, water_biomes_map):
+        """Simple-Fallback: Basis Bodenfeuchtigkeit ohne Gaussian-Diffusion"""
+        height, width = water_biomes_map.shape
+        soil_moisture = np.zeros((height, width), dtype=np.float32)
+
+        # Direkte Wasserpräsenz
+        soil_moisture[water_biomes_map > 0] = 100.0
+
+        # Einfache radiale Ausbreitung
+        for y in range(height):
+            for x in range(width):
+                if water_biomes_map[y, x] > 0:
+                    # Vereinfachte Nachbarschaft-Feuchtigkeit
+                    for dy in range(-2, 3):
+                        for dx in range(-2, 3):
+                            ny, nx = y + dy, x + dx
+                            if 0 <= ny < height and 0 <= nx < width:
+                                distance = np.sqrt(dx*dx + dy*dy)
+                                if distance > 0:
+                                    moisture = 50.0 / distance
+                                    soil_moisture[ny, nx] = max(soil_moisture[ny, nx], moisture)
+
+        return np.clip(soil_moisture, 0, 100)
+
+
+class EvaporationCalculator:
+    """
+    Funktionsweise: Berechnet Evaporation basierend auf statischen Weather-Daten
+    Aufgabe: Erstellt evaporation_map durch Integration von temp_map, wind_map und humid_map
+    """
+
+    def __init__(self, evaporation_base_rate=0.002, shader_manager=None):
+        self.base_rate = evaporation_base_rate
+        self.shader_manager = shader_manager
+
+    def calculate_evaporation(self, temp_map, wind_map, humid_map, water_biomes_map, parameters):
+        """
+        Funktionsweise: GPU-accelerated Evaporation mit Magnus-Formel
+        Aufgabe: 3-stufiges Fallback-System für realistische Verdunstung
+        """
+        # GPU-Shader (Optimal)
+        if self.shader_manager:
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    "water", "atmosphericEvaporation",
+                    {
+                        "temp_map": temp_map,
+                        "wind_map": wind_map,
+                        "humid_map": humid_map,
+                        "water_biomes_map": water_biomes_map,
+                        "base_rate": self.base_rate
+                    },
+                    parameters
+                )
+                if result.get("success"):
+                    return result["evaporation_map"]
+            except Exception as e:
+                logging.warning(f"GPU evaporation calculation failed: {e}, falling back to CPU")
+
+        # CPU-Fallback (Gut)
+        try:
+            return self._cpu_evaporation_calculation(temp_map, wind_map, humid_map, water_biomes_map)
+        except Exception as e:
+            logging.warning(f"CPU evaporation calculation failed: {e}, using simple fallback")
+
+        # Simple-Fallback (Minimal)
+        return self._simple_evaporation_calculation(water_biomes_map)
+
+    def _cpu_evaporation_calculation(self, temp_map, wind_map, humid_map, water_biomes_map):
+        """CPU-optimierte Evaporation mit Magnus-Formel"""
+        height, width = temp_map.shape
+        evaporation_map = np.zeros((height, width), dtype=np.float32)
+
+        for y in range(height):
+            for x in range(width):
+                if water_biomes_map[y, x] == 0:
+                    continue
+
+                temperature = temp_map[y, x]
+                humidity = humid_map[y, x]
+                wind_speed = np.sqrt(wind_map[y, x, 0]**2 + wind_map[y, x, 1]**2)
+
+                # Magnus-Formel für maximale Wasserdampfdichte
+                max_vapor_density = 5.0 * np.exp(0.06 * temperature)
+
+                # Relative Feuchtigkeit
+                if max_vapor_density > 0:
+                    relative_humidity = humidity / max_vapor_density
+                    relative_humidity = min(1.0, relative_humidity)
+                else:
+                    relative_humidity = 1.0
+
+                # Evaporation-Faktoren
+                humidity_factor = 1.0 - relative_humidity
+                temp_factor = np.exp(temperature / 20.0) if temperature > 0 else 0.1
+                wind_factor = 1.0 + wind_speed * 0.2
+
+                # Basis-Evaporation
+                evaporation_rate = self.base_rate * humidity_factor * temp_factor * wind_factor * 1000
+                evaporation_map[y, x] = evaporation_rate
+
+        return self._limit_by_available_water(evaporation_map, water_biomes_map)
+
+    def _simple_evaporation_calculation(self, water_biomes_map):
+        """Simple-Fallback: Fixed Evaporation-Rate ohne atmosphärische Komplexität"""
+        evaporation_map = np.zeros_like(water_biomes_map, dtype=np.float32)
+        evaporation_map[water_biomes_map > 0] = self.base_rate * 500  # Fixed rate
+        return evaporation_map
+
+    def _limit_by_available_water(self, evaporation_map, water_biomes_map):
+        """Begrenzt Evaporation durch verfügbare Wasseroberfläche"""
+        height, width = evaporation_map.shape
+        limited_evaporation = np.copy(evaporation_map)
+
+        for y in range(height):
+            for x in range(width):
+                water_type = water_biomes_map[y, x]
+                potential_evap = evaporation_map[y, x]
+
+                if water_type == 0:
+                    limited_evaporation[y, x] = 0.0
+                elif water_type == 1:  # Creek
+                    limited_evaporation[y, x] = min(potential_evap, 50.0)
+                elif water_type == 2:  # River
+                    limited_evaporation[y, x] = min(potential_evap, 100.0)
+                elif water_type == 3:  # Grand River
+                    limited_evaporation[y, x] = min(potential_evap, 200.0)
+                # Lake: keine Begrenzung
+
+        return limited_evaporation
+
+
+class BiDirectionalTerrainIntegrator:
+    """
+    Funktionsweise: Koordiniert bidirektionale Terrain-Modifikation zwischen Water-Generator und DataLODManager
+    Aufgabe: Überträgt erosion_map/sedimentation_map für composite_heightmap-Erstellung
+    """
+
+    def __init__(self, data_lod_manager):
+        self.data_lod_manager = data_lod_manager
+
+    def transfer_erosion_data(self, erosion_map, sedimentation_map, lod_level):
+        """
+        Funktionsweise: Überträgt Erosions-/Sedimentations-Daten für composite_heightmap
+        Aufgabe: Automatische Cache-Invalidation und Signal-Emission bei Terrain-Änderungen
+        """
+        if self.data_lod_manager:
+            try:
+                # Übertrage Erosions-/Sedimentationsdaten
+                self.data_lod_manager.set_terrain_modification_data(
+                    "erosion_map", erosion_map, lod_level
+                )
+                self.data_lod_manager.set_terrain_modification_data(
+                    "sedimentation_map", sedimentation_map, lod_level
+                )
+
+                # Trigger composite_heightmap update
+                self.data_lod_manager.update_composite_heightmap(lod_level)
+
+                # Signal emission für nachgelagerte Generatoren
+                self.data_lod_manager.emit_terrain_modification_signal("water", lod_level)
+
+            except Exception as e:
+                logging.warning(f"Terrain integration failed: {e}")
+
+    def coordinate_composite_heightmap_updates(self, lod_level):
+        """Koordiniert composite_heightmap-Updates mit DataLODManager"""
+        if self.data_lod_manager:
+            self.data_lod_manager.invalidate_dependent_generators("terrain", lod_level)
+
+
+class HydrologySystemGenerator(BaseGenerator):
+    """
+    Funktionsweise: Hauptklasse für dynamisches Hydrologiesystem mit BaseGenerator-API
+    Aufgabe: Koordiniert alle hydrologischen Prozesse mit LOD-System und Multi-Dependency-Resolution
+    """
+
+    def __init__(self, map_seed=42, shader_manager=None, data_lod_manager=None):
+        super().__init__(map_seed)
+        self.shader_manager = shader_manager
+        self.data_lod_manager = data_lod_manager
+
+        # Sub-System Initialisierung
+        self.lake_detection = LakeDetectionSystem(shader_manager=shader_manager)
+        self.flow_network = FlowNetworkBuilder(shader_manager=shader_manager)
+        self.manning_calculator = ManningFlowCalculator(shader_manager=shader_manager)
+        self.erosion_system = ErosionSedimentationSystem(shader_manager=shader_manager)
+        self.soil_moisture = SoilMoistureCalculator(shader_manager=shader_manager)
+        self.evaporation = EvaporationCalculator(shader_manager=shader_manager)
+
+        # Terrain-Integration
+        self.terrain_integrator = BiDirectionalTerrainIntegrator(data_lod_manager)
+
+    def _load_default_parameters(self):
+        """Lädt WATER-Parameter aus value_default.py"""
+        try:
+            from gui.config.value_default import WATER
+            return {
+                'lake_volume_threshold': WATER.LAKE_VOLUME_THRESHOLD["default"],
+                'rain_threshold': WATER.RAIN_THRESHOLD["default"],
+                'manning_coefficient': WATER.MANNING_COEFFICIENT["default"],
+                'erosion_strength': WATER.EROSION_STRENGTH["default"],
+                'sediment_capacity_factor': WATER.SEDIMENT_CAPACITY_FACTOR["default"],
+                'evaporation_base_rate': WATER.EVAPORATION_BASE_RATE["default"],
+                'diffusion_radius': WATER.DIFFUSION_RADIUS["default"],
+                'settling_velocity': WATER.SETTLING_VELOCITY["default"],
+                'erosion_iterations_per_lod': WATER.EROSION_ITERATIONS_PER_LOD.get("default", 10),
+                'water_seed': WATER.WATER_SEED.get("default", 12345)
+            }
+        except ImportError:
+            # Fallback defaults
+            return {
+                'lake_volume_threshold': 0.1,
+                'rain_threshold': 5.0,
+                'manning_coefficient': 0.03,
+                'erosion_strength': 1.0,
+                'sediment_capacity_factor': 0.1,
+                'evaporation_base_rate': 0.002,
+                'diffusion_radius': 5.0,
+                'settling_velocity': 0.01,
+                'erosion_iterations_per_lod': 10,
+                'water_seed': 12345
+            }
+
+    def _get_dependencies(self, data_manager):
+        """Holt alle 8 benötigten Dependencies aus DataManager"""
+        if not data_manager:
+            raise Exception("DataManager required for Water generation")
+
+        dependencies = {}
+
+        try:
+            # Terrain-Dependencies (2)
+            heightmap = data_manager.get_terrain_data_combined("heightmap")
+            slopemap = data_manager.get_terrain_data("slopemap")
+
+            if heightmap is None:
+                raise Exception("Heightmap dependency not available - run Terrain generator first")
+            if slopemap is None:
+                raise Exception("Slopemap dependency not available - run Terrain generator first")
+
+            dependencies['heightmap'] = heightmap
+            dependencies['slopemap'] = slopemap
+
+            # Geology-Dependencies (2)
+            hardness_map = data_manager.get_geology_data("hardness_map")
+            rock_map = data_manager.get_geology_data("rock_map")
+
+            if hardness_map is None:
+                raise Exception("Hardness_map dependency not available - run Geology generator first")
+            if rock_map is None:
+                raise Exception("Rock_map dependency not available - run Geology generator first")
+
+            dependencies['hardness_map'] = hardness_map
+            dependencies['rock_map'] = rock_map
+
+            # Weather-Dependencies (4)
+            precip_map = data_manager.get_weather_data("precip_map")
+            temp_map = data_manager.get_weather_data("temp_map")
+            wind_map = data_manager.get_weather_data("wind_map")
+            humid_map = data_manager.get_weather_data("humid_map")
+
+            if precip_map is None:
+                raise Exception("Precip_map dependency not available - run Weather generator first")
+            if temp_map is None:
+                raise Exception("Temp_map dependency not available - run Weather generator first")
+            if wind_map is None:
+                raise Exception("Wind_map dependency not available - run Weather generator first")
+            if humid_map is None:
+                raise Exception("Humid_map dependency not available - run Weather generator first")
+
+            dependencies['precip_map'] = precip_map
+            dependencies['temp_map'] = temp_map
+            dependencies['wind_map'] = wind_map
+            dependencies['humid_map'] = humid_map
+
+            self.logger.debug("All 8 Water dependencies loaded successfully")
+
+        except Exception as e:
+            self.logger.error(f"Failed to load dependencies: {e}")
+            raise
+
+        return dependencies
+
+    def _execute_generation(self, lod, dependencies, parameters):
+        """Führt Water-Generierung mit LOD-optimierten Algorithmen aus"""
+        self.logger.info(f"Starting water generation for LOD {lod}")
+
+        # Dependencies extrahieren
+        heightmap = dependencies['heightmap']
+        slopemap = dependencies['slopemap']
+        hardness_map = dependencies['hardness_map']
+        rock_map = dependencies['rock_map']
+        precip_map = dependencies['precip_map']
+        temp_map = dependencies['temp_map']
+        wind_map = dependencies['wind_map']
+        humid_map = dependencies['humid_map']
+
+        # Parameter aktualisieren
+        self._update_parameters(parameters)
+
+        # LOD-Größe bestimmen
+        target_size = self._get_lod_size(lod, heightmap.shape[0])
+
+        # Alle Arrays auf Zielgröße interpolieren
+        heightmap = self._interpolate_array(heightmap, target_size)
+        slopemap = self._interpolate_array(slopemap, target_size)
+        hardness_map = self._interpolate_array(hardness_map, target_size)
+        rock_map = self._interpolate_array(rock_map, target_size)
+        precip_map = self._interpolate_array(precip_map, target_size)
+        temp_map = self._interpolate_array(temp_map, target_size)
+        wind_map = self._interpolate_array(wind_map, target_size)
+        humid_map = self._interpolate_array(humid_map, target_size)
+
+        # LOD-spezifische Iterationsanzahl
+        lod_iterations = self._get_lod_iterations(lod)
+
+        try:
+            # Phase 1: Lake Detection (0% - 15%)
+            self._update_progress("Lake Detection", 5, "Detecting local minima...")
+            lake_map, valid_lakes = self.lake_detection.detect_lakes(heightmap, parameters)
+
+            # Phase 2: Flow Network Building (15% - 40%)
+            self._update_progress("Flow Network", 20, "Calculating steepest descent...")
+            flow_accumulation, water_biomes_map = self.flow_network.build_flow_network(
+                heightmap, precip_map, lake_map, parameters, lod_iterations
+            )
+
+            # Phase 3: Manning Flow Calculation (40% - 60%)
+            self._update_progress("Manning Flow", 45, "Solving Manning equation...")
+            flow_speed, cross_section = self.manning_calculator.calculate_flow_properties(
+                flow_accumulation, slopemap, heightmap, parameters, lod_iterations
+            )
+
+            # Phase 4: Erosion-Sedimentation (60% - 85%)
+            self._update_progress("Erosion-Sedimentation", 65, "Calculating stream power...")
+
+            # Berechne Flow-Directions für Sediment-Transport
+            flow_directions = self.flow_network._calculate_steepest_descent(heightmap)
+
+            erosion_map, sedimentation_map = self.erosion_system.simulate_erosion_sedimentation(
+                flow_accumulation, flow_speed, flow_directions, hardness_map, parameters, lod_iterations
+            )
+
+            # Phase 5: Soil Moisture (85% - 95%)
+            self._update_progress("Soil Moisture", 88, "Calculating gaussian diffusion...")
+            soil_moist_map = self.soil_moisture.calculate_soil_moisture(
+                water_biomes_map, flow_accumulation, parameters
+            )
+
+            # Phase 6: Evaporation (95% - 100%)
+            self._update_progress("Evaporation", 96, "Calculating atmospheric evaporation...")
+            evaporation_map = self.evaporation.calculate_evaporation(
+                temp_map, humid_map, wind_map, water_biomes_map, parameters
+            )
+
+            # Finale Berechnungen
+            self._update_progress("Finalization", 98, "Creating water depth map...")
+            water_map = self._create_water_depth_map(water_biomes_map, flow_accumulation, cross_section)
+            ocean_outflow = self._calculate_ocean_outflow(flow_accumulation, flow_directions, heightmap.shape)
+
+            # WaterData-Objekt erstellen
+            water_data = WaterData()
+            water_data.water_map = water_map
+            water_data.flow_map = flow_accumulation
+            water_data.flow_speed = flow_speed
+            water_data.cross_section = cross_section
+            water_data.soil_moist_map = soil_moist_map
+            water_data.erosion_map = erosion_map
+            water_data.sedimentation_map = sedimentation_map
+            water_data.evaporation_map = evaporation_map
+            water_data.ocean_outflow = ocean_outflow
+            water_data.water_biomes_map = water_biomes_map
+            water_data.lod_level = lod
+            water_data.actual_size = target_size
+            water_data.parameters = parameters.copy()
+            water_data.validity_state = "valid"
+            water_data.parameter_hash = self._calculate_parameter_hash(parameters)
+
+            # Bidirektionale Terrain-Integration
+            self.terrain_integrator.transfer_erosion_data(erosion_map, sedimentation_map, lod)
+
+            self.logger.debug(f"Water generation complete - LOD: {lod}, size: {target_size}")
+            return water_data
+
+        except Exception as e:
+            self.logger.error(f"Water generation failed: {e}")
+            # Fallback zu minimal water data
+            return self._create_minimal_water_data(target_size, lod, parameters)
+
+    def _update_parameters(self, parameters):
+        """Aktualisiert alle Sub-System Parameter"""
+        self.lake_detection.lake_volume_threshold = parameters.get('lake_volume_threshold', 0.1)
+        self.flow_network.rain_threshold = parameters.get('rain_threshold', 5.0)
+        self.manning_calculator.manning_n = parameters.get('manning_coefficient', 0.03)
+        self.erosion_system.erosion_strength = parameters.get('erosion_strength', 1.0)
+        self.erosion_system.capacity_factor = parameters.get('sediment_capacity_factor', 0.1)
+        self.erosion_system.settling_velocity = parameters.get('settling_velocity', 0.01)
+        self.soil_moisture.diffusion_radius = parameters.get('diffusion_radius', 5.0)
+        self.evaporation.base_rate = parameters.get('evaporation_base_rate', 0.002)
+
+    def _save_to_data_manager(self, data_manager, result, parameters):
+        """Speichert alle 11 Water-Outputs im DataManager"""
+        if isinstance(result, WaterData):
+            data_manager.set_water_data("water_map", result.water_map, parameters)
+            data_manager.set_water_data("flow_map", result.flow_map, parameters)
+            data_manager.set_water_data("flow_speed", result.flow_speed, parameters)
+            data_manager.set_water_data("cross_section", result.cross_section, parameters)
+            data_manager.set_water_data("soil_moist_map", result.soil_moist_map, parameters)
+            data_manager.set_water_data("erosion_map", result.erosion_map, parameters)
+            data_manager.set_water_data("sedimentation_map", result.sedimentation_map, parameters)
+            data_manager.set_water_data("evaporation_map", result.evaporation_map, parameters)
+            data_manager.set_water_data("ocean_outflow", result.ocean_outflow, parameters)
+            data_manager.set_water_data("water_biomes_map", result.water_biomes_map, parameters)
+
+            self.logger.debug("WaterData object with 11 outputs saved to DataManager")
+        else:
+            self.logger.warning(f"Unknown water result format: {type(result)}")
+
+    def update_seed(self, new_seed):
+        """Aktualisiert Seed für alle Water-Komponenten"""
+        if new_seed != self.map_seed:
+            super().update_seed(new_seed)
+
+    def _get_lod_size(self, lod, original_size):
+        """Bestimmt Zielgröße basierend auf LOD-Level"""
+        lod_sizes = {"LOD64": 64, "LOD128": 128, "LOD256": 256}
+
+        if lod == "FINAL":
+            return original_size
+        else:
+            return lod_sizes.get(lod, 64)
+
+    def _get_lod_iterations(self, lod):
+        """Bestimmt LOD-spezifische Iterationsanzahl für Performance-Optimierung"""
+        if lod == "LOD64":
+            return {
+                'flow': 50,  # Statt height*width//10 (409)
+                'sediment': 3,  # Statt 10
+                'manning': 5  # Statt 20
+            }
+        elif lod == "LOD128":
+            return {
+                'flow': 100,  # Statt 1638
+                'sediment': 5,  # Statt 10
+                'manning': 10  # Statt 20
+            }
+        elif lod == "LOD256":
+            return {
+                'flow': 200,  # Statt 6553
+                'sediment': 7,  # Statt 10
+                'manning': 15  # Statt 20
+            }
+        else:  # FINAL
+            return {
+                'flow': 400,  # Vernünftige Grenze statt //10
+                'sediment': 10,  # Original
+                'manning': 20  # Original
+            }
+
+    def _interpolate_array(self, array, target_size):
+        """Interpoliert Arrays aller Typen auf neue Größe"""
+        if array is None:
+            return None
+
+        if len(array.shape) == 2:
+            # 2D Array (heightmap, temp_map, etc.)
+            return self._interpolate_2d(array, target_size)
+        elif len(array.shape) == 3:
+            if array.shape[2] == 2:
+                # 3D Array mit 2 Kanälen (wind_map, slopemap)
+                result = np.zeros((target_size, target_size, 2), dtype=array.dtype)
+                result[:, :, 0] = self._interpolate_2d(array[:, :, 0], target_size)
+                result[:, :, 1] = self._interpolate_2d(array[:, :, 1], target_size)
+                return result
+            elif array.shape[2] == 3:
+                # 3D Array mit 3 Kanälen (rock_map RGB)
+                result = np.zeros((target_size, target_size, 3), dtype=array.dtype)
+                for channel in range(3):
+                    result[:, :, channel] = self._interpolate_2d(array[:, :, channel], target_size)
+
+                # Massenerhaltung für rock_map: R+G+B=255
+                if array.dtype == np.uint8:  # Vermutlich rock_map
+                    result = self._ensure_mass_conservation(result)
+
+                return result
+
+        raise ValueError(f"Unsupported array shape for interpolation: {array.shape}")
+
+    def _interpolate_2d(self, array, target_size):
+        """Bilineare Interpolation für 2D-Arrays"""
+        old_size = array.shape[0]
+        if old_size == target_size:
+            return array.copy()
+
+        scale_factor = (old_size - 1) / (target_size - 1)
+        interpolated = np.zeros((target_size, target_size), dtype=array.dtype)
+
+        for new_y in range(target_size):
+            for new_x in range(target_size):
+                old_x = new_x * scale_factor
+                old_y = new_y * scale_factor
+
+                x0, y0 = int(old_x), int(old_y)
+                x1, y1 = min(x0 + 1, old_size - 1), min(y0 + 1, old_size - 1)
+
+                fx, fy = old_x - x0, old_y - y0
+
+                # Bilineare Interpolation
+                h00, h10 = array[y0, x0], array[y0, x1]
+                h01, h11 = array[y1, x0], array[y1, x1]
+
+                h0 = h00 * (1 - fx) + h10 * fx
+                h1 = h01 * (1 - fx) + h11 * fx
+
+                interpolated[new_y, new_x] = h0 * (1 - fy) + h1 * fy
+
+        return interpolated
+
+    def _ensure_mass_conservation(self, rock_map):
+        """Stellt sicher dass R+G+B=255 für rock_map nach Interpolation"""
+        height, width = rock_map.shape[:2]
+        conserved_map = np.copy(rock_map).astype(np.float32)
+
+        for y in range(height):
+            for x in range(width):
+                r, g, b = conserved_map[y, x, :]
+                total = r + g + b
+
+                if total > 0:
+                    # Normalisierung auf 255
+                    conserved_map[y, x, 0] = (r / total) * 255
+                    conserved_map[y, x, 1] = (g / total) * 255
+                    conserved_map[y, x, 2] = (b / total) * 255
+                else:
+                    # Gleichverteilung bei total=0
+                    conserved_map[y, x, :] = [85, 85, 85]
+
+        return conserved_map.astype(np.uint8)
+
     def _create_water_depth_map(self, water_biomes_map, flow_accumulation, cross_section):
-        """
-        Funktionsweise: Erstellt Wasser-Tiefen-Map aus Flow-Daten
-        Aufgabe: Konvertiert Flow-Accumulation zu Wassertiefen
-        """
+        """Erstellt Wasser-Tiefen-Map aus Flow-Daten"""
         height, width = water_biomes_map.shape
         water_map = np.zeros((height, width), dtype=np.float32)
 
@@ -1623,10 +1408,7 @@ class HydrologySystemGenerator(BaseGenerator):
         return water_map
 
     def _calculate_ocean_outflow(self, flow_accumulation, flow_directions, map_shape):
-        """
-        Funktionsweise: Berechnet Wasser-Abfluss ins Meer (an Kartenrändern)
-        Aufgabe: Summiert allen Wasser-Abfluss der die Karte verlässt
-        """
+        """Berechnet Wasser-Abfluss ins Meer (an Kartenrändern)"""
         height, width = map_shape
         total_outflow = 0.0
 
@@ -1640,13 +1422,45 @@ class HydrologySystemGenerator(BaseGenerator):
 
                     if flow_dir >= 0:
                         direction_offsets = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
-                        dx, dy = direction_offsets[flow_dir]
-                        target_x, target_y = x + dx, y + dy
+                        if flow_dir < len(direction_offsets):
+                            dx, dy = direction_offsets[flow_dir]
+                            target_x, target_y = x + dx, y + dy
 
-                        if target_x < 0 or target_x >= width or target_y < 0 or target_y >= height:
-                            total_outflow += flow_accumulation[y, x]
+                            if target_x < 0 or target_x >= width or target_y < 0 or target_y >= height:
+                                total_outflow += flow_accumulation[y, x]
 
         return total_outflow
+
+    def _create_minimal_water_data(self, target_size, lod, parameters):
+        """Erstellt minimale WaterData bei Critical-Failures"""
+        water_data = WaterData()
+        water_data.water_map = np.zeros((target_size, target_size), dtype=np.float32)
+        water_data.flow_map = np.zeros((target_size, target_size), dtype=np.float32)
+        water_data.flow_speed = np.zeros((target_size, target_size), dtype=np.float32)
+        water_data.cross_section = np.zeros((target_size, target_size), dtype=np.float32)
+        water_data.soil_moist_map = np.ones((target_size, target_size), dtype=np.float32) * 30.0  # 30% default
+        water_data.erosion_map = np.zeros((target_size, target_size), dtype=np.float32)
+        water_data.sedimentation_map = np.zeros((target_size, target_size), dtype=np.float32)
+        water_data.evaporation_map = np.zeros((target_size, target_size), dtype=np.float32)
+        water_data.ocean_outflow = 0.0
+        water_data.water_biomes_map = np.zeros((target_size, target_size), dtype=np.uint8)
+        water_data.lod_level = lod
+        water_data.actual_size = target_size
+        water_data.parameters = parameters.copy()
+        water_data.validity_state = "fallback"
+        water_data.parameter_hash = self._calculate_parameter_hash(parameters)
+        return water_data
+
+    def _calculate_parameter_hash(self, parameters):
+        """Berechnet Hash für Parameter-basierte Cache-Invalidation"""
+        import hashlib
+        param_str = str(sorted(parameters.items()))
+        return hashlib.md5(param_str.encode()).hexdigest()
+
+    def _update_progress(self, phase, percentage, message):
+        """Progress-Update für UI-Integration"""
+        if hasattr(self, 'progress_callback') and self.progress_callback:
+            self.progress_callback(phase, percentage, message)
 
     # ===== LEGACY-KOMPATIBILITÄT =====
     # Alle alten Methoden bleiben für Rückwärts-Kompatibilität erhalten
@@ -1655,10 +1469,7 @@ class HydrologySystemGenerator(BaseGenerator):
                                   wind_map, humid_map, lake_volume_threshold, rain_threshold, manning_coefficient,
                                   erosion_strength, sediment_capacity_factor, evaporation_base_rate,
                                   diffusion_radius, settling_velocity, map_seed):
-        """
-        Funktionsweise: Legacy-Methode für direkte Hydrologie-Generierung (KOMPATIBILITÄT)
-        Aufgabe: Erhält bestehende API für Rückwärts-Kompatibilität
-        """
+        """Legacy-Methode für direkte Hydrologie-Generierung (KOMPATIBILITÄT)"""
         # Konvertiert alte API zur neuen API
         dependencies = {
             'heightmap': heightmap,
@@ -1690,14 +1501,11 @@ class HydrologySystemGenerator(BaseGenerator):
         # Legacy-Format zurückgeben (Tuple mit 11 Elementen)
         return (water_data.water_map, water_data.flow_map, water_data.flow_speed,
                 water_data.cross_section, water_data.soil_moist_map, water_data.erosion_map,
-                water_data.sedimentation_map, water_data.rock_map_updated, water_data.evaporation_map,
+                water_data.sedimentation_map, None, water_data.evaporation_map,  # rock_map_updated entfernt
                 water_data.ocean_outflow, water_data.water_biomes_map)
 
     def simulate_water_cycle(self, current_hydrology, time_step=1.0):
-        """
-        Funktionsweise: Legacy-Methode für Water-Cycle-Updates
-        Aufgabe: Zeitliche Evolution des Wasser-Kreislaufs
-        """
+        """Legacy-Methode für Water-Cycle-Updates"""
         if isinstance(current_hydrology, WaterData):
             soil_moist_map = current_hydrology.soil_moist_map
             evaporation_map = current_hydrology.evaporation_map
@@ -1729,24 +1537,17 @@ class HydrologySystemGenerator(BaseGenerator):
                     ocean_outflow, water_biomes_map)
 
     def update_erosion_sedimentation(self, heightmap, rock_map, erosion_map, sedimentation_map, time_step=1.0):
-        """
-        Funktionsweise: Legacy-Methode für Erosion/Sedimentation-Updates
-        Aufgabe: Terrain-Modifikation durch hydrologische Prozesse
-        """
+        """Legacy-Methode für Erosion/Sedimentation-Updates"""
         net_height_change = (sedimentation_map - erosion_map) * time_step * 0.1
         new_heightmap = heightmap + net_height_change
 
-        erosion_system = ErosionSedimentationSystem(self.erosion_strength, self.sediment_capacity_factor,
-                                                    self.settling_velocity)
-        new_rock_map = erosion_system.apply_mass_conservation(rock_map, erosion_map, sedimentation_map)
+        # Simplified mass conservation ohne komplexe Geology-Integration
+        new_rock_map = rock_map  # Keep unchanged für Legacy-Kompatibilität
 
         return new_heightmap, new_rock_map
 
     def get_hydrology_statistics(self, hydrology_data):
-        """
-        Funktionsweise: Legacy-Methode für Hydrologie-Statistiken
-        Aufgabe: Analyse-Funktionen für Hydrologie-System-Debugging
-        """
+        """Legacy-Methode für Hydrologie-Statistiken"""
         if isinstance(hydrology_data, WaterData):
             water_biomes_map = hydrology_data.water_biomes_map
             flow_map = hydrology_data.flow_map
@@ -1756,7 +1557,6 @@ class HydrologySystemGenerator(BaseGenerator):
             soil_moist_map = hydrology_data.soil_moist_map
             evaporation_map = hydrology_data.evaporation_map
             ocean_outflow = hydrology_data.ocean_outflow
-            rock_map_updated = hydrology_data.rock_map_updated
         else:
             # Legacy Tuple-Format
             (water_map, flow_map, flow_speed, cross_section, soil_moist_map,
@@ -1798,21 +1598,22 @@ class HydrologySystemGenerator(BaseGenerator):
                 'max_soil_moisture': float(np.max(soil_moist_map)),
                 'total_evaporation': float(np.sum(evaporation_map)),
                 'max_evaporation_rate': float(np.max(evaporation_map))
-            },
-            'rock_composition': {
-                'sedimentary_percent': float(np.mean(rock_map_updated[:, :, 0]) / 255 * 100),
-                'igneous_percent': float(np.mean(rock_map_updated[:, :, 1]) / 255 * 100),
-                'metamorphic_percent': float(np.mean(rock_map_updated[:, :, 2]) / 255 * 100)
             }
         }
 
         return stats
 
     def validate_mass_conservation(self, rock_map_original, rock_map_updated):
-        """
-        Funktionsweise: Legacy-Methode für Massenerhaltungs-Validation
-        Aufgabe: Überprüft ob R+G+B=255 bei allen Pixeln erhalten bleibt
-        """
+        """Legacy-Methode für Massenerhaltungs-Validation"""
+        if rock_map_original is None or rock_map_updated is None:
+            return {
+                'original_mass_conservation': False,
+                'updated_mass_conservation': False,
+                'total_mass_difference': 0.0,
+                'mass_conservation_ratio': 1.0,
+                'invalid_pixels': 0
+            }
+
         original_sums = np.sum(rock_map_original, axis=2)
         updated_sums = np.sum(rock_map_updated, axis=2)
 
@@ -1827,7 +1628,7 @@ class HydrologySystemGenerator(BaseGenerator):
             'original_mass_conservation': original_valid,
             'updated_mass_conservation': updated_valid,
             'total_mass_difference': float(mass_difference),
-            'mass_conservation_ratio': float(total_updated / total_original) if total_original > 0 else 0.0,
+            'mass_conservation_ratio': float(total_updated / total_original) if total_original > 0 else 1.0,
             'invalid_pixels': int(np.sum(updated_sums != 255))
         }
 
