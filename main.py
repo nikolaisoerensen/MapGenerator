@@ -68,16 +68,17 @@ class MapGeneratorApp(QObject):
         self._setup_logging()
         self.logger = logging.getLogger(__name__)
 
-        # Core managers - centralized creation
-        self.data_lod_manager = DataLODManager()
-        self.navigation_manager = NavigationManager(data_manager=self.data_lod_manager)
-        self.generation_orchestrator = GenerationOrchestrator(data_manager=self.data_lod_manager)
-
-        # Window references
+        # Nur minimale Initialisierung
         self.main_menu = None
-        self.loading_dialog = None
-        self.map_editor = None
         self.current_window = None
+        self.is_shutting_down = False
+
+        # Manager nur einzeln initialisieren
+        self.data_lod_manager = None
+        self.navigation_manager = None
+        self.generation_orchestrator = None
+
+        self.logger.info("MapGeneratorApp minimal initialization completed")
 
         # Application state
         self.is_shutting_down = False
@@ -174,10 +175,27 @@ class MapGeneratorApp(QObject):
         state and begins memory monitoring.
         """
         self.logger.info("Starting MapGenerator application")
-        self._show_main_menu()
 
-        # Start memory monitoring
-        self.memory_monitor_timer.start(AppConstants.MEMORY_CHECK_INTERVAL_MS)
+        try:
+            # Manager einzeln erstellen und testen
+            self.logger.info("Creating DataLODManager...")
+            self.data_lod_manager = DataLODManager()
+            self.logger.info("DataLODManager created successfully")
+
+            self.logger.info("Creating NavigationManager...")
+            self.navigation_manager = NavigationManager(data_manager=self.data_lod_manager)
+            self.logger.info("NavigationManager created successfully")
+
+            # GenerationOrchestrator erstmal weglassen
+            # self.generation_orchestrator = GenerationOrchestrator(data_manager=self.data_lod_manager)
+
+            self._show_main_menu()
+
+        except Exception as e:
+            self.logger.error(f"Manager creation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return
 
     def _show_main_menu(self):
         """
@@ -194,7 +212,7 @@ class MapGeneratorApp(QObject):
             )
 
             # Connect map editor launch signal
-            self.main_menu.map_editor_requested.connect(self._show_map_editor())
+            self.main_menu.map_editor_requested.connect(self._show_map_editor)
 
             self.main_menu.show()
             self.current_window = self.main_menu
@@ -205,6 +223,7 @@ class MapGeneratorApp(QObject):
             self.logger.error(f"Failed to create MainMenu: {e}")
             self._handle_critical_error("MainMenu creation failed", e)
 
+    @pyqtSlot()
     def _show_map_editor(self):
         """
         Create and display MapEditor window

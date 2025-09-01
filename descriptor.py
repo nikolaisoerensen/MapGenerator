@@ -260,100 +260,429 @@ def geology_generator():
     - GeologyData: Validity-State, Parameter-Hash, LOD-Metadata, Mass-Conservation-Info, Performance-Stats
     """
 
+
 def settlement_generator():
     """
     Path: core/settlement_generator.py
-    
-    Funktionsweise: Intelligente Settlement-Platzierung
-    - Terrain-Suitability Analysis (Steigung, Höhe, Wasser-Nähe)
-        Suitability-Map wird mit diesen Einflussgrößen erzeugt.
-    - Locations: 
-        Settlements: Städte oder Dörfer die an bestimmten Orten vorkommen können (Täler, flache Hügel). Settlements
-        verringern die Terrainverformung in der Nähe etwas. Je nach Radius (Siedlungsgröße) ist der Einfluss auf die
-        Umgebung größer/kleiner. Die Form der Stadt soll zB Linsenförmig sein und über die Slopemap erzeugt werden.
-        Zwischen Settlements gibt es einen Minimalabstand je nach map_size und Anzahl von Settlements. Innerhalb der
-        Stadtgrenzen ist civ_map = 1, außerhalb nimmt der Einfluss ab.
-        Roads: Nachdem Settlements entstanden sind werden die ersten Wege zwischen den Ortschaften geplottet. Dazu soll
-        der Weg des geringsten Widerstands gefunden werden (Pathfinding via slopemap-cost). Danach werden die Straßen
-        etwas gebogen über sanfte Splineinterpolation zwischen zB jedem 3.Waypoint. Erzeugen sehr geringen Einfluss
-        entlang der Wege (z.B. 0.3).
-        Roadsites: z.B. Taverne, Handelsposten, Wegschrein, Zollhaus, Galgenplatz, Markt, besondere Industrie.
-        Entstehen in einem Bereich von 30%-70% Weglänge zwischen Settlements entlang von Roads. Der civ_map-Einfluss
-        ist wesentlich geringer als der von Städten.
-        Landmarks: z.B. Burgen, Kloster, mystische Stätte etc. entstehen in Regionen mit einem
-        civ_map value < thresholds (landmark_wilderness). Erzeugen einen ähnlich geringen Einfluss wie Roadsites.
-        Außerdem werden beide nur in niedrigeren Höhen und Slopes generiert.
-        Wilderness: Bereiche unterhalb eines civ_map-Werts unterhalb von 0.2 werden genullt und als Wilderness
-        deklariert. Hier spawnen keine Plotnodes. Hier sollen in der  späteren Spielentwicklung Questevents stattfinden.
-        civ_map-Logik: civ_map wird mit 0.0 initialisiert. Jeder Quellpunkt trägt akkumulativ zum civ-Wert bei.
-        Einflussverteilung um Quellpunkt über radialen Decay-Kernel (z.B. Gauß, linear fallend oder benutzerdefinierte
-        Kurve). Decay ist stärker an Hanglagen, so dass Zivilisation nicht auf Berge reicht. Decayradius und Initialwert
-        abhängig von Location-Typ: Stadt-Grenzpunkte starten bei 0.8 (innerhalb der Stadt ist 1.0), Roadwaypoints
-        addieren 0.2 bis max. 0.5, Roadsite/Landmarks 0.4. Optional bei sehr hohen Berechnungzeiten kann die
-        Einflussverteilung mit GPU-Shadermasken erfolgen.
-        Plotnodes: Es wird eine feste Anzahl an Plotnodes generiert (plotnodes-parameter). Gleichmäßige Verteilung auf
-        alle Bereiche außerhalb von Städten und Wilderness. Die Plotnodes verbinden sich mit mit Nachbarnodes über
-        Delaunay-Triangulation. Dann verbinden sich die Delaunay-Dreiecke mit benachbarten Dreiecken zu Grundstücken.
-        Die Plotnode-Civwerte werden zusammengerechnet und wenn sie einen Wert (plot-size-parameter) überschreiten ist
-        die Größe erreicht. So werden Grundstücke in Region mit hohem Civ-wert kleiner. Über Abstoßungslogik können die
-        Nodes "physisch" umarrangiert werden. Kanten mit geringem Winkel sollen sich glätten und die Zwischenpunkte
-        können verschwinden. Sehr spitze Winkel lockern sich ebenso.
-        Plotnode-Eigenschaften:
-            node_id, node_location, connector_id (list of nodes), connector_distance (x,y entfernung),
-            connector_elevation (akkumulierter höhenunterschied zu connector), connector_movecost (movecost
-            abhängig von biomes)
-        Plots: Plots bestehend aus Plotnodes haben folgende Eigenschaften:
-            biome_amount: akkumulierte Menge eines jeden Bioms in den Grenzen des Plots
-            resource_amount: später im Spiel sich verändernde Menge an natürlichen Rohstoffen.
-            plot_area: Größe des Plots
-            plot_distance: Anzahl der Nodepunkte*Distance Entfernung zu
-    
-    data_manager Input:
-        - heightmap
-        - slopemap
-        - water_map
-    
-    Parameter Input:
-        - map_seed
-        - settlements, landmarks, roadsites, plotnodes: number of each type
-        - civ_influence_decay: Influence around Locationtypes decays of distance
-        - terrain_factor_villages: terrain influence on settlement suitability
-        - road_slope_to_distance_ratio: rather short roads or steep roads
-        - landmark_wilderness: wilderness area size by changing cutoff-threshold
-        - plotsize: how much accumulated civ-value to form plot
-    
-    Output:
-        - settlement list
-        - landmark list
-        - roadsite list
-        - plot_map
-        - civ_map
-    
-    Klassen:
-    SettlementGenerator  
-        Funktionsweise: Hauptklasse für intelligente Settlement-Platzierung und Civilization-Mapping
-        Aufgabe: Koordiniert alle Settlement-Aspekte und erstellt civ_map
-        Methoden: generate_settlements(), create_road_network(), place_landmarks(), generate_plots()
-    
-    TerrainSuitabilityAnalyzer
-        Funktionsweise: Analysiert Terrain-Eignung für Settlements basierend auf Steigung, Höhe, Wasser-Nähe
-        Aufgabe: Erstellt Suitability-Map für optimale Settlement-Platzierung
-        Methoden: analyze_slope_suitability(), calculate_water_proximity(), evaluate_elevation_fitness()
-    
-    PathfindingSystem   
-        Funktionsweise: Findet Wege geringsten Widerstands zwischen Settlements für Straßen
-        Aufgabe: Erstellt realistische Straßenverbindungen mit Spline-Interpolation
-        Methoden: find_least_resistance_path(), apply_spline_smoothing(), calculate_movement_cost()
-    
-    CivilizationInfluenceMapper    
-        Funktionsweise: Berechnet civ_map durch radialen Decay von Settlement/Road/Landmark-Punkten
-        Aufgabe: Erstellt realistische Zivilisations-Verteilung mit Decay-Kernels
-        Methoden: apply_settlement_influence(), calculate_road_influence(), apply_decay_kernel()
-    
-    PlotNodeSystem    
-        Funktionsweise: Generiert Plotnodes mit Delaunay-Triangulation und Grundstücks-Bildung
-        Aufgabe: Erstellt Grundstücks-System für späteres Gameplay
-        Methoden: generate_plot_nodes(), create_delaunay_triangulation(), merge_to_plots(), optimize_node_positions()
+    date_changed: 26.08.2025
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    SETTLEMENT GENERATOR - INTELLIGENTE SETTLEMENT-PLATZIERUNG UND ZIVILISATIONS-MAPPING
+
+    Input: heightmap_modified, water_map, biome_map, slopemap
+    Output: Settlement-Strukturen mit civ_map, Plotnode-System und Road-Networks
+    Kern: Multi-Criteria-Suitability-Analysis mit Delaunay-Triangulation und Civilization-Influence-Mapping
+
+    ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    1. ÜBERBLICK UND ZIELSETZUNG
+
+    Der SettlementGenerator implementiert intelligente Settlement-Platzierung als finaler Generator
+    im System durch Integration aller vorherigen Generator-Outputs. Als komplexester
+    Generator koordiniert er terrain+geology+weather+water+biome-Dependencies für
+    realistische Zivilisationsverteilung mit dynamischem Plotnode-System.
+
+    Kernfunktionen:
+    - Multi-Generator-Input-Integration (terrain+water+biome Dependencies)
+    - Terrain-Suitability-Analysis für optimale Settlement-Platzierung
+    - Dijkstra-basierte Road-Network-Generierung zwischen Settlements
+    - Civilization-Influence-Mapping mit radialer Decay-Funktion
+    - Delaunay-Triangulation-basiertes Plotnode-System für Landverwaltung
+
+    Architektonische Positionierung:
+    Der SettlementGenerator fungiert als finaler Zivilisations-Assembler zwischen allen
+    vorherigen Generatoren und der finalen World-Assembly. Er transformiert
+    natürliche Landschaft in bewohnte Zivilisations-Strukturen.
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    2. CORE-GENERATOR INTEGRATION UND LOD-SYSTEM
+
+    SettlementSystemGenerator Anbindung:
+    Die Kern-Integration erfolgt über SettlementSystemGenerator.calculate_settlements()
+    mit Multi-Input-Data-Assembly und LOD-progressiver Settlement-Density-Strategie.
+    Terrain-Suitability-Analysis verwendet Gauß-basierte Fitness-Berechnung für
+    optimale Settlement-Locations basierend auf Slope/Height/Water-Proximity/Biome-Suitability.
+
+    Road-Network-Generation implementiert Dijkstra-Algorithm für optimale
+    Pfad-Verbindungen zwischen Settlements mit Terrain-Cost-Integration.
+    Plotnode-System erzeugt Delaunay-Triangulation-basierte Landverwaltung
+    mit civ_map-abhängiger Plot-Größen-Optimierung.
+
+    SettlementData Output-Strukturen:
+    - settlement_positions: 2D numpy.float32 array (N,3), [x, y, settlement_type]
+    - road_network: 2D numpy.float32 array (M,4), [start_x, start_y, end_x, end_y]
+    - civ_map: 2D numpy.float32 array, Civilization-Influence [0-1]
+    - plot_boundaries: List of polygon arrays, Plotnode-Boundaries
+    - plotnode_properties: Dict mit node_id, connections, distances
+    - settlement_statistics: Dict mit Density-Metriken und Network-Eigenschaften
+
+    LOD-System (Numerisch mit Settlement-Density-Progression):
+    - lod_level 1: 100 plotnodes mit Basic-Suitability für schnelle Preview-Qualität
+    - lod_level 2: 200 plotnodes mit Enhanced-Road-Network-Integration
+    - lod_level 3: 400 plotnodes mit Detailed-Delaunay-Triangulation
+    - lod_level 4: 800 plotnodes mit High-Quality-Civilization-Mapping
+    - lod_level 5: 1600 plotnodes mit Premium-Settlement-Optimization
+    - lod_level 6+: bis max_plotnodes erreicht mit Maximum-Quality für Export-Readiness
+
+    Fallback-System (3-stufig vollständige Generation-Level-Fallbacks):
+    - GPU-Shader (Optimal): Parallele Suitability-Analysis und Influence-Mapping mit Compute-Shadern
+    - CPU-Fallback (Gut): Optimierte NumPy-Vectorization mit Multiprocessing für Pathfinding
+    - Simple-Fallback (Minimal): Height/Slope-basierte Settlement-Placement ohne komplexe Algorithmen
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    3. MULTI-GENERATOR DEPENDENCY-MANAGEMENT
+
+    Input Dependencies (finale Generator-Komplexität):
+    Der SettlementGenerator koordiniert die finale Cross-Generator-Dependencies
+    im System durch Multi-Source-Data-Integration. Primary-Dependencies umfassen
+    terrain_tab für heightmap_modified-basierte Elevation-Suitability. Secondary-Dependencies
+    integrieren water_tab für water_map-basierte Water-Access-Analysis.
+    Tertiary-Dependencies nutzen biome_tab für biome_map-basierte
+    Ecosystem-Settlement-Compatibility-Modulation.
+
+    Required Dependencies Matrix:
+    - heightmap_modified: Post-Erosion-Terrain für realistische Settlement-Placement
+    - water_map: Water-Access-Analysis für Settlement-Suitability und Trade-Route-Optimization
+    - biome_map: Ecosystem-Compatibility für Settlement-Type-Classification
+    - slopemap: Terrain-Accessibility für Road-Network-Cost-Calculation
+
+    Multi-Generator-Validation-Pipeline:
+    Input-Data-Consistency-Checks validieren Shape-Compatibility zwischen allen
+    Dependencies mit automatischer LOD-Level-Matching. Settlement-Suitability-Validation
+    prüft Height-Water-Biome-Konsistenz für realistische Civilization-Placement.
+    Cross-Generator-Quality-Assessment bewertet Input-Data-Reliability für
+    robuste Settlement-Generation-Results.
+
+    Dependency-Resolution-Strategy:
+    Bei fehlenden Dependencies implementiert das System Graceful-Degradation mit
+    Simplified-Settlement-Placement basierend auf verfügbaren Inputs. Missing-Input-Recovery
+    verwendet Default-Suitability-Conditions für realistische Settlement-Approximation.
+    Partial-Input-Processing ermöglicht Settlement-Generation mit reduzierter Precision
+    statt vollständigem Failure.
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    4. TERRAIN-SUITABILITY ANALYSIS SYSTEM
+
+    Multi-Criteria-Suitability-Algorithm:
+    Das System implementiert wissenschaftlich fundierte Settlement-Suitability basierend
+    auf Slope-Analysis, Elevation-Optimization, Water-Proximity und Biome-Compatibility
+    mit Gauß-basierte Fitness-Berechnung für alle Settlement-Locations.
+
+    Suitability-Factors-Integration:
+    Slope-Suitability implementiert exponentiellen Penalty für Steigungen >15°.
+    Water-Proximity-Analysis verwendet Gaussian-Distance-Decay um Gewässer.
+    Elevation-Suitability bevorzugt mittlere Höhen (100-800m) mit Valley-Preference.
+    Biome-Compatibility klassifiziert Settlement-friendly Biomes vs. Wilderness.
+
+    SUITABILITY_CALCULATION_FORMULAS:
+    ```
+    slope_penalty = exp(-slope_angle / slope_tolerance)
+    water_bonus = exp(-water_distance² / (2 * water_sigma²))
+    elevation_fitness = exp(-(elevation - optimal_elevation)² / (2 * elevation_sigma²))
+    biome_multiplier = biome_suitability_table[biome_type]
+
+    total_suitability = slope_penalty * water_bonus * elevation_fitness * biome_multiplier
+    ```
+
+    Settlement-Type-Classification:
+    - Cities: Hohe Suitability + Water-Access + Trade-Route-Intersection
+    - Villages: Moderate Suitability + Biome-Compatibility + Resource-Access
+    - Landmarks: Spezielle Locations (Berg-Gipfel, Wilderness, Strategic-Points)
+    - Roadsites: Intermediate Points entlang von Trade-Routes
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    5. ROAD-NETWORK UND PATHFINDING-SYSTEM
+
+    Dijkstra-Algorithm-Implementation:
+    Das System implementiert Dijkstra-Algorithm für optimale Road-Networks zwischen
+    allen Settlements mit Terrain-Cost-Integration. Movement-Cost-Calculation
+    berücksichtigt Slope-Penalties, Water-Crossing-Costs und Biome-Traversal-Difficulty
+    für realistische Trade-Route-Optimization.
+
+    Terrain-Cost-Matrix-Generation:
+    ```
+    slope_cost = 1 + slope_penalty_factor * slope_angle²
+    water_crossing_cost = base_cost * water_crossing_multiplier
+    biome_cost = biome_traversal_difficulty[biome_type]
+    elevation_change_cost = abs(elevation_delta) * elevation_cost_factor
+
+    total_movement_cost = base_cost * slope_cost * biome_cost + water_crossing_cost
+    ```
+
+    Road-Network-Optimization:
+    Dijkstra-Pathfinding findet kürzeste gewichtete Pfade zwischen allen Settlement-Pairs.
+    Road-Spline-Smoothing reduziert sharp angles durch Bézier-Curve-Interpolation
+    zwischen Waypoints. Road-Width-Calculation basiert auf Traffic-Volume zwischen
+    Settlement-Pairs für realistische Road-Sizing.
+
+    Trade-Route-Analysis:
+    Settlement-Economic-Value bestimmt Trade-Potential basierend auf Size und Resources.
+    Route-Importance-Scoring priorisiert Major-Trade-Routes zwischen Cities.
+    Alternative-Route-Generation erstellt Backup-Routes für Network-Resilience.
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    6. CIVILIZATION-INFLUENCE-MAPPING
+
+    Civilization-Map-Algorithm-Implementation:
+    Das civ_map-System implementiert radiale Influence-Decay von allen Settlement-Sources
+    mit Terrain-modified Distance-Calculation. Settlement-Influence-Values variieren
+    je nach Settlement-Type und Size für realistische Civilization-Density-Mapping.
+
+    Mathematical-Influence-Formulas:
+    ```
+    # Base Influence Values
+    city_influence = 0.8
+    village_influence = 0.4
+    roadsite_influence = 0.2
+    landmark_influence = 0.3
+
+    # Terrain-Modified Distance
+    slope_factor = 1 + terrain_factor * slope_angle
+    effective_distance = euclidean_distance * slope_factor
+
+    # Gaussian Decay
+    influence = base_influence * exp(-0.5 * (effective_distance / sigma)²)
+
+    # Accumulative Integration
+    civ_map[x,y] = min(1.0, sum(all_influences_at_location))
+    ```
+
+    Settlement-Influence-Radii:
+    - Cities: sigma = 50 pixels, max_influence = 0.8
+    - Villages: sigma = 25 pixels, max_influence = 0.4
+    - Roads: sigma = 5 pixels, max_influence = 0.2
+    - Landmarks: sigma = 15 pixels, max_influence = 0.3
+
+    Wilderness-Threshold-System:
+    Bereiche mit civ_map < 0.2 werden als Wilderness klassifiziert.
+    Wilderness-Areas erhalten keine Plotnodes für Natural-Preserve-Effect.
+    Landmark-Placement bevorzugt Wilderness-Areas für Strategic/Mystical-Locations.
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    7. PLOTNODE-SYSTEM UND DELAUNAY-TRIANGULATION
+
+    Plotnode-Distribution-Algorithm:
+    Das System generiert gleichmäßige Plotnode-Verteilung außerhalb von Cities und
+    Wilderness mit LOD-basierter Density-Scaling. Plotnode-Count steigt von
+    100 (LOD1) bis max_plotnodes mit Settlement-Density-Correlation.
+
+    Delaunay-Triangulation-Integration:
+    Scipy.spatial.Delaunay erzeugt optimale Triangle-Networks zwischen Plotnodes.
+    Triangle-Merging-Algorithm kombiniert Adjacent-Triangles zu größeren Plots
+    basierend auf civ_map-Values und plot_size_threshold. Plot-Size-Optimization
+    balanciert kleine Plots in High-Civ-Areas vs. große Plots in Low-Civ-Areas.
+
+    Plotnode-Properties-System:
+    ```python
+    plotnode_properties = {
+        'node_id': unique_identifier,
+        'node_location': [x, y],
+        'connector_ids': [list_of_connected_nodes],
+        'connector_distances': [euclidean_distances],
+        'connector_elevations': [accumulated_height_differences],
+        'connector_movecosts': [biome_adjusted_movement_costs]
+    }
+    ```
+
+    Plot-Properties-Calculation:
+    - biome_amount: Accumulated biome percentages within plot boundaries
+    - plot_area: Polygon area calculation for plot size
+    - plot_distance: Network distance to nearest settlement
+    - resource_potential: Future game mechanic placeholder
+
+    Physical-Node-Optimization:
+    Node-Position-Refinement durch Repulsion-Forces zwischen close nodes.
+    Edge-Smoothing eliminiert sharp angles durch Intermediate-Node-Insertion.
+    Network-Connectivity-Validation sichert Connected-Graph ohne Isolated-Components.
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    8. SHADER-MANAGER INTEGRATION UND GPU-OPTIMIERUNG
+
+    Vollständige Generation-Level-Fallbacks:
+    Der SettlementGenerator implementiert komplette LOD-Level-basierte Fallback-Strategy
+    statt pixelbasierter Mixed-Processing für Konsistenz und Performance.
+    GPU-Shader-Request erfolgt für gesamten LOD-Level mit Success/Failure-Response
+    für einheitliche Processing-Method pro Generation-Cycle.
+
+    GPU-Parallelisierung-Strategy:
+    Suitability-Analysis-Parallelisierung ermöglicht independent Calculation für jeden
+    Pixel durch parallele Multi-Criteria-Evaluation auf GPU-Cores. Influence-Mapping
+    und Distance-Field-Calculations implementieren als Parallel-Shader-Operations für
+    optimale GPU-Utilization.
+
+    Shader-Request-Implementation:
+    ```
+    GPU-Request: shader_manager.request_settlement_analysis(
+        operation_type="suitability_analysis",
+        input_data=[heightmap_modified, water_map, biome_map, slopemap],
+        parameters=settlement_parameters,
+        lod_level=current_lod
+    )
+
+    Success-Response: Validated suitability_map + settlement_positions + performance_metrics
+    Failure-Response: Error-details + recommended_fallback_strategy
+    ```
+
+    Settlement-Specific-Shader-Operations:
+    - request_suitability_analysis: Multi-Criteria-Settlement-Placement-Optimization
+    - request_influence_calculation: Parallel civ_map-Generation mit Terrain-Decay
+    - request_pathfinding_costs: Movement-Cost-Field-Generation für Dijkstra-Algorithm
+
+    CPU-Fallback-Optimization:
+    CPU-Implementation nutzt optimierte NumPy-Vectorization mit Multiprocessing
+    für parallele Suitability-Analysis-Batches. Vectorized-Distance-Calculations
+    und Broadcasting-Operations maximieren CPU-Performance bei GPU-Unavailability.
+
+    Simple-Fallback-Implementation:
+    Minimal-Settlement-Placement verwendet Height-Water-basierte Location-Selection
+    ohne komplexe Multi-Criteria-Analysis für garantierte Results bei kritischen System-Failures.
+    Simplified-Road-Networks implementieren nur Direct-Line-Connections ohne
+    Terrain-Cost-Optimization.
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    9. BIDIREKTIONALE TERRAIN-INTEGRATION
+
+    Modified-Heightmap-Integration:
+    Der SettlementGenerator priorisiert heightmap_modified vom Water-Generator für
+    realistische Post-Erosion-Settlement-Classification. Input-Selection-Logic prüft
+    Water-Generator-Modified-Heightmap-Availability und verwendet automatisch
+    neueste Terrain-Data für accurate Elevation-based-Suitability-Analysis.
+
+    Post-Erosion-Settlement-Adaptation:
+    Modified-Terrain-Integration ermöglicht realistische Settlement-Distribution nach
+    Erosions-Prozessen mit natürlicher Valley-Settlement-Placement in erodierten
+    Areas. Flow-Path-Integration nutzt Water-Generator-Flow-Networks für
+    Trade-Route-Optimization entlang natürlicher Transportation-Corridors.
+
+    Settlement-Terrain-Feedback:
+    Settlements modifizieren minimal lokale Terrain-Roughness für Building-Foundations
+    aber keine großflächigen Terrain-Modifications wie Water-Generator.
+    Settlement-Impact beschränkt sich auf lokale Accessibility-Improvements
+    ohne DataLODManager heightmap-Updates.
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    10. ERROR-HANDLING UND VALIDATION SYSTEM
+
+    Graceful-Degradation-Strategy:
+    Multi-Input-Availability-Checks implementieren Partial-Input-Processing für
+    Settlement-Generation mit verfügbaren Dependencies. Missing-Input-Recovery verwendet
+    Default-Suitability-Conditions und Simplified-Settlement-Distribution für System-Continuity.
+    GPU-Memory-Exhaustion triggert Automatic-LOD-Reduction und Plotnode-Count-Decrease.
+
+    Input-Data-Validation-Pipeline:
+    Cross-Generator-Consistency-Checks validieren Physical-Plausibility zwischen
+    heightmap_modified-Water-Biome-Data und Settlement-Suitability-Requirements.
+    Data-Quality-Assessment prüft NaN-Detection, Range-Validation und Shape-Consistency
+    für robuste Multi-Input-Integration.
+
+    Settlement-Generation-Validation:
+    Settlement-Position-Plausibility-Checks erkennen unrealistische Settlement-Placement
+    wie Cities in Steep-Slopes oder Wilderness-Only-Areas. Dijkstra-Pathfinding-Validation
+    prüft Network-Connectivity und Route-Optimization-Consistency.
+    Delaunay-Triangulation-Validation sichert Valid-Triangle-Networks ohne Degenerate-Cases.
+
+    Recovery-Strategy-Implementation:
+    Critical-Failure-Recovery implementiert Minimal-Settlement-System mit Basic-Placement
+    ohne komplexe Multi-Criteria-Analysis für System-Stability. Parameter-Adjustment-Recovery
+    modifiziert Suitability-Thresholds bei Input-Data-Inconsistencies.
+    Default-Settlement-Distribution-Fallback gewährleistet plausible Results bei
+    Multi-System-Failures.
+
+    Memory-Management-Integration:
+    Large-Array-Detection für Plotnode-Arrays >50MB mit automatischer Cleanup-Coordination.
+    QMutex-Protection für Thread-safe Settlement-Data-Access während UI-Updates.
+    Resource-Cleanup nach Settlement-Generation-Completion über DataLODManager-Integration.
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    11. MANAGER-INTEGRATION UND SIGNAL-FLOW
+
+    DataLODManager-Integration-Patterns:
+    SettlementGenerator integriert mit DataLODManager über set_settlement_data_lod() für
+    Result-Storage mit Parameter-Hash-basierter Cache-Invalidation. Multi-Input-Retrieval
+    koordiniert get_terrain_data("heightmap_modified"), get_water_data(), get_biome_data() für
+    Complete-Dependency-Assembly.
+
+    GenerationOrchestrator-Coordination:
+    Generation-Flow erfolgt über GenerationOrchestrator.request_generation("settlement")
+    nach Multi-Dependency-Satisfaction. LOD-Progression-Management koordiniert
+    mit anderen Generatoren für Consistent-Quality-Scaling und Resource-Optimization.
+
+    ParameterManager-Synchronisation:
+    UI-Parameter-Synchronisation implementiert Proxy-Pattern zwischen SettlementTab
+    und ParameterManager für Real-time-Parameter-Updates. Cross-Parameter-Constraint-Validation
+    prüft plotnode_count vs. map_size und andere Logical-Constraints.
+
+    Signal-Architecture-Integration:
+    ```
+    Signal-Flow-Implementation:
+    SettlementTab.generate_requested("settlement") →
+    GenerationOrchestrator.request_generation("settlement", parameters) →
+    SettlementSystemGenerator.calculate_settlements() →
+    DataLODManager.set_settlement_data_lod() →
+    data_updated("settlement") Signal →
+    SettlementTab.on_data_updated() →
+    SettlementTab.update_display()
+    ```
+
+    Performance-Monitoring-Integration:
+    ShaderManager-Performance-Tracking sammelt GPU-Suitability-Analysis-Metrics für
+    LOD-Performance-Optimization. DataLODManager-ResourceTracker monitored
+    Large-Array-Memory-Usage für Settlement-Data und Plotnode-Results.
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    12. KLASSEN-ARCHITEKTUR
+
+    SettlementSystemGenerator:
+    Funktionsweise: Hauptklasse für Multi-Criteria-Settlement-Placement mit vollständiger
+    Manager-Integration und GPU-Optimization-Support. Koordiniert Suitability-Analysis,
+    Road-Network-Generation und Plotnode-System für Complete-Settlement-Assembly.
+    External-Interface: calculate_settlements(multi_input_data, parameters, lod_level)
+    wird von GenerationOrchestrator aufgerufen. Internal-Methods implementieren
+    _coordinate_settlement_generation(), _validate_multi_input(), _create_settlement_data().
+
+    TerrainSuitabilityAnalyzer:
+    Funktionsweise: Multi-Criteria-Analysis von Settlement-Locations mit Gauß-basierte
+    Fitness-Calculation und Slope-Water-Biome-Integration für optimale Placement-Optimization.
+    Implementiert Scientific-Settlement-Planning-Standards mit Multi-Factor-Weighting
+    für realistic Civilization-Development-Patterns.
+    Methoden umfassen calculate_suitability_matrix(), weight_environmental_factors(),
+    optimize_settlement_locations() mit GPU-Parallelisierung-Support.
+
+    RoadNetworkBuilder:
+    Funktionsweise: Dijkstra-basiertes Road-Network-System mit Terrain-Cost-Integration
+    und Trade-Route-Optimization für realistic Transportation-Infrastructure.
+    Implementiert Movement-Cost-Calculation, Path-Optimization und Route-Smoothing
+    für Natural-Road-Network-Development zwischen Settlements.
+    Methoden: build_cost_matrix(), calculate_dijkstra_paths(), apply_spline_smoothing().
+
+    CivilizationInfluenceMapper:
+    Funktionsweise: Berechnet civ_map durch radiale Gaussian-Decay von Settlement-Points
+    mit Terrain-modified Distance-Calculation für Natural-Civilization-Spread-Patterns.
+    Implementiert Mathematical-Influence-Integration mit Accumulative-Decay-Systems
+    für Realistic-Population-Density-Simulation.
+    Methoden: calculate_influence_fields(), apply_terrain_decay(), integrate_civilization_map().
+
+    PlotNodeSystemManager:
+    Funktionsweise: Generiert Plotnodes mit Delaunay-Triangulation und Plot-Boundary-Formation
+    für Land-Management-System mit civ_map-dependent Plot-Size-Optimization.
+    Implementiert Spatial-Optimization-Algorithms mit Network-Connectivity-Validation
+    für Coherent-Land-Division-Systems.
+    Methoden: generate_plot_nodes(), create_delaunay_triangulation(), optimize_plot_boundaries(),
+    calculate_plot_properties().
+
+    ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════
     """
 
 def weather_generator():
@@ -836,222 +1165,386 @@ def water_generator():
     - Performance-Optimization: 10 Erosion-Iterations × 7 LOD-Levels = 70 komplexe Berechnungs-Zyklen pro Generation
     """
 
+
 def biome_generator():
     """
     Path: core/biome_generator.py
+    date_changed: 24.08.2025
 
-    Funktionsweise: Klassifikation von Biomen auf Basis von Höhe, Temperatur, Niederschlag und Slope
-    - Gauß-basierte Klassifizierung mit Gewichtungen je Biomtyp
-    - Verwendung eines vektorbasierten Klassifikators für performante Zuordnung auf großen Karten
-    - Zwei-Ebenen-System: Base-Biomes und Super-Biomes
-    - Supersampling für weichere Übergänge zwischen allen Biomen (die vier dominantesten Anteile pro Zelle)
-    - Super-Biomes überschreiben Base-Biomes basierend auf speziellen Bedingungen
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-    Parameter Input:
-    - biome_wetness_factor (Gewichtung der Bodenfeuchtigkeit)
-    - biome_temp_factor (Gewichtung der Temperaturwerte)
-    - sea_level (Meeresspiegel-Höhe in Metern)
-    - bank_width (Radius für Ufer-Biome in Pixeln)
-    - edge_softness (Globaler Weichheits-Faktor für alle Super-Biome-Übergänge, 0.1-2.0)
-    - alpine_level (Basis-Höhe für Alpine-Zone in Metern)
-    - snow_level (Basis-Höhe für Schneegrenze in Metern)
-    - cliff_slope (Grenzwert für Klippen-Klassifikation in Grad)
+    BIOME GENERATOR - KOMPLEXE ÖKOSYSTEM-KLASSIFIKATION MIT MULTI-GENERATOR-INTEGRATION
 
-    data_manager Input:
-    - map_seed (Globaler Karten-Seed für reproduzierbare Zufallswerte)
-    - heightmap (2D-Array in meter Altitude)
-    - slopemap (2D-Array in m/m mit dz/dx, dz/dy)
-    - temp_map (2D-Array in °C)
-    - soil_moist_map (2D-Array in Bodenfeuchtigkeit %)
-    - water_biomes_map (2D-Array mit Wasser-Klassifikation: 0=kein Wasser, 1=Creek, 2=River, 3=Grand River, 4=Lake)
+    Input: heightmap, temp_map, precip_map, soil_moist_map, water_biomes_map
+    Output: Finale Biome-Verteilung mit 15 Base-Biomes + 11 Super-Biomes + Supersampling
+    Kern: Multi-Factor-Classification mit Whittaker-Matrix und Proximity-Biome-System
 
-    Output:
-    - biome_map (2D-Array mit Index der jeweils dominantesten Biomklasse)
-    - biome_map_super (2D-Array, 2x supersampled zur Darstellung gemischter Biome)
-    - super_biome_mask (2D-Array, Maske welche Pixel von Super-Biomes überschrieben wurden)
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-    BASE_BIOME_CLASSIFICATIONS = {
-        'ice_cap': 'T=-40--5 | soil_moist=0-300 | h=0-8000 | slope=0-90',
-        'tundra': 'T=-15-5 | soil_moist=100-600 | h=0-2000 | slope=0-30',
-        'taiga': 'T=-10-15 | soil_moist=300-1200 | h=50-2500 | slope=0-45',
-        'grassland': 'T=0-25 | soil_moist=200-800 | h=10-1500 | slope=0-15',
-        'temperate_forest': 'T=5-25 | soil_moist=600-2000 | h=0-2000 | slope=0-60',
-        'mediterranean': 'T=8-30 | soil_moist=300-900 | h=0-1200 | slope=0-45',
-        'desert': 'T=10-50 | soil_moist=0-250 | h=0-2000 | slope=0-30',
-        'semi_arid': 'T=5-35 | soil_moist=200-600 | h=0-1800 | slope=0-25',
-        'tropical_rainforest': 'T=20-35 | soil_moist=1500-4000 | h=0-1500 | slope=0-70',
-        'tropical_seasonal': 'T=18-35 | soil_moist=800-2000 | h=0-1200 | slope=0-40',
-        'savanna': 'T=15-35 | soil_moist=400-1200 | h=0-1800 | slope=0-20',
-        'montane_forest': 'T=0-20 | soil_moist=800-3000 | h=800-3500 | slope=5-80',
-        'swamp': 'T=5-35 | soil_moist=800-3000 | h=0-200 | slope=0-5',
-        'coastal_dunes': 'T=5-35 | soil_moist=300-1500 | h=0-100 | slope=5-45',
-        'badlands': 'T=-5-45 | soil_moist=0-400 | h=200-2500 | slope=15-90'
-    }
+    1. ÜBERBLICK UND ZIELSETZUNG
 
-    SUPER_BIOME_CONDITIONS = {
-        'ocean': {
-            'condition': 'lokales Minimum + Randverbindung + h < sea_level',
-            'description': 'Flood-Fill von lokalen Minima die mit Kartenrand verbunden sind und unter sea_level liegen',
-            'priority': 0
-        },
-        'lake': {
-            'condition': 'water_biomes_map == 4',
-            'description': 'Direkt aus water_biomes_map übernommen',
-            'priority': 1
-        },
-        'grand_river': {
-            'condition': 'water_biomes_map == 3',
-            'description': 'Direkt aus water_biomes_map übernommen',
-            'priority': 2
-        },
-        'river': {
-            'condition': 'water_biomes_map == 2',
-            'description': 'Direkt aus water_biomes_map übernommen',
-            'priority': 3
-        },
-        'creek': {
-            'condition': 'water_biomes_map == 1',
-            'description': 'Direkt aus water_biomes_map übernommen',
-            'priority': 4
-        },
-        'cliff': {
-            'condition': 'slope_degrees > cliff_slope',
-            'description': 'Klippe ab einem Grenzwert cliff_slope mit weichen Übergängen',
-            'priority': 5,
-            'soft_transition': True,
-            'probability_formula': 'sigmoid((slope_degrees - cliff_slope) / edge_softness)'
-        },
-        'beach': {
-            'condition': 'Nähe zu Ocean + h <= sea_level + 5',
-            'description': 'Innerhalb bank_width Distanz zu Ocean-Pixeln mit weichen Rändern',
-            'priority': 6,
-            'soft_transition': True,
-            'probability_formula': 'max(0, 1 - (distance_to_ocean / bank_width)^edge_softness)'
-        },
-        'lake_edge': {
-            'condition': 'Nähe zu Lake + nicht selbst Lake',
-            'description': 'Innerhalb bank_width Distanz zu Lake-Pixeln mit weichen Rändern',
-            'priority': 7,
-            'soft_transition': True,
-            'probability_formula': 'max(0, 1 - (distance_to_lake / bank_width)^edge_softness)'
-        },
-        'river_bank': {
-            'condition': 'Nähe zu River/Grand River/Creek + nicht selbst Wasser',
-            'description': 'Innerhalb bank_width Distanz zu Fließgewässern mit weichen Rändern',
-            'priority': 8,
-            'soft_transition': True,
-            'probability_formula': 'max(0, 1 - (distance_to_water / bank_width)^edge_softness)'
-        },
-        'snow_level': {
-            'condition': 'h > snow_level + 500*(1 + temp_map(x,y)/10)',
-            'description': 'Schneegrenze mit graduellen, temperaturabhängigen Übergängen',
-            'priority': 9,
-            'soft_transition': True,
-            'probability_formula': 'sigmoid((h - (snow_level + 500*(1 + temp/10))) / (100 * edge_softness))'
-        },
-        'alpine_level': {
-            'condition': 'h > alpine_level + 500*(1 + temp_map(x,y)/10)',
-            'description': 'Alpine Zone mit graduellen, temperaturabhängigen Übergängen',
-            'priority': 10,
-            'soft_transition': True,
-            'probability_formula': 'sigmoid((h - (alpine_level + 500*(1 + temp/10))) / (200 * edge_softness))'
-        }
-    }
+    Der BiomeGenerator implementiert komplexe Ökosystem-Klassifikation als finaler Generator
+    im System durch Integration aller vorherigen Generator-Outputs. Als komplexester
+    Generator koordiniert er terrain+geology+weather+water-Dependencies für
+    realistische Biom-Verteilung mit 26 verschiedenen Biom-Typen.
 
-    Beschreibung der Biom-Zuweisung:
+    Kernfunktionen:
+    - Multi-Generator-Input-Integration (terrain+weather+water Dependencies)
+    - Gauss-basierte Klassifizierung von 15 Base-Biomes nach Whittaker-Diagramm
+    - Super-Biome-Override-System mit 11 speziellen Biom-Typen
+    - 2x2-Supersampling mit diskretisierter Zufalls-Rotation für weiche Übergänge
+    - Proximity-Biome-System für Ufer-Bereiche mit konfigurierbarer Edge-Softness
 
-    Schritt 1: Base-Biome Klassifikation
-    Für alle Pixel wird zunächst das Base-Biome durch Gauß-basierte Klassifikation bestimmt:
-    - Slope wird berechnet: slope_degrees = arctan(sqrt((dz/dx)² + (dz/dy)²)) * 180/π
-    - Für jedes Base-Biome wird die Gauß-Passung für alle 4 Parameter berechnet
-    - Das Biom mit dem höchsten kombinierten Gewicht wird als Base-Biome zugewiesen
-    - Gewichtung: Temperatur (30%), Niederschlag (35%), Höhe (20%), Slope (15%)
+    Architektonische Positionierung:
+    Der BiomeGenerator fungiert als finaler Ökosystem-Assembler zwischen allen
+    vorherigen Generatoren und der finalen World-Assembly. Er transformiert
+    physikalische Parameter in biologische Realität.
 
-    Schritt 2: Super-Biome Überschreibung
-    Super-Biomes überschreiben Base-Biomes in folgender Prioritätsreihenfolge:
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-    2.1: Ocean Detection
-    - Identifikation aller lokalen Minima in heightmap
-    - Flood-Fill Algorithmus startet von Kartenrändern
-    - Nur Minima die (a) mit Rand verbunden sind UND (b) h < sea_level erfüllen werden zu Ocean
-    - Binnengewässer werden NICHT zu Ocean
+    2. CORE-GENERATOR INTEGRATION UND LOD-SYSTEM
 
-    2.2: Water-Biomes aus water_biomes_map
-    - Direkte Übertragung: water_biomes_map == 1 → Creek
-    - Direkte Übertragung: water_biomes_map == 2 → River
-    - Direkte Übertragung: water_biomes_map == 3 → Grand River
-    - Direkte Übertragung: water_biomes_map == 4 → Lake
+    BiomeClassificationSystem Anbindung:
+    Die Kern-Integration erfolgt über BiomeClassificationSystem.calculate_biomes()
+    mit Multi-Input-Data-Assembly und LOD-progressiver Enhancement-Strategie.
+    Base-Biome-Classification verwendet Gauss-basierte Fitness-Berechnung für
+    alle 15 Grundbiome basierend auf Temperature/Precipitation/Elevation/Moisture.
 
-    2.3: Proximity-basierte Super-Biomes
-    - Beach: Gaussian-Filter um alle Ocean-Pixel mit Radius bank_width + h <= sea_level + 5
-    - Lake Edge: Gaussian-Filter um alle Lake-Pixel mit Radius bank_width, außer Lake-Pixel selbst
-    - River Bank: Gaussian-Filter um alle Creek/River/Grand River-Pixel mit Radius bank_width, außer Wasser-Pixel selbst
+    Super-Biome-Override implementiert hierarchisches Priority-System mit 11
+    speziellen Bedingungen die Base-Biomes überschreiben. Supersampling-System
+    erzeugt 2x2-Sub-Pixel-Grid mit reproduzierbarer Zufalls-Rotation für
+    natürliche Biom-Übergänge ohne künstliche Patterns.
 
-    Schritt 3: Supersampling mit diskretisierter Zufalls-Rotation
-    Beide Base-Biomes und Super-Biomes werden 2x2 supersampled mit optimierter Rotation:
+    BiomeData Output-Strukturen:
+    - biome_map: 2D numpy.uint8 array, Index der dominantesten Biom-Klasse
+    - biome_map_super: 2D numpy.uint8 array, 2x supersampled für weiche Übergänge
+    - super_biome_mask: 2D numpy.bool array, Override-Bereiche-Maske
+    - climate_classification: 2D numpy.uint8 array, Whittaker-Klimazone-Zuordnung
+    - biome_statistics: Dict mit Verteilungs-Prozenten und Diversity-Metriken
+    - validity_state: LOD-Konsistenz und Parameter-Change-Detection
 
-    3.1: Diskretisierte Rotations-Zuweisung
-    - Rotations-Seed für Pixel (x,y): rotation_hash = (map_seed + 12345 + x*997 + y*991) % 4
-    - Rotation-Mapping:
-      - hash % 4 == 0: 0° Rotation (Sub-Pixel-Reihenfolge: TL, TR, BL, BR)
-      - hash % 4 == 1: 90° Rotation (Sub-Pixel-Reihenfolge: BL, TL, BR, TR)
-      - hash % 4 == 2: 180° Rotation (Sub-Pixel-Reihenfolge: BR, BL, TR, TL)
-      - hash % 4 == 3: 270° Rotation (Sub-Pixel-Reihenfolge: TR, BR, TL, BL)
-    - Große Primzahlen (997, 991) + Konstante (12345) sorgen für maximale Streuung
-    - Benachbarte Pixel haben garantiert unterschiedliche Rotations-Bereiche
-    - Verhindert zusammenhängende Bereiche mit gleicher Sub-Pixel-Anordnung
+    LOD-System (Numerisch mit Multi-Input-Progression):
+    - lod_level 1: 32x32 mit Basic-Classification für schnelle Preview-Qualität
+    - lod_level 2: 64x64 mit Enhanced-Super-Biome-Integration
+    - lod_level 3: 128x128 mit Detailed-Proximity-Calculations
+    - lod_level 4: 256x256 mit High-Quality-Supersampling
+    - lod_level 5: 512x512 mit Premium-Classification-Precision
+    - lod_level 6+: bis map_size mit Maximum-Quality für Export-Readiness
 
-    3.2: Wahrscheinlichkeitsbasierte Super-Biome mit einheitlicher Softness
-    Für Super-Biomes mit soft_transition=True wird edge_softness global angewendet:
-    - **Cliff:** sigmoid((slope_degrees - cliff_slope) / edge_softness)
-    - **Bank-Biomes:** max(0, 1 - (distance / bank_width)^edge_softness)
-    - **Höhen-Biomes:**
-      - Snow: sigmoid((height_diff) / (100 * edge_softness))
-      - Alpine: sigmoid((height_diff) / (200 * edge_softness))
-    - **Einheitliche Kontrolle:** Ein Parameter steuert alle Übergangs-Weichheiten
-    - **Konsistenz:** Alle Super-Biomes haben ähnlich weiche/harte Übergänge
+    Fallback-System (3-stufig vollständige Generation-Level-Fallbacks):
+    - GPU-Shader (Optimal): Parallele Multi-Factor-Classification mit Compute-Shadern
+    - CPU-Fallback (Gut): Optimierte NumPy-Vectorization mit Multiprocessing
+    - Simple-Fallback (Minimal): Linear Height/Temperature-basierte Classification
 
-    3.3: Sub-Pixel Zuweisung mit optimierter Zufälligkeit
-    - Sub-Pixel-Seed: sub_seed = (map_seed + 54321 + x*4 + y*4 + rotated_sub_index*3571) % 1000
-    - Wahrscheinlichkeit: probability = sub_seed / 1000.0 (Bereich 0.000-0.999)
-    - Wenn probability < Super-Biome-Wahrscheinlichkeit: Super-Biome zugewiesen
-    - Primzahl 3571 sorgt für unkorrelierte Sub-Pixel-Wahrscheinlichkeiten
-    - Konstante 54321 trennt Rotations- und Wahrscheinlichkeits-Zufälligkeit
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-    Vorteile des optimierten Systems:
-    - **Einheitliche Softness-Kontrolle:** Ein Parameter `edge_softness` steuert alle Super-Biome-Übergänge
-    - **Optimierte Zufälligkeit:** Große Primzahlen und Konstanten maximieren räumliche Streuung
-    - **Diskretisierte Rotation:** Benachbarte Pixel haben garantiert unterschiedliche Rotations-Bereiche
-    - **Reproduzierbare Ergebnisse:** `map_seed` sorgt für konsistente, aber variierte Zufälligkeit
-    - **Keine Korrelation:** Verschiedene Zufallsaspekte (Rotation, Wahrscheinlichkeit) sind unabhängig
-    - **Performance-optimiert:** Integer-Arithmetik und Modulo-Operationen für schnelle Berechnung
-    - **Natürliche Muster:** Eliminiert künstliche Repetition durch mathematisch optimierte Streuung
+    3. MULTI-GENERATOR DEPENDENCY-MANAGEMENT
 
-    Klassen:
-    BiomeClassificationSystem
-        Funktionsweise: Hauptklasse für Biom-Klassifikation basierend auf Klimadaten
-        Aufgabe: Koordiniert Base-Biome und Super-Biome Zuordnung mit Supersampling
-        Methoden: classify_biomes(), apply_supersampling(), integrate_super_biomes()
+    Input Dependencies (komplexeste aller Generatoren):
+    Der BiomeGenerator koordiniert die umfangreichsten Cross-Generator-Dependencies
+    im System durch Multi-Source-Data-Integration. Primary-Dependencies umfassen
+    terrain_tab für heightmap-basierte Elevation-Classification. Secondary-Dependencies
+    integrieren weather_tab für temp_map/precip_map Whittaker-Matrix-Classification.
+    Tertiary-Dependencies nutzen water_tab für soil_moist_map/water_biomes_map
+    Moisture/Proximity-Modulation.
 
-    BaseBiomeClassifier
-        Funktionsweise: Gauß-basierte Klassifizierung von 15 Grundbiomen
-        Aufgabe: Erstellt biome_map basierend auf Höhe, Temperatur, Niederschlag und Slope
-        Methoden: calculate_gaussian_fitness(), weight_environmental_factors(), assign_dominant_biome()
+    Required Dependencies Matrix:
+    - heightmap: Elevation-basierte Alpine/Snow-Level-Classification
+    - temp_map: Temperature-Faktor für Whittaker-Biome-Matrix
+    - precip_map: Precipitation-Faktor für Climate-Zone-Determination
+    - soil_moist_map: Moisture-basierte Wetland/Desert-Modulation
+    - water_biomes_map: Proximity-Super-Biome-Classification
 
-    SuperBiomeOverrideSystem
-        Funktionsweise: Überschreibt Base-Biomes mit speziellen Bedingungen (Ocean, Cliff, Beach, etc.)
-        Aufgabe: Erstellt super_biome_mask für prioritätsbasierte Biom-Überschreibung
-        Methoden: detect_ocean_connectivity(), apply_proximity_biomes(), calculate_elevation_biomes()
+    Multi-Generator-Validation-Pipeline:
+    Input-Data-Consistency-Checks validieren Shape-Compatibility zwischen allen
+    Dependencies mit automatischer LOD-Level-Matching. Physical-Plausibility-Validation
+    prüft Temperature-Elevation-Konsistenz und Precipitation-Soil-Moisture-Korrelation.
+    Cross-Generator-Quality-Assessment bewertet Input-Data-Reliability für
+    robuste Classification-Results.
 
-    SupersamplingManager
-        Funktionsweise: 2x2 Supersampling mit diskretisierter Zufalls-Rotation
-        Aufgabe: Erstellt biome_map_super für weiche Übergänge zwischen Biomen
-        Methoden: apply_rotational_supersampling(), calculate_soft_transitions(), optimize_spatial_distribution()
+    Dependency-Resolution-Strategy:
+    Bei fehlenden Dependencies implementiert das System Graceful-Degradation mit
+    Simplified-Classification basierend auf verfügbaren Inputs. Missing-Input-Recovery
+    verwendet Default-Climate-Conditions für realistische Biome-Approximation.
+    Partial-Input-Processing ermöglicht Classification mit reduzierter Precision
+    statt vollständigem Failure.
 
-    ProximityBiomeCalculator
-        Funktionsweise: Berechnet Proximity-basierte Super-Biomes (Beach, Lake Edge, River Bank)
-        Aufgabe: Erstellt weiche Übergänge um Gewässer mit konfigurierbarem edge_softness
-        Methoden: calculate_distance_fields(), apply_gaussian_proximity(), blend_with_base_biomes()
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    4. BASE-BIOME CLASSIFICATION SYSTEM
+
+    15 Base-Biomes nach Whittaker-Klassifikation:
+    Das System implementiert wissenschaftlich fundierte Biom-Classification basierend
+    auf Temperature-Precipitation-Matrix mit Höhen- und Moisture-Modulation.
+    Ice-Cap-Biomes entstehen bei extremen Temperaturen unter -5°C mit beliebiger
+    Moisture. Tundra-Classification erfolgt bei -15°C bis 5°C mit moderater Moisture.
+
+    Gauss-basierte Fitness-Berechnung:
+    Jedes Base-Biome definiert optimale Parameter-Ranges für Temperature,
+    Precipitation, Elevation und Soil-Moisture mit Gauss-Kurven-basierten
+    Fitness-Scores. Multi-Factor-Integration gewichtet alle vier Parameter
+    nach konfigurierbaren Faktoren für adaptive Classification-Sensitivity.
+
+    BASE_BIOME_DEFINITIONS:
+    - ice_cap: Temperature(-40,-5), Moisture(0,300), Elevation(0,8000)
+    - tundra: Temperature(-15,5), Moisture(100,600), Elevation(0,2000)
+    - taiga: Temperature(-10,15), Moisture(300,1200), Elevation(50,2500)
+    - grassland: Temperature(0,25), Moisture(200,800), Elevation(10,1500)
+    - temperate_forest: Temperature(5,25), Moisture(600,2000), Elevation(0,2000)
+    - mediterranean: Temperature(8,30), Moisture(300,900), Elevation(0,1200)
+    - desert: Temperature(10,50), Moisture(0,250), Elevation(0,2000)
+    - semi_arid: Temperature(5,35), Moisture(200,600), Elevation(0,1800)
+    - tropical_rainforest: Temperature(20,35), Moisture(1500,4000), Elevation(0,1500)
+    - tropical_seasonal: Temperature(18,35), Moisture(800,2000), Elevation(0,1200)
+    - savanna: Temperature(15,35), Moisture(400,1200), Elevation(0,1800)
+    - montane_forest: Temperature(0,20), Moisture(800,3000), Elevation(800,3500)
+    - swamp: Temperature(5,35), Moisture(800,3000), Elevation(0,200)
+    - coastal_dunes: Temperature(5,35), Moisture(300,1500), Elevation(0,100)
+    - badlands: Temperature(-5,45), Moisture(0,400), Elevation(200,2500)
+
+    Classification-Algorithm-Implementation:
+    Multi-Factor-Gauss-Fitting berechnet Fitness-Score für jedes Pixel gegen
+    alle 15 Base-Biomes mit Parameter-Gewichtung: Temperature(30%), Precipitation(35%),
+    Elevation(20%), Soil-Moisture(15%). Dominant-Biome-Selection wählt höchsten
+    Fitness-Score mit Tie-Breaking durch Zufalls-Seed-basierte Deterministic-Selection.
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    5. SUPER-BIOME OVERRIDE SYSTEM
+
+    11 Super-Biomes mit Priority-Hierarchie:
+    Das Super-Biome-System implementiert spezialisierte Biom-Typen die Base-Biomes
+    in strikter Priority-Reihenfolge überschreiben. Wasser-basierte Super-Biomes
+    haben höchste Priorität (0-4) gefolgt von Topographie-basierten (5-6),
+    Proximity-basierten (7-8) und Höhen-basierten (9-10) Classifications.
+
+    Wasser-basierte Super-Biomes (Priority 0-4):
+    Ocean-Classification erfolgt durch Flood-Fill-Algorithm von lokalen Minima
+    mit Kartenrand-Verbindung unter sea_level. Lake/River/Creek-Classifications
+    übernehmen direkt water_biomes_map-Klassifikation ohne zusätzliche Processing.
+    Grand-River-Biomes erhalten Priority über kleinere Wasserkörper.
+
+    Topographie-basierte Super-Biomes (Priority 5-6):
+    Cliff-Classification identifiziert steile Hänge über cliff_slope-Grenzwert
+    mit Sigmoid-Transition-Function für weiche Übergänge. Beach-Classification
+    erfolgt durch Ocean-Proximity-Analysis innerhalb bank_width mit exponentieller
+    Distance-Decay-Function.
+
+    Proximity-basierte Super-Biomes (Priority 7-8):
+    Lake-Edge und River-Bank-Classifications verwenden Distance-Field-Calculations
+    mit Gaussian-Decay-Functions um entsprechende Wasserkörper. Bank_width-Parameter
+    definiert maximale Proximity-Distance mit edge_softness-Kontrolle für
+    Transition-Qualität.
+
+    Höhen-basierte Super-Biomes (Priority 9-10):
+    Alpine-Level und Snow-Level-Classifications implementieren temperatur-adaptive
+    Höhengrenzen mit graduellen Sigmoid-Transitions. Temperature-Correlation
+    ermöglicht realistische Höhen-Temperatur-abhängige Schneegrenzen und
+    Alpine-Zones.
+
+    Edge-Softness Unified-Control:
+    Alle Proximity- und Höhen-basierten Super-Biomes verwenden einheitlichen
+    edge_softness-Parameter für konsistente Transition-Control. Sigmoid-Functions
+    und Distance-Decay-Curves skalieren proportional zu edge_softness für
+    User-kontrollierbare Biome-Boundary-Weichheit.
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    6. SUPERSAMPLING UND TRANSITION-SYSTEM
+
+    2x2-Supersampling mit Diskretisierter Rotation:
+    Das Supersampling-System erzeugt natürliche Biome-Übergänge durch 2x2-Sub-Pixel-Grid
+    mit reproduzierbarer Zufalls-Rotation pro Pixel. Diskretisierte Rotations-Zuweisung
+    verwendet große Primzahlen für maximale räumliche Streuung ohne Pattern-Artifacts.
+
+    Rotations-Algorithm-Implementation:
+    Rotation-Hash-Calculation erfolgt durch (map_seed + 12345 + x*997 + y*991) % 4
+    für vier mögliche Rotations-States pro Pixel. Sub-Pixel-Sampling implementiert
+    entsprechende Rotations-Reihenfolge: 0°→TL,TR,BL,BR; 90°→BL,TL,BR,TR etc.
+    Primzahl-basierte Hash-Functions eliminieren räumliche Korrelationen.
+
+    Probabilistic-Super-Biome-Assignment:
+    Super-Biomes mit soft_transition-Flag verwenden Wahrscheinlichkeits-basierte
+    Sub-Pixel-Assignment durch edge_softness-modulierte Probability-Functions.
+    Sub-Pixel-Seed-Generation gewährleistet reproduzierbare aber unkorrelierte
+    Zufalls-Entscheidungen für konsistente Results bei wiederholten Generations.
+
+    Transition-Quality-Enhancement:
+    Einheitliche edge_softness-Kontrolle ermöglicht globale Transition-Weichheit-Anpassung
+    für alle Super-Biome-Types. Biome-Boundary-Smoothing reduziert künstliche
+    Hard-Edges durch graduelle Probability-Transitions zwischen verschiedenen
+    Biome-Classifications.
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    7. SHADER-MANAGER INTEGRATION UND GPU-OPTIMIERUNG
+
+    Vollständige Generation-Level-Fallbacks:
+    Der BiomeGenerator implementiert komplette LOD-Level-basierte Fallback-Strategy
+    statt pixelbasierter Mixed-Processing für Konsistenz und Performance.
+    GPU-Shader-Request erfolgt für gesamten LOD-Level mit Success/Failure-Response
+    für einheitliche Processing-Method pro Generation-Cycle.
+
+    GPU-Parallelisierung-Strategy:
+    Pixelbasierte Parallelisierung ermöglicht independent Classification für jeden
+    Pixel durch parallele Gauss-Fitting-Calculations auf GPU-Cores. Multi-Factor-Classification
+    und Super-Biome-Conditions implementieren als Parallel-Shader-Branches für
+    optimale GPU-Utilization.
+
+    Shader-Request-Implementation:
+    ```
+    GPU-Request: shader_manager.request_biome_classification(
+        operation_type="multi_factor_classification",
+        input_data=[heightmap, temp_map, precip_map, soil_moist_map, water_biomes_map],
+        parameters=biome_parameters,
+        lod_level=current_lod
+    )
+
+    Success-Response: Validated biome_map + super_biome_mask + performance_metrics
+    Failure-Response: Error-details + recommended_fallback_strategy
+    ```
+
+    CPU-Fallback-Optimization:
+    CPU-Implementation nutzt optimierte NumPy-Vectorization mit Multiprocessing
+    für parallele Biome-Classification-Batches. Vectorized-Gauss-Calculations
+    und Broadcasting-Operations maximieren CPU-Performance bei GPU-Unavailability.
+
+    Simple-Fallback-Implementation:
+    Minimal-Classification verwendet Linear-Height-Temperature-basierte Biome-Assignment
+    ohne komplexe Gauss-Fitting für garantierte Results bei kritischen System-Failures.
+    Simplified-Super-Biome-Logic implementiert nur Water-Body und Elevation-Threshold-Classifications.
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    8. BIDIREKTIONALE WATER-INTEGRATION
+
+    Modified-Heightmap-Integration:
+    Der BiomeGenerator priorisiert modified_heightmap vom Water-Generator für
+    realistische Post-Erosion-Biome-Classification. Input-Selection-Logic prüft
+    Water-Generator-Modified-Heightmap-Availability und verwendet automatisch
+    neueste Terrain-Data für accurate Elevation-based-Classifications.
+
+    Simple-Water-Integration-Implementation:
+    ```
+    Input-Selection-Logic:
+    if data_lod_manager.has_water_data("heightmap_modified"):
+        heightmap = data_lod_manager.get_water_data("heightmap_modified")
+        post_erosion_classification = True
+    else:
+        heightmap = data_lod_manager.get_terrain_data("heightmap")
+        post_erosion_classification = False
+    ```
+
+    Post-Erosion-Biome-Adaptation:
+    Modified-Terrain-Integration ermöglicht realistische Biome-Distribution nach
+    Erosions-Prozessen ohne komplexe Erosion-specific-Biome-Modifications initial.
+    Flow-Path-Elevation-Changes reflektieren sich automatisch in Alpine/Snow-Level
+    und Elevation-based-Base-Biome-Classifications.
+
+    Future-Enhancement-Preparation:
+    System-Architecture ermöglicht zukünftige Advanced-Erosion-Biome-Adaptations
+    wie Enhanced-River-Bank-Formation in erodierten Tälern und Wetland-Classification
+    in Sedimentations-Bereichen ohne Current-Implementation-Complexity.
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    9. ERROR-HANDLING UND VALIDATION SYSTEM
+
+    Graceful-Degradation-Strategy:
+    Multi-Input-Availability-Checks implementieren Partial-Input-Processing für
+    Classification mit verfügbaren Dependencies. Missing-Input-Recovery verwendet
+    Default-Climate-Conditions und Simplified-Biome-Distribution für System-Continuity.
+    GPU-Memory-Exhaustion triggert Automatic-LOD-Reduction und Supersampling-Disable.
+
+    Input-Data-Validation-Pipeline:
+    Cross-Generator-Consistency-Checks validieren Physical-Plausibility zwischen
+    Temperature-Elevation-Data und Precipitation-Soil-Moisture-Correlation.
+    Data-Quality-Assessment prüft NaN-Detection, Range-Validation und Shape-Consistency
+    für robuste Multi-Input-Integration.
+
+    Classification-Validation-Mechanisms:
+    Biome-Distribution-Plausibility-Checks erkennen unrealistische Biome-Patterns
+    wie Desert-Classification in High-Precipitation-Areas. Whittaker-Matrix-Consistency
+    validiert Climate-Zone-Biome-Mapping gegen wissenschaftliche Standards.
+    Super-Biome-Override-Logic-Validation prüft Priority-System-Consistency.
+
+    Recovery-Strategy-Implementation:
+    Critical-Failure-Recovery implementiert Minimal-Biome-System mit 5 Base-Biomes
+    ohne Super-Biome-Override für System-Stability. Parameter-Adjustment-Recovery
+    modifiziert Classification-Sensitivity bei Input-Data-Inconsistencies.
+    Default-Biome-Distribution-Fallback gewährleistet plausible Results bei
+    Multi-System-Failures.
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    10. MANAGER-INTEGRATION UND SIGNAL-FLOW
+
+    DataLODManager-Integration-Patterns:
+    BiomeGenerator integriert mit DataLODManager über set_biome_data_lod() für
+    Result-Storage mit Parameter-Hash-basierter Cache-Invalidation. Multi-Input-Retrieval
+    koordiniert get_terrain_data(), get_weather_data(), get_water_data() für
+    Complete-Dependency-Assembly.
+
+    GenerationOrchestrator-Coordination:
+    Generation-Flow erfolgt über GenerationOrchestrator.request_generation("biome")
+    nach Multi-Dependency-Satisfaction. LOD-Progression-Management koordiniert
+    mit anderen Generatoren für Consistent-Quality-Scaling und Resource-Optimization.
+
+    ParameterManager-Synchronisation:
+    UI-Parameter-Synchronisation implementiert Proxy-Pattern zwischen BiomeTab
+    und ParameterManager für Real-time-Parameter-Updates. Cross-Parameter-Constraint-Validation
+    prüft alpine_level < snow_level und andere Logical-Constraints.
+
+    Signal-Architecture-Integration:
+    ```
+    Signal-Flow-Implementation:
+    BiomeTab.generate_requested("biome") →
+    GenerationOrchestrator.request_generation("biome", parameters) →
+    BiomeClassificationSystem.calculate_biomes() →
+    DataLODManager.set_biome_data_lod() →
+    data_updated("biome") Signal →
+    BiomeTab.on_data_updated() →
+    BiomeTab.update_display()
+    ```
+
+    Performance-Monitoring-Integration:
+    ShaderManager-Performance-Tracking sammelt GPU-Classification-Metrics für
+    LOD-Performance-Optimization. DataLODManager-ResourceTracker monitored
+    Large-Array-Memory-Usage für Biome-Data und Supersampling-Results.
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    11. KLASSEN-ARCHITEKTUR
+
+    BiomeClassificationSystem:
+    Funktionsweise: Hauptklasse für Multi-Factor-Biome-Classification mit vollständiger
+    Manager-Integration und GPU-Optimization-Support. Koordiniert Base-Classification,
+    Super-Biome-Override und Supersampling-Pipeline für Complete-Biome-Assembly.
+    External-Interface: calculate_biomes(multi_input_data, parameters, lod_level)
+    wird von GenerationOrchestrator aufgerufen. Internal-Methods implementieren
+    _coordinate_classification(), _validate_multi_input(), _create_biome_data().
+
+    BaseBiomeClassifier:
+    Funktionsweise: Gauss-basierte Classification von 15 Grundbiomen mit Whittaker-Matrix-Logic
+    und Multi-Factor-Parameter-Weighting. Implementiert Scientific-Classification-Standards
+    mit Temperature-Precipitation-Elevation-Moisture-Integration für accurate Biome-Mapping.
+    Methoden umfassen calculate_gaussian_fitness(), weight_environmental_factors(),
+    classify_dominant_biome() mit GPU-Parallelisierung-Support.
+
+    SuperBiomeOverrideSystem:
+    Funktionsweise: Priority-basiertes Override-System mit 11 speziellen Biom-Bedingungen
+    und Unified-Edge-Softness-Control. Implementiert Water-Connectivity-Detection,
+    Proximity-Field-Calculations und Elevation-Threshold-Logic für Natural-Super-Biome-Distribution.
+    Methoden: detect_water_connectivity(), calculate_proximity_fields(), apply_elevation_thresholds().
+
+    SupersamplingManager:
+    Funktionsweise: 2x2-Supersampling mit diskretisierter Rotation und Probabilistic-Assignment
+    für Natural-Biome-Transitions ohne Pattern-Artifacts. Implementiert Reproduzierbare-Randomization
+    mit Primzahl-basierter Hash-Distribution für Consistent-Results.
+    Methoden: apply_rotational_supersampling(), optimize_spatial_distribution(),
+    calculate_transition_probabilities().
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     """
 
 def value_default():
