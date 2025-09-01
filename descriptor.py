@@ -2978,7 +2978,7 @@ def main_menu():
 
 def base_tab():
     """
-    Path: gui/tabs/base_tab_refactored.py
+    Path: gui/tabs/base_tab.py
     date_changed: 24.08.2025
 
     ## ÜBERSICHT UND ZIELSETZUNG

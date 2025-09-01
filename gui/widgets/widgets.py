@@ -687,3 +687,122 @@ class GradientBackgroundWidget(QWidget):
         # Horizontale Linien
         for y in range(0, self.height(), 50):
             painter.drawLine(0, y, self.width(), y)
+
+class NavigationPanel(QGroupBox):
+    """
+    Funktionsweise: Navigation Panel für Tab-Wechsel und Workflow-Navigation
+    Aufgabe: Previous/Next Buttons, Tab-Jump, Workflow-Progress
+    Kommunikation: Signals für Navigation-Requests
+    """
+
+    navigation_requested = pyqtSignal(str)  # (target_tab)
+
+    def __init__(self, navigation_manager, show_tab_buttons=True, parent=None):
+        super().__init__("Navigation", parent)
+        self.navigation_manager = navigation_manager
+        self.show_tab_buttons = show_tab_buttons
+        self.current_tab = None
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Erstellt UI für Navigation Panel"""
+        layout = QVBoxLayout()
+
+        # Previous/Next Navigation
+        nav_layout = QHBoxLayout()
+
+        self.prev_button = BaseButton("← Previous", "secondary")
+        self.prev_button.clicked.connect(self.go_previous)
+        nav_layout.addWidget(self.prev_button)
+
+        self.next_button = BaseButton("Next →", "primary")
+        self.next_button.clicked.connect(self.go_next)
+        nav_layout.addWidget(self.next_button)
+
+        layout.addLayout(nav_layout)
+
+        # Tab-Jump Buttons (optional)
+        if self.show_tab_buttons:
+            jump_group = QGroupBox("Jump To")
+            jump_layout = QGridLayout()
+
+            self.tab_buttons = {}
+            tabs = ["terrain", "geology", "weather", "water", "biome", "settlement", "overview"]
+
+            for i, tab_name in enumerate(tabs):
+                button = BaseButton(tab_name.title(), "secondary")
+                button.clicked.connect(lambda checked, tab=tab_name: self.jump_to_tab(tab))
+                self.tab_buttons[tab_name] = button
+
+                row, col = divmod(i, 2)
+                jump_layout.addWidget(button, row, col)
+
+            jump_group.setLayout(jump_layout)
+            layout.addWidget(jump_group)
+
+        self.setLayout(layout)
+
+    def set_current_tab(self, tab_name: str):
+        """
+        Funktionsweise: Setzt aktuellen Tab und aktualisiert Button-States
+        Parameter: tab_name (str)
+        """
+        self.current_tab = tab_name
+        self.update_navigation_buttons()
+        self.update_tab_buttons()
+
+    def update_navigation_buttons(self):
+        """Aktualisiert Previous/Next Button States"""
+        if not self.navigation_manager:
+            return
+
+        # Tab-Reihenfolge
+        tab_order = ["terrain", "geology", "weather", "water", "biome", "settlement", "overview"]
+
+        if self.current_tab in tab_order:
+            current_index = tab_order.index(self.current_tab)
+
+            # Previous Button
+            self.prev_button.setEnabled(current_index > 0)
+
+            # Next Button
+            self.next_button.setEnabled(current_index < len(tab_order) - 1)
+
+    def update_tab_buttons(self):
+        """Aktualisiert Tab-Jump Button States"""
+        if not self.show_tab_buttons:
+            return
+
+        for tab_name, button in self.tab_buttons.items():
+            if tab_name == self.current_tab:
+                button.button_type = "primary"
+                button.setup_styling()
+            else:
+                button.button_type = "secondary"
+                button.setup_styling()
+
+    @pyqtSlot()
+    def go_previous(self):
+        """Navigation zu Previous Tab"""
+        tab_order = ["terrain", "geology", "weather", "water", "biome", "settlement", "overview"]
+
+        if self.current_tab in tab_order:
+            current_index = tab_order.index(self.current_tab)
+            if current_index > 0:
+                target_tab = tab_order[current_index - 1]
+                self.navigation_requested.emit(target_tab)
+
+    @pyqtSlot()
+    def go_next(self):
+        """Navigation zu Next Tab"""
+        tab_order = ["terrain", "geology", "weather", "water", "biome", "settlement", "overview"]
+
+        if self.current_tab in tab_order:
+            current_index = tab_order.index(self.current_tab)
+            if current_index < len(tab_order) - 1:
+                target_tab = tab_order[current_index + 1]
+                self.navigation_requested.emit(target_tab)
+
+    def jump_to_tab(self, tab_name: str):
+        """Jump zu spezifischem Tab"""
+        self.navigation_requested.emit(tab_name)

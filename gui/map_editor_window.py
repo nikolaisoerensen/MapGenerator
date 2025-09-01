@@ -102,11 +102,13 @@ class MapEditorWindow(QMainWindow):
     # Navigation signals
     return_to_main_menu = pyqtSignal()
 
-    def __init__(self, data_manager, navigation_manager, generation_orchestrator=None, parent=None):
+    def __init__(self, data_manager=None, navigation_manager=None, shader_manager=None, parameter_manager=None,generation_orchestrator=None, parent=None):
         super().__init__(parent)
         # Core dependencies
         self.data_manager = data_manager
         self.navigation_manager = navigation_manager
+        self.shader_manager = shader_manager
+        self.parameter_manager = parameter_manager
         self.generation_orchestrator = generation_orchestrator
 
         self.logger = logging.getLogger(__name__)
@@ -115,7 +117,6 @@ class MapEditorWindow(QMainWindow):
             self.logger.error("DEBUG: MapEditor received None as generation_orchestrator!")
         else:
             self.logger.info(f"DEBUG: MapEditor received orchestrator: {type(self.generation_orchestrator)}")
-
 
         # UI components
         self.tab_widget = None
@@ -128,9 +129,6 @@ class MapEditorWindow(QMainWindow):
         # Status monitoring
         self.status_update_timer = QTimer()
         self.status_update_timer.timeout.connect(self._update_status)
-
-        # Resource management
-        self.shader_manager = None  # Placeholder for 3D rendering
 
         # Initialize window
         self._setup_window()
@@ -231,15 +229,6 @@ class MapEditorWindow(QMainWindow):
             ]
 
             self._add_menu_actions(generation_menu, generation_actions)
-
-            # LOD submenu
-            lod_menu = generation_menu.addMenu('&Target Quality')
-            lod_actions = [
-                ("LOD64 (Fast Preview)", None, lambda: self._set_global_target_lod("LOD64")),
-                ("LOD256 (High Quality)", None, lambda: self._set_global_target_lod("LOD256")),
-                ("FINAL (Best Quality)", None, lambda: self._set_global_target_lod("FINAL"))
-            ]
-            self._add_menu_actions(lod_menu, lod_actions)
 
         # View Menu
         view_menu = menubar.addMenu('&View')
@@ -426,6 +415,7 @@ class MapEditorWindow(QMainWindow):
 
             tab_instance = tab_class(
                 data_manager=self.data_manager,
+                parameter_manager=self.parameter_manager,
                 navigation_manager=self.navigation_manager,
                 shader_manager=self.shader_manager,
                 generation_orchestrator=self.generation_orchestrator
@@ -978,33 +968,6 @@ class MapEditorWindow(QMainWindow):
             self.active_generations.clear()
             self.status_indicator.set_warning("All generation stopped")
             self.logger.info("All generation stopped by user request")
-
-    def _set_global_target_lod(self, lod_level: str):
-        """
-        Set target LOD for all tabs
-        ===========================
-
-        Args:
-            lod_level: Target LOD level to set globally
-        """
-        # Update toolbar combo
-        if hasattr(self, 'toolbar_lod_combo'):
-            self.toolbar_lod_combo.setCurrentText(lod_level)
-
-        # Propagate to all tabs that support LOD selection
-        for tab_instance in self.tabs.values():
-            try:
-                if hasattr(tab_instance, 'target_lod'):
-                    tab_instance.target_lod = lod_level
-                if hasattr(tab_instance, 'target_lod_combo'):
-                    for i in range(tab_instance.target_lod_combo.count()):
-                        if lod_level in tab_instance.target_lod_combo.itemText(i):
-                            tab_instance.target_lod_combo.setCurrentIndex(i)
-                            break
-            except Exception as e:
-                self.logger.warning(f"Failed to set LOD for tab: {e}")
-
-        self.logger.info(f"Global target LOD set to: {lod_level}")
 
     @pyqtSlot(str)
     def _on_toolbar_lod_changed(self, lod_level: str):

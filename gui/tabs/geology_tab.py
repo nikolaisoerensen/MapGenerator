@@ -21,7 +21,7 @@ import logging
 from .base_tab import BaseMapTab
 from gui.config.value_default import GEOLOGY
 from gui.widgets.widgets import ParameterSlider, StatusIndicator
-from core.geology_generator import GeologyGenerator, RockTypeClassifier, MassConservationManager
+from core.geology_generator import GeologySystemGenerator, RockTypeClassifier, MassConservationManager
 
 
 class GeologyTab(BaseMapTab):
@@ -41,13 +41,14 @@ class GeologyTab(BaseMapTab):
         self.logger = logging.getLogger(__name__)
 
         # Core-Generator (nur für direkte Fallback-Generation)
-        self.geology_generator = GeologyGenerator()
+        self.geology_generator = GeologySystemGenerator()
         self.rock_classifier = RockTypeClassifier()
         self.mass_conservation = MassConservationManager()
 
         # Enhanced Features - WIEDERHERGESTELLT
         self.dependency_validation_enabled = True
         self.data_validation_enabled = True
+
 
         # Setup standardisierte Orchestrator-Integration
         self.setup_standard_orchestrator_handlers("geology")

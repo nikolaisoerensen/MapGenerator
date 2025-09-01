@@ -35,6 +35,8 @@ from gui.config.gui_default import AppConstants
 from gui.map_editor_window import MapEditorWindow
 from gui.managers.data_lod_manager import DataLODManager
 from gui.managers.navigation_manager import NavigationManager
+from gui.managers.shader_manager import ShaderManager
+from gui.managers.parameter_manager import ParameterCommunicationHub
 from gui.managers.generation_orchestrator import GenerationOrchestrator
 
 class MapGeneratorApp(QObject):
@@ -76,6 +78,8 @@ class MapGeneratorApp(QObject):
         # Manager nur einzeln initialisieren
         self.data_lod_manager = None
         self.navigation_manager = None
+        self.shader_manager = None
+        self.parameter_manager = None
         self.generation_orchestrator = None
 
         self.logger.info("MapGeneratorApp minimal initialization completed")
@@ -163,6 +167,7 @@ class MapGeneratorApp(QObject):
         """
         self.memory_monitor_timer = QTimer()
         self.memory_monitor_timer.timeout.connect(self._log_memory_usage)
+
         # Timer started only when needed
 
     def start_application(self):
@@ -179,15 +184,21 @@ class MapGeneratorApp(QObject):
         try:
             # Manager einzeln erstellen und testen
             self.logger.info("Creating DataLODManager...")
-            self.data_lod_manager = DataLODManager()
-            self.logger.info("DataLODManager created successfully")
+            self.data_manager = DataLODManager()
 
             self.logger.info("Creating NavigationManager...")
             self.navigation_manager = NavigationManager(data_manager=self.data_lod_manager)
-            self.logger.info("NavigationManager created successfully")
 
-            # GenerationOrchestrator erstmal weglassen
-            # self.generation_orchestrator = GenerationOrchestrator(data_manager=self.data_lod_manager)
+            self.logger.info("Creating GenerationOrchestrator...")
+            self.generation_orchestrator = GenerationOrchestrator(data_manager=self.data_lod_manager)
+
+            self.logger.info("Creating ParameterManager...")
+            self.navigation_manager = ParameterCommunicationHub()
+
+            self.logger.info("Creating ShaderManager...")
+            self.navigation_manager = ShaderManager()
+
+
 
             self._show_main_menu()
 
@@ -207,7 +218,10 @@ class MapGeneratorApp(QObject):
         """
         try:
             self.main_menu = MainMenuWindow(
-                data_manager=self.data_lod_manager,
+                data_manager=self.data_manager,
+                parameter_manager=self.parameter_manager,
+                shader_manager=self.shader_manager,
+                generation_orchestrator=self.generation_orchestrator,
                 navigation_manager=self.navigation_manager
             )
 
@@ -237,7 +251,9 @@ class MapGeneratorApp(QObject):
             self.logger.info("Creating MapEditor window")
 
             self.map_editor = MapEditorWindow(
-                data_manager=self.data_lod_manager,
+                data_manager=self.data_manager,
+                parameter_manager=self.parameter_manager,
+                shader_manager=self.shader_manager,
                 navigation_manager=self.navigation_manager,
                 generation_orchestrator=self.generation_orchestrator
             )
@@ -590,7 +606,6 @@ class MapGeneratorApp(QObject):
 
             # Close all windows
             windows_to_close = [
-                ("loading_dialog", self.loading_dialog),
                 ("map_editor", self.map_editor),
                 ("main_menu", self.main_menu)
             ]
@@ -607,7 +622,7 @@ class MapGeneratorApp(QObject):
             managers_to_cleanup = [
                 ("NavigationManager", self.navigation_manager),
                 ("GenerationOrchestrator", self.generation_orchestrator),
-                ("DataManager", self.data_manager)
+                ("DataManager", self.data_lod_manager)
             ]
 
             for manager_name, manager in managers_to_cleanup:

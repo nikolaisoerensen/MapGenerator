@@ -45,7 +45,8 @@ class MainMenuWindow(QMainWindow):
     # NEUES SIGNAL FÜR MAIN.PY INTEGRATION
     map_editor_requested = pyqtSignal()
 
-    def __init__(self, data_manager=None, navigation_manager=None):
+    def __init__(self, shader_manager=None, parameter_manager=None, generation_orchestrator=None,
+                 data_manager=None, navigation_manager=None):
         """
         Funktionsweise: Initialisiert MainMenu mit optionalen Manager-References
         Aufgabe: UI Setup ohne eigene Manager-Erstellung (kommt von main.py)
@@ -54,19 +55,11 @@ class MainMenuWindow(QMainWindow):
         super().__init__()
         self.logger = logging.getLogger(__name__)
 
-        # Manager von main.py übernehmen oder erstellen (Backward-Compatibility)
-        if data_manager and navigation_manager:
-            self.data_manager = data_manager
-            self.navigation_manager = navigation_manager
-            self.logger.info("Using managers from main.py")
-        else:
-            # Fallback für direkten MainMenu-Start (Development)
-            from gui.managers.data_manager import DataManager
-            from gui.managers.navigation_manager import NavigationManager
-
-            self.data_manager = DataManager()
-            self.navigation_manager = NavigationManager(self)
-            self.logger.warning("Created own managers (fallback mode)")
+        self.data_manager = data_manager
+        self.navigation_manager = navigation_manager
+        self.generation_orchestrator = generation_orchestrator
+        self.shader_manager = shader_manager
+        self.parameter_manager = parameter_manager
 
         # Window Setup
         self.setup_window()

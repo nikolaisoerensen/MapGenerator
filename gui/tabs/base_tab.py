@@ -39,7 +39,7 @@ import weakref
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
-from gui.widgets.widgets import BaseButton, NavigationPanel, StatusIndicator, DisplayWrapper
+from gui.widgets.widgets import BaseButton, StatusIndicator, DisplayWrapper, NavigationPanel
 
 # Map Display Import mit Fallback
 try:
@@ -81,7 +81,7 @@ class BaseMapTab(QWidget):
     display_mode_changed = pyqtSignal(str)  # display_mode
 
     def __init__(self, data_lod_manager=None, parameter_manager=None,
-                 navigation_manager=None, generation_orchestrator=None):
+                 navigation_manager=None, shader_manager=None, generation_orchestrator=None):
         super().__init__()
 
         # Manager-Referenzen (können None sein für Fallback-Verhalten)

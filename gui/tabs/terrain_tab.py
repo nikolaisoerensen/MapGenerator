@@ -1,777 +1,695 @@
 """
 Path: gui/tabs/terrain_tab.py
+Date changed: 24.08.2025
 
-Funktionsweise: Terrain-Editor mit GenerationOrchestrator Integration - VOLLSTÄNDIG REFACTORED
-- Erbt von BaseMapTab für gemeinsame Features
-- NEUE INTEGRATION: GenerationOrchestrator statt direkte Core-Calls
-- Spezialisierte Widgets: TerrainParameterPanel, TerrainStatisticsWidget
-- Live 2D/3D Preview über map_display_2d/3d.py erweitert
-- Real-time Terrain-Statistics (Höhenverteilung, Steigungen, Verschattung)
-- Output: heightmap, slopemap, shademap für nachfolgende Generatoren
-- REFACTORED: Modulare Architektur, Standard-Orchestrator-Handler, Parameter-Update-Manager,
-             Vereinfachtes LOD-System, Zentraler Display-Renderer, Explizite Imports
+TerrainTab implementiert die Terrain-Generator UI mit vollständiger BaseMapTab-Integration
+und direkter Anbindung an den TerrainGenerator aus core/terrain_generator.py. Als Basis-Generator
+ohne Dependencies liefert er heightmap, slopemap und shadowmap für alle nachgelagerten Systeme.
 """
 
 from PyQt5.QtWidgets import (
-    QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QWidget, QCheckBox, QComboBox, QRadioButton
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
+    QButtonGroup, QCheckBox, QSlider, QLabel
 )
-from PyQt5.QtCore import pyqtSlot, QTimer
+from PyQt5.QtCore import pyqtSlot, Qt
 from PyQt5.QtGui import QFont
-
-import numpy as np
 import logging
+from typing import Dict, Any, Optional
 
-from .base_tab import BaseMapTab
+from gui.tabs.base_tab import BaseMapTab
+from gui.widgets.widgets import (
+    BaseButton, ParameterSlider, RandomSeedButton,
+    StatusIndicator, ProgressBar, NoWheelSlider
+)
 from gui.config.value_default import TERRAIN, get_parameter_config, validate_parameter_set
-from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, RandomSeedButton, ParameterUpdateManager
-from gui.managers.orchestrator_manager import StandardOrchestratorHandler, OrchestratorRequestBuilder
-
-def get_terrain_error_decorators():
-    """
-    Funktionsweise: Lazy Loading von Terrain Tab Error Decorators
-    Aufgabe: Lädt Memory-Critical, Parameter und GPU-Shader Decorators
-    Return: Tuple von Decorator-Funktionen
-    """
-    try:
-        from gui.error_handler import memory_critical_handler, parameter_handler, gpu_shader_handler
-        return memory_critical_handler, parameter_handler, gpu_shader_handler
-    except ImportError:
-        def noop_decorator(*args, **kwargs):
-            def decorator(func):
-                return func
-            return decorator
-        return noop_decorator, noop_decorator, noop_decorator
-
-memory_critical_handler, parameter_handler, gpu_shader_handler = get_terrain_error_decorators()
-
-
-class TerrainConstants:
-    """Konstanten für Terrain-Tab"""
-    MAX_PROGRESS = 100
-    SHADOW_ANGLES = 6
-    DEFAULT_SHADOW_ANGLE = 2
-
-    @staticmethod
-    def validate_angle_index(index: int) -> bool:
-        """Validiert Shadow-Angle-Index"""
-        return 0 <= index < TerrainConstants.SHADOW_ANGLES
-
 
 class TerrainTab(BaseMapTab):
     """
-    Funktionsweise: Hauptklasse für Terrain-Generation mit Standard-Orchestrator-Handler - VOLLSTÄNDIG REFACTORED
-    Aufgabe: Koordiniert UI, Parameter-Management und Orchestrator-basierte Generation
-    Output: heightmap, slopemap, shademap für alle nachfolgenden Generatoren
-    REFACTORED: Standard-Orchestrator-Handler, Vereinfachtes LOD-System, Zentraler Renderer
+    Terrain-Generator Tab mit vollständiger BaseMapTab-Integration.
+    Implementiert heightmap, slopemap und shadowmap Generation als Basis für alle anderen Generatoren.
     """
 
-    def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
+    def __init__(self, data_manager, parameter_manager, navigation_manager, shader_manager, generation_orchestrator):
 
-        self.logger = logging.getLogger(__name__)
+        # Generator-Konfiguration vor BaseMapTab.__init__()
+        self.generator_type = "terrain"
+        self.required_dependencies = []  # Terrain hat keine Dependencies
 
-        # Terrain-Konstanten
-        self.terrain_constants = TerrainConstants()
-        super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
-
-        # Parameter-Tracking für Cache-Validation mit Sync
-        self.current_parameters = {}
-        self.last_generated_parameters = {}
-
-        # Parameter-Update-Manager für Race-Condition Prevention
-        self.parameter_manager = ParameterUpdateManager(self)
-
-        # HOMOGENE ORCHESTRATOR-HANDLER INTEGRATION (entsprechend Descriptoren)
-        self.orchestrator_handler = StandardOrchestratorHandler(self, "terrain")
-        self.setup_orchestrator_integration()
-
-        # Setup UI
-        self.setup_terrain_ui()
-        self.setup_parameter_validation()
-
-        # Initial Parameter Load
-        self.load_default_parameters()
-
-    def setup_orchestrator_integration(self):
-        """
-        Funktionsweise: Einheitliche Orchestrator-Integration entsprechend Descriptoren
-        Aufgabe: Setup für Standard-Orchestrator-Handler mit homogenen Signal-Connections
-        """
-        # Standard-Handler Setup
-        success = self.orchestrator_handler.setup_standard_handlers()
-
-        if success:
-            # HOMOGENE SIGNAL-CONNECTIONS (entsprechend Descriptor-Spezifikation)
-            self.orchestrator_handler.generation_completed.connect(self.on_terrain_generation_completed)
-            self.orchestrator_handler.lod_progression_completed.connect(self.on_lod_progression_completed)
-            self.orchestrator_handler.generation_progress.connect(self.update_generation_progress)
-
-            self.logger.info("Terrain orchestrator integration completed")
-        else:
-            self.logger.error("Failed to setup terrain orchestrator integration")
-
-    def setup_terrain_ui(self):
-        """
-        Funktionsweise: Erstellt spezialisierte UI für Terrain-Generator - REFACTORED
-        Aufgabe: Parameter-Slider, Statistics-Widget, Standard-LOD-Controls
-        """
-        # Parameter Panel erstellen
-        self.parameter_panel = self.create_terrain_parameter_panel()
-        self.control_panel.layout().addWidget(self.parameter_panel)
-
-        # Standard LOD Control Panel aus BaseTab nutzen
-        self.lod_control_panel = self.create_standard_lod_panel()
-        self.control_panel.layout().addWidget(self.lod_control_panel)
-
-        # Statistics Widget
-        self.statistics_widget = TerrainStatisticsWidget()
-        self.control_panel.layout().addWidget(self.statistics_widget)
-
-    def create_terrain_parameter_panel(self) -> QGroupBox:
-        """
-        Funktionsweise: Erstellt Parameter-Panel mit allen Terrain-Parametern - REFACTORED
-        Aufgabe: Slider für alle Core-Parameter + Random-Seed Button
-        Return: QGroupBox mit allen Parameter-Slidern (KONSISTENTE BREITE)
-        REFACTORED: Nur eine Definition, RandomSeedButton korrekt integriert, SLIDER-BREITE-FIX
-        """
-        panel = QGroupBox("Terrain Parameters")
-        layout = QVBoxLayout()
-
-        # Dictionary für alle Parameter-Slider
-        self.parameter_sliders = {}
-
-        # Alle Terrain-Parameter aus value_default.py
-        terrain_params = [
-            "size", "amplitude", "octaves", "frequency",
-            "persistence", "lacunarity", "redistribute_power", "map_seed"
-        ]
-
-        for param_name in terrain_params:
-            param_config = get_parameter_config("terrain", param_name)
-
-            # Spezial-Layout für map_seed mit Random-Button
-            if param_name == "map_seed":
-                seed_container = QWidget()
-                seed_layout = QHBoxLayout()
-                seed_layout.setContentsMargins(0, 0, 0, 0)
-
-                # Parameter-Slider mit FESTER BREITE
-                slider = ParameterSlider(
-                    label="Map Seed",
-                    min_val=param_config["min"],
-                    max_val=param_config["max"],
-                    default_val=param_config["default"],
-                    step=param_config.get("step", 1),
-                    suffix=param_config.get("suffix", "")
-                )
-                slider.setFixedWidth(280)  # SLIDER-BREITE-FIX
-
-                # Random-Seed Button
-                random_button = RandomSeedButton()
-                random_button.seed_generated.connect(slider.setValue)
-
-                seed_layout.addWidget(slider)
-                seed_layout.addWidget(random_button)
-                seed_container.setLayout(seed_layout)
-
-                slider.valueChanged.connect(self.on_parameter_changed)
-                self.parameter_sliders[param_name] = slider
-                layout.addWidget(seed_container)
-
-            else:
-                # Normale Parameter-Slider mit FESTER BREITE
-                slider = ParameterSlider(
-                    label=param_name.replace("_", " ").title(),
-                    min_val=param_config["min"],
-                    max_val=param_config["max"],
-                    default_val=param_config["default"],
-                    step=param_config.get("step", 1),
-                    suffix=param_config.get("suffix", "")
-                )
-                slider.setFixedWidth(300)  # SLIDER-BREITE-FIX
-
-                slider.valueChanged.connect(self.on_parameter_changed)
-                self.parameter_sliders[param_name] = slider
-                layout.addWidget(slider)
-
-        panel.setLayout(layout)
-        return panel
-
-    def setup_parameter_validation(self):
-        """
-        Funktionsweise: Setup für Parameter-Validation und Cross-Parameter Constraints
-        Aufgabe: Verbindet Validation-System mit Parameter-Änderungen
-        """
-        self.validation_status = StatusIndicator("Parameter Validation")
-        self.control_panel.layout().addWidget(self.validation_status)
-
-    def load_default_parameters(self):
-        """
-        Funktionsweise: Lädt Default-Parameter in alle Slider
-        Aufgabe: Initialisiert UI mit Standard-Werten aus value_default.py
-        """
-        for param_name, slider in self.parameter_sliders.items():
-            param_config = get_parameter_config("terrain", param_name)
-            slider.setValue(param_config["default"])
-
-        # Initial Parameter-Set speichern
-        self.current_parameters = self.get_current_parameters()
-        self.last_generated_parameters = self.current_parameters.copy()
-
-    def get_current_parameters(self) -> dict:
-        """
-        Funktionsweise: Sammelt aktuelle Parameter-Werte von allen Slidern
-        Return: dict mit allen aktuellen Parameter-Werten inkl. Size-Weiterleitung
-        """
-        parameters = {}
-        for param_name, slider in self.parameter_sliders.items():
-            parameters[param_name] = slider.getValue()
-
-        if "size" in parameters:
-            parameters["size"] = int(parameters["size"])
-
-        return parameters
-
-    def set_parameters(self, parameters: dict):
-        """
-        Funktionsweise: Setzt Parameter-Werte - ERWEITERT für Map-Size-Sync
-        Parameter: parameters (dict)
-        Aufgabe: External Parameter-Updates mit Map-Size-Synchronisation
-        """
-        for param_name, value in parameters.items():
-            if param_name in self.parameter_sliders:
-                self.parameter_sliders[param_name].setValue(value)
-
-        # Parameter-State synchronisieren
-        self.current_parameters = self.get_current_parameters()
-        self.last_generated_parameters = self.current_parameters.copy()
-
-        # MAP-SIZE SYNCHRONISATION zu anderen Tabs
-        if "size" in parameters and self.data_manager:
-            size = int(parameters["size"])
-            # HINZUGEFÜGT: sync_map_size für DataManager-Integration
-            if hasattr(self.data_manager, 'sync_map_size'):
-                self.data_manager.sync_map_size("terrain", size)
-            self.logger.info(f"Map size synchronized: {size}")
-
-    @pyqtSlot()
-    def on_parameter_changed(self):
-        """
-        Funktionsweise: Slot für Parameter-Änderungen mit Debouncing - REFACTORED
-        Aufgabe: Triggert Validation und Orchestrator-basierte Auto-Generation
-        REFACTORED: Nutzt ParameterUpdateManager gegen Race-Conditions
-        """
-        self.current_parameters = self.get_current_parameters()
-
-        # Debounced Updates über ParameterUpdateManager
-        self.parameter_manager.request_validation()
-
-        # Auto-Simulation triggeren (wenn aktiviert)
-        if self.auto_simulation_enabled and not self.generation_in_progress:
-            if self.has_significant_parameter_change():
-                self.parameter_manager.request_generation()
-
-    def has_significant_parameter_change(self) -> bool:
-        """
-        Funktionsweise: Prüft ob Parameter-Änderung signifikant genug für Neu-Generation ist
-        Return: bool - Signifikante Änderung
-        """
-        for param_name, current_value in self.current_parameters.items():
-            last_value = self.last_generated_parameters.get(param_name, None)
-
-            if last_value is None or abs(current_value - last_value) > 0.001:
-                return True
-
-        return False
-
-    def validate_current_parameters(self):
-        """
-        Funktionsweise: Validiert aktuelle Parameter auf Constraints und Performance
-        Aufgabe: Prüft Cross-Parameter Validation und zeigt Warnings/Errors
-        Besonderheit: Parameter Handler schützt vor Validation-Fehlern
-        """
-        try:
-            is_valid, warnings, errors = validate_parameter_set("terrain", self.current_parameters)
-        except ImportError:
-            is_valid, warnings, errors = True, [], []
-
-        if errors:
-            self.validation_status.set_error(f"Errors: {'; '.join(errors)}")
-        elif warnings:
-            self.validation_status.set_warning(f"Warnings: {'; '.join(warnings)}")
-        else:
-            self.validation_status.set_success("Parameters valid")
-
-    def generate(self):
-        """
-        Funktionsweise: Terrain-Generation - REPARIERT Generation-Interrupt + Orchestrator-Integration
-        Aufgabe: Unterbricht laufende Generation, startet neue über Orchestrator mit OrchestratorRequestBuilder
-        REPARIERT: Generation-Interrupt statt "already in progress" Skip, Orchestrator-Request-Pattern
-        """
-        try:
-            if not self.generation_orchestrator:
-                self.logger.error("No GenerationOrchestrator available")
-                self.handle_generation_error(Exception("GenerationOrchestrator not available"))
-                return
-
-            # LAUFENDE GENERATION UNTERBRECHEN statt skippen - FIX für "nach einem mal rechnen"
-            if self.generation_in_progress:
-                self.logger.info("Interrupting current terrain generation for new request")
-                try:
-                    self.generation_orchestrator.cancel_generation("terrain")
-                    # Kurz warten bis Cancellation verarbeitet
-                    QTimer.singleShot(100, lambda: self._start_new_generation())
-                    return
-                except Exception as cancel_error:
-                    self.logger.warning(f"Generation cancel failed: {cancel_error}, forcing new generation")
-                    self.generation_in_progress = False
-
-            self._start_new_generation()
-
-        except Exception as e:
-            self.handle_generation_error(e)
-            self.generation_in_progress = False
-            raise
-
-    def _start_new_generation(self):
-        """
-        Funktionsweise: Startet neue Generation nach Interrupt - ORCHESTRATOR-INTEGRATION
-        Aufgabe: Trennt Generation-Start für saubere Interrupt-Handling mit OrchestratorRequestBuilder
-        """
-        self.logger.info(f"Starting terrain generation with target LOD: {self.target_lod}")
-
-        self.start_generation_timing()
-        self.generation_in_progress = True
-
-        params = self.current_parameters.copy()
-
-        # MAP-SIZE SYNCHRONISATION - FIX für DataManager-Integration
-        if self.data_manager and hasattr(self.data_manager, 'sync_map_size'):
-            self.data_manager.sync_map_size("terrain", params.get("size", 512))
-
-        # ORCHESTRATOR-REQUEST-BUILDER INTEGRATION (entsprechend Descriptoren)
-        request = OrchestratorRequestBuilder.build_terrain_request(
-            parameters=params,
-            target_lod=self.target_lod,
-            source_tab="terrain"
+        # Manager-Integration
+        super().__init__(
+            data_lod_manager=data_manager,
+            parameter_manager=parameter_manager,
+            navigation_manager=navigation_manager,
+            shader_manager=shader_manager,
+            generation_orchestrator=generation_orchestrator
         )
 
-        # Request an Orchestrator senden
-        request_id = self.generation_orchestrator.request_generation(request)
+        # Terrain-spezifische Attribute
+        self.parameter_sliders = {}
+        self.generation_button = None
+        self.progress_bar = None
+        self.statistics_display = None
+        self.display_mode_group = None
+        self.current_display_mode = "height"
 
-        if request_id:
-            self.logger.info(f"Terrain generation requested: {request_id}")
-            self.last_generated_parameters = params.copy()
-        else:
-            self.logger.error("Failed to request terrain generation")
-            self.handle_generation_error(Exception("Failed to request generation"))
-            self.generation_in_progress = False
+        # Shadow und Overlay Controls
+        self.shadow_checkbox = None
+        self.shadow_angle_slider = None
+        self.contour_checkbox = None
+        self.grid_checkbox = None
+
+        # LOD-System Tracking
+        self.current_lod = 1
+        self.max_lod = 6
+
+        self.logger = logging.getLogger("TerrainTab")
+        self.logger.info("TerrainTab initialized")
+
+    def create_parameter_controls(self):
+        """
+        Erstellt alle Parameter-Controls für Terrain-Generation.
+        Implementiert Required-Method von BaseMapTab.
+        """
+        if not self.control_panel or not self.control_panel.layout():
+            self.logger.error("Control panel not available for parameter creation")
+            return
+
+        try:
+            # Terrain Parameters GroupBox
+            self._create_terrain_parameters()
+
+            # Generation Control GroupBox
+            self._create_generation_controls()
+
+            # Terrain Statistics GroupBox
+            self._create_statistics_display()
+
+            self.logger.debug("Parameter controls created successfully")
+
+        except Exception as e:
+            self.logger.error(f"Parameter control creation failed: {e}")
+
+    def _create_terrain_parameters(self):
+        """Erstellt Terrain Parameter Controls"""
+        terrain_group = QGroupBox("Terrain Parameters")
+        terrain_group.setFont(QFont("Arial", 10, QFont.Bold))
+        terrain_layout = QVBoxLayout()
+
+        # Parameter-Definitionen aus value_default.TERRAIN
+        parameter_configs = [
+            ("map_size", "Map Size", TERRAIN.MAPSIZE),
+            ("amplitude", "Height Amplitude", TERRAIN.AMPLITUDE),
+            ("octaves", "Detail Octaves", TERRAIN.OCTAVES),
+            ("frequency", "Base Frequency", TERRAIN.FREQUENCY),
+            ("persistence", "Detail Persistence", TERRAIN.PERSISTENCE),
+            ("lacunarity", "Frequency Scaling", TERRAIN.LACUNARITY),
+            ("redistribute_power", "Height Redistribution", TERRAIN.REDISTRIBUTE_POWER),
+            ("map_seed", "Map Seed", TERRAIN.MAP_SEED)
+        ]
+
+        for param_key, label, config in parameter_configs:
+            if param_key == "map_seed":
+                # Seed Parameter mit RandomSeedButton
+                seed_layout = self._create_seed_parameter(param_key, label, config)
+                terrain_layout.addLayout(seed_layout)
+            else:
+                # Standard Parameter Slider
+                slider = ParameterSlider(
+                    label=label,
+                    min_val=config["min"],
+                    max_val=config["max"],
+                    default_val=config["default"],
+                    step=config["step"],
+                    suffix=config.get("suffix", "")
+                )
+
+                # Parameter-Change Handler
+                slider.valueChanged.connect(
+                    lambda value, key=param_key: self._on_parameter_changed(key, value)
+                )
+
+                self.parameter_sliders[param_key] = slider
+                terrain_layout.addWidget(slider)
+
+        terrain_group.setLayout(terrain_layout)
+        self.control_panel.layout().addWidget(terrain_group)
+
+    def _create_seed_parameter(self, param_key: str, label: str, config: Dict):
+        """Erstellt Seed Parameter mit RandomSeedButton"""
+        seed_layout = QHBoxLayout()
+
+        # Seed Slider
+        seed_slider = ParameterSlider(
+            label=label,
+            min_val=config["min"],
+            max_val=config["max"],
+            default_val=config["default"],
+            step=config["step"]
+        )
+
+        seed_slider.valueChanged.connect(
+            lambda value: self._on_parameter_changed(param_key, value)
+        )
+
+        # Random Seed Button
+        random_button = RandomSeedButton()
+        random_button.seed_generated.connect(
+            lambda seed: self._set_random_seed(param_key, seed)
+        )
+
+        self.parameter_sliders[param_key] = seed_slider
+
+        seed_layout.addWidget(seed_slider)
+        seed_layout.addWidget(random_button)
+
+        return seed_layout
+
+    def _create_generation_controls(self):
+        """Erstellt Generation Control GroupBox"""
+        generation_group = QGroupBox("Generation Control")
+        generation_group.setFont(QFont("Arial", 10, QFont.Bold))
+        generation_layout = QVBoxLayout()
+
+        # Berechnen Button
+        self.generation_button = BaseButton("Berechnen", "primary")
+        self.generation_button.clicked.connect(self._on_generate_clicked)
+        generation_layout.addWidget(self.generation_button)
+
+        # Progress Bar für LOD-Progression
+        self.progress_bar = ProgressBar()
+        generation_layout.addWidget(self.progress_bar)
+
+        # System Status
+        self.system_status = StatusIndicator("Generation Status")
+        self.system_status.set_success("Ready")
+        generation_layout.addWidget(self.system_status)
+
+        generation_group.setLayout(generation_layout)
+        self.control_panel.layout().addWidget(generation_group)
+
+    def _create_statistics_display(self):
+        """Erstellt Terrain Statistics GroupBox"""
+        stats_group = QGroupBox("Terrain Statistics")
+        stats_group.setFont(QFont("Arial", 10, QFont.Bold))
+        stats_layout = QVBoxLayout()
+
+        # Statistics Labels
+        self.height_range_label = QLabel("Height Range: No data")
+        self.slope_stats_label = QLabel("Slope Statistics: No data")
+        self.shadow_coverage_label = QLabel("Shadow Coverage: No data")
+        self.performance_label = QLabel("Performance: No data")
+
+        # Styling für Statistics
+        for label in [self.height_range_label, self.slope_stats_label,
+                     self.shadow_coverage_label, self.performance_label]:
+            label.setStyleSheet("font-size: 10px; color: #2c3e50; padding: 2px;")
+
+        stats_layout.addWidget(self.height_range_label)
+        stats_layout.addWidget(self.slope_stats_label)
+        stats_layout.addWidget(self.shadow_coverage_label)
+        stats_layout.addWidget(self.performance_label)
+
+        stats_group.setLayout(stats_layout)
+        self.control_panel.layout().addWidget(stats_group)
 
     def create_visualization_controls(self):
         """
-        Funktionsweise: Erstellt Terrain-spezifische Visualization-Controls - REPARIERT
-        Aufgabe: Standard Height-Display + Terrain-Modi, sichert Standard-Height-Auswahl
-        Return: QWidget mit erweiterten Visualization-Controls
+        Erstellt Terrain-spezifische Visualization Controls.
+        Überschreibt Optional-Method von BaseMapTab.
         """
-        widget = super().create_visualization_controls()
-        layout = widget.layout()
+        controls_widget = QWidget()
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Terrain-spezifische Modi hinzufügen
-        self.slopemap_radio = QRadioButton("Slope")
-        self.slopemap_radio.setStyleSheet("font-size: 11px;")
-        self.slopemap_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.slopemap_radio, 1)
-        layout.insertWidget(1, self.slopemap_radio)
+        # Display Mode Controls (Height/Slope)
+        display_mode_layout = self._create_display_mode_controls()
+        controls_layout.addLayout(display_mode_layout)
 
-        self.shademap_radio = QRadioButton("Shadow")
-        self.shademap_radio.setStyleSheet("font-size: 11px;")
-        self.shademap_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.shademap_radio, 2)
-        layout.insertWidget(2, self.shademap_radio)
+        # Separator
+        controls_layout.addWidget(self._create_vertical_separator())
 
-        # Shadow Angle Slider (kompakt)
-        self.shadow_angle_slider = ParameterSlider(
-            label="Angle",
-            min_val=0,
-            max_val=self.terrain_constants.SHADOW_ANGLES - 1,
-            default_val=self.terrain_constants.DEFAULT_SHADOW_ANGLE,
-            step=1
-        )
-        self.shadow_angle_slider.valueChanged.connect(self.update_display_mode)
-        self.shadow_angle_slider.setVisible(False)
-        layout.addWidget(self.shadow_angle_slider)
+        # Overlay Controls (Shadow/Contour/Grid)
+        overlay_layout = self._create_overlay_controls()
+        controls_layout.addLayout(overlay_layout)
 
-        # SICHERSTELLEN: Height-Mode als Standard und Initial-Display
-        if hasattr(self, 'heightmap_radio'):
-            self.heightmap_radio.setChecked(True)
-            # Initial-Display nach kurzer Verzögerung
-            QTimer.singleShot(200, self.update_display_mode)
+        controls_widget.setLayout(controls_layout)
+        return controls_widget
 
-        return widget
+    def _create_display_mode_controls(self):
+        """Erstellt Height/Slope Display Mode Controls"""
+        layout = QHBoxLayout()
+
+        # Display Mode Button Group
+        self.display_mode_group = QButtonGroup()
+
+        height_radio = QRadioButton("Height")
+        height_radio.setChecked(True)
+        height_radio.toggled.connect(lambda checked: self._on_display_mode_changed("height", checked))
+        self.display_mode_group.addButton(height_radio, 0)
+
+        slope_radio = QRadioButton("Slope")
+        slope_radio.toggled.connect(lambda checked: self._on_display_mode_changed("slope", checked))
+        self.display_mode_group.addButton(slope_radio, 1)
+
+        layout.addWidget(height_radio)
+        layout.addWidget(slope_radio)
+
+        return layout
+
+    def _create_overlay_controls(self):
+        """Erstellt Overlay Controls (Shadow/Contour/Grid)"""
+        layout = QHBoxLayout()
+
+        # Shadow Overlay mit Angle Slider
+        shadow_layout = QVBoxLayout()
+
+        self.shadow_checkbox = QCheckBox("Shadow")
+        self.shadow_checkbox.toggled.connect(self._on_shadow_toggled)
+        shadow_layout.addWidget(self.shadow_checkbox)
+
+        # Shadow Angle Slider (0-6 entspricht 7 Sonnenstände)
+        shadow_angle_layout = QHBoxLayout()
+        shadow_angle_layout.addWidget(QLabel("Angle:"))
+
+        self.shadow_angle_slider = NoWheelSlider(Qt.Horizontal)
+        self.shadow_angle_slider.setRange(0, 6)
+        self.shadow_angle_slider.setValue(3)
+        self.shadow_angle_slider.setMaximumWidth(60)
+        self.shadow_angle_slider.valueChanged.connect(self._on_shadow_angle_changed)
+        shadow_angle_layout.addWidget(self.shadow_angle_slider)
+
+        shadow_layout.addLayout(shadow_angle_layout)
+        layout.addLayout(shadow_layout)
+
+        # Contour Lines Overlay
+        self.contour_checkbox = QCheckBox("Contour Lines")
+        self.contour_checkbox.toggled.connect(self._on_contour_toggled)
+        layout.addWidget(self.contour_checkbox)
+
+        # Grid Overlay
+        self.grid_checkbox = QCheckBox("Grid")
+        self.grid_checkbox.toggled.connect(self._on_grid_toggled)
+        layout.addWidget(self.grid_checkbox)
+
+        return layout
+
+    def _create_vertical_separator(self):
+        """Erstellt vertikalen Separator für UI-Layout"""
+        separator = QWidget()
+        separator.setFixedWidth(1)
+        separator.setStyleSheet("background-color: #bdc3c7;")
+        return separator
+
+    # =============================================================================
+    # EVENT HANDLERS
+    # =============================================================================
+
+    def _on_parameter_changed(self, param_name: str, value: float):
+        """Handler für Parameter-Änderungen"""
+        try:
+            # Parameter an ParameterManager weiterleiten
+            if self.parameter_manager:
+                self.parameter_ui_changed.emit(self.generator_type, param_name, value)
+
+            # Cross-Parameter Validation
+            self._validate_parameter_constraints()
+
+            self.logger.debug(f"Parameter changed: {param_name} = {value}")
+
+        except Exception as e:
+            self.logger.error(f"Parameter change handling failed: {e}")
+
+    def _set_random_seed(self, param_key: str, seed_value: int):
+        """Setzt zufälligen Seed-Wert"""
+        try:
+            if param_key in self.parameter_sliders:
+                self.parameter_sliders[param_key].setValue(seed_value)
+                self._on_parameter_changed(param_key, seed_value)
+
+        except Exception as e:
+            self.logger.error(f"Random seed setting failed: {e}")
+
+    def _validate_parameter_constraints(self):
+        """Validiert Cross-Parameter Constraints"""
+        try:
+            # Aktuelle Parameter-Werte sammeln
+            parameters = {}
+            for param_name, slider in self.parameter_sliders.items():
+                parameters[param_name] = slider.getValue()
+
+            # Validation über value_default.py
+            is_valid, warnings, errors = validate_parameter_set("terrain", parameters)
+
+            # UI-Status Updates
+            if errors:
+                if self.system_status:
+                    self.system_status.set_error(f"Parameter errors: {', '.join(errors)}")
+            elif warnings:
+                if self.system_status:
+                    self.system_status.set_warning(f"Warnings: {', '.join(warnings)}")
+            else:
+                if self.system_status:
+                    self.system_status.set_success("Parameters valid")
+
+        except Exception as e:
+            self.logger.error(f"Parameter validation failed: {e}")
+
+    def _on_generate_clicked(self):
+        """Handler für Generate-Button"""
+        try:
+            # Dependency Check (Terrain hat keine Dependencies)
+            if not self.check_input_dependencies():
+                self.logger.warning("Input dependencies not met")
+                return
+
+            # Parameter Validation
+            self._validate_parameter_constraints()
+
+            # Generation Request über BaseMapTab
+            self.generate()
+
+            self.logger.info("Terrain generation requested")
+
+        except Exception as e:
+            self.logger.error(f"Generation request failed: {e}")
+            if self.system_status:
+                self.system_status.set_error(f"Generation failed: {e}")
+
+    def _on_display_mode_changed(self, mode: str, checked: bool):
+        """Handler für Display Mode Changes"""
+        if checked:
+            self.current_display_mode = mode
+            self.update_display_mode()
+            self.logger.debug(f"Display mode changed to: {mode}")
+
+    def _on_shadow_toggled(self, checked: bool):
+        """Handler für Shadow Overlay Toggle"""
+        try:
+            # Shadow Overlay über Display-System
+            current_display = self.get_current_display()
+            if current_display and hasattr(current_display.display, 'set_shadow_overlay'):
+                current_display.display.set_shadow_overlay(checked, self.shadow_angle_slider.value())
+
+            self.logger.debug(f"Shadow overlay: {checked}")
+
+        except Exception as e:
+            self.logger.debug(f"Shadow overlay toggle failed: {e}")
+
+    def _on_shadow_angle_changed(self, angle: int):
+        """Handler für Shadow Angle Changes"""
+        try:
+            if self.shadow_checkbox and self.shadow_checkbox.isChecked():
+                current_display = self.get_current_display()
+                if current_display and hasattr(current_display.display, 'set_shadow_overlay'):
+                    current_display.display.set_shadow_overlay(True, angle)
+
+            self.logger.debug(f"Shadow angle changed to: {angle}")
+
+        except Exception as e:
+            self.logger.debug(f"Shadow angle change failed: {e}")
+
+    def _on_contour_toggled(self, checked: bool):
+        """Handler für Contour Lines Toggle"""
+        try:
+            current_display = self.get_current_display()
+            if current_display and hasattr(current_display.display, 'set_contour_overlay'):
+                current_display.display.set_contour_overlay(checked)
+
+            self.logger.debug(f"Contour overlay: {checked}")
+
+        except Exception as e:
+            self.logger.debug(f"Contour overlay toggle failed: {e}")
+
+    def _on_grid_toggled(self, checked: bool):
+        """Handler für Grid Overlay Toggle"""
+        try:
+            current_display = self.get_current_display()
+            if current_display and hasattr(current_display.display, 'set_grid_overlay'):
+                current_display.display.set_grid_overlay(checked)
+
+            self.logger.debug(f"Grid overlay: {checked}")
+
+        except Exception as e:
+            self.logger.debug(f"Grid overlay toggle failed: {e}")
+
+    # =============================================================================
+    # DISPLAY UPDATE SYSTEM
+    # =============================================================================
 
     def update_display_mode(self):
         """
-        Funktionsweise: Handler für Terrain Display-Mode-Änderungen - REFACTORED + SHADOWMAP RGB-MIXING
-        Aufgabe: Nutzt zentralen Renderer aus BaseTab + implementiert dx/dz rot, dy/dz blau Mixing
-        REFACTORED: Zentraler _render_current_mode eliminiert Code-Duplikation
-        HINZUGEFÜGT: RGB-Mixing für Shadowmap (dx/dz rot, dy/dz blau)
-        """
-        if not hasattr(self, 'display_mode'):
-            return
-
-        current_mode = self.display_mode.checkedId()
-        current_display = self.get_current_display()
-
-        if not current_display:
-            self.logger.debug("No display available for mode update")
-            return
-
-        # Shadow-Angle-Slider nur bei Shadow-Mode anzeigen
-        if hasattr(self, 'shadow_angle_slider'):
-            self.shadow_angle_slider.setVisible(current_mode == 2)
-
-        try:
-            if current_mode == 0:  # Heightmap
-                heightmap = self.data_manager.get_terrain_data("heightmap")
-                if heightmap is not None:
-                    self._render_current_mode(current_mode, current_display, heightmap, "heightmap")
-
-            elif current_mode == 1:  # Slopemap - RGB-MIXING für dx/dz und dy/dz
-                slopemap = self.data_manager.get_terrain_data("slopemap")
-                if slopemap is not None:
-                    # RGB-MIXING: dx/dz rot, dy/dz blau
-                    if len(slopemap.shape) == 3 and slopemap.shape[2] >= 2:
-                        dx_dz = slopemap[:, :, 0]  # dz/dx
-                        dy_dz = slopemap[:, :, 1]  # dz/dy
-
-                        # Normalisierung auf [0, 1]
-                        dx_norm = np.abs(dx_dz) / (np.max(np.abs(dx_dz)) + 1e-8)
-                        dy_norm = np.abs(dy_dz) / (np.max(np.abs(dy_dz)) + 1e-8)
-
-                        # RGB-Array erstellen: Rot für dx, Blau für dy, Grün = 0
-                        rgb_slopemap = np.zeros((slopemap.shape[0], slopemap.shape[1], 3))
-                        rgb_slopemap[:, :, 0] = dx_norm  # Rot-Kanal
-                        rgb_slopemap[:, :, 2] = dy_norm  # Blau-Kanal
-
-                        self._render_current_mode(current_mode, current_display, rgb_slopemap, "slopemap_rgb")
-                    else:
-                        # Fallback für 2D-Slopemap
-                        self._render_current_mode(current_mode, current_display, slopemap, "slopemap")
-
-            elif current_mode == 2:  # Shademap mit Memory-optimiertem Slicing
-                try:
-                    shademap = self.data_manager.get_terrain_data("shadowmap")
-                    if shademap is not None and hasattr(self, 'shadow_angle_slider'):
-                        angle_index = int(self.shadow_angle_slider.getValue())
-
-                        if self.terrain_constants.validate_angle_index(angle_index):
-                            if len(shademap.shape) == 3 and shademap.shape[2] > angle_index:
-                                # Memory-optimiertes Slicing mit Views statt Copies
-                                angle_shadowmap = shademap[:, :, angle_index:angle_index+1].squeeze()
-                                self._render_current_mode(current_mode, current_display, angle_shadowmap, "shadowmap")
-                            else:
-                                self._render_current_mode(current_mode, current_display, shademap, "shadowmap")
-                        else:
-                            self.logger.warning(f"Invalid shadow angle index: {angle_index}")
-
-                except Exception as e:
-                    self.logger.error(f"Shademap display error: {e}")
-
-        except Exception as e:
-            self.logger.error(f"Display mode update failed: {e}")
-
-    def update_terrain_display(self):
-        """
-        Funktionsweise: Aktualisiert Display basierend auf aktuellem Visualization-Mode
-        Aufgabe: Delegiert an update_display_mode für konsistente Rendering-Logic
-        """
-        self.update_display_mode()
-
-    def update_terrain_statistics(self):
-        """
-        Funktionsweise: Aktualisiert Terrain-Statistics mit neuesten Daten
-        """
-        heightmap = self.data_manager.get_terrain_data("heightmap")
-        slopemap = self.data_manager.get_terrain_data("slopemap")
-        shadowmap = self.data_manager.get_terrain_data("shadowmap")
-
-        if heightmap is not None and slopemap is not None and shadowmap is not None:
-            best_lod = self.get_best_available_lod()
-            self.statistics_widget.update_statistics(heightmap, slopemap, shadowmap, best_lod)
-
-    def _safe_display_update(self):
-        """
-        Funktionsweise: Crash-sichere Display-Update - HINZUGEFÜGT
-        Aufgabe: Display-Update mit vollständigem Exception-Handling
+        Überschreibt BaseMapTab Display-Update für Terrain-spezifische Modi.
+        Implementiert Height/Slope Display-Switching.
         """
         try:
-            if hasattr(self, 'update_display_mode'):
-                self.update_display_mode()
-        except Exception as e:
-            self.logger.error(f"Safe display update failed: {e}")
+            if not self.data_lod_manager:
+                return
 
-    def get_best_available_lod(self) -> str:
-        """
-        Funktionsweise: Findet höchstes verfügbares LOD-Level
-        Return: str - Bestes verfügbares LOD oder None
-        """
-        lod_priority = ["FINAL", "LOD256", "LOD128", "LOD64"]
+            current_display = self.get_current_display()
+            if not current_display:
+                return
 
-        for lod in lod_priority:
-            if lod in self.available_lods:
-                return lod
+            # Daten basierend auf Display-Mode holen
+            if self.current_display_mode == "height":
+                data = self.data_lod_manager.get_terrain_data("heightmap")
+                data_type = "heightmap"
+            elif self.current_display_mode == "slope":
+                data = self.data_lod_manager.get_terrain_data("slopemap")
+                data_type = "slopemap"
+            else:
+                return
 
-        return "Unknown"
+            # Display Update mit Change-Detection
+            if data is not None and hasattr(current_display, 'update_display'):
+                display_id = f"TerrainTab_{self.current_view}_{data_type}"
 
-    # HOMOGENE TAB-INTEGRATION SLOTS (entsprechend Descriptor-Spezifikationen):
+                if hasattr(self.data_lod_manager, 'display_update_manager'):
+                    needs_update = self.data_lod_manager.display_update_manager.needs_update(
+                        display_id, data, data_type
+                    )
 
-    @pyqtSlot(str, dict)
-    def on_terrain_generation_completed(self, result_id: str, result_data: dict):
-        """
-        Funktionsweise: Slot für Generation-Completion - HOMOGENE SIGNATURE entsprechend Descriptoren
-        Parameter: result_id (str), result_data (dict) - Einheitlich für alle Tabs
-        """
-        success = result_data.get('success', False)
-        lod_level = result_data.get('lod_level', 'Unknown')
+                    if needs_update:
+                        current_display.update_display(data, data_type)
+                        self.data_lod_manager.display_update_manager.mark_updated(
+                            display_id, data, data_type
+                        )
 
-        # Generation-Status zurücksetzen
-        self.generation_in_progress = False
-
-        if success:
-            try:
-                # SICHERSTELLEN dass Height-Mode angezeigt wird - FIX für Problem 5
-                if hasattr(self, 'heightmap_radio') and self.heightmap_radio.isChecked():
-                    self.update_terrain_display()
+                        # Statistics Update
+                        self._update_statistics(data, data_type)
                 else:
-                    # Force Height-Mode wenn nichts anderes ausgewählt
-                    if hasattr(self, 'heightmap_radio'):
-                        self.heightmap_radio.setChecked(True)
-                    self.update_terrain_display()
-
-                self.update_terrain_statistics()
-
-                # LOD-Status aktualisieren
-                if lod_level in ["LOD64", "LOD128", "LOD256", "FINAL"]:
-                    self.available_lods.add(lod_level)
-
-            except Exception as e:
-                self.logger.error(f"Post-generation update failed: {e}")
-
-        self.logger.info(f"Terrain generation completed: {result_id} lod={lod_level} success={success}")
-
-    @pyqtSlot(str, str)
-    def on_lod_progression_completed(self, result_id: str, lod_level: str):
-        """
-        Funktionsweise: Slot für LOD-Progression-Updates - HOMOGENE SIGNATURE entsprechend Descriptoren
-        Parameter: result_id (str), lod_level (str) - Einheitlich für alle Tabs
-        """
-        self.logger.info(f"Terrain LOD progression completed: {result_id} -> {lod_level}")
-
-        # LOD-Level zu verfügbaren hinzufügen
-        if lod_level in ["LOD64", "LOD128", "LOD256", "FINAL"]:
-            self.available_lods.add(lod_level)
-
-        # Display sofort aktualisieren mit neuem LOD
-        try:
-            self.update_terrain_display()
-        except Exception as e:
-            self.logger.error(f"LOD progression display update failed: {e}")
-
-    @pyqtSlot(int, str)
-    def update_generation_progress(self, progress: int, message: str):
-        """
-        Funktionsweise: Slot für Progress-Updates - HOMOGENE SIGNATURE entsprechend Descriptoren
-        Parameter: progress (int), message (str) - Vereinfacht für alle Tabs
-        """
-        # Progress an Auto-Simulation-Panel weiterleiten
-        if hasattr(self, 'auto_simulation_panel'):
-            self.auto_simulation_panel.set_generation_status("progress", message)
-
-        # Progress-Wert für UI-Elements
-        if hasattr(self, 'progress_bar'):
-            self.progress_bar.setValue(progress)
-
-    def _validate_and_fix_slopemap(self, slopemap):
-        """Robust slopemap validation"""
-        try:
-            if slopemap is None:
-                return self._create_fallback_slopemap()
-
-            if not isinstance(slopemap, np.ndarray):
-                slopemap = np.array(slopemap)
-
-            # Shape validation
-            if len(slopemap.shape) < 2:
-                return self._create_fallback_slopemap()
-
-            # Ensure 3D shape (H, W, 2) for dx, dy
-            if len(slopemap.shape) == 2:
-                h, w = slopemap.shape
-                new_slopemap = np.zeros((h, w, 2))
-                new_slopemap[:, :, 0] = slopemap  # dx
-                slopemap = new_slopemap
-
-            return slopemap
+                    # Fallback ohne Change-Detection
+                    current_display.update_display(data, data_type)
+                    self._update_statistics(data, data_type)
 
         except Exception as e:
-            self.logger.error(f"Slopemap validation failed: {e}")
-            return self._create_fallback_slopemap()
+            self.logger.debug(f"Display mode update failed: {e}")
 
-    def _create_fallback_slopemap(self):
-        """Erstellt Fallback-Slopemap für Validation-Fehler"""
-        return np.zeros((64, 64, 2), dtype=np.float32)
+    def _update_statistics(self, data, data_type: str):
+        """Aktualisiert Terrain Statistics basierend auf aktuellen Daten"""
+        try:
+            import numpy as np
 
-    def get_generation_status_summary(self) -> dict:
+            if data_type == "heightmap" and hasattr(data, 'shape'):
+                # Height Statistics
+                height_min = float(np.min(data))
+                height_max = float(np.max(data))
+                height_mean = float(np.mean(data))
+                height_std = float(np.std(data))
+
+                self.height_range_label.setText(
+                    f"Height Range: {height_min:.1f}m - {height_max:.1f}m "
+                    f"(Mean: {height_mean:.1f}m ± {height_std:.1f}m)"
+                )
+
+                # Performance Metrics
+                data_size_mb = (data.nbytes / (1024 * 1024))
+                self.performance_label.setText(
+                    f"Performance: {data.shape[0]}×{data.shape[1]} "
+                    f"({data_size_mb:.1f}MB)"
+                )
+
+            elif data_type == "slopemap" and hasattr(data, 'shape') and len(data.shape) == 3:
+                # Slope Statistics (data ist (H,W,2) für dx/dy Gradienten)
+                slope_magnitude = np.sqrt(data[:,:,0]**2 + data[:,:,1]**2)
+                max_slope = float(np.max(slope_magnitude))
+                mean_slope = float(np.mean(slope_magnitude))
+
+                # Konvertierung zu Degrees
+                max_slope_deg = np.degrees(np.arctan(max_slope))
+                mean_slope_deg = np.degrees(np.arctan(mean_slope))
+
+                self.slope_stats_label.setText(
+                    f"Slope Statistics: Max {max_slope_deg:.1f}°, "
+                    f"Mean {mean_slope_deg:.1f}°"
+                )
+
+            # Shadow Coverage (falls verfügbar)
+            shadow_data = self.data_lod_manager.get_terrain_data("shadowmap")
+            if shadow_data is not None and hasattr(shadow_data, 'shape'):
+                if len(shadow_data.shape) == 3:  # (H,W,7) für 7 Sonnenwinkel
+                    shadow_min = float(np.min(shadow_data))
+                    shadow_max = float(np.max(shadow_data))
+                    shadow_mean = float(np.mean(shadow_data))
+
+                    self.shadow_coverage_label.setText(
+                        f"Shadow Coverage: {shadow_min:.2f} - {shadow_max:.2f} "
+                        f"(Mean: {shadow_mean:.2f})"
+                    )
+
+        except Exception as e:
+            self.logger.debug(f"Statistics update failed: {e}")
+
+    # =============================================================================
+    # GENERATION PROGRESS TRACKING
+    # =============================================================================
+
+    @pyqtSlot(str, int)
+    def on_generation_progress(self, generator_type: str, progress: int):
         """
-        Funktionsweise: Sammelt aktuellen Generation-Status für Export/Debug
-        Return: dict mit aktuellem Status
+        Überschreibt BaseMapTab Progress Handler für LOD-spezifisches Progress.
         """
-        return {
-            "available_lods": list(self.available_lods),
-            "target_lod": self.target_lod,
-            "generation_in_progress": self.generation_in_progress,
-            "current_parameters": self.current_parameters,
-            "last_generated_parameters": self.last_generated_parameters,
-            "best_available_lod": self.get_best_available_lod()
-        }
+        if generator_type != self.generator_type:
+            return
 
-    def force_regeneration(self):
+        try:
+            # LOD-Level aus Progress ableiten (0-100 Progress → LOD 1-6)
+            lod_level = max(1, min(6, int((progress / 100) * self.max_lod) + 1))
+
+            if self.progress_bar:
+                # LOD-spezifischer Progress Text
+                phase_text = "Heightmap Generation"
+                if progress > 60:
+                    phase_text = "Shadow Calculation"
+                elif progress > 30:
+                    phase_text = "Slope Calculation"
+
+                self.progress_bar.set_lod_progress(lod_level, self.max_lod, phase_text)
+
+            # Generation Button Status
+            if self.generation_button:
+                self.generation_button.set_loading(True)
+
+            # System Status Update
+            if self.system_status:
+                self.system_status.set_pending(f"Generating LOD {lod_level}/{self.max_lod} ({progress}%)")
+
+            self.current_lod = lod_level
+
+        except Exception as e:
+            self.logger.error(f"Progress tracking failed: {e}")
+
+    @pyqtSlot(str, bool)
+    def on_generation_completed(self, generator_type: str, success: bool):
         """
-        Funktionsweise: Erzwingt komplette Neu-Generation (für Debug/Development)
-        Aufgabe: Löscht alle LODs und startet von LOD64 neu
+        Überschreibt BaseMapTab Completion Handler für Terrain-spezifische Completion.
         """
-        self.available_lods.clear()
+        if generator_type != self.generator_type:
+            return
 
-        if self.data_manager:
-            self.data_manager.invalidate_cache("terrain")
+        try:
+            # Progress Bar Reset
+            if self.progress_bar:
+                if success:
+                    self.progress_bar.set_progress(100, "Completed", "")
+                else:
+                    self.progress_bar.reset()
 
-        self.generate()
+            # Generation Button aktivieren
+            if self.generation_button:
+                self.generation_button.set_loading(False)
+
+            # System Status
+            if self.system_status:
+                if success:
+                    self.system_status.set_success(f"Generation completed (LOD {self.max_lod})")
+                else:
+                    self.system_status.set_error("Generation failed")
+
+            # Display Update nach Completion
+            if success:
+                self.update_display_mode()
+
+                # Map-Size Sync zu anderen Tabs
+                if self.data_lod_manager and hasattr(self.data_lod_manager, 'sync_map_size'):
+                    current_map_size = self.parameter_sliders.get('map_size', {}).getValue()
+                    if current_map_size:
+                        self.data_lod_manager.sync_map_size(int(current_map_size))
+
+            # Parent-Class Completion Handler
+            super().on_generation_completed(generator_type, success)
+
+        except Exception as e:
+            self.logger.error(f"Generation completion handling failed: {e}")
+
+    # =============================================================================
+    # PARAMETER SYNCHRONISATION
+    # =============================================================================
+
+    def update_parameter_ui(self, param_name: str, value):
+        """
+        Überschreibt BaseMapTab Parameter-UI Update für Terrain-Parameter.
+        Synchronisiert UI-Controls mit ParameterManager-Updates.
+        """
+        try:
+            if param_name in self.parameter_sliders:
+                # Update ohne Signal-Emission (verhindert Loop)
+                slider = self.parameter_sliders[param_name]
+                slider.blockSignals(True)
+                slider.setValue(value)
+                slider.blockSignals(False)
+
+                self.logger.debug(f"Parameter UI updated: {param_name} = {value}")
+
+            # Cross-Parameter Validation nach Update
+            self._validate_parameter_constraints()
+
+        except Exception as e:
+            self.logger.error(f"Parameter UI update failed: {e}")
+
+    # =============================================================================
+    # DEPENDENCY SYSTEM (überschrieben, da Terrain keine Dependencies hat)
+    # =============================================================================
+
+    def check_input_dependencies(self) -> bool:
+        """
+        Überschreibt BaseMapTab Dependency Check.
+        Terrain hat keine Input-Dependencies, gibt immer True zurück.
+        """
+        return True  # Terrain ist Basis-Generator ohne Dependencies
+
+    # =============================================================================
+    # RESOURCE MANAGEMENT
+    # =============================================================================
 
     def cleanup_resources(self):
         """
-        Funktionsweise: Cleanup-Methode für Resource-Management - ERWEITERT
-        Aufgabe: Wird beim Tab-Wechsel oder Schließen aufgerufen
-        ERWEITERT: Parameter-Manager cleanup, Orchestrator-Handler cleanup
+        Erweitert BaseMapTab Cleanup für Terrain-spezifische Resources.
         """
-        # Parameter-Manager cleanup
-        if hasattr(self, 'parameter_manager'):
-            self.parameter_manager.cleanup()
+        try:
+            self.logger.debug("Cleaning up terrain-specific resources")
 
-        # Orchestrator-Handler cleanup
-        if hasattr(self, 'orchestrator_handler'):
-            self.orchestrator_handler.cleanup_connections()
+            # Terrain-spezifische Cleanup
+            self.parameter_sliders.clear()
+            self.current_lod = 1
 
-        # Parent Cleanup aufrufen
-        super().cleanup_resources()
+            # Progress Reset
+            if self.progress_bar:
+                self.progress_bar.reset()
+
+            # Status Reset
+            if self.system_status:
+                self.system_status.set_success("Ready")
+
+            # Parent Cleanup
+            super().cleanup_resources()
+
+        except Exception as e:
+            self.logger.error(f"Terrain cleanup failed: {e}")
 
 
-class TerrainStatisticsWidget(QGroupBox):
+def terrain_tab():
     """
-    Funktionsweise: Widget für Real-time Terrain-Statistiken - REFACTORED
-    Aufgabe: Zeigt Höhenverteilung, Steigungsstatistiken, Verschattungsinfo
-    REFACTORED: Optimierte Statistics-Berechnung, bessere Performance
+    Factory-Funktion für TerrainTab-Erstellung.
+    Wird von der Main-Application für Tab-Initialisierung verwendet.
     """
-
-    def __init__(self):
-        super().__init__("Terrain Statistics")
-        self.current_lod = "Unknown"
-        self.cached_statistics = {}  # Cache für wiederholte Berechnungen
-        self.setup_ui()
-
-    def setup_ui(self):
-        """
-        Funktionsweise: Erstellt UI für Statistik-Anzeige
-        """
-        layout = QVBoxLayout()
-
-        # LOD-Info
-        self.lod_info = QLabel("LOD: Unknown")
-        self.lod_info.setStyleSheet("font-weight: bold; color: #3498db;")
-        layout.addWidget(self.lod_info)
-
-        # Statistics Labels
-        self.height_stats = QLabel("Height: -")
-        self.slope_stats = QLabel("Slope: -")
-        self.shadow_stats = QLabel("Shadow: -")
-        self.performance_stats = QLabel("Performance: -")
-
-        layout.addWidget(self.height_stats)
-        layout.addWidget(self.slope_stats)
-        layout.addWidget(self.shadow_stats)
-        layout.addWidget(self.performance_stats)
-
-        self.setLayout(layout)
-
-    def update_statistics(self, heightmap: np.ndarray, slopemap: np.ndarray,
-                         shadowmap: np.ndarray, lod_level: str = "Unknown"):
-        """
-        Funktionsweise: Berechnet und zeigt aktuelle Terrain-Statistiken - OPTIMIERT
-        Parameter: heightmap, slopemap, shadowmap (numpy arrays), lod_level (str)
-        OPTIMIERT: Caching für wiederholte Berechnungen
-        """
-        # Cache-Key basierend auf Array-Shapes und LOD
-        cache_key = f"{heightmap.shape}_{slopemap.shape}_{shadowmap.shape}_{lod_level}"
-
-        if cache_key in self.cached_statistics:
-            stats = self.cached_statistics[cache_key]
-        else:
-            stats = self._calculate_statistics(heightmap, slopemap, shadowmap)
-            self.cached_statistics[cache_key] = stats
-
-        self.current_lod = lod_level
-        self.lod_info.setText(f"LOD: {lod_level} ({heightmap.shape[0]}x{heightmap.shape[1]})")
-
-        # Update Labels
-        self.height_stats.setText(f"Height: {stats['height_min']:.1f}m - {stats['height_max']:.1f}m (μ={stats['height_mean']:.1f}m, σ={stats['height_std']:.1f}m)")
-        self.slope_stats.setText(f"Slope: 0° - {stats['slope_max']:.1f}° (μ={stats['slope_mean']:.1f}°)")
-        self.shadow_stats.setText(f"Shadow: {stats['shadow_min']:.2f} - 1.00 (μ={stats['shadow_mean']:.2f})")
-        self.performance_stats.setText(f"Data Size: {stats['data_size_mb']:.1f} MB")
-
-    def _calculate_statistics(self, heightmap: np.ndarray, slopemap: np.ndarray,
-                            shadowmap: np.ndarray) -> dict:
-        """
-        Funktionsweise: Berechnet Statistics einmalig für Caching
-        Parameter: heightmap, slopemap, shadowmap
-        Return: dict mit allen Statistics
-        """
-        # Height Statistics
-        height_min = float(np.min(heightmap))
-        height_max = float(np.max(heightmap))
-        height_mean = float(np.mean(heightmap))
-        height_std = float(np.std(heightmap))
-
-        # Slope Statistics (Convert to degrees)
-        if len(slopemap.shape) == 3 and slopemap.shape[2] >= 2:
-            slope_magnitude = np.sqrt(slopemap[:,:,0]**2 + slopemap[:,:,1]**2)
-        else:
-            slope_magnitude = slopemap
-
-        slope_degrees = np.arctan(slope_magnitude) * 180 / np.pi
-        slope_max = float(np.max(slope_degrees))
-        slope_mean = float(np.mean(slope_degrees))
-
-        # Shadow Statistics (Average über alle Winkel falls Multi-Angle)
-        if len(shadowmap.shape) == 3:
-            shadow_mean = float(np.mean(shadowmap))
-            shadow_min = float(np.min(shadowmap))
-        else:
-            shadow_mean = float(np.mean(shadowmap))
-            shadow_min = float(np.min(shadowmap))
-
-        # Performance Statistics
-        data_size_mb = (heightmap.nbytes + slopemap.nbytes + shadowmap.nbytes) / (1024 * 1024)
-
-        return {
-            'height_min': height_min,
-            'height_max': height_max,
-            'height_mean': height_mean,
-            'height_std': height_std,
-            'slope_max': slope_max,
-            'slope_mean': slope_mean,
-            'shadow_min': shadow_min,
-            'shadow_mean': shadow_mean,
-            'data_size_mb': data_size_mb
-        }
-
-    def clear_cache(self):
-        """Löscht Statistics-Cache"""
-        self.cached_statistics.clear()
+    return TerrainTab
