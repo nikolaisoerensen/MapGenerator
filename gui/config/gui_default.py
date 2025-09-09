@@ -29,7 +29,7 @@ class WindowSettings:
     MAIN_MENU = {
         "width": 1200,
         "height": 800,
-        "min_width": 1000,
+        "min_width": 600,
         "min_height": 600
     }
 

@@ -1,15 +1,20 @@
 """
 Path: gui/main_menu.py
 
-Funktionsweise: Einfaches Hauptmenü mit 4 Buttons - GEÄNDERT für Signal-Navigation
+Funktionsweise: Einfaches Hauptmenü mit 4 Buttons für Signal-Navigation
 - Map-Editor Button sendet Signal statt direkte Loading-Erstellung
-- Manager von main.py übernehmen statt eigene Erstellung
 - Backward-Compatibility für direkten MainMenu-Start
 """
 
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
+from PyQt5.QtWidgets import (
+    QMainWindow,
+    QApplication,
+    QVBoxLayout,
+    QWidget,
+    QLabel,
+    QHBoxLayout,
+    QMessageBox)
+from PyQt5.QtCore import pyqtSignal, Qt
 import logging
 
 from gui.widgets.widgets import BaseButton, GradientBackgroundWidget
@@ -42,11 +47,9 @@ class MainMenuWindow(QMainWindow):
     Kommunikation: map_editor_requested Signal für Navigation zu main.py
     """
 
-    # NEUES SIGNAL FÜR MAIN.PY INTEGRATION
     map_editor_requested = pyqtSignal()
 
-    def __init__(self, shader_manager=None, parameter_manager=None, generation_orchestrator=None,
-                 data_manager=None, navigation_manager=None):
+    def __init__(self):
         """
         Funktionsweise: Initialisiert MainMenu mit optionalen Manager-References
         Aufgabe: UI Setup ohne eigene Manager-Erstellung (kommt von main.py)
@@ -55,18 +58,11 @@ class MainMenuWindow(QMainWindow):
         super().__init__()
         self.logger = logging.getLogger(__name__)
 
-        self.data_manager = data_manager
-        self.navigation_manager = navigation_manager
-        self.generation_orchestrator = generation_orchestrator
-        self.shader_manager = shader_manager
-        self.parameter_manager = parameter_manager
-
         # Window Setup
         self.setup_window()
 
         # UI Setup
         self.setup_ui()
-
         self.logger.info("Main Menu initialized")
 
     def setup_window(self):
@@ -79,10 +75,10 @@ class MainMenuWindow(QMainWindow):
 
         # Window Size aus gui_default.py
         main_menu_settings = WindowSettings.MAIN_MENU
-        width = main_menu_settings.get("width", 800)
-        height = main_menu_settings.get("height", 600)
+        width = main_menu_settings.get("width", 1000)
+        height = main_menu_settings.get("height", 1000)
         min_width = main_menu_settings.get("min_width", 600)
-        min_height = main_menu_settings.get("min_height", 400)
+        min_height = main_menu_settings.get("min_height", 600)
 
         self.resize(width, height)
         self.setMinimumSize(min_width, min_height)
@@ -92,17 +88,6 @@ class MainMenuWindow(QMainWindow):
 
         # Window Flags
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint)
-
-    def center_window(self):
-        """
-        Funktionsweise: Zentriert Fenster auf dem Bildschirm
-        Aufgabe: Berechnet Bildschirmmitte und positioniert Fenster dort
-        """
-        screen = QApplication.desktop().screenGeometry()
-        window = self.geometry()
-        x = (screen.width() - window.width()) // 2
-        y = (screen.height() - window.height()) // 2
-        self.move(x, y)
 
     def setup_ui(self):
         """
@@ -131,6 +116,17 @@ class MainMenuWindow(QMainWindow):
         main_layout.addStretch()
 
         central_widget.setLayout(main_layout)
+
+    def center_window(self):
+        """
+        Funktionsweise: Zentriert Fenster auf dem Bildschirm
+        Aufgabe: Berechnet Bildschirmmitte und positioniert Fenster dort
+        """
+        screen = QApplication.desktop().screenGeometry()
+        window = self.geometry()
+        x = (screen.width() - window.width()) // 2
+        y = (screen.height() - window.height()) // 2
+        self.move(x, y)
 
     def create_title_section(self) -> QWidget:
         """

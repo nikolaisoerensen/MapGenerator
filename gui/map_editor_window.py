@@ -31,6 +31,11 @@ import logging
 from typing import Dict, Any, Optional
 
 from gui.config.gui_default import WindowSettings, EditorConstants
+from gui.managers.data_lod_manager import DataLODManager
+from gui.managers.generation_orchestrator import GenerationOrchestrator
+from gui.managers.navigation_manager import NavigationManager
+from gui.managers.parameter_manager import ParameterManager
+from gui.managers.shader_manager import ShaderManager
 from gui.widgets.widgets import BaseButton, StatusIndicator
 
 # Professional tab imports with comprehensive error handling
@@ -102,14 +107,17 @@ class MapEditorWindow(QMainWindow):
     # Navigation signals
     return_to_main_menu = pyqtSignal()
 
-    def __init__(self, data_manager=None, navigation_manager=None, shader_manager=None, parameter_manager=None,generation_orchestrator=None, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        # Core dependencies
-        self.data_manager = data_manager
-        self.navigation_manager = navigation_manager
-        self.shader_manager = shader_manager
-        self.parameter_manager = parameter_manager
-        self.generation_orchestrator = generation_orchestrator
+
+        # Manager einzeln initialisieren
+        self.data_lod_manager = None
+        self.navigation_manager = None
+        self.shader_manager = None
+        self.parameter_manager = None
+        self.generation_orchestrator = None
+        self._setup_managers()
+        self._check_managers()
 
         self.logger = logging.getLogger(__name__)
 
@@ -191,6 +199,115 @@ class MapEditorWindow(QMainWindow):
         self._create_menu_bar()
         self._create_toolbar()
         self._create_status_bar()
+
+
+    def _setup_managers(self):
+        try:
+            # Manager einzeln erstellen und testen
+            self.logger.info("Creating DataLODManager...")
+            self.data_manager = DataLODManager()
+
+            self.logger.info("Creating ShaderManager...")
+            self.shader_manager = ShaderManager()
+
+            self.logger.info("Creating ParameterManager...")
+            self.parameter_manager = ParameterManager()
+    
+            self.logger.info("Creating NavigationManager...")
+            self.navigation_manager = NavigationManager(data_manager=self.data_lod_manager)
+    
+            self.logger.info("Creating GenerationOrchestrator...")
+            self.generation_orchestrator = GenerationOrchestrator(data_manager=self.data_lod_manager)
+    
+        except Exception as e:
+            self.logger.error(f"Manager creation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+
+    def _check_managers(self):
+        if self.generation_orchestrator is None:
+            self.logger.error("DEBUG: MapEditor received None as generation_orchestrator!")
+        else:
+            self.logger.info(f"DEBUG: MapEditor received orchestrator: {type(self.generation_orchestrator)}")
+
+        if self.shader_manager is None:
+            self.logger.error("DEBUG: MapEditor received None as shader_manager!")
+        else:
+            self.logger.info(f"DEBUG: MapEditor received shader_manager: {type(self.shader_manager)}")
+
+        if self.parameter_manager is None:
+            self.logger.error("DEBUG: MapEditor received None as parameter_manager!")
+        else:
+            self.logger.info(f"DEBUG: MapEditor received orchestrator: {type(self.parameter_manager)}")
+
+        if self.data_manager is None:
+            self.logger.error("DEBUG: MapEditor received None as data_manager!")
+        else:
+            self.logger.info(f"DEBUG: MapEditor received orchestrator: {type(self.data_manager)}")
+
+    def _setup_manager_integration(self):
+        """
+        Configure manager cross-communication and signal routing
+        =======================================================
+
+        Establishes signal connections between NavigationManager and
+        GenerationOrchestrator for coordinated application behavior.
+        Connects orchestrator events to application-level handlers
+        for UI updates and state management.
+        """
+        try:
+            # DataLODManager ↔ GenerationOrchestrator
+            self.data_lod_manager.dependencies_satisfied.connect(
+                self.generation_orchestrator.on_dependencies_ready)
+            self.generation_orchestrator.generation_completed.connect(
+                self.data_lod_manager.on_generation_completed)
+            self.generation_orchestrator.lod_progress.connect(
+                self.data_lod_manager.on_lod_progress)
+            self.logger.info("INFO: Successfully connected Generation Orchestrator with Data-LOD-Manager Signals!")
+        except Exception as e:
+            self.logger.error("ERROR: Failed to connect Generation Orchestrator with Data-LOD-Manager Signals!")
+
+        try:
+            # ParameterManager ↔ DataLODManager (Cache-Invalidation)
+            self.parameter_manager.cache_invalidation_requested.connect(
+                self.data_lod_manager.invalidate_cache)
+            self.parameter_manager.parameter_changed.connect(
+                self.data_lod_manager.on_parameter_changed)
+            self.logger.info("INFO: Successfully connected ParameterManager with Data-LOD-Manager Signals!")
+        except Exception as e:
+            self.logger.error("ERROR: Failed to connect ParameterManager with Data-LOD-Manager Signals!")
+
+        try:
+            # ShaderManager ↔ DataLODManager (Performance-Tracking)
+            self.shader_manager.shader_performance_updated.connect(
+                self.data_lod_manager.update_performance_metrics)
+            self.shader_manager.gpu_memory_warning.connect(
+                self.data_lod_manager.handle_memory_warning)
+            self.data_lod_manager.memory_warning.connect(
+                self.shader_manager.reduce_gpu_usage)
+            self.logger.info("INFO: Successfully connected ShaderManager with Data-LOD-Manager Signals!")
+        except Exception as e:
+            self.logger.error("ERROR: Failed to connect ShaderManager with Data-LOD-Manager Signals!")
+
+        try:
+            # NavigationManager ↔ Window (Tab-Navigation)
+            self.navigation_manager.tab_changed.connect(self._on_tab_navigation_requested)
+            self.logger.info("INFO: Successfully connected NavigationManager Signals!")
+        except Exception as e:
+            self.logger.error("ERROR: Failed to connect NavigationManager Signals!")
+
+        try:
+            # GenerationOrchestrator ↔ Window (Status-Updates)
+            self.generation_orchestrator.generation_completed.connect(self._on_generation_completed)
+            self.generation_orchestrator.lod_progression_completed.connect(self._on_lod_progression_completed)
+            self.generation_orchestrator.generation_progress.connect(self._on_generation_progress)
+            self.generation_orchestrator.dependency_invalidated.connect(self._on_dependency_invalidated)
+            self.generation_orchestrator.batch_generation_completed.connect(self._on_batch_completed)
+            self.generation_orchestrator.queue_status_changed.connect(self._on_queue_status_changed)
+            self.logger.info("INFO: Successfully connected GenerationOrchestrator Status Signals!")
+        except Exception as e:
+            self.logger.error("ERROR: Failed to connect GenerationOrchestrator Status Signals!")
 
     def _create_menu_bar(self):
         """
@@ -565,27 +682,6 @@ class MapEditorWindow(QMainWindow):
         # Data manager signals
         if self.data_manager:
             self.data_manager.data_updated.connect(self._on_data_updated)
-
-    def _setup_orchestrator_integration(self):
-        """
-        Configure GenerationOrchestrator signal integration
-        ==================================================
-
-        Connects orchestrator signals to window-level handlers
-        for coordinated generation monitoring and UI updates.
-        """
-        if not self.generation_orchestrator:
-            self.logger.warning("No GenerationOrchestrator provided to MapEditor")
-            return
-
-        # Connect orchestrator signals
-        self.generation_orchestrator.generation_started.connect(self._on_generation_started)
-        self.generation_orchestrator.generation_completed.connect(self._on_generation_completed)
-        self.generation_orchestrator.generation_progress.connect(self._on_generation_progress)
-        self.generation_orchestrator.batch_generation_completed.connect(self._on_batch_generation_completed)
-        self.generation_orchestrator.dependency_invalidated.connect(self._on_dependency_invalidated)
-
-    # Tab Management Methods
 
     def activate_tab(self, tab_name: str) -> bool:
         """

@@ -26,7 +26,7 @@ class ParameterChangeEvent:
     timestamp: float = field(default_factory=time.time)
 
 
-class ParameterCommunicationHub(QObject):
+class ParameterManager(QObject):
     """
     Funktionsweise: Zentrale Koordination aller Parameter zwischen Tabs
     Aufgabe: Cross-Tab-Parameter-Sharing, Change-Tracking, Dependency-Management
