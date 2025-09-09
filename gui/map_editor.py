@@ -24,11 +24,11 @@ Architecture:
 - Comprehensive status monitoring and progress tracking
 """
 
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
+from PyQt5.QtWidgets import QMainWindow, QApplication, QTabWidget, QMenu, QAction, QLabel, QComboBox, QWidget, \
+    QVBoxLayout, QMessageBox, QFileDialog
+from PyQt5.QtCore import pyqtSignal, QTimer, Qt, pyqtSlot
 import logging
-from typing import Dict, Any, Optional
+from typing import Optional
 
 from gui.config.gui_default import WindowSettings, EditorConstants
 from gui.managers.data_lod_manager import DataLODManager
@@ -37,6 +37,7 @@ from gui.managers.navigation_manager import NavigationManager
 from gui.managers.parameter_manager import ParameterManager
 from gui.managers.shader_manager import ShaderManager
 from gui.widgets.widgets import BaseButton, StatusIndicator
+
 
 # Professional tab imports with comprehensive error handling
 def _import_tab_safely(module_path: str, class_name: str) -> tuple[bool, Optional[type], str]:
@@ -73,6 +74,7 @@ def _import_tab_safely(module_path: str, class_name: str) -> tuple[bool, Optiona
     except Exception as e:
         return False, None, "instantiation_failed"
 
+
 # Import available tabs
 TERRAIN_AVAILABLE, TerrainTab, terrain_error = _import_tab_safely("gui.tabs.terrain_tab", "TerrainTab")
 GEOLOGY_AVAILABLE, GeologyTab, geology_error = _import_tab_safely("gui.tabs.geology_tab", "GeologyTab")
@@ -81,6 +83,7 @@ WATER_AVAILABLE, WaterTab, water_error = _import_tab_safely("gui.tabs.water_tab"
 BIOME_AVAILABLE, BiomeTab, biome_error = _import_tab_safely("gui.tabs.biome_tab", "BiomeTab")
 SETTLEMENT_AVAILABLE, SettlementTab, settlement_error = _import_tab_safely("gui.tabs.settlement_tab", "SettlementTab")
 OVERVIEW_AVAILABLE, OverviewTab, overview_error = _import_tab_safely("gui.tabs.overview_tab", "OverviewTab")
+
 
 class MapEditorWindow(QMainWindow):
     """
@@ -99,16 +102,12 @@ class MapEditorWindow(QMainWindow):
     - Professional menu and toolbar integration
     - Memory-efficient resource management
     - Comprehensive error recovery
-
-    Signals:
-        return_to_main_menu: Emitted when user requests return to main menu
     """
-
-    # Navigation signals
-    return_to_main_menu = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        self.logger = logging.getLogger(__name__)
 
         # Manager einzeln initialisieren
         self.data_lod_manager = None
@@ -118,8 +117,6 @@ class MapEditorWindow(QMainWindow):
         self.generation_orchestrator = None
         self._setup_managers()
         self._check_managers()
-
-        self.logger = logging.getLogger(__name__)
 
         if self.generation_orchestrator is None:
             self.logger.error("DEBUG: MapEditor received None as generation_orchestrator!")
@@ -143,7 +140,7 @@ class MapEditorWindow(QMainWindow):
         self._setup_ui()
         self._setup_tabs()
         self._setup_signals()
-        #self._setup_orchestrator_integration()
+        # self._setup_orchestrator_integration()
 
         # Start status monitoring
         self.status_update_timer.start(EditorConstants.STATUS_UPDATE_INTERVAL_MS)
@@ -200,7 +197,6 @@ class MapEditorWindow(QMainWindow):
         self._create_toolbar()
         self._create_status_bar()
 
-
     def _setup_managers(self):
         try:
             # Manager einzeln erstellen und testen
@@ -212,13 +208,13 @@ class MapEditorWindow(QMainWindow):
 
             self.logger.info("Creating ParameterManager...")
             self.parameter_manager = ParameterManager()
-    
+
             self.logger.info("Creating NavigationManager...")
             self.navigation_manager = NavigationManager(data_manager=self.data_lod_manager)
-    
+
             self.logger.info("Creating GenerationOrchestrator...")
             self.generation_orchestrator = GenerationOrchestrator(data_manager=self.data_lod_manager)
-    
+
         except Exception as e:
             self.logger.error(f"Manager creation failed: {e}")
             import traceback
@@ -947,7 +943,8 @@ class MapEditorWindow(QMainWindow):
         """Export complete world data"""
         try:
             # TODO: Implement comprehensive world export
-            QMessageBox.information(self, "Export World", "Comprehensive world export will be implemented in future version")
+            QMessageBox.information(self, "Export World",
+                                    "Comprehensive world export will be implemented in future version")
             self.logger.info("World export requested")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export world: {str(e)}")
@@ -1259,7 +1256,8 @@ class MapEditorWindow(QMainWindow):
         try:
             return {
                 "window_info": {
-                    "current_tab": self.tab_widget.tabText(self.tab_widget.currentIndex()) if self.tab_widget.currentIndex() >= 0 else "None",
+                    "current_tab": self.tab_widget.tabText(
+                        self.tab_widget.currentIndex()) if self.tab_widget.currentIndex() >= 0 else "None",
                     "total_tabs": self.tab_widget.count(),
                     "window_size": f"{self.width()}x{self.height()}"
                 },

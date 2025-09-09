@@ -148,7 +148,7 @@ class MainMenuWindow(QMainWindow):
                 margin-bottom: 10px;
             }
         """)
-        layout.addWidget(title_label)
+        layout.addWidget(title_label) # Title setzen
 
         # Subtitle
         subtitle_label = QLabel("World Generation Suite")
@@ -160,9 +160,9 @@ class MainMenuWindow(QMainWindow):
                 font-style: italic;
             }
         """)
-        layout.addWidget(subtitle_label)
+        layout.addWidget(subtitle_label) # Subtitle setzen
 
-        section.setLayout(layout)
+        section.setLayout(layout) # Layout in Container einsetzen
         return section
 
     def create_button_section(self) -> QWidget:
@@ -185,7 +185,7 @@ class MainMenuWindow(QMainWindow):
         self.map_editor_button = BaseButton("Map-Editor", "primary")
         self.map_editor_button.setMinimumHeight(
             LayoutSettings.BUTTON_HEIGHT + 15)  # Etwas höher für Hauptbutton
-        self.map_editor_button.clicked.connect(self.start_map_editor)
+        self.map_editor_button.clicked.connect(self._on_map_editor_button_clicked)
         button_layout.addWidget(self.map_editor_button)
 
         # Load Button (placeholder)
@@ -203,7 +203,7 @@ class MainMenuWindow(QMainWindow):
         # Exit Button
         self.exit_button = BaseButton("Beenden", "danger")
         self.exit_button.setMinimumHeight(LayoutSettings.BUTTON_HEIGHT + 10)
-        self.exit_button.clicked.connect(self.exit_application)
+        self.exit_button.clicked.connect(self._on_exit_button_clicked)
         button_layout.addWidget(self.exit_button)
 
         button_container.setLayout(button_layout)
@@ -218,20 +218,47 @@ class MainMenuWindow(QMainWindow):
         section.setLayout(layout)
         return section
 
-    def start_map_editor(self):
+    def _on_map_editor_button_clicked(self):
         """
         Funktionsweise: Sendet Signal für Map-Editor Start (keine direkte Aktion)
         Aufgabe: Informiert main.py über Map-Editor Request
         """
         try:
-            self.logger.info("Map Editor requested")
+            self.logger.info("Importing Map Editor Window")
+            from gui.map_editor import MapEditorWindow
 
-            # Signal an main.py senden
-            self.map_editor_requested.emit()
+            # Main Menu verstecken
+            self.logger.info("Hide Main Menu")
+            self.hide()
 
+            # Erstelle Map Editor, übergebe Main Menu und zeige es
+            self.logger.info("Create and show Map Editor")
+            self.map_editor = MapEditorWindow(parent=self)
+            self.map_editor.show()
         except Exception as e:
             self.show_error_message("Error", f"Failed to start Map Editor:\n{str(e)}")
-            self.logger.error(f"Map Editor request failed: {e}")
+            self.logger.error(f"Map Editor error while opening: {e}")
+
+    def _on_exit_button_clicked(self):
+        """
+        Funktionsweise: Beendet Anwendung direkt ohne Bestätigung
+        Aufgabe: Einfaches QApplication.quit()
+        """
+        self.logger.info("Application exit initiated")
+        QApplication.quit()
+
+    def show_error_message(self, title: str, message: str):
+        """
+        Funktionsweise: Zeigt standardisierte Error-Message
+        Parameter: title (str), message (str) - Titel und Nachricht des Fehlers
+        Aufgabe: Einheitliche Error-Darstellung
+        """
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(message)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec_()
 
     def show_placeholder_message(self):
         """
@@ -259,27 +286,6 @@ class MainMenuWindow(QMainWindow):
         msg_box.exec_()
 
         self.logger.info(f"Placeholder message shown for '{button_text}'")
-
-    def exit_application(self):
-        """
-        Funktionsweise: Beendet Anwendung direkt ohne Bestätigung
-        Aufgabe: Einfaches QApplication.quit()
-        """
-        self.logger.info("Application exit initiated")
-        QApplication.quit()
-
-    def show_error_message(self, title: str, message: str):
-        """
-        Funktionsweise: Zeigt standardisierte Error-Message
-        Parameter: title (str), message (str) - Titel und Nachricht des Fehlers
-        Aufgabe: Einheitliche Error-Darstellung
-        """
-        msg_box = QMessageBox(self)
-        msg_box.setIcon(QMessageBox.Critical)
-        msg_box.setWindowTitle(title)
-        msg_box.setText(message)
-        msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.exec_()
 
     def closeEvent(self, event):
         """

@@ -303,7 +303,7 @@ class ParameterExportManager:
     Features: Versioning, Metadata, Validation, Template-Support
     """
 
-    def __init__(self, parameter_hub: ParameterCommunicationHub):
+    def __init__(self, parameter_hub: ParameterManager):
         self.parameter_hub = parameter_hub
         self.logger = logging.getLogger(__name__)
 
@@ -630,12 +630,12 @@ class ParameterPresetManager:
 
 # Utility Functions für Parameter-Manager
 
-def create_standard_parameter_hub() -> ParameterCommunicationHub:
+def create_standard_parameter_hub() -> ParameterManager:
     """
     Funktionsweise: Factory für Standard-Parameter-Hub mit Constraints
-    Return: Konfigurierter ParameterCommunicationHub
+    Return: Konfigurierter ParameterManager
     """
-    hub = ParameterCommunicationHub()
+    hub = ParameterManager()
 
     # Standard-Constraints hinzufügen
     _add_standard_constraints(hub)
@@ -643,7 +643,7 @@ def create_standard_parameter_hub() -> ParameterCommunicationHub:
     return hub
 
 
-def _add_standard_constraints(hub: ParameterCommunicationHub):
+def _add_standard_constraints(hub: ParameterManager):
     """
     Funktionsweise: Fügt Standard-Parameter-Constraints hinzu
     Parameter: hub
@@ -659,7 +659,7 @@ def _add_standard_constraints(hub: ParameterCommunicationHub):
     hub.add_parameter_constraint("geology", "metamorphic_hardness", lambda x: 0 <= x <= 100)
 
 
-def register_standard_map_tabs(hub: ParameterCommunicationHub, tabs: Dict[str, Any]):
+def register_standard_map_tabs(hub: ParameterManager, tabs: Dict[str, Any]):
     """
     Funktionsweise: Registriert Standard-Map-Tabs mit Dependencies
     Parameter: hub, tabs dict
