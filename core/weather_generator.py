@@ -37,7 +37,7 @@ LOD-System (Numerisch):
 import numpy as np
 from opensimplex import OpenSimplex
 import logging
-from typing import Optional, Dict, Any, Tuple
+from typing import Dict, Any, Tuple
 
 
 class WeatherData:

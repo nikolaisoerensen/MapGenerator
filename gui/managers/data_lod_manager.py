@@ -23,8 +23,9 @@ import weakref
 import time
 import hashlib
 import logging
+import threading
 from collections import defaultdict
-from typing import Dict, Any, Optional, List, Tuple, Set, Callable
+from typing import Dict, Any, Optional, List, Tuple, Callable
 from dataclasses import dataclass, field
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
 
@@ -76,6 +77,17 @@ class TabStatus:
     error_message: str = ""
     available_data_keys: List[str] = field(default_factory=list)
 
+@dataclass
+class DataStatus:
+    """Status-Information für ein Dataset"""
+    data: str
+    lod_level: int
+    lod_size: int
+    lod_status: str  # "idle", "pending", "success", "failure"
+    progress_percent: int = 0
+    error_message: str = ""
+    available_data_keys: List[str] = field(default_factory=list)
+
 @dataclass 
 class LODConfig:
     """LOD-Konfiguration für Map-size-proportionale Skalierung"""
@@ -105,14 +117,48 @@ class LODConfig:
         max_doubling_lod = int(math.log2(self.target_map_size / self.minimal_map_size)) + 1
         return max_doubling_lod
 
-# Tab-Dependencies: Nur Tab-abhängig, gleiche LOD-Stufe
-DEPENDENCY_MATRIX = {
-    "terrain": [],                           # Keine Dependencies  
-    "geology": ["terrain"],                  # Gleiche LOD-Stufe
-    "weather": ["terrain"],                  # Gleiche LOD-Stufe
-    "water": ["terrain"],                    # Gleiche LOD-Stufe  
-    "biome": ["weather", "water"],          # Gleiche LOD-Stufe
-    "settlement": ["terrain", "geology"]     # Gleiche LOD-Stufe
+# Tab-Dependencies: Data-abhängig, gleiche LOD-Stufe
+TAB_DEPENDENCY_MATRIX = {
+    "terrain": ["heightmap_combined", "slopemap", "shadowmap"],
+    "geology": ["rock_map", "hardness_map"],
+    "weather": ["wind_map", "temp_map", "precip_map", "humid_map"],
+    "water": ["flow_map", "flow_speed", "cross_section", "soil_moist_map", "erosion_map", "sedimentation_map",
+              "evaporation_map", "ocean_outflow", "water_biomes_map"],
+    "biome": ["biome_map", "biome_map_super", "super_biome_mask", "climate_classification", "biome_statistics"],
+    "settlement": ["settlement_list", "landmark_list", "roadsite_list", "plot_map", "civ_map"]
+}
+
+# Tab-Dependencies: Data-abhängig, gleiche LOD-Stufe
+DATA_DEPENDENCY_MATRIX = {
+    "heightmap": [],
+    "heightmap_combined": ["heightmap"],
+    "slopemap": ["heightmap_combined"],
+    "shadowmap": ["heightmap_combined"],
+    "rock_map": ["heightmap_combined"],
+    "hardness_map": ["rock_map"],
+    "wind_map": ["heightmap_combined"],
+    "temp_map": ["heightmap_combined"],
+    "precip_map": ["heightmap_combined"],
+    "humid_map": ["heightmap_combined"],
+    "flow_map": ["heightmap_combined"],
+    "flow_speed": ["heightmap_combined"],
+    "cross_section": ["heightmap_combined"],
+    "soil_moist_map": ["heightmap_combined"],
+    "erosion_map": ["heightmap_combined"],
+    "sedimentation_map": ["heightmap_combined"],
+    "evaporation_map": ["heightmap_combined"],
+    "ocean_outflow": ["heightmap_combined"],
+    "water_biomes_map": ["heightmap_combined"],
+    "biome_map": ["heightmap_combined"],
+    "biome_map_super": ["heightmap_combined"],
+    "super_biome_mask": ["heightmap_combined"],
+    "climate_classification": ["heightmap_combined"],
+    "biome_statistics": ["heightmap_combined"],
+    "settlement_list": ["heightmap_combined"],
+    "landmark_list": ["heightmap_combined"],
+    "roadsite_list": ["heightmap_combined"],
+    "plot_map": ["heightmap_combined"],
+    "civ_map": ["heightmap_combined"]
 }
 
 # =============================================================================
@@ -144,14 +190,22 @@ class ResourceTracker(QObject):
     def __init__(self, memory_threshold_mb: int = 500):
         super().__init__()
 
-        self.tracked_resources = {}  # {resource_id: WeakReference}
-        self.resource_info = {}  # {resource_id: ResourceInfo}
-        self.type_registry = defaultdict(set)  # {resource_type: {resource_ids}}
+        # Thread-Safety
+        self._lock = threading.RLock()  # Reentrant Lock für verschachtelte Calls
 
+        # Datenstrukturen (alle Zugriffe unter Lock)
+        self._tracked_resources = {}  # {resource_id: WeakReference}
+        self._resource_info = {}  # {resource_id: ResourceInfo}
+        self._type_registry = defaultdict(set)  # {resource_type: {resource_ids}}
+
+        # ID-Management
         self._next_id = 0
         self.memory_threshold_mb = memory_threshold_mb
 
-        # Automatic cleanup timer
+        # State Management
+        self._is_shutting_down = False
+
+        # Timer mit explizitem Lifecycle
         self.cleanup_timer = QTimer()
         self.cleanup_timer.timeout.connect(self._automatic_cleanup)
         self.cleanup_timer.start(30000)  # 30 seconds
@@ -166,45 +220,91 @@ class ResourceTracker(QObject):
         Parameter: resource, resource_type, cleanup_func, metadata
         Return: resource_id für Referenzierung
         """
-        resource_id = f"{resource_type}_{self._next_id}"
-        self._next_id += 1
+        if self._is_shutting_down:
+            raise RuntimeError("ResourceTracker is shutting down")
 
-        # WeakReference mit Callback für automatisches Cleanup
-        weak_ref = weakref.ref(resource, lambda ref: self._on_resource_deleted(resource_id))
+        with self._lock:
+            try:
+                # ID generieren (noch nicht committen)
+                temp_resource_id = f"{resource_type}_{self._next_id}"
 
-        # Resource-Info erstellen
-        estimated_size = self._estimate_resource_size(resource)
-        info = ResourceInfo(
-            resource_id=resource_id,
-            resource_type=resource_type,
-            creation_time=time.time(),
-            cleanup_func=cleanup_func,
-            estimated_size=estimated_size,
-            metadata=metadata or {}
-        )
+                # Resource-Größe schätzen (kann Exception werfen)
+                estimated_size = self._estimate_resource_size(resource)
 
-        # Registrierung
-        self.tracked_resources[resource_id] = weak_ref
-        self.resource_info[resource_id] = info
-        self.type_registry[resource_type].add(resource_id)
+                # ResourceInfo erstellen (kann Exception werfen)
+                info = ResourceInfo(
+                    resource_id=temp_resource_id,
+                    resource_type=resource_type,
+                    creation_time=time.time(),
+                    cleanup_func=cleanup_func,
+                    estimated_size=estimated_size,
+                    metadata=metadata or {}
+                )
 
-        self.logger.debug(f"Registered resource: {resource_id} ({resource_type}, {estimated_size} bytes)")
-        self.resource_registered.emit(resource_id, resource_type)
+                # WeakReference mit sicherem Callback erstellen
+                weak_ref = weakref.ref(
+                    resource,
+                    self._make_cleanup_callback(temp_resource_id)
+                )
 
-        # Memory-Check
-        self._check_memory_usage()
+                # Alles erfolgreich -> Jetzt committen
+                resource_id = temp_resource_id
+                self._next_id += 1
+
+                # Atomic registration
+                self._tracked_resources[resource_id] = weak_ref
+                self._resource_info[resource_id] = info
+                self._type_registry[resource_type].add(resource_id)
+
+                self.logger.debug(f"Registered resource: {resource_id} ({resource_type}, {estimated_size} bytes)")
+                self.resource_registered.emit(resource_id, resource_type)
+
+                # Memory-Check (außerhalb kritischer Sektion)
+
+            except Exception as e:
+                self.logger.error(f"Resource registration failed: {e}")
+                raise
+
+            # Memory-Check nach Lock-Release (kann länger dauern)
+        try:
+            self._check_memory_usage()
+        except Exception as e:
+            self.logger.warning(f"Memory check after registration failed: {e}")
 
         return resource_id
 
+    def _make_cleanup_callback(self, resource_id: str):
+        """
+        Erstellt thread-sicheren Cleanup-Callback
+        Verhindert Race Conditions zwischen WeakRef-Callback und Cleanup-Timer
+        """
+
+        def cleanup_callback(weak_ref):
+            if self._is_shutting_down:
+                return
+
+            try:
+                with self._lock:
+                    if resource_id in self._resource_info:
+                        self.logger.debug(f"Resource garbage collected: {resource_id}")
+                        self._cleanup_resource_unsafe(resource_id)
+            except Exception as e:
+                self.logger.warning(f"WeakRef callback failed for {resource_id}: {e}")
+
+        return cleanup_callback
+
     def cleanup_by_type(self, resource_type: str) -> int:
         """
-        Funktionsweise: Cleaned alle Ressourcen eines bestimmten Typs
-        Parameter: resource_type
-        Return: Anzahl gecleanter Ressourcen
+        Thread-sichere Cleanup-Methode nach Resource-Typ
         """
-        resource_ids = list(self.type_registry.get(resource_type, set()))
-        cleaned_count = 0
+        if self._is_shutting_down:
+            return 0
 
+        with self._lock:
+            # Snapshot der zu löschenden IDs
+            resource_ids = list(self._type_registry.get(resource_type, set()))
+
+        cleaned_count = 0
         for resource_id in resource_ids:
             if self._cleanup_resource(resource_id):
                 cleaned_count += 1
@@ -214,15 +314,19 @@ class ResourceTracker(QObject):
 
     def cleanup_by_age(self, max_age_seconds: float) -> int:
         """
-        Funktionsweise: Cleaned alte Ressourcen basierend auf Alter
-        Parameter: max_age_seconds
-        Return: Anzahl gecleanter Ressourcen
+        Thread-sichere Cleanup alter Ressourcen
         """
+        if self._is_shutting_down:
+            return 0
+
         current_time = time.time()
-        old_resources = [
-            resource_id for resource_id, info in self.resource_info.items()
-            if current_time - info.creation_time > max_age_seconds
-        ]
+
+        with self._lock:
+            # Snapshot aller ResourceInfo
+            old_resources = [
+                resource_id for resource_id, info in self._resource_info.items()
+                if current_time - info.creation_time > max_age_seconds
+            ]
 
         cleaned_count = 0
         for resource_id in old_resources:
@@ -234,12 +338,13 @@ class ResourceTracker(QObject):
 
     def force_cleanup_all(self) -> int:
         """
-        Funktionsweise: Emergency cleanup aller Ressourcen
-        Return: Anzahl gecleanter Ressourcen
+        Vollständige Cleanup-Methode für Shutdown
         """
-        resource_ids = list(self.tracked_resources.keys())
-        cleaned_count = 0
+        with self._lock:
+            # Snapshot aller Resource-IDs
+            resource_ids = list(self._tracked_resources.keys())
 
+        cleaned_count = 0
         for resource_id in resource_ids:
             if self._cleanup_resource(resource_id):
                 cleaned_count += 1
@@ -247,70 +352,21 @@ class ResourceTracker(QObject):
         self.logger.warning(f"Force cleanup: {cleaned_count} resources cleaned")
         return cleaned_count
 
-    def get_memory_usage(self) -> Dict[str, int]:
-        """
-        Funktionsweise: Gibt Memory-Usage pro Resource-Type zurück
-        Return: dict {resource_type: bytes}
-        """
-        usage = defaultdict(int)
-
-        for resource_id, resource_ref in self.tracked_resources.items():
-            resource = resource_ref()
-            if resource is not None and resource_id in self.resource_info:
-                info = self.resource_info[resource_id]
-                usage[info.resource_type] += info.estimated_size
-
-        return dict(usage)
-
-    def get_resource_statistics(self) -> Dict[str, Any]:
-        """
-        Funktionsweise: Sammelt detaillierte Resource-Statistiken
-        Return: dict mit Resource-Stats
-        """
-        stats = {
-            'total_resources': len(self.tracked_resources),
-            'alive_resources': sum(1 for ref in self.tracked_resources.values() if ref() is not None),
-            'dead_references': sum(1 for ref in self.tracked_resources.values() if ref() is None),
-            'total_memory_mb': sum(self.get_memory_usage().values()) / (1024 * 1024),
-            'types': {},
-            'oldest_resource_age': 0
-        }
-
-        # Per-Type Statistics
-        for resource_type, resource_ids in self.type_registry.items():
-            alive_count = sum(
-                1 for rid in resource_ids
-                if rid in self.tracked_resources and self.tracked_resources[rid]() is not None
-            )
-            total_size = sum(
-                self.resource_info[rid].estimated_size
-                for rid in resource_ids
-                if rid in self.resource_info
-            )
-
-            stats['types'][resource_type] = {
-                'count': alive_count,
-                'total_size_mb': total_size / (1024 * 1024)
-            }
-
-        # Oldest Resource Age
-        if self.resource_info:
-            current_time = time.time()
-            oldest_time = min(info.creation_time for info in self.resource_info.values())
-            stats['oldest_resource_age'] = current_time - oldest_time
-
-        return stats
-
     def _cleanup_resource(self, resource_id: str) -> bool:
         """
-        Funktionsweise: Cleaned einzelne Ressource
-        Parameter: resource_id
-        Return: bool - Cleanup erfolgreich
+        Thread-sichere einzelne Resource-Cleanup
         """
-        if resource_id not in self.resource_info:
+        with self._lock:
+            return self._cleanup_resource_unsafe(resource_id)
+
+    def _cleanup_resource_unsafe(self, resource_id: str) -> bool:
+        """
+        Interne Cleanup-Methode (Lock muss bereits gehalten werden)
+        """
+        if resource_id not in self._resource_info:
             return False
 
-        info = self.resource_info[resource_id]
+        info = self._resource_info[resource_id]
 
         # Cleanup-Funktion ausführen
         if info.cleanup_func:
@@ -319,82 +375,212 @@ class ResourceTracker(QObject):
             except Exception as e:
                 self.logger.warning(f"Cleanup function failed for {resource_id}: {e}")
 
-        # Aus Registries entfernen
-        self.tracked_resources.pop(resource_id, None)
-        self.resource_info.pop(resource_id, None)
-        self.type_registry[info.resource_type].discard(resource_id)
+        # Aus allen Registries entfernen
+        self._tracked_resources.pop(resource_id, None)
+        self._resource_info.pop(resource_id, None)
+        self._type_registry[info.resource_type].discard(resource_id)
 
         self.logger.debug(f"Cleaned resource: {resource_id}")
         self.resource_cleaned.emit(resource_id, info.resource_type)
 
         return True
 
+    def get_memory_usage(self) -> Dict[str, int]:
+        """
+        Thread-sichere Memory-Usage-Berechnung
+        """
+        with self._lock:
+            usage = defaultdict(int)
+
+            # Snapshot der Resource-Info
+            resource_info_items = list(self._resource_info.items())
+
+        # Berechnung außerhalb Lock
+        for resource_id, info in resource_info_items:
+            # Prüfen ob Resource noch lebt
+            weak_ref = None
+            with self._lock:
+                weak_ref = self._tracked_resources.get(resource_id)
+
+            if weak_ref and weak_ref() is not None:
+                usage[info.resource_type] += info.estimated_size
+
+        return dict(usage)
+
+    def get_resource_statistics(self) -> Dict[str, Any]:
+        """
+        Thread-sichere Resource-Statistiken
+        """
+        with self._lock:
+            total_resources = len(self._tracked_resources)
+
+            # Alive resources count (kann Exception werfen)
+            alive_count = 0
+            for weak_ref in self._tracked_resources.values():
+                try:
+                    if weak_ref() is not None:
+                        alive_count += 1
+                except Exception:
+                    pass
+
+            dead_count = total_resources - alive_count
+
+            # Memory usage berechnen
+            memory_usage = self.get_memory_usage()
+            total_memory_mb = sum(memory_usage.values()) / (1024 * 1024)
+
+            # Oldest resource age
+            oldest_age = 0
+            if self._resource_info:
+                current_time = time.time()
+                oldest_time = min(info.creation_time for info in self._resource_info.values())
+                oldest_age = current_time - oldest_time
+
+        return {
+            'total_resources': total_resources,
+            'alive_resources': alive_count,
+            'dead_references': dead_count,
+            'total_memory_mb': total_memory_mb,
+            'oldest_resource_age': oldest_age,
+            'is_shutting_down': self._is_shutting_down
+        }
+
+    def _check_memory_usage(self):
+        """
+        Defensive Memory-Usage-Prüfung mit Error-Handling
+        """
+        try:
+            memory_usage = self.get_memory_usage()
+            total_memory_bytes = sum(memory_usage.values())
+            total_memory_mb = total_memory_bytes / (1024 * 1024)
+
+            if total_memory_mb > self.memory_threshold_mb:
+                self.logger.warning(f"Memory usage: {total_memory_mb:.1f}MB > {self.memory_threshold_mb}MB")
+                self.memory_warning.emit(int(total_memory_mb), self.memory_threshold_mb)
+
+        except Exception as e:
+            self.logger.warning(f"Memory usage check failed: {e}")
+
+    def cleanup_resources(self):
+        """
+        Explizite Shutdown-Methode für saubere Ressourcen-Freigabe
+        """
+        self.logger.info("Starting ResourceTracker shutdown")
+
+        # Shutdown-Flag setzen
+        with self._lock:
+            self._is_shutting_down = True
+
+        # Timer stoppen
+        if hasattr(self, 'cleanup_timer') and self.cleanup_timer.isActive():
+            self.cleanup_timer.stop()
+
+        # Alle Resources cleanup
+        cleaned_count = self.force_cleanup_all()
+
+        # Vergewissern dass alles leer ist
+        with self._lock:
+            self._tracked_resources.clear()
+            self._resource_info.clear()
+            self._type_registry.clear()
+
+        self.logger.info(f"ResourceTracker shutdown completed: {cleaned_count} resources cleaned")
+
+    def __del__(self):
+        """
+        Destruktor mit sicherer Cleanup-Routine
+        """
+        try:
+            if not self._is_shutting_down:
+                self.cleanup_resources()
+        except Exception as e:
+            # Keine Logs in Destruktor - kann zu Deadlocks führen
+            pass
+
     def _on_resource_deleted(self, resource_id: str):
         """
         Funktionsweise: Callback für automatisches Cleanup bei Garbage Collection
         Parameter: resource_id
         """
-        if resource_id in self.resource_info:
+        if resource_id in self._resource_info:
             self.logger.debug(f"Resource garbage collected: {resource_id}")
             self._cleanup_resource(resource_id)
 
     def _automatic_cleanup(self):
         """
-        Funktionsweise: Automatisches Cleanup für Timer-basierte Wartung
+        Thread-sichere automatische Cleanup-Routine
         """
-        # Dead references cleanup
-        dead_refs = [
-            resource_id for resource_id, ref in self.tracked_resources.items()
-            if ref() is None
-        ]
+        if self._is_shutting_down:
+            return
 
-        for resource_id in dead_refs:
-            self._cleanup_resource(resource_id)
+        try:
+            with self._lock:
+                # Snapshot für Dead-Reference-Check
+                resource_items = list(self._tracked_resources.items())
 
-        # Memory-Check
-        self._check_memory_usage()
+            # Dead references finden (außerhalb Lock)
+            dead_refs = []
+            for resource_id, weak_ref in resource_items:
+                try:
+                    if weak_ref() is None:
+                        dead_refs.append(resource_id)
+                except Exception:
+                    # WeakRef kann Exception werfen wenn Objekt zur falschen Zeit gecollected wird
+                    dead_refs.append(resource_id)
 
-    def _check_memory_usage(self):
-        """
-        Funktionsweise: Prüft Memory-Usage und emittiert Warnings
-        """
-        total_memory_bytes = sum(self.get_memory_usage().values())
-        total_memory_mb = total_memory_bytes / (1024 * 1024)
+            # Dead references cleanup (mit Lock pro Resource)
+            for resource_id in dead_refs:
+                self._cleanup_resource(resource_id)
 
-        if total_memory_mb > self.memory_threshold_mb:
-            self.logger.warning(f"Memory usage: {total_memory_mb:.1f}MB > {self.memory_threshold_mb}MB")
-            self.memory_warning.emit(int(total_memory_mb), self.memory_threshold_mb)
+            # Memory-Check
+            self._check_memory_usage()
+
+        except Exception as e:
+            self.logger.error(f"Automatic cleanup failed: {e}")
 
     def _estimate_resource_size(self, resource: Any) -> int:
         """
-        Funktionsweise: Schätzt Ressourcen-Größe für Memory-Tracking
-        Parameter: resource
-        Return: Geschätzte Größe in Bytes
+        Sichere Resource-Größenschätzung mit umfassendem Error-Handling
         """
         try:
             # NumPy Arrays
-            if isinstance(resource, np.ndarray):
+            if hasattr(resource, 'nbytes'):  # Numpy arrays, pandas, etc.
                 return resource.nbytes
 
             # Qt Objects mit size hint
             if hasattr(resource, 'size') and hasattr(resource.size(), 'width'):
                 size = resource.size()
-                # Annahme: 4 bytes per pixel für RGBA
-                return size.width() * size.height() * 4
+                return size.width() * size.height() * 4  # Assume RGBA
 
-            # Generic Python Objects
+            # Python Objects mit __sizeof__
             if hasattr(resource, '__sizeof__'):
-                return resource.__sizeof__()
+                base_size = resource.__sizeof__()
 
-            # Fallback für Listen/Tuples
-            if isinstance(resource, (list, tuple)):
-                return sum(self._estimate_resource_size(item) for item in resource[:100])  # Sample first 100
+                # Für Container: Samplelimitierte Größenschätzung
+                if isinstance(resource, (list, tuple)):
+                    if len(resource) > 100:
+                        # Sample first 100 items
+                        sample_size = sum(
+                            self._estimate_resource_size(item)
+                            for item in resource[:100]
+                        )
+                        estimated_total = (sample_size * len(resource)) // 100
+                        return base_size + estimated_total
+                    else:
+                        # Small containers: full calculation
+                        return base_size + sum(
+                            self._estimate_resource_size(item)
+                            for item in resource
+                        )
 
-            # Default fallback
-            return 1024  # 1KB default
+                return base_size
 
-        except Exception:
-            return 1024  # Fallback bei Estimation-Fehlern
+            # Fallback für unbekannte Typen
+            return 1024  # 1KB conservative estimate
+
+        except Exception as e:
+            self.logger.debug(f"Resource size estimation failed: {e}")
+            return 1024  # Fallback
 
 class DisplayUpdateManager(QObject):
     """
@@ -574,14 +760,21 @@ class LODCommunicationHub(QObject):
         super().__init__()
         self.logger = logging.getLogger(__name__)
         
-        # Status-Cache für alle Tabs
+        # Status-Cache für alle DataKeys und Tabs
+        self.datakey_statuses: Dict[str, DataKeyStatus] = {}
         self.tab_statuses: Dict[str, TabStatus] = {}
         
         # LOD-Konfiguration
         self.lod_config: Optional[LODConfig] = None
+
+        # Initialisiere alle DataKeys mit Idle-Status
+        for datakey in DATA_DEPENDENCY_MATRIX.keys():
+            self.datakey_statuses[datakey] = DataKeyStatus(
+                datakey=datakey, lod_level=0, lod_size=0, status="idle"
+            )
         
         # Initialisiere alle bekannten Tabs mit Idle-Status
-        for tab in DEPENDENCY_MATRIX.keys():
+        for tab in TAB_DEPENDENCY_MATRIX.keys():
             self.tab_statuses[tab] = TabStatus(
                 tab=tab, lod_level=0, lod_size=0, lod_status="idle"
             )
@@ -590,6 +783,12 @@ class LODCommunicationHub(QObject):
         """Setzt LOD-Konfiguration für alle Tabs"""
         self.lod_config = LODConfig(minimal_map_size, target_map_size)
         self.logger.info(f"LOD config set: {minimal_map_size} → {target_map_size}")
+
+        # Aktualisiere DataKey-Status
+        for datakey_name in self.datakey_statuses:
+            status = self.datakey_statuses[datakey_name]
+            if status.lod_level > 0:
+                status.lod_size = self.lod_config.get_map_size_for_lod(status.lod_level)
         
         # Aktualisiere alle Tab-Status mit neuen LOD-Sizes
         for tab_name in self.tab_statuses:

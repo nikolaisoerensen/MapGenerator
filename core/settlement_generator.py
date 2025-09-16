@@ -43,9 +43,9 @@ Parameter Input (aus value_default.py SETTLEMENT):
 
 data_manager Input:
 - map_seed (Globaler Karten-Seed für reproduzierbare Settlement-Platzierung)
-- heightmap (2D-Array in meter Altitude) - REQUIRED
-- slopemap (2D-Array in m/m mit dz/dx, dz/dy) - REQUIRED
-- water_map (2D-Array mit Wasser-Klassifikation) - REQUIRED
+- heightmap (2D-Array in meter Altitude)
+- slopemap (2D-Array in m/m mit dz/dx, dz/dy)
+- water_map (2D-Array mit Wasser-Klassifikation)
 - biome_map (2D-Array mit Biom-Indices) - OPTIONAL (Fallback: Höhen-basiert)
 
 Output:
