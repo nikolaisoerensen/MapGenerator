@@ -33,7 +33,7 @@ def get_weather_error_decorators():
     Return: Tuple von Decorator-Funktionen
     """
     try:
-        from gui.error_handler import core_generation_handler, gpu_shader_handler, dependency_handler
+        from gui.utils.error_handler import core_generation_handler, gpu_shader_handler, dependency_handler
         return core_generation_handler, gpu_shader_handler, dependency_handler
     except ImportError:
         def noop_decorator(*args, **kwargs):

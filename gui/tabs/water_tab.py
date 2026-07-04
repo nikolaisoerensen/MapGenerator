@@ -32,7 +32,7 @@ def get_water_error_decorators():
     Return: Tuple von Decorator-Funktionen
     """
     try:
-        from gui.error_handler import memory_critical_handler, gpu_shader_handler, core_generation_handler
+        from gui.utils.error_handler import memory_critical_handler, gpu_shader_handler, core_generation_handler
         return memory_critical_handler, gpu_shader_handler, core_generation_handler
     except ImportError:
         def noop_decorator(*args, **kwargs):
