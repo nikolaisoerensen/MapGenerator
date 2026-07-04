@@ -32,11 +32,18 @@ class GeologyTab(BaseMapTab):
     Output: rock_map (RGB), hardness_map über DataLODManager
     """
 
-    def __init__(self, data_lod_manager, navigation_manager, shader_manager, generation_orchestrator=None):
+    def __init__(self, data_lod_manager, parameter_manager, navigation_manager, shader_manager, generation_orchestrator):
+        self.generator_type = "geology"
         # Required dependencies für BaseTab
         self.required_dependencies = ["heightmap", "slopemap"]
 
-        super().__init__(data_lod_manager, navigation_manager, shader_manager, generation_orchestrator)
+        super().__init__(
+            data_lod_manager=data_lod_manager,
+            parameter_manager=parameter_manager,
+            navigation_manager=navigation_manager,
+            shader_manager=shader_manager,
+            generation_orchestrator=generation_orchestrator
+        )
 
         self.logger = logging.getLogger(__name__)
 

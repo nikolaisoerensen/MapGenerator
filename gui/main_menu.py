@@ -27,7 +27,7 @@ def get_error_decorators():
     Return: Tuple von Decorator-Funktionen (initialization_handler, ui_navigation_handler)
     """
     try:
-        from gui.error_handler import initialization_handler, ui_navigation_handler
+        from gui.utils.error_handler import initialization_handler, ui_navigation_handler
         return initialization_handler, ui_navigation_handler
     except ImportError:
         # Graceful Fallback - No-op Decorators wenn Error Handler nicht verfügbar

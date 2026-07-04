@@ -12,13 +12,15 @@ Funktionsweise: Wassersystem mit River-Networks, Erosion und vollständiger Core
 
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
-from PyQt5.QtGui import *
 import numpy as np
 import logging
 
 from .base_tab import BaseMapTab
 from gui.config.value_default import WATER, get_parameter_config, validate_parameter_set, VALIDATION_RULES
-from gui.widgets.widgets import ParameterSlider, StatusIndicator
+from gui.widgets.widgets import (
+    ParameterSlider,
+    StatusIndicator
+)
 from core.water_generator import (
     HydrologySystemGenerator, LakeDetectionSystem, FlowNetworkBuilder,
     ManningFlowCalculator, ErosionSedimentationSystem, SoilMoistureCalculator,
@@ -51,8 +53,16 @@ class WaterTab(BaseMapTab):
     Output: Komplettes Wassersystem mit Erosion und Sedimentation
     """
 
-    def __init__(self, data_lod_manager, navigation_manager, shader_manager, generation_orchestrator=None):
-        super().__init__(data_lod_manager, navigation_manager, shader_manager, generation_orchestrator)
+    def __init__(self, data_lod_manager, parameter_manager, navigation_manager, shader_manager, generation_orchestrator):
+        self.generator_type = "water"
+
+        super().__init__(
+            data_lod_manager=data_lod_manager,
+            parameter_manager=parameter_manager,
+            navigation_manager=navigation_manager,
+            shader_manager=shader_manager,
+            generation_orchestrator=generation_orchestrator
+        )
         self.logger = logging.getLogger(__name__)
 
         # Core-Generator Instanzen

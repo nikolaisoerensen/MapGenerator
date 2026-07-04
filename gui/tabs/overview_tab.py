@@ -20,7 +20,10 @@ import logging
 from typing import Dict, Any, List, Optional
 
 from .base_tab import BaseMapTab
-from gui.widgets.widgets import BaseButton, StatusIndicator, WorldExportWidget, WorldStatisticsWidget
+from gui.widgets.widgets import (
+    BaseButton,
+    StatusIndicator
+)
 
 
 class OverviewTab(BaseMapTab):
@@ -31,9 +34,16 @@ class OverviewTab(BaseMapTab):
     Output: Export-Dateien und finale Welt-Darstellung
     """
 
-    def __init__(self, data_lod_manager, navigation_manager, shader_manager, generation_orchestrator=None):
-        self.generation_orchestrator = generation_orchestrator
-        super().__init__(data_lod_manager, navigation_manager, shader_manager)
+    def __init__(self, data_lod_manager, parameter_manager, navigation_manager, shader_manager, generation_orchestrator):
+        self.generator_type = "overview"
+
+        super().__init__(
+            data_lod_manager=data_lod_manager,
+            parameter_manager=parameter_manager,
+            navigation_manager=navigation_manager,
+            shader_manager=shader_manager,
+            generation_orchestrator=generation_orchestrator
+        )
         self.logger = logging.getLogger(__name__)
 
         # State
@@ -91,9 +101,6 @@ class OverviewTab(BaseMapTab):
         # Parameter Summary
         self.parameter_summary = ParameterSummaryWidget()
         self.control_panel.layout().addWidget(self.parameter_summary)
-
-        # Navigation (nur Previous, kein Next)
-        self.setup_navigation_panel()
 
     def setup_data_monitoring(self):
         """
@@ -803,6 +810,108 @@ class OverviewTab(BaseMapTab):
                         f.write(f"{key}: {value}\n")
 
                 f.write("\n")
+
+class WorldStatisticsWidget(QGroupBox):
+    """
+    Funktionsweise: Zeigt umfassende Welt-Statistiken über alle Generatoren
+    Aufgabe: Stellt die von OverviewTab berechneten Kategorie-Statistiken lesbar dar
+    """
+
+    def __init__(self):
+        super().__init__("World Statistics")
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Erstellt UI für die Welt-Statistik-Anzeige"""
+        layout = QVBoxLayout()
+
+        self.statistics_text = QTextEdit()
+        self.statistics_text.setReadOnly(True)
+        self.statistics_text.setMinimumHeight(200)
+        layout.addWidget(self.statistics_text)
+
+        self.setLayout(layout)
+
+    def update_comprehensive_statistics(self, stats: dict):
+        """
+        Funktionsweise: Aktualisiert die Anzeige mit den kompletten Welt-Statistiken
+        Parameter: stats (dict) - Kategorien (terrain, geology, climate, ...) mit Kennzahlen
+        """
+        lines = []
+
+        for category, category_stats in stats.items():
+            if not category_stats:
+                continue
+
+            lines.append(category.upper())
+
+            for key, value in category_stats.items():
+                if isinstance(value, tuple) and len(value) == 2:
+                    lines.append(f"  {key}: {value[0]:.2f} - {value[1]:.2f}")
+                elif isinstance(value, float):
+                    lines.append(f"  {key}: {value:.3f}")
+                else:
+                    lines.append(f"  {key}: {value}")
+
+            lines.append("")
+
+        self.statistics_text.setPlainText("\n".join(lines))
+
+
+class WorldExportWidget(QGroupBox):
+    """
+    Funktionsweise: Bedienoberfläche für den Welt-Export in verschiedene Formate
+    Aufgabe: Format-Auswahl und Export-Anforderung; der eigentliche Export erfolgt in OverviewTab
+    Kommunikation: Signal export_requested(export_format, export_options)
+    """
+
+    export_requested = pyqtSignal(str, dict)
+
+    def __init__(self):
+        super().__init__("World Export")
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Erstellt UI für Format-Auswahl, Export-Button und Status-Rückmeldung"""
+        layout = QVBoxLayout()
+
+        format_layout = QHBoxLayout()
+        format_layout.addWidget(QLabel("Format:"))
+
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["png", "json", "obj"])
+        format_layout.addWidget(self.format_combo)
+
+        layout.addLayout(format_layout)
+
+        self.export_button = BaseButton("Export World", "primary")
+        self.export_button.clicked.connect(self._on_export_clicked)
+        layout.addWidget(self.export_button)
+
+        self.export_status = StatusIndicator("Export Status")
+        self.export_status.set_unknown()
+        layout.addWidget(self.export_status)
+
+        self.setLayout(layout)
+
+    def _on_export_clicked(self):
+        """
+        Funktionsweise: Löst den Export mit dem gewählten Format aus
+        Aufgabe: Sammelt Format und Optionen und emittiert export_requested
+        """
+        export_format = self.format_combo.currentText()
+        export_options = {"export_directory": "world_export"}
+        self.export_requested.emit(export_format, export_options)
+
+    def set_export_complete(self, success: bool, message: str):
+        """
+        Funktionsweise: Zeigt das Ergebnis eines Export-Vorgangs an
+        Parameter: success (bool), message (str)
+        """
+        if success:
+            self.export_status.set_success(message)
+        else:
+            self.export_status.set_error(message)
 
 class WorldCompletenessWidget(QGroupBox):
     """

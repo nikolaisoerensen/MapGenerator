@@ -17,8 +17,11 @@ import logging
 
 from .base_tab import BaseMapTab
 from gui.config.value_default import SETTLEMENT, get_parameter_config, validate_parameter_set, VALIDATION_RULES
-from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, MultiDependencyStatusWidget
-from gui.OldManagers.orchestrator_manager import StandardOrchestratorHandler, OrchestratorRequestBuilder
+from gui.widgets.widgets import (
+    BaseButton, ParameterSlider, RandomSeedButton,
+    StatusIndicator, ProgressBar, NoWheelSlider
+)
+from gui.OldManagers.generation_orchestrator import StandardOrchestratorHandler, OrchestratorRequestBuilder
 
 def get_settlement_error_decorators():
     """
@@ -27,7 +30,7 @@ def get_settlement_error_decorators():
     Return: Tuple von Decorator-Funktionen
     """
     try:
-        from gui.error_handler import core_generation_handler, dependency_handler, ui_navigation_handler
+        from gui.utils.error_handler import core_generation_handler, dependency_handler, ui_navigation_handler
         return core_generation_handler, dependency_handler, ui_navigation_handler
     except ImportError:
         def noop_decorator(*args, **kwargs):
@@ -46,8 +49,16 @@ class SettlementTab(BaseMapTab):
     Output: SettlementData mit allen Settlement-Komponenten
     """
 
-    def __init__(self, data_lod_manager, navigation_manager, shader_manager, generation_orchestrator=None):
-        super().__init__(data_lod_manager, navigation_manager, shader_manager, generation_orchestrator)
+    def __init__(self, data_lod_manager, parameter_manager, navigation_manager, shader_manager, generation_orchestrator):
+        self.generator_type = "settlement"
+
+        super().__init__(
+            data_lod_manager=data_lod_manager,
+            parameter_manager=parameter_manager,
+            navigation_manager=navigation_manager,
+            shader_manager=shader_manager,
+            generation_orchestrator=generation_orchestrator
+        )
         self.logger = logging.getLogger(__name__)
 
         # GenerationOrchestrator Integration

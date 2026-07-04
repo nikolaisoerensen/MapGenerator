@@ -40,7 +40,7 @@ from gui.config.value_default import TERRAIN
 def get_data_manager_error_decorators():
     """Lazy Loading von Data Manager Error Decorators"""
     try:
-        from gui.error_handler import data_management_handler, memory_critical_handler
+        from gui.utils.error_handler import data_management_handler, memory_critical_handler
         return data_management_handler, memory_critical_handler
     except ImportError:
         def noop_decorator(*args, **kwargs):
@@ -3023,6 +3023,54 @@ class DataLODManager(QObject):
     def get_geology_data(self, data_key: str) -> Optional[np.ndarray]:
         """Legacy-Methode"""
         return self.get_geology_data_lod(data_key)
+
+    # =============================================================================
+    # REST DATA MANAGEMENT - LOD-ERWEITERT (PRÜFEN OB SPÄTER SETTER HIER HER GEBRACHT WERDEN)
+    # =============================================================================
+
+    def get_weather_data_lod(self, data_key: str, lod_level: int = None) -> Optional[np.ndarray]:
+        """Gibt Weather-Daten für LOD-Level zurück"""
+        if lod_level is None:
+            lod_level = self._current_lods.get("weather", 0)
+        lod_key = f"lod_{lod_level}_{data_key}"
+        return self._weather_data.get(lod_key)
+
+    def get_weather_data(self, data_key: str) -> Optional[np.ndarray]:
+        """Legacy-Methode"""
+        return self.get_weather_data_lod(data_key)
+
+    def get_water_data_lod(self, data_key: str, lod_level: int = None) -> Optional[np.ndarray]:
+        """Gibt Water-Daten für LOD-Level zurück"""
+        if lod_level is None:
+            lod_level = self._current_lods.get("water", 0)
+        lod_key = f"lod_{lod_level}_{data_key}"
+        return self._water_data.get(lod_key)
+
+    def get_water_data(self, data_key: str) -> Optional[np.ndarray]:
+        """Legacy-Methode"""
+        return self.get_water_data_lod(data_key)
+
+    def get_biome_data_lod(self, data_key: str, lod_level: int = None) -> Optional[np.ndarray]:
+        """Gibt Biome-Daten für LOD-Level zurück"""
+        if lod_level is None:
+            lod_level = self._current_lods.get("biome", 0)
+        lod_key = f"lod_{lod_level}_{data_key}"
+        return self._biome_data.get(lod_key)
+
+    def get_biome_data(self, data_key: str) -> Optional[np.ndarray]:
+        """Legacy-Methode"""
+        return self.get_biome_data_lod(data_key)
+
+    def get_settlement_data_lod(self, data_key: str, lod_level: int = None) -> Optional[np.ndarray]:
+        """Gibt Settlement-Daten für LOD-Level zurück"""
+        if lod_level is None:
+            lod_level = self._current_lods.get("settlement", 0)
+        lod_key = f"lod_{lod_level}_{data_key}"
+        return self._settlement_data.get(lod_key)
+
+    def get_settlement_data(self, data_key: str) -> Optional[np.ndarray]:
+        """Legacy-Methode"""
+        return self.get_settlement_data_lod(data_key)
 
     # =============================================================================
     # MEMORY-MANAGEMENT INTEGRATION - PUNKT 7 ERWEITERT

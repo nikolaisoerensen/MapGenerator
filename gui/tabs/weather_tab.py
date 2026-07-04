@@ -20,7 +20,11 @@ from PyQt5.QtWidgets import QGroupBox, QVBoxLayout, QButtonGroup, QRadioButton, 
 
 from .base_tab import BaseMapTab
 from gui.config.value_default import WEATHER, get_parameter_config, validate_parameter_set, VALIDATION_RULES
-from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, MultiDependencyStatusWidget
+from gui.widgets.widgets import (
+    ParameterSlider,
+    StatusIndicator,
+    BaseButton
+)
 from core.weather_generator import (
     WeatherSystemGenerator, TemperatureCalculator, WindFieldSimulator,
     PrecipitationSystem, AtmosphericMoistureManager
@@ -52,8 +56,16 @@ class WeatherTab(BaseMapTab):
     Output: wind_map, temp_map, precip_map, humid_map für nachfolgende Generatoren
     """
 
-    def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
-        super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
+    def __init__(self, data_lod_manager, parameter_manager, navigation_manager, shader_manager, generation_orchestrator):
+        self.generator_type = "weather"
+
+        super().__init__(
+            data_lod_manager=data_lod_manager,
+            parameter_manager=parameter_manager,
+            navigation_manager=navigation_manager,
+            shader_manager=shader_manager,
+            generation_orchestrator=generation_orchestrator
+        )
         self.logger = logging.getLogger(__name__)
 
         # Core-Generator Instanzen
@@ -244,21 +256,19 @@ class WeatherTab(BaseMapTab):
 
     def setup_dependency_checking(self):
         """
-        Funktionsweise: Setup für Input-Dependency Checking - SHADEMAP-FIX
-        Aufgabe: MINIMAL-FIX für fehlende Shademap-Dependency
+        Funktionsweise: Setup für Input-Dependency Checking des Weather-Systems
+        Aufgabe: Registriert Required Dependencies und den Dependency-Status-Indicator
         """
         self.required_dependencies = ["heightmap", "shadowmap"]
 
         # Optional soil_moist_map (kann fehlen)
-        if self.data_manager.get_water_data("soil_moist_map") is not None:
+        if self.data_lod_manager.get_water_data("soil_moist_map") is not None:
             self.required_dependencies.append("soil_moist_map")
 
-        self.dependency_status = MultiDependencyStatusWidget(
-            self.required_dependencies, "Weather Dependencies"
-        )
+        self.dependency_status = StatusIndicator("Weather Dependencies")
         self.control_panel.layout().addWidget(self.dependency_status)
 
-        self.data_manager.data_updated.connect(self.on_data_updated)
+        self.data_lod_manager.data_updated.connect(self.on_data_updated)
 
     def setup_shader_integration(self):
         """
@@ -351,7 +361,7 @@ class WeatherTab(BaseMapTab):
         Funktionsweise: Prüft ob alle Required Dependencies verfügbar sind
         Aufgabe: Aktiviert/Deaktiviert Generation Button und zeigt Status
         """
-        is_complete, missing = self.data_manager.check_dependencies("weather", self.required_dependencies)
+        is_complete, missing = self.data_lod_manager .check_dependencies("weather", self.required_dependencies)
 
         self.dependency_status.update_dependency_status(is_complete, missing)
 
@@ -416,10 +426,10 @@ class WeatherTab(BaseMapTab):
             self.update_weather_display()
 
             integrated_results = {
-                "temp_map": self.data_manager.get_weather_data("temp_map"),
-                "wind_map": self.data_manager.get_weather_data("wind_map"),
-                "humid_map": self.data_manager.get_weather_data("humid_map"),
-                "precip_map": self.data_manager.get_weather_data("precip_map")
+                "temp_map": self.data_lod_manager .get_weather_data("temp_map"),
+                "wind_map": self.data_lod_manager .get_weather_data("wind_map"),
+                "humid_map": self.data_lod_manager .get_weather_data("humid_map"),
+                "precip_map": self.data_lod_manager .get_weather_data("precip_map")
             }
             if any(integrated_results.values()):
                 self.climate_stats.update_generation_statistics(integrated_results)
@@ -449,11 +459,11 @@ class WeatherTab(BaseMapTab):
         inputs = {}
 
         # Terrain Inputs
-        inputs["heightmap"] = self.data_manager.get_terrain_data("heightmap")
-        inputs["shadowmap"] = self.data_manager.get_terrain_data("shadowmap")  # Korrigiert
+        inputs["heightmap"] = self.data_lod_manager .get_terrain_data("heightmap")
+        inputs["shadowmap"] = self.data_lod_manager .get_terrain_data("shadowmap")  # Korrigiert
 
         # Water Input (Fallback wenn nicht verfügbar)
-        inputs["soil_moist_map"] = self.data_manager.get_water_data("soil_moist_map")
+        inputs["soil_moist_map"] = self.data_lod_manager .get_water_data("soil_moist_map")
 
         # Validation für Required Inputs
         required_inputs = ["heightmap", "shadowmap"]
@@ -474,10 +484,10 @@ class WeatherTab(BaseMapTab):
         Parameter: results (dict mit allen Weather-Maps), params (dict)
         """
         # Weather Results speichern
-        self.data_manager.set_weather_data("temp_map", results["temp_map"], params)
-        self.data_manager.set_weather_data("wind_map", results["wind_map"], params)
-        self.data_manager.set_weather_data("humid_map", results["humid_map"], params)
-        self.data_manager.set_weather_data("precip_map", results["precip_map"], params)
+        self.data_lod_manager .set_weather_data("temp_map", results["temp_map"], params)
+        self.data_lod_manager .set_weather_data("wind_map", results["wind_map"], params)
+        self.data_lod_manager .set_weather_data("humid_map", results["humid_map"], params)
+        self.data_lod_manager .set_weather_data("precip_map", results["precip_map"], params)
 
     def update_weather_display(self):
         """
@@ -487,22 +497,22 @@ class WeatherTab(BaseMapTab):
         current_mode = self.display_mode.checkedId()
 
         if current_mode == 0:  # Temperature Map
-            temp_map = self.data_manager.get_weather_data("temp_map")
+            temp_map = self.data_lod_manager .get_weather_data("temp_map")
             if temp_map is not None:
                 self.map_display.display_temperature_map(temp_map)
 
         elif current_mode == 1:  # Precipitation Map
-            precip_map = self.data_manager.get_weather_data("precip_map")
+            precip_map = self.data_lod_manager .get_weather_data("precip_map")
             if precip_map is not None:
                 self.map_display.display_precipitation_map(precip_map)
 
         elif current_mode == 2:  # Humidity Map
-            humid_map = self.data_manager.get_weather_data("humid_map")
+            humid_map = self.data_lod_manager .get_weather_data("humid_map")
             if humid_map is not None:
                 self.map_display.display_humidity_map(humid_map)
 
         elif current_mode == 3:  # Wind Field
-            wind_map = self.data_manager.get_weather_data("wind_map")
+            wind_map = self.data_lod_manager .get_weather_data("wind_map")
             if wind_map is not None:
                 self.map_display.display_wind_field(wind_map)
 
@@ -516,27 +526,27 @@ class WeatherTab(BaseMapTab):
         """
         # 3D Terrain Overlay
         if self.terrain_3d_cb.isChecked():
-            heightmap = self.data_manager.get_terrain_data("heightmap")
+            heightmap = self.data_lod_manager .get_terrain_data("heightmap")
             if heightmap is not None:
                 self.map_display.overlay_3d_terrain(heightmap)
 
         # Contour Lines
         if self.contour_lines_cb.isChecked():
-            heightmap = self.data_manager.get_terrain_data("heightmap")
+            heightmap = self.data_lod_manager .get_terrain_data("heightmap")
             if heightmap is not None:
                 self.map_display.overlay_elevation_contours(heightmap)
 
         # Orographic Effects Highlighting
         if self.orographic_effects_cb.isChecked():
-            heightmap = self.data_manager.get_terrain_data("heightmap")
-            wind_map = self.data_manager.get_weather_data("wind_map")
+            heightmap = self.data_lod_manager .get_terrain_data("heightmap")
+            wind_map = self.data_lod_manager .get_weather_data("wind_map")
             if heightmap is not None and wind_map is not None:
                 self.map_display.highlight_orographic_effects(heightmap, wind_map)
 
         # 3D Wind Vectors
         if self.wind_vectors_3d_cb.isChecked():
-            wind_map = self.data_manager.get_weather_data("wind_map")
-            heightmap = self.data_manager.get_terrain_data("heightmap")
+            wind_map = self.data_lod_manager .get_weather_data("wind_map")
+            heightmap = self.data_lod_manager .get_terrain_data("heightmap")
             if wind_map is not None and heightmap is not None:
                 density = int(self.wind_density_slider.getValue())
                 scale = self.wind_scale_slider.getValue()
@@ -553,7 +563,7 @@ class WeatherTab(BaseMapTab):
 
         try:
             if current_mode == 0:  # Temperature Map
-                temp_map = self.data_manager.get_weather_data("temp_map")
+                temp_map = self.data_lod_manager .get_weather_data("temp_map")
                 if temp_map is not None:
                     current_display.update_display(temp_map, "temp_map")
             # ... weitere Modi

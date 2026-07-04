@@ -18,8 +18,10 @@ import logging
 
 from .base_tab import BaseMapTab
 from gui.config.value_default import BIOME, get_parameter_config, validate_parameter_set, VALIDATION_RULES
-from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, WorldExportWidget, WorldStatisticsWidget, \
-    MultiDependencyStatusWidget, BiomeLegendDialog
+from gui.widgets.widgets import (
+    BaseButton, ParameterSlider, RandomSeedButton,
+    StatusIndicator, ProgressBar, NoWheelSlider
+)
 from core.biome_generator import (
     BiomeClassificationSystem, BaseBiomeClassifier, SuperBiomeOverrideSystem,
     SupersamplingManager, ProximityBiomeCalculator
@@ -34,8 +36,16 @@ class BiomeTab(BaseMapTab):
     Output: biome_map, biome_map_super, super_biome_mask für finale Darstellung
     """
 
-    def __init__(self, data_lod_manager, navigation_manager, shader_manager, generation_orchestrator=None):
-        super().__init__(data_lod_manager, navigation_manager, shader_manager, generation_orchestrator)
+    def __init__(self, data_lod_manager, parameter_manager, navigation_manager, shader_manager, generation_orchestrator):
+        self.generator_type = "biome"
+
+        super().__init__(
+            data_lod_manager=data_lod_manager,
+            parameter_manager=parameter_manager,
+            navigation_manager=navigation_manager,
+            shader_manager=shader_manager,
+            generation_orchestrator=generation_orchestrator
+        )
         self.logger = logging.getLogger(__name__)
 
         # Core-Generator Instanzen

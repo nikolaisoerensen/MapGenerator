@@ -95,9 +95,9 @@ class MapGeneratorApp(QObject):
                 log_colors={
                     'DEBUG': 'cyan',
                     'INFO': 'yellow',
-                    'WARNING': 'orange',
-                    'ERROR': 'red',
-                    'CRITICAL': 'red,bg_white',
+                    'WARNING': 'bold_yellow',
+                    'ERROR': 'bold_red',
+                    'CRITICAL': 'bold_red,bg_white',
                 }
             ))
 
