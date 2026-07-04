@@ -91,7 +91,6 @@ class GeneratorType(Enum):
     BIOME = "biome"
     SETTLEMENT = "settlement"
 
-
 class GenerationRequest:
     """
     Funktionsweise: Encapsulation einer Generator-Anfrage mit allen Metadaten
@@ -129,7 +128,7 @@ class OrchestratorRequestBuilder:
                       target_lod: int = None, source_tab: str = None) -> OrchestratorRequest:
         """Erstellt Request mit automatischer Target-LOD-Berechnung"""
         if target_lod is None:
-            from gui.managers.data_lod_manager import calculate_max_lod_for_size
+            from gui.OldManagers.data_lod_manager import calculate_max_lod_for_size
             from gui.config.value_default import TERRAIN
             map_size = parameters.get("size", TERRAIN.MAPSIZE["default"])
             target_lod = calculate_max_lod_for_size(map_size)
@@ -363,9 +362,9 @@ class GenerationOrchestrator(QObject):
     batch_generation_completed = pyqtSignal(bool, str)  # (success: bool, summary_message: str)
     queue_status_changed = pyqtSignal(list)  # (thread_status_list: List[Dict])
 
-    def __init__(self, data_manager):
+    def __init__(self, data_lod_manager):
         super().__init__()
-        self.data_manager = data_manager
+        self.data_lod_manager = data_lod_manager
         self.logger = logging.getLogger(__name__)
 
         # Dependency-Tree Definition (basierend auf Core-Generator Requirements)
@@ -630,13 +629,13 @@ class GenerationOrchestrator(QObject):
             # DataManager-Integration für verfügbare LOD-Levels
             if generator_type == GeneratorType.TERRAIN:
                 # Terrain-spezifische LOD-Prüfung über DataManager
-                if self.data_manager.has_terrain_lod("LOD64"):
+                if self.data_lod_manager.has_terrain_lod("LOD64"):
                     completed[generator_type.value].add("LOD64")
-                if self.data_manager.has_terrain_lod("LOD128"):
+                if self.data_lod_manager.has_terrain_lod("LOD128"):
                     completed[generator_type.value].add("LOD128")
-                if self.data_manager.has_terrain_lod("LOD256"):
+                if self.data_lod_manager.has_terrain_lod("LOD256"):
                     completed[generator_type.value].add("LOD256")
-                if self.data_manager.has_terrain_lod("FINAL"):
+                if self.data_lod_manager.has_terrain_lod("FINAL"):
                     completed[generator_type.value].add("FINAL")
             else:
                 # Andere Generatoren: Standard-Status-Check
@@ -678,7 +677,7 @@ class GenerationOrchestrator(QObject):
 
     def create_lod_sequence(self, generator_type: GeneratorType, target_lod: int) -> List[int]:
         """Erstellt numerische LOD-Sequence von aktuellem Level bis Target"""
-        current_lod = self.data_manager.get_current_lod_level(generator_type.value)
+        current_lod = self.data_lod_manager.get_current_lod_level(generator_type.value)
 
         if current_lod >= target_lod:
             return []  # Bereits erreicht oder überschritten
@@ -714,7 +713,7 @@ class GenerationOrchestrator(QObject):
             generator_type=generator_type,
             lod_level=current_lod,
             parameters=parameters,
-            data_manager=self.data_manager,
+            data_lod_manager=self.data_lod_manager,
             request_id=request_id,
             parent=self
         )
@@ -744,7 +743,7 @@ class GenerationOrchestrator(QObject):
             self.state_tracker.set_request_completed(generator_type, lod_level)
 
             # DataManager-Integration: Ergebnis automatisch speichern
-            self.save_generation_result_to_data_manager(generator_type, lod_level, result_data)
+            self.save_generation_result_to_data_lod_manager(generator_type, lod_level, result_data)
 
         # LOD-Progression-Signal emittieren (für sofortige UI-Updates mit bestem verfügbarem LOD)
         self.lod_progression_completed.emit(request_id, lod_level)
@@ -780,7 +779,7 @@ class GenerationOrchestrator(QObject):
         # Queue-Resolution triggern falls neue Dependencies verfügbar
         QTimer.singleShot(100, self.resolve_dependency_queue)
 
-    def save_generation_result_to_data_manager(self, generator_type: str, lod_level: str, result_data: dict):
+    def save_generation_result_to_data_lod_manager(self, generator_type: str, lod_level: str, result_data: dict):
         """
         Funktionsweise: Speichert Generation-Ergebnis automatisch im DataManager
         Parameter: generator_type, lod_level, result_data
@@ -791,15 +790,15 @@ class GenerationOrchestrator(QObject):
 
             if generator_type == "terrain" and generator_output:
                 # TerrainData-Objekt speichern
-                self.data_manager.set_terrain_data_complete(generator_output, parameters_used)
+                self.data_lod_manager.set_terrain_data_complete(generator_output, parameters_used)
                 self.logger.debug(f"Terrain data saved to DataManager for {lod_level}")
 
             elif generator_type == "geology" and generator_output:
                 # Geology-Daten speichern (rock_map, hardness_map)
                 if hasattr(generator_output, 'rock_map'):
-                    self.data_manager.set_geology_data("rock_map", generator_output.rock_map, parameters_used)
+                    self.data_lod_manager.set_geology_data("rock_map", generator_output.rock_map, parameters_used)
                 if hasattr(generator_output, 'hardness_map'):
-                    self.data_manager.set_geology_data("hardness_map", generator_output.hardness_map, parameters_used)
+                    self.data_lod_manager.set_geology_data("hardness_map", generator_output.hardness_map, parameters_used)
 
             elif generator_type == "weather" and generator_output:
                 # Weather-Daten speichern
@@ -807,7 +806,7 @@ class GenerationOrchestrator(QObject):
                 for output_key in weather_outputs:
                     if hasattr(generator_output, output_key):
                         output_data = getattr(generator_output, output_key)
-                        self.data_manager.set_weather_data(output_key, output_data, parameters_used)
+                        self.data_lod_manager.set_weather_data(output_key, output_data, parameters_used)
 
             elif generator_type == "water" and generator_output:
                 # Water-Daten speichern
@@ -817,7 +816,7 @@ class GenerationOrchestrator(QObject):
                 for output_key in water_outputs:
                     if hasattr(generator_output, output_key):
                         output_data = getattr(generator_output, output_key)
-                        self.data_manager.set_water_data(output_key, output_data, parameters_used)
+                        self.data_lod_manager.set_water_data(output_key, output_data, parameters_used)
 
             elif generator_type == "biome" and generator_output:
                 # Biome-Daten speichern
@@ -825,7 +824,7 @@ class GenerationOrchestrator(QObject):
                 for output_key in biome_outputs:
                     if hasattr(generator_output, output_key):
                         output_data = getattr(generator_output, output_key)
-                        self.data_manager.set_biome_data(output_key, output_data, parameters_used)
+                        self.data_lod_manager.set_biome_data(output_key, output_data, parameters_used)
 
             elif generator_type == "settlement" and generator_output:
                 # Settlement-Daten speichern
@@ -833,7 +832,7 @@ class GenerationOrchestrator(QObject):
                 for output_key in settlement_outputs:
                     if hasattr(generator_output, output_key):
                         output_data = getattr(generator_output, output_key)
-                        self.data_manager.set_settlement_data(output_key, output_data, parameters_used)
+                        self.data_lod_manager.set_settlement_data(output_key, output_data, parameters_used)
 
         except Exception as e:
             self.logger.error(f"Failed to save generation result to DataManager: {e}")
@@ -858,7 +857,7 @@ class GenerationOrchestrator(QObject):
             return
 
         # Generator-Output aus DataManager holen
-        generator_data = self.get_generator_data_from_data_manager(generator_type.value)
+        generator_data = self.get_generator_data_from_data_lod_manager(generator_type.value)
 
         # result_data für Tab-Kompatibilität zusammenstellen
         result_data = {
@@ -879,7 +878,7 @@ class GenerationOrchestrator(QObject):
 
         self.logger.info(f"Final completion emitted for {request_id}")
 
-    def get_generator_data_from_data_manager(self, generator_type: str) -> dict:
+    def get_generator_data_from_data_lod_manager(self, generator_type: str) -> dict:
         """
         Funktionsweise: Holt Generator-Daten aus DataManager für Final-Completion
         Parameter: generator_type
@@ -887,41 +886,41 @@ class GenerationOrchestrator(QObject):
         """
         if generator_type == "terrain":
             return {
-                "heightmap": self.data_manager.get_terrain_data("heightmap"),
-                "slopemap": self.data_manager.get_terrain_data("slopemap"),
-                "shadowmap": self.data_manager.get_terrain_data("shadowmap"),
-                "terrain_data_complete": self.data_manager.get_terrain_data("complete")
+                "heightmap": self.data_lod_manager.get_terrain_data("heightmap"),
+                "slopemap": self.data_lod_manager.get_terrain_data("slopemap"),
+                "shadowmap": self.data_lod_manager.get_terrain_data("shadowmap"),
+                "terrain_data_complete": self.data_lod_manager.get_terrain_data("complete")
             }
         elif generator_type == "geology":
             return {
-                "rock_map": self.data_manager.get_geology_data("rock_map"),
-                "hardness_map": self.data_manager.get_geology_data("hardness_map")
+                "rock_map": self.data_lod_manager.get_geology_data("rock_map"),
+                "hardness_map": self.data_lod_manager.get_geology_data("hardness_map")
             }
         elif generator_type == "weather":
             return {
-                "wind_map": self.data_manager.get_weather_data("wind_map"),
-                "temp_map": self.data_manager.get_weather_data("temp_map"),
-                "precip_map": self.data_manager.get_weather_data("precip_map"),
-                "humid_map": self.data_manager.get_weather_data("humid_map")
+                "wind_map": self.data_lod_manager.get_weather_data("wind_map"),
+                "temp_map": self.data_lod_manager.get_weather_data("temp_map"),
+                "precip_map": self.data_lod_manager.get_weather_data("precip_map"),
+                "humid_map": self.data_lod_manager.get_weather_data("humid_map")
             }
         elif generator_type == "water":
             return {
-                "water_map": self.data_manager.get_water_data("water_map"),
-                "flow_map": self.data_manager.get_water_data("flow_map"),
-                "soil_moist_map": self.data_manager.get_water_data("soil_moist_map"),
-                "water_biomes_map": self.data_manager.get_water_data("water_biomes_map")
+                "water_map": self.data_lod_manager.get_water_data("water_map"),
+                "flow_map": self.data_lod_manager.get_water_data("flow_map"),
+                "soil_moist_map": self.data_lod_manager.get_water_data("soil_moist_map"),
+                "water_biomes_map": self.data_lod_manager.get_water_data("water_biomes_map")
             }
         elif generator_type == "biome":
             return {
-                "biome_map": self.data_manager.get_biome_data("biome_map"),
-                "biome_map_super": self.data_manager.get_biome_data("biome_map_super"),
-                "super_biome_mask": self.data_manager.get_biome_data("super_biome_mask")
+                "biome_map": self.data_lod_manager.get_biome_data("biome_map"),
+                "biome_map_super": self.data_lod_manager.get_biome_data("biome_map_super"),
+                "super_biome_mask": self.data_lod_manager.get_biome_data("super_biome_mask")
             }
         elif generator_type == "settlement":
             return {
-                "settlement_list": self.data_manager.get_settlement_data("settlement_list"),
-                "plot_map": self.data_manager.get_settlement_data("plot_map"),
-                "civ_map": self.data_manager.get_settlement_data("civ_map")
+                "settlement_list": self.data_lod_manager.get_settlement_data("settlement_list"),
+                "plot_map": self.data_lod_manager.get_settlement_data("plot_map"),
+                "civ_map": self.data_lod_manager.get_settlement_data("civ_map")
             }
         else:
             return {}
@@ -1040,7 +1039,7 @@ class GenerationOrchestrator(QObject):
         """
         for affected_type in affected_generators:
             # DataManager Cache invalidieren
-            self.data_manager.invalidate_cache(affected_type.value)
+            self.data_lod_manager.invalidate_cache(affected_type.value)
 
             # LOD-Status zurücksetzen
             self.reset_lod_status(affected_type)
@@ -1074,7 +1073,7 @@ class GenerationOrchestrator(QObject):
         Return: Memory-Usage Summary mit DataManager-Integration
         """
         return {
-            "data_manager_usage": self.data_manager.get_memory_usage(),
+            "data_lod_manager_usage": self.data_lod_manager.get_memory_usage(),
             "active_threads": len(self.generation_threads),
             "processing_requests": len(self.processing_requests),
             "queued_requests": len(self.dependency_queue.queued_requests)
@@ -1145,13 +1144,13 @@ class GenerationThread(QThread):
     generation_progress = pyqtSignal(int, str)  # (progress, message) - homogen für alle Tabs
 
     def __init__(self, generator_instance, generator_type: GeneratorType, lod_level: int,
-                 parameters: Dict[str, Any], data_manager, request_id: str, parent=None):
+                 parameters: Dict[str, Any], data_lod_manager, request_id: str, parent=None):
         super().__init__(parent)
         self.generator_instance = generator_instance
         self.generator_type = generator_type
         self.lod_level = lod_level
         self.parameters = parameters
-        self.data_manager = data_manager
+        self.data_lod_manager = data_lod_manager
         self.request_id = request_id
 
     def run(self):
@@ -1170,7 +1169,7 @@ class GenerationThread(QThread):
                     lod=self.lod_level.value,
                     dependencies={},  # Dependencies werden über DataManager automatisch geholt
                     parameters=self.parameters,
-                    data_manager=self.data_manager,
+                    data_lod_manager=self.data_lod_manager,
                     progress=progress_callback
                 )
             else:

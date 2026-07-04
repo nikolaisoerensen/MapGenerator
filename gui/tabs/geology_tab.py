@@ -32,11 +32,11 @@ class GeologyTab(BaseMapTab):
     Output: rock_map (RGB), hardness_map über DataLODManager
     """
 
-    def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
+    def __init__(self, data_lod_manager, navigation_manager, shader_manager, generation_orchestrator=None):
         # Required dependencies für BaseTab
         self.required_dependencies = ["heightmap", "slopemap"]
 
-        super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
+        super().__init__(data_lod_manager, navigation_manager, shader_manager, generation_orchestrator)
 
         self.logger = logging.getLogger(__name__)
 
@@ -243,23 +243,23 @@ class GeologyTab(BaseMapTab):
 
         try:
             if current_mode == 0:  # Heightmap (Base)
-                heightmap = self.data_manager.get_terrain_data("heightmap")
+                heightmap = self.data_lod_manager.get_terrain_data("heightmap")
                 if heightmap is not None:
                     self._render_current_mode(0, current_display, heightmap, "heightmap")
 
             elif current_mode == 1:  # Rock Types
-                rock_map = self.data_manager.get_geology_data("rock_map")
+                rock_map = self.data_lod_manager.get_geology_data("rock_map")
                 if rock_map is not None:
                     self._render_current_mode(1, current_display, rock_map, "rock_map")
 
             elif current_mode == 2:  # Hardness Map
-                hardness_map = self.data_manager.get_geology_data("hardness_map")
+                hardness_map = self.data_lod_manager.get_geology_data("hardness_map")
                 if hardness_map is not None:
                     self._render_current_mode(2, current_display, hardness_map, "hardness_map")
 
             # 3D Terrain Overlay wenn aktiviert
             if hasattr(self, 'terrain_3d_checkbox') and self.terrain_3d_checkbox.isChecked():
-                heightmap = self.data_manager.get_terrain_data("heightmap")
+                heightmap = self.data_lod_manager.get_terrain_data("heightmap")
                 if heightmap is not None and hasattr(current_display, 'overlay_3d_terrain'):
                     current_display.overlay_3d_terrain(heightmap)
 
@@ -273,8 +273,8 @@ class GeologyTab(BaseMapTab):
         """
         try:
             # Input-Validation
-            heightmap = self.data_manager.get_terrain_data("heightmap")
-            slopemap = self.data_manager.get_terrain_data("slopemap")
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            slopemap = self.data_lod_manager.get_terrain_data("slopemap")
 
             if heightmap is None or slopemap is None:
                 raise ValueError("Missing terrain data for geology generation")
@@ -285,10 +285,10 @@ class GeologyTab(BaseMapTab):
             result = self.geology_generator.generate(parameters, heightmap, slopemap)
 
             # Results über DataLODManager speichern
-            current_lod = self.data_manager.get_current_lod_level("geology")
+            current_lod = self.data_lod_manager.get_current_lod_level("geology")
 
-            self.data_manager.set_geology_data_lod("rock_map", result.rock_map, current_lod, parameters)
-            self.data_manager.set_geology_data_lod("hardness_map", result.hardness_map, current_lod, parameters)
+            self.data_lod_manager.set_geology_data_lod("rock_map", result.rock_map, current_lod, parameters)
+            self.data_lod_manager.set_geology_data_lod("hardness_map", result.hardness_map, current_lod, parameters)
 
             # Rock Distribution Widget aktualisieren
             self.rock_distribution_widget.update_statistics(result.rock_map, result.hardness_map)
@@ -342,8 +342,8 @@ class GeologyTab(BaseMapTab):
         Aufgabe: Prüft ob Terrain-Daten verfügbar sind
         """
         try:
-            heightmap = self.data_manager.get_terrain_data("heightmap")
-            slopemap = self.data_manager.get_terrain_data("slopemap")
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            slopemap = self.data_lod_manager.get_terrain_data("slopemap")
 
             dependencies_met = heightmap is not None and slopemap is not None
 
@@ -495,8 +495,8 @@ class RockDistributionWidget(QGroupBox):
             if not self._validate_input_data():
                 raise ValueError("Input validation failed - terrain data invalid or missing")
 
-            heightmap = self.data_manager.get_terrain_data("heightmap")
-            slopemap = self.data_manager.get_terrain_data("slopemap")
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            slopemap = self.data_lod_manager.get_terrain_data("slopemap")
             parameters = self.get_current_parameters()
 
             # Core-Generation ausführen
@@ -510,8 +510,8 @@ class RockDistributionWidget(QGroupBox):
             # Results über DataLODManager speichern
             current_lod = getattr(self, 'target_lod', 'FINAL')
 
-            self.data_manager.set_geology_data_lod("rock_map", result.rock_map, current_lod, parameters)
-            self.data_manager.set_geology_data_lod("hardness_map", result.hardness_map, current_lod, parameters)
+            self.data_lod_manager.set_geology_data_lod("rock_map", result.rock_map, current_lod, parameters)
+            self.data_lod_manager.set_geology_data_lod("hardness_map", result.hardness_map, current_lod, parameters)
 
             # Rock Distribution Widget aktualisieren
             self.rock_distribution_widget.update_statistics(result.rock_map, result.hardness_map)
@@ -533,8 +533,8 @@ class RockDistributionWidget(QGroupBox):
         Aufgabe: Validiert Terrain-Inputs vor Generation
         """
         try:
-            heightmap = self.data_manager.get_terrain_data("heightmap")
-            slopemap = self.data_manager.get_terrain_data("slopemap")
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            slopemap = self.data_lod_manager.get_terrain_data("slopemap")
 
             if heightmap is None:
                 self.logger.error("Missing heightmap from terrain generation")
@@ -653,7 +653,7 @@ class RockDistributionWidget(QGroupBox):
         """Erstellt Fallback-Rock_map bei Validation/Repair-Fehlern"""
         try:
             # Use terrain size if available
-            heightmap = self.data_manager.get_terrain_data("heightmap")
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
             if heightmap is not None:
                 h, w = heightmap.shape
             else:
@@ -677,8 +677,8 @@ class RockDistributionWidget(QGroupBox):
         Aufgabe: Prüft Dependencies mit detailliertem Status-Feedback
         """
         try:
-            heightmap = self.data_manager.get_terrain_data("heightmap")
-            slopemap = self.data_manager.get_terrain_data("slopemap")
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            slopemap = self.data_lod_manager.get_terrain_data("slopemap")
 
             dependencies_met = True
             status_messages = []
@@ -755,8 +755,8 @@ class RockDistributionWidget(QGroupBox):
 
                 # Sofortiges Statistics-Update - WIEDERHERGESTELLT
                 try:
-                    rock_map = self.data_manager.get_geology_data("rock_map")
-                    hardness_map = self.data_manager.get_geology_data("hardness_map")
+                    rock_map = self.data_lod_manager.get_geology_data("rock_map")
+                    hardness_map = self.data_lod_manager.get_geology_data("hardness_map")
 
                     if rock_map is not None and hardness_map is not None:
                         self.rock_distribution_widget.update_statistics(rock_map, hardness_map)

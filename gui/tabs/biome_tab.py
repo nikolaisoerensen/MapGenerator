@@ -34,8 +34,8 @@ class BiomeTab(BaseMapTab):
     Output: biome_map, biome_map_super, super_biome_mask für finale Darstellung
     """
 
-    def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
-        super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
+    def __init__(self, data_lod_manager, navigation_manager, shader_manager, generation_orchestrator=None):
+        super().__init__(data_lod_manager, navigation_manager, shader_manager, generation_orchestrator)
         self.logger = logging.getLogger(__name__)
 
         # Core-Generator Instanzen
@@ -305,7 +305,7 @@ class BiomeTab(BaseMapTab):
         self.control_panel.layout().addWidget(self.dependency_status)
 
         # Data Manager Signals
-        self.data_manager.data_updated.connect(self.on_data_updated)
+        self.data_lod_manager.data_updated.connect(self.on_data_updated)
 
     def load_default_parameters(self):
         """Lädt Default-Parameter"""
@@ -355,7 +355,7 @@ class BiomeTab(BaseMapTab):
         Funktionsweise: Prüft alle Required Dependencies für Biome-System
         Aufgabe: Aktiviert/Deaktiviert Generation basierend auf verfügbaren Inputs
         """
-        is_complete, missing = self.data_manager.check_dependencies("biome", self.required_dependencies)
+        is_complete, missing = self.data_lod_manager.check_dependencies("biome", self.required_dependencies)
 
         self.dependency_status.update_dependency_status(is_complete, missing)
         self.manual_generate_button.setEnabled(is_complete)
@@ -373,15 +373,15 @@ class BiomeTab(BaseMapTab):
         inputs = {}
 
         # Terrain Inputs
-        inputs["heightmap"] = self.data_manager.get_terrain_data("heightmap")
-        inputs["slopemap"] = self.data_manager.get_terrain_data("slopemap")
+        inputs["heightmap"] = self.data_lod_manager.get_terrain_data("heightmap")
+        inputs["slopemap"] = self.data_lod_manager.get_terrain_data("slopemap")
 
         # Weather Inputs
-        inputs["temp_map"] = self.data_manager.get_weather_data("temp_map")
+        inputs["temp_map"] = self.data_lod_manager.get_weather_data("temp_map")
 
         # Water Inputs
-        inputs["soil_moist_map"] = self.data_manager.get_water_data("soil_moist_map")
-        inputs["water_biomes_map"] = self.data_manager.get_water_data("water_biomes_map")
+        inputs["soil_moist_map"] = self.data_lod_manager.get_water_data("soil_moist_map")
+        inputs["water_biomes_map"] = self.data_lod_manager.get_water_data("water_biomes_map")
 
         # Validation
         for key, data in inputs.items():
@@ -398,17 +398,17 @@ class BiomeTab(BaseMapTab):
         current_mode = self.display_mode.checkedId()
 
         if current_mode == 0:  # Base Biomes
-            biome_map = self.data_manager.get_biome_data("biome_map")
+            biome_map = self.data_lod_manager.get_biome_data("biome_map")
             if biome_map is not None:
                 self.map_display.display_base_biomes(biome_map)
 
         elif current_mode == 1:  # Super Biomes (2x2 Supersampled)
-            biome_map_super = self.data_manager.get_biome_data("biome_map_super")
+            biome_map_super = self.data_lod_manager.get_biome_data("biome_map_super")
             if biome_map_super is not None:
                 self.map_display.display_super_biomes(biome_map_super)
 
         elif current_mode == 2:  # Super-Biome Override Mask
-            super_biome_mask = self.data_manager.get_biome_data("super_biome_mask")
+            super_biome_mask = self.data_lod_manager.get_biome_data("super_biome_mask")
             if super_biome_mask is not None:
                 self.map_display.display_super_biome_mask(super_biome_mask)
 
@@ -422,20 +422,20 @@ class BiomeTab(BaseMapTab):
         """
         # Settlements Overlay
         if self.settlements_overlay.isChecked():
-            settlement_list = self.data_manager.get_settlement_data("settlement_list")
-            landmark_list = self.data_manager.get_settlement_data("landmark_list")
+            settlement_list = self.data_lod_manager.get_settlement_data("settlement_list")
+            landmark_list = self.data_lod_manager.get_settlement_data("landmark_list")
             if settlement_list is not None:
                 self.map_display.overlay_settlements(settlement_list, landmark_list)
 
         # Rivers Overlay
         if self.rivers_overlay.isChecked():
-            flow_map = self.data_manager.get_water_data("flow_map")
+            flow_map = self.data_lod_manager.get_water_data("flow_map")
             if flow_map is not None:
                 self.map_display.overlay_river_network(flow_map)
 
         # Elevation Contours Overlay
         if self.elevation_contours.isChecked():
-            heightmap = self.data_manager.get_terrain_data("heightmap")
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
             if heightmap is not None:
                 self.map_display.overlay_elevation_contours(heightmap)
 
@@ -500,33 +500,33 @@ class BiomeTab(BaseMapTab):
         """
         world_data = {
             "terrain": {
-                "heightmap": self.data_manager.get_terrain_data("heightmap"),
-                "slopemap": self.data_manager.get_terrain_data("slopemap"),
-                "shademap": self.data_manager.get_terrain_data("shademap")
+                "heightmap": self.data_lod_manager.get_terrain_data("heightmap"),
+                "slopemap": self.data_lod_manager.get_terrain_data("slopemap"),
+                "shademap": self.data_lod_manager.get_terrain_data("shademap")
             },
             "geology": {
-                "rock_map": self.data_manager.get_geology_data("rock_map"),
-                "hardness_map": self.data_manager.get_geology_data("hardness_map")
+                "rock_map": self.data_lod_manager.get_geology_data("rock_map"),
+                "hardness_map": self.data_lod_manager.get_geology_data("hardness_map")
             },
             "settlements": {
-                "settlement_list": self.data_manager.get_settlement_data("settlement_list"),
-                "landmark_list": self.data_manager.get_settlement_data("landmark_list"),
-                "civ_map": self.data_manager.get_settlement_data("civ_map")
+                "settlement_list": self.data_lod_manager.get_settlement_data("settlement_list"),
+                "landmark_list": self.data_lod_manager.get_settlement_data("landmark_list"),
+                "civ_map": self.data_lod_manager.get_settlement_data("civ_map")
             },
             "weather": {
-                "temp_map": self.data_manager.get_weather_data("temp_map"),
-                "precip_map": self.data_manager.get_weather_data("precip_map"),
-                "wind_map": self.data_manager.get_weather_data("wind_map")
+                "temp_map": self.data_lod_manager.get_weather_data("temp_map"),
+                "precip_map": self.data_lod_manager.get_weather_data("precip_map"),
+                "wind_map": self.data_lod_manager.get_weather_data("wind_map")
             },
             "water": {
-                "water_map": self.data_manager.get_water_data("water_map"),
-                "flow_map": self.data_manager.get_water_data("flow_map"),
-                "soil_moist_map": self.data_manager.get_water_data("soil_moist_map")
+                "water_map": self.data_lod_manager.get_water_data("water_map"),
+                "flow_map": self.data_lod_manager.get_water_data("flow_map"),
+                "soil_moist_map": self.data_lod_manager.get_water_data("soil_moist_map")
             },
             "biomes": {
-                "biome_map": self.data_manager.get_biome_data("biome_map"),
-                "biome_map_super": self.data_manager.get_biome_data("biome_map_super"),
-                "super_biome_mask": self.data_manager.get_biome_data("super_biome_mask")
+                "biome_map": self.data_lod_manager.get_biome_data("biome_map"),
+                "biome_map_super": self.data_lod_manager.get_biome_data("biome_map_super"),
+                "super_biome_mask": self.data_lod_manager.get_biome_data("super_biome_mask")
             },
             "parameters": {
                 "terrain": self.get_all_parameters("terrain"),

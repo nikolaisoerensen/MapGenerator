@@ -29,7 +29,7 @@ class TerrainTab(BaseMapTab):
     Implementiert heightmap, slopemap und shadowmap Generation als Basis für alle anderen Generatoren.
     """
 
-    def __init__(self, data_manager, parameter_manager, navigation_manager, shader_manager, generation_orchestrator):
+    def __init__(self, data_lod_manager, parameter_manager, navigation_manager, shader_manager, generation_orchestrator):
 
         # Generator-Konfiguration vor BaseMapTab.__init__()
         self.generator_type = "terrain"
@@ -37,7 +37,7 @@ class TerrainTab(BaseMapTab):
 
         # Manager-Integration
         super().__init__(
-            data_lod_manager=data_manager,
+            data_lod_manager=data_lod_manager,
             parameter_manager=parameter_manager,
             navigation_manager=navigation_manager,
             shader_manager=shader_manager,

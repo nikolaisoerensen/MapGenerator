@@ -27,13 +27,13 @@ class OverviewTab(BaseMapTab):
     """
     Funktionsweise: Finale Übersicht über komplette generierte Welt
     Aufgabe: Zusammenfassung, High-Quality Rendering, Export, Quality Assurance
-    Input: Alle Generator-Outputs von data_manager
+    Input: Alle Generator-Outputs von data_lod_manager
     Output: Export-Dateien und finale Welt-Darstellung
     """
 
-    def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
+    def __init__(self, data_lod_manager, navigation_manager, shader_manager, generation_orchestrator=None):
         self.generation_orchestrator = generation_orchestrator
-        super().__init__(data_manager, navigation_manager, shader_manager)
+        super().__init__(data_lod_manager, navigation_manager, shader_manager)
         self.logger = logging.getLogger(__name__)
 
         # State
@@ -101,7 +101,7 @@ class OverviewTab(BaseMapTab):
         Aufgabe: Überwacht Data-Updates und prüft World-Completeness
         """
         # Data Manager Signals
-        self.data_manager.data_updated.connect(self.on_data_updated)
+        self.data_lod_manager.data_updated.connect(self.on_data_updated)
 
         # Timer für regelmäßige Completeness-Checks
         self.completeness_timer = QTimer()
@@ -175,25 +175,25 @@ class OverviewTab(BaseMapTab):
 
         # Terrain Data
         for key in ["heightmap", "slopemap", "shademap"]:
-            data = self.data_manager.get_terrain_data(key)
+            data = self.data_lod_manager.get_terrain_data(key)
             if data is not None:
                 available_data["terrain"][key] = data
 
         # Geology Data
         for key in ["rock_map", "hardness_map"]:
-            data = self.data_manager.get_geology_data(key)
+            data = self.data_lod_manager.get_geology_data(key)
             if data is not None:
                 available_data["geology"][key] = data
 
         # Settlement Data
         for key in ["settlement_list", "landmark_list", "roadsite_list", "plot_map", "civ_map"]:
-            data = self.data_manager.get_settlement_data(key)
+            data = self.data_lod_manager.get_settlement_data(key)
             if data is not None:
                 available_data["settlement"][key] = data
 
         # Weather Data
         for key in ["wind_map", "temp_map", "precip_map", "humid_map"]:
-            data = self.data_manager.get_weather_data(key)
+            data = self.data_lod_manager.get_weather_data(key)
             if data is not None:
                 available_data["weather"][key] = data
 
@@ -202,13 +202,13 @@ class OverviewTab(BaseMapTab):
                       "erosion_map", "sedimentation_map", "rock_map_updated", "evaporation_map",
                       "ocean_outflow", "water_biomes_map"]
         for key in water_keys:
-            data = self.data_manager.get_water_data(key)
+            data = self.data_lod_manager.get_water_data(key)
             if data is not None:
                 available_data["water"][key] = data
 
         # Biome Data
         for key in ["biome_map", "biome_map_super", "super_biome_mask"]:
-            data = self.data_manager.get_biome_data(key)
+            data = self.data_lod_manager.get_biome_data(key)
             if data is not None:
                 available_data["biome"][key] = data
 
@@ -356,7 +356,7 @@ class OverviewTab(BaseMapTab):
         # Overall Statistics
         stats["overall"] = {
             "data_completeness": self.analyze_data_completeness(available_data)["completion_percentage"],
-            "memory_usage_mb": sum(self.data_manager.get_memory_usage().values()),
+            "memory_usage_mb": sum(self.data_lod_manager.get_memory_usage().values()),
             "generation_time": "Not tracked",  # Würde normalerweise getrackt werden
             "world_complexity_score": self.calculate_world_complexity_score(stats)
         }

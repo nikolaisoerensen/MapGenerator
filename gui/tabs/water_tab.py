@@ -18,8 +18,7 @@ import logging
 
 from .base_tab import BaseMapTab
 from gui.config.value_default import WATER, get_parameter_config, validate_parameter_set, VALIDATION_RULES
-from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, MultiDependencyStatusWidget
-
+from gui.widgets.widgets import ParameterSlider, StatusIndicator
 from core.water_generator import (
     HydrologySystemGenerator, LakeDetectionSystem, FlowNetworkBuilder,
     ManningFlowCalculator, ErosionSedimentationSystem, SoilMoistureCalculator,
@@ -52,8 +51,8 @@ class WaterTab(BaseMapTab):
     Output: Komplettes Wassersystem mit Erosion und Sedimentation
     """
 
-    def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
-        super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
+    def __init__(self, data_lod_manager, navigation_manager, shader_manager, generation_orchestrator=None):
+        super().__init__(data_lod_manager, navigation_manager, shader_manager, generation_orchestrator)
         self.logger = logging.getLogger(__name__)
 
         # Core-Generator Instanzen
@@ -285,12 +284,12 @@ class WaterTab(BaseMapTab):
         self.required_dependencies = VALIDATION_RULES.DEPENDENCIES["water"]
 
         # Dependency Status Widget mit Details
-        self.dependency_status = MultiDependencyStatusWidget(self.required_dependencies)
+        #self.dependency_status = MultiDependencyStatusWidget(self.required_dependencies)
         self.control_panel.layout().addWidget(self.dependency_status)
 
         # Data Manager Signals
-        self.data_manager.data_updated.connect(self.on_data_updated)
-        self.data_manager.dependency_changed.connect(self.on_dependency_changed)
+        self.data_lod_manager.data_updated.connect(self.on_data_updated)
+        self.data_lod_manager.dependency_changed.connect(self.on_dependency_changed)
 
     def setup_shader_integration(self):
         """
@@ -358,7 +357,7 @@ class WaterTab(BaseMapTab):
         Funktionsweise: Dependency-Check - REPARIERT manual_generate_button None-Check
         Aufgabe: Robuster Button-Access mit None-Protection
         """
-        is_complete, missing = self.data_manager.check_dependencies("water", self.required_dependencies)
+        is_complete, missing = self.data_lod_manager.check_dependencies("water", self.required_dependencies)
 
         # Dependency Status Update
         if hasattr(self, 'dependency_status'):
@@ -381,18 +380,18 @@ class WaterTab(BaseMapTab):
         inputs = {}
 
         # Terrain Inputs
-        inputs["heightmap"] = self.data_manager.get_terrain_data("heightmap")
-        inputs["slopemap"] = self.data_manager.get_terrain_data("slopemap")
+        inputs["heightmap"] = self.data_lod_manager.get_terrain_data("heightmap")
+        inputs["slopemap"] = self.data_lod_manager.get_terrain_data("slopemap")
 
         # Geology Inputs
-        inputs["hardness_map"] = self.data_manager.get_geology_data("hardness_map")
-        inputs["rock_map"] = self.data_manager.get_geology_data("rock_map")
+        inputs["hardness_map"] = self.data_lod_manager.get_geology_data("hardness_map")
+        inputs["rock_map"] = self.data_lod_manager.get_geology_data("rock_map")
 
         # Weather Inputs
-        inputs["precip_map"] = self.data_manager.get_weather_data("precip_map")
-        inputs["temp_map"] = self.data_manager.get_weather_data("temp_map")
-        inputs["wind_map"] = self.data_manager.get_weather_data("wind_map")
-        inputs["humid_map"] = self.data_manager.get_weather_data("humid_map")
+        inputs["precip_map"] = self.data_lod_manager.get_weather_data("precip_map")
+        inputs["temp_map"] = self.data_lod_manager.get_weather_data("temp_map")
+        inputs["wind_map"] = self.data_lod_manager.get_weather_data("wind_map")
+        inputs["humid_map"] = self.data_lod_manager.get_weather_data("humid_map")
 
         # Validation
         for key, data in inputs.items():
@@ -409,24 +408,24 @@ class WaterTab(BaseMapTab):
         Parameter: Alle Result-Dictionaries und Arrays von Core-Generatoren
         """
         # Flow Results
-        self.data_manager.set_water_data("water_map", flow_results["water_map"], params)
-        self.data_manager.set_water_data("flow_map", flow_results["flow_map"], params)
-        self.data_manager.set_water_data("flow_speed", flow_results["flow_speed"], params)
-        self.data_manager.set_water_data("cross_section", flow_results["cross_section"], params)
+        self.data_lod_manager.set_water_data("water_map", flow_results["water_map"], params)
+        self.data_lod_manager.set_water_data("flow_map", flow_results["flow_map"], params)
+        self.data_lod_manager.set_water_data("flow_speed", flow_results["flow_speed"], params)
+        self.data_lod_manager.set_water_data("cross_section", flow_results["cross_section"], params)
 
         # Erosion Results
-        self.data_manager.set_water_data("erosion_map", erosion_results["erosion_map"], params)
-        self.data_manager.set_water_data("sedimentation_map", erosion_results["sedimentation_map"], params)
-        self.data_manager.set_water_data("rock_map_updated", erosion_results["rock_map_updated"], params)
+        self.data_lod_manager.set_water_data("erosion_map", erosion_results["erosion_map"], params)
+        self.data_lod_manager.set_water_data("sedimentation_map", erosion_results["sedimentation_map"], params)
+        self.data_lod_manager.set_water_data("rock_map_updated", erosion_results["rock_map_updated"], params)
 
         # Additional Results
-        self.data_manager.set_water_data("soil_moist_map", soil_moisture_map, params)
-        self.data_manager.set_water_data("evaporation_map", evaporation_map, params)
-        self.data_manager.set_water_data("water_biomes_map", water_biomes_map, params)
+        self.data_lod_manager.set_water_data("soil_moist_map", soil_moisture_map, params)
+        self.data_lod_manager.set_water_data("evaporation_map", evaporation_map, params)
+        self.data_lod_manager.set_water_data("water_biomes_map", water_biomes_map, params)
 
         # Ocean Outflow (Scalar)
         ocean_outflow = flow_results.get("ocean_outflow", 0.0)
-        self.data_manager.set_water_data("ocean_outflow", ocean_outflow, params)
+        self.data_lod_manager.set_water_data("ocean_outflow", ocean_outflow, params)
 
     def update_water_display(self):
         """
@@ -440,7 +439,7 @@ class WaterTab(BaseMapTab):
             return
 
         data_key = current_radio.property("data_key")
-        water_data = self.data_manager.get_water_data(data_key)
+        water_data = self.data_lod_manager.get_water_data(data_key)
 
         if water_data is None:
             return
@@ -469,13 +468,13 @@ class WaterTab(BaseMapTab):
 
         # River Network Overlay
         if self.river_overlay_checkbox.isChecked():
-            flow_map = self.data_manager.get_water_data("flow_map")
+            flow_map = self.data_lod_manager.get_water_data("flow_map")
             if flow_map is not None:
                 self.map_display.overlay_river_network(flow_map)
 
         # 3D Terrain Overlay
         if self.terrain_3d_checkbox.isChecked():
-            heightmap = self.data_manager.get_terrain_data("heightmap")
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
             if heightmap is not None:
                 self.map_display.overlay_3d_terrain(heightmap)
 
@@ -487,7 +486,7 @@ class WaterTab(BaseMapTab):
             return
 
         # Vereinfachter Display-Update
-        water_map = self.data_manager.get_water_data("water_map")
+        water_map = self.data_lod_manager.get_water_data("water_map")
         if water_map is not None:
             try:
                 current_display.update_display(water_map, "water_map")

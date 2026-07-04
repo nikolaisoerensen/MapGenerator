@@ -24,18 +24,21 @@ Architecture:
 - Comprehensive status monitoring and progress tracking
 """
 
+# TODO: Exit aus Map Editor muss sauber gemacht werden mit Cleanup.
+# TODO: Exit aus Map Editor vorher Signal jetzt direkt: was ist besser? Ich habe schließlich laufende Berechnungen.
+
 from PyQt5.QtWidgets import QMainWindow, QApplication, QTabWidget, QMenu, QAction, QLabel, QComboBox, QWidget, \
     QVBoxLayout, QMessageBox, QFileDialog
-from PyQt5.QtCore import pyqtSignal, QTimer, Qt, pyqtSlot
+from PyQt5.QtCore import QTimer, Qt, pyqtSlot
 import logging
 from typing import Optional
 
 from gui.config.gui_default import WindowSettings, EditorConstants
-from gui.managers.data_lod_manager import DataLODManager
-from gui.managers.generation_orchestrator import GenerationOrchestrator
-from gui.managers.navigation_manager import NavigationManager
-from gui.managers.parameter_manager import ParameterManager
-from gui.managers.shader_manager import ShaderManager
+from gui.OldManagers.data_lod_manager import DataLODManager
+from gui.OldManagers.generation_orchestrator import GenerationOrchestrator
+from gui.OldManagers.navigation_manager import NavigationManager
+from gui.OldManagers.parameter_manager import ParameterManager
+from gui.OldManagers.shader_manager import ShaderManager
 from gui.widgets.widgets import BaseButton, StatusIndicator
 
 
@@ -111,17 +114,13 @@ class MapEditorWindow(QMainWindow):
 
         # Manager einzeln initialisieren
         self.data_lod_manager = None
-        self.navigation_manager = None
         self.shader_manager = None
         self.parameter_manager = None
+        self.navigation_manager = None
         self.generation_orchestrator = None
+
         self._setup_managers()
         self._check_managers()
-
-        if self.generation_orchestrator is None:
-            self.logger.error("DEBUG: MapEditor received None as generation_orchestrator!")
-        else:
-            self.logger.info(f"DEBUG: MapEditor received orchestrator: {type(self.generation_orchestrator)}")
 
         # UI components
         self.tab_widget = None
@@ -140,7 +139,6 @@ class MapEditorWindow(QMainWindow):
         self._setup_ui()
         self._setup_tabs()
         self._setup_signals()
-        # self._setup_orchestrator_integration()
 
         # Start status monitoring
         self.status_update_timer.start(EditorConstants.STATUS_UPDATE_INTERVAL_MS)
@@ -159,9 +157,15 @@ class MapEditorWindow(QMainWindow):
         self.setWindowTitle("MapGenerator - Professional Map Editor")
 
         # Load settings from configuration
-        settings = WindowSettings.MAP_EDITOR
-        self.resize(settings.get("width", 1500), settings.get("height", 1000))
-        self.setMinimumSize(settings.get("min_width", 1200), settings.get("min_height", 800))
+        # (Abfrage nach Bildschirmgröße wird nicht gemacht, kann Fehler verursachen)
+        try:
+            settings = WindowSettings.MAP_EDITOR
+        except AttributeError:
+            self.logger.error("WindowSettings.MAP_EDITOR not found. Fallback settings.")
+            settings = {"width": 1500, "height": 1000, "min_width": 1200, "min_height": 800}
+
+        self.resize(settings.get("width"), settings.get("height"))
+        self.setMinimumSize(settings.get("min_width"), settings.get("min_height"))
 
         # Center window on screen
         self._center_window()
@@ -188,20 +192,19 @@ class MapEditorWindow(QMainWindow):
         self.tab_widget.setTabPosition(QTabWidget.North)
         self.tab_widget.setTabsClosable(False)
         self.tab_widget.setMovable(False)
-        self.tab_widget.setDocumentMode(True)  # Professional appearance
+        self.tab_widget.setDocumentMode(True)
 
         self.setCentralWidget(self.tab_widget)
 
         # Create UI components
         self._create_menu_bar()
-        self._create_toolbar()
         self._create_status_bar()
 
     def _setup_managers(self):
         try:
             # Manager einzeln erstellen und testen
             self.logger.info("Creating DataLODManager...")
-            self.data_manager = DataLODManager()
+            self.data_lod_manager = DataLODManager()
 
             self.logger.info("Creating ShaderManager...")
             self.shader_manager = ShaderManager()
@@ -210,10 +213,10 @@ class MapEditorWindow(QMainWindow):
             self.parameter_manager = ParameterManager()
 
             self.logger.info("Creating NavigationManager...")
-            self.navigation_manager = NavigationManager(data_manager=self.data_lod_manager)
+            self.navigation_manager = NavigationManager(data_lod_manager=self.data_lod_manager)
 
             self.logger.info("Creating GenerationOrchestrator...")
-            self.generation_orchestrator = GenerationOrchestrator(data_manager=self.data_lod_manager)
+            self.generation_orchestrator = GenerationOrchestrator(data_lod_manager=self.data_lod_manager)
 
         except Exception as e:
             self.logger.error(f"Manager creation failed: {e}")
@@ -222,25 +225,30 @@ class MapEditorWindow(QMainWindow):
             return
 
     def _check_managers(self):
-        if self.generation_orchestrator is None:
-            self.logger.error("DEBUG: MapEditor received None as generation_orchestrator!")
+        if self.data_lod_manager is None:
+            self.logger.error("DEBUG: MapEditor received None as data_lod_manager!")
         else:
-            self.logger.info(f"DEBUG: MapEditor received orchestrator: {type(self.generation_orchestrator)}")
+            self.logger.info(f"DEBUG: MapEditor received data_lod_manager: {type(self.data_lod_manager)}")
+
+        if self.parameter_manager is None:
+            self.logger.error("DEBUG: MapEditor received None as parameter_manager!")
+        else:
+            self.logger.info(f"DEBUG: MapEditor received parameter_manager: {type(self.parameter_manager)}")
 
         if self.shader_manager is None:
             self.logger.error("DEBUG: MapEditor received None as shader_manager!")
         else:
             self.logger.info(f"DEBUG: MapEditor received shader_manager: {type(self.shader_manager)}")
 
-        if self.parameter_manager is None:
-            self.logger.error("DEBUG: MapEditor received None as parameter_manager!")
+        if self.navigation_manager is None:
+            self.logger.error("DEBUG: MapEditor received None as navigation_manager!")
         else:
-            self.logger.info(f"DEBUG: MapEditor received orchestrator: {type(self.parameter_manager)}")
+            self.logger.info(f"DEBUG: MapEditor received navigation_manager: {type(self.navigation_manager)}")
 
-        if self.data_manager is None:
-            self.logger.error("DEBUG: MapEditor received None as data_manager!")
+        if self.generation_orchestrator is None:
+            self.logger.error("DEBUG: MapEditor received None as generation_orchestrator!")
         else:
-            self.logger.info(f"DEBUG: MapEditor received orchestrator: {type(self.data_manager)}")
+            self.logger.info(f"DEBUG: MapEditor received orchestrator: {type(self.generation_orchestrator)}")
 
     def _setup_manager_integration(self):
         """
@@ -252,6 +260,8 @@ class MapEditorWindow(QMainWindow):
         Connects orchestrator events to application-level handlers
         for UI updates and state management.
         """
+        # TODO: viele Erfundene Signale? Auf jeden Fall enthält es sicherlich Fehler.
+
         try:
             # DataLODManager ↔ GenerationOrchestrator
             self.data_lod_manager.dependencies_satisfied.connect(
@@ -326,7 +336,7 @@ class MapEditorWindow(QMainWindow):
             ("separator", None, None),
             ("&Export World", "Ctrl+E", self._export_world),
             ("separator", None, None),
-            ("&Return to Main Menu", None, lambda: self.return_to_main_menu.emit())
+            ("&Return to Main Menu", None, self._return_to_main_menu)
         ]
 
         self._add_menu_actions(file_menu, file_actions)
@@ -385,54 +395,6 @@ class MapEditorWindow(QMainWindow):
                 action.triggered.connect(callback)
 
             menu.addAction(action)
-
-    def _create_toolbar(self):
-        """
-        Create main toolbar with frequently used functions
-        ================================================
-
-        Builds toolbar with generation controls, quality settings,
-        and export functions for quick access to common operations.
-        """
-        toolbar = self.addToolBar('Main Toolbar')
-        toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        toolbar.setMovable(False)
-
-        # Generation controls (if orchestrator available)
-        if self.generation_orchestrator:
-            generate_current_action = QAction('🔄 Generate Current Tab', self)
-            generate_current_action.setToolTip('Generate current tab with selected quality')
-            generate_current_action.triggered.connect(self._generate_current_tab)
-            toolbar.addAction(generate_current_action)
-
-            generate_all_action = QAction('🔄 Generate All', self)
-            generate_all_action.setToolTip('Generate all maps in sequence')
-            generate_all_action.triggered.connect(self._generate_all_maps)
-            toolbar.addAction(generate_all_action)
-
-            toolbar.addSeparator()
-
-            # Quality control
-            toolbar.addWidget(QLabel('Quality:'))
-
-            self.toolbar_lod_combo = QComboBox()
-            self.toolbar_lod_combo.addItems(['LOD64', 'LOD256', 'FINAL'])
-            self.toolbar_lod_combo.setCurrentText('FINAL')
-            self.toolbar_lod_combo.currentTextChanged.connect(self._on_toolbar_lod_changed)
-            toolbar.addWidget(self.toolbar_lod_combo)
-
-            toolbar.addSeparator()
-
-        # Export controls
-        export_png_action = QAction('📷 Export View', self)
-        export_png_action.setToolTip('Export current view as PNG')
-        export_png_action.triggered.connect(self._export_current_png)
-        toolbar.addAction(export_png_action)
-
-        export_world_action = QAction('💾 Export World', self)
-        export_world_action.setToolTip('Export complete world data')
-        export_world_action.triggered.connect(self._export_world)
-        toolbar.addAction(export_world_action)
 
     def _create_status_bar(self):
         """
@@ -527,7 +489,7 @@ class MapEditorWindow(QMainWindow):
             self.logger.debug(f"Creating {tab_name} tab instance")
 
             tab_instance = tab_class(
-                data_manager=self.data_manager,
+                data_lod_manager=self.data_lod_manager,
                 parameter_manager=self.parameter_manager,
                 navigation_manager=self.navigation_manager,
                 shader_manager=self.shader_manager,
@@ -676,8 +638,8 @@ class MapEditorWindow(QMainWindow):
             self.navigation_manager.tab_changed.connect(self._on_navigation_requested)
 
         # Data manager signals
-        if self.data_manager:
-            self.data_manager.data_updated.connect(self._on_data_updated)
+        if self.data_lod_manager:
+            self.data_lod_manager.data_updated.connect(self._on_data_updated)
 
     def activate_tab(self, tab_name: str) -> bool:
         """
@@ -859,9 +821,9 @@ class MapEditorWindow(QMainWindow):
         """
         try:
             # Update memory usage
-            if self.data_manager:
+            if self.data_lod_manager:
                 try:
-                    memory_usage = self.data_manager.get_memory_usage()
+                    memory_usage = self.data_lod_manager.get_memory_usage()
                     total_memory = sum(memory_usage.values()) if memory_usage else 0
                     self.memory_label.setText(f"Memory: {total_memory:.1f} MB")
                 except Exception as e:
@@ -890,8 +852,8 @@ class MapEditorWindow(QMainWindow):
         if reply == QMessageBox.Yes:
             try:
                 # Clear data manager
-                if self.data_manager:
-                    self.data_manager.clear_all_data()
+                if self.data_lod_manager:
+                    self.data_lod_manager.clear_all_data()
 
                 # Reset all tabs
                 for tab_name, tab_instance in self.tabs.items():
@@ -974,6 +936,35 @@ class MapEditorWindow(QMainWindow):
                 "Current tab does not support view export"
             )
 
+    def _return_to_main_menu(self):
+        try:
+            # Clear data manager
+            if self.data_lod_manager:
+                self.data_lod_manager.clear_all_data()
+
+            # Reset all tabs
+            for tab_name, tab_instance in self.tabs.items():
+                if hasattr(tab_instance, 'reset_state'):
+                    tab_instance.reset_state()
+
+            # Clear generation tracking
+            self.active_generations.clear()
+            self.tab_generation_status.clear()
+
+            self.status_indicator.set_success("New world created")
+            self.logger.info("Returning to Main Menu...")
+
+            self.close()
+
+            if hasattr(self, 'main_menu_reference'):
+                self.main_menu_reference.show()
+
+            self.logger.info("Success returning to Main Menu.")
+
+        except Exception as e:
+            self.logger.error(f"Failed to return to Main Menu: {e}")
+
+
     # Generation Control Methods
 
     def _generate_current_tab(self):
@@ -1023,8 +1014,8 @@ class MapEditorWindow(QMainWindow):
 
         try:
             # Clear all data for fresh start
-            if self.data_manager:
-                self.data_manager.clear_all_data()
+            if self.data_lod_manager:
+                self.data_lod_manager.clear_all_data()
 
             # Get generation sequence from navigation manager
             if self.navigation_manager and hasattr(self.navigation_manager, 'tab_order'):
@@ -1267,7 +1258,7 @@ class MapEditorWindow(QMainWindow):
                     "orchestrator_available": self.generation_orchestrator is not None
                 },
                 "resource_status": {
-                    "memory_usage": self.data_manager.get_memory_usage() if self.data_manager else {},
+                    "memory_usage": self.data_lod_manager.get_memory_usage() if self.data_lod_manager else {},
                     "tabs_loaded": list(self.tabs.keys()),
                     "shader_manager_available": self.shader_manager is not None
                 },

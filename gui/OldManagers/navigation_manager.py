@@ -30,13 +30,13 @@ class NavigationManager(QObject):
     parameters_saved = pyqtSignal(str)  # (tab_name)
     validation_failed = pyqtSignal(str, str)  # (tab_name, error_message)
 
-    def __init__(self, data_manager):
+    def __init__(self, data_lod_manager):
         """
         Funktionsweise: Initialisiert NavigationManager mit Tab-Reihenfolge und Dependencies
         Aufgabe: Setzt Standard-Tab-Reihenfolge und verknüpft mit data_manager
         """
         super().__init__()
-        self.data_manager = data_manager
+        self.data_lod_manager = data_lod_manager
         self.current_tab = "main_menu"
 
         # Tab-Reihenfolge wie in Dokumentation definiert

@@ -18,7 +18,7 @@ import logging
 from .base_tab import BaseMapTab
 from gui.config.value_default import SETTLEMENT, get_parameter_config, validate_parameter_set, VALIDATION_RULES
 from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, MultiDependencyStatusWidget
-from gui.managers.orchestrator_manager import StandardOrchestratorHandler, OrchestratorRequestBuilder
+from gui.OldManagers.orchestrator_manager import StandardOrchestratorHandler, OrchestratorRequestBuilder
 
 def get_settlement_error_decorators():
     """
@@ -46,8 +46,8 @@ class SettlementTab(BaseMapTab):
     Output: SettlementData mit allen Settlement-Komponenten
     """
 
-    def __init__(self, data_manager, navigation_manager, shader_manager, generation_orchestrator=None):
-        super().__init__(data_manager, navigation_manager, shader_manager, generation_orchestrator)
+    def __init__(self, data_lod_manager, navigation_manager, shader_manager, generation_orchestrator=None):
+        super().__init__(data_lod_manager, navigation_manager, shader_manager, generation_orchestrator)
         self.logger = logging.getLogger(__name__)
 
         # GenerationOrchestrator Integration
@@ -367,7 +367,7 @@ class SettlementTab(BaseMapTab):
         self.control_panel.layout().addWidget(self.dependency_status)
 
         # Data Manager Signals
-        self.data_manager.data_updated.connect(self.on_data_updated)
+        self.data_lod_manager.data_updated.connect(self.on_data_updated)
 
     def setup_input_status(self):
         """
@@ -423,7 +423,7 @@ class SettlementTab(BaseMapTab):
         Funktionsweise: Aktualisiert Settlement-Statistiken nach Generation
         Aufgabe: Zeigt Generation-Results in Statistics-Widget
         """
-        settlement_data = self.data_manager.get_settlement_data("settlement_data_complete")
+        settlement_data = self.data_lod_manager.get_settlement_data("settlement_data_complete")
         if settlement_data and hasattr(self, 'settlement_stats'):
             self.settlement_stats.update_generation_statistics(
                 settlement_data.settlement_list,
@@ -531,7 +531,7 @@ class SettlementTab(BaseMapTab):
         Funktionsweise: Prüft alle Required Dependencies für Settlement-System
         Aufgabe: Aktiviert/Deaktiviert Generation basierend auf verfügbaren Inputs
         """
-        is_complete, missing = self.data_manager.check_dependencies("settlement", self.required_dependencies)
+        is_complete, missing = self.data_lod_manager.check_dependencies("settlement", self.required_dependencies)
 
         self.dependency_status.update_dependency_status(is_complete, missing)
         self.manual_generate_button.setEnabled(is_complete)
@@ -545,8 +545,8 @@ class SettlementTab(BaseMapTab):
         """
         try:
             # Terrain Quality Check
-            heightmap = self.data_manager.get_terrain_data("heightmap")
-            slopemap = self.data_manager.get_terrain_data("slopemap")
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            slopemap = self.data_lod_manager.get_terrain_data("slopemap")
 
             if heightmap is not None and slopemap is not None:
                 # Analysiere Terrain-Qualität für Settlements
@@ -561,7 +561,7 @@ class SettlementTab(BaseMapTab):
                 self.terrain_status.set_error("Missing terrain data")
 
             # Water Proximity Check
-            water_map = self.data_manager.get_water_data("water_map")
+            water_map = self.data_lod_manager.get_water_data("water_map")
             if water_map is not None:
                 water_coverage = np.sum(water_map > 0.01) / water_map.size
                 if water_coverage > 0.05:  # > 5% Wasser
@@ -596,14 +596,14 @@ class SettlementTab(BaseMapTab):
         current_mode = self.display_mode.checkedId()
 
         if current_mode == 0:  # Terrain Suitability
-            suitability_map = self.data_manager.get_settlement_data("combined_suitability_map")
+            suitability_map = self.data_lod_manager.get_settlement_data("combined_suitability_map")
             if suitability_map is not None:
                 self.map_display.display_terrain_suitability(suitability_map)
 
         elif current_mode == 1:  # Settlements & Landmarks
-            settlements = self.data_manager.get_settlement_data("settlement_list")
-            landmarks = self.data_manager.get_settlement_data("landmark_list")
-            roadsites = self.data_manager.get_settlement_data("roadsite_list")
+            settlements = self.data_lod_manager.get_settlement_data("settlement_list")
+            landmarks = self.data_lod_manager.get_settlement_data("landmark_list")
+            roadsites = self.data_lod_manager.get_settlement_data("roadsite_list")
 
             if settlements is not None:
                 # Filter basierend auf Checkboxes
@@ -616,17 +616,17 @@ class SettlementTab(BaseMapTab):
                 )
 
         elif current_mode == 2:  # Road Network
-            roads = self.data_manager.get_settlement_data("roads")
+            roads = self.data_lod_manager.get_settlement_data("roads")
             if roads is not None:
                 self.map_display.display_road_network(roads)
 
         elif current_mode == 3:  # Civilization Map
-            civ_map = self.data_manager.get_settlement_data("civ_map")
+            civ_map = self.data_lod_manager.get_settlement_data("civ_map")
             if civ_map is not None:
                 self.map_display.display_civilization_map(civ_map)
 
         elif current_mode == 4:  # Plot Boundaries
-            plot_map = self.data_manager.get_settlement_data("plot_map")
+            plot_map = self.data_lod_manager.get_settlement_data("plot_map")
             if plot_map is not None:
                 self.map_display.display_plot_boundaries(plot_map)
 
@@ -640,14 +640,14 @@ class SettlementTab(BaseMapTab):
         """
         # 3D Terrain Overlay
         if self.terrain_3d_cb.isChecked():
-            heightmap = self.data_manager.get_terrain_data("heightmap")
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
             if heightmap is not None:
                 self.map_display.overlay_3d_terrain(heightmap)
 
         # 3D Settlement Markers
         if self.settlement_markers_3d_cb.isChecked():
-            settlements = self.data_manager.get_settlement_data("settlement_list")
-            landmarks = self.data_manager.get_settlement_data("landmark_list")
+            settlements = self.data_lod_manager.get_settlement_data("settlement_list")
+            landmarks = self.data_lod_manager.get_settlement_data("landmark_list")
             if settlements is not None:
                 self.map_display.overlay_3d_settlement_markers(settlements, landmarks)
 
