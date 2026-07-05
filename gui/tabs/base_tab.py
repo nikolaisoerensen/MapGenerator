@@ -297,28 +297,37 @@ class BaseMapTab(QWidget):
             pass  # Auch Fallback fehlgeschlagen
 
     def setup_manager_connections(self):
-        """Verbindet Signals mit verfügbaren Managern"""
-        try:
-            # ParameterManager Connections
-            if self.parameter_manager:
+        """
+        Verbindet Signals mit verfügbaren Managern.
+        Jeder Manager wird einzeln abgesichert verbunden, damit ein
+        fehlgeschlagener Anschluss die übrigen Verbindungen nicht verhindert.
+        Fehlgeschlagene Verbindungen werden als INFO geloggt und der Tab
+        läuft ohne den betreffenden Manager weiter.
+        """
+        # ParameterManager Connections
+        if self.parameter_manager:
+            try:
                 self.parameter_manager.parameter_changed.connect(self.on_parameter_changed)
                 self.parameter_ui_changed.connect(self.parameter_manager.set_parameter)
+            except (AttributeError, TypeError) as e:
+                self.logger.info(f"ParameterManager connection not established: {e}")
 
-            # DataLODManager Connections
-            if self.data_lod_manager:
+        # DataLODManager Connections
+        if self.data_lod_manager:
+            try:
                 self.data_lod_manager.data_updated.connect(self.on_data_updated)
+            except (AttributeError, TypeError) as e:
+                self.logger.info(f"DataLODManager connection not established: {e}")
 
-            # GenerationOrchestrator Connections
-            if self.generation_orchestrator:
+        # GenerationOrchestrator Connections
+        if self.generation_orchestrator:
+            try:
                 self.generate_requested.connect(self.generation_orchestrator.request_generation)
                 self.generation_orchestrator.generation_started.connect(self.on_generation_started)
                 self.generation_orchestrator.generation_completed.connect(self.on_generation_completed)
                 self.generation_orchestrator.generation_progress.connect(self.on_generation_progress)
-
-            self.logger.debug("Manager connections established")
-
-        except Exception as e:
-            self.logger.error(f"Manager connection setup failed: {e}")
+            except (AttributeError, TypeError) as e:
+                self.logger.info(f"GenerationOrchestrator connection not established: {e}")
 
     def _calculate_optimal_control_width(self) -> int:
         """Berechnet optimale Breite für Control Panel"""
@@ -443,11 +452,11 @@ class BaseMapTab(QWidget):
     # SIGNAL HANDLERS (vereinfacht)
     # =============================================================================
 
-    @pyqtSlot(str, str, object)
-    def on_parameter_changed(self, generator_type: str, param_name: str, value):
+    @pyqtSlot(str, str, object, object)
+    def on_parameter_changed(self, generator_type: str, param_name: str, old_value, new_value):
         """Handler für Parameter-Änderungen vom ParameterManager"""
         if generator_type == self.generator_type:
-            self.update_parameter_ui(param_name, value)
+            self.update_parameter_ui(param_name, new_value)
 
     @pyqtSlot(str, str)
     def on_data_updated(self, generator_type: str, data_key: str):
@@ -471,9 +480,12 @@ class BaseMapTab(QWidget):
             if self.status_display:
                 self.status_display.set_pending("Generation in progress...")
 
-    @pyqtSlot(str, bool)
-    def on_generation_completed(self, generator_type: str, success: bool):
-        """Handler für Generation-Completion"""
+    @pyqtSlot(str, dict)
+    def on_generation_completed(self, result_id: str, result_data: dict):
+        """Handler für Generation-Completion vom GenerationOrchestrator"""
+        generator_type = result_data.get("generator_type", "")
+        success = result_data.get("success", False)
+
         if generator_type == self.generator_type:
             self.generation_active = False
 
@@ -483,12 +495,11 @@ class BaseMapTab(QWidget):
                 else:
                     self.status_display.set_error("Generation failed")
 
-    @pyqtSlot(str, int)
-    def on_generation_progress(self, generator_type: str, progress: int):
-        """Handler für Generation-Progress"""
-        if generator_type == self.generator_type:
-            if self.status_display:
-                self.status_display.set_pending(f"Generating... {progress}%")
+    @pyqtSlot(int, str)
+    def on_generation_progress(self, progress: int, message: str):
+        """Handler für Generation-Progress vom GenerationOrchestrator"""
+        if self.generation_active and self.status_display:
+            self.status_display.set_pending(f"{message} ({progress}%)")
 
     # =============================================================================
     # EXTENSIBILITY INTERFACE FÜR SUB-CLASSES

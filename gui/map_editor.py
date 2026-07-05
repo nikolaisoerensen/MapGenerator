@@ -50,6 +50,8 @@ def _import_tab_safely(module_path: str, class_name: str) -> tuple[bool, Optiona
 
     Attempts to import tab class and provides detailed feedback
     on the type of failure for appropriate error handling.
+    Import failures are logged with the original exception so that
+    missing classes or broken imports are visible at startup.
 
     Args:
         module_path: Python module path to import from
@@ -59,22 +61,27 @@ def _import_tab_safely(module_path: str, class_name: str) -> tuple[bool, Optiona
         Tuple of (import_success, class_object, error_type)
         error_type: "import_failed", "class_missing", "instantiation_failed", or "success"
     """
+    logger = logging.getLogger(__name__)
+
     try:
         module = __import__(module_path, fromlist=[class_name])
         if not hasattr(module, class_name):
+            logger.warning(f"Tab import: {module_path} loaded, but class {class_name} is missing")
             return False, None, "class_missing"
 
         tab_class = getattr(module, class_name)
 
-        # Verify class is instantiable (basic check)
         if not callable(tab_class):
+            logger.warning(f"Tab import: {module_path}.{class_name} is not callable")
             return False, None, "class_missing"
 
         return True, tab_class, "success"
 
     except ImportError as e:
+        logger.warning(f"Tab import failed for {module_path}.{class_name}: {e}")
         return False, None, "import_failed"
     except Exception as e:
+        logger.warning(f"Tab import error for {module_path}.{class_name}: {e}")
         return False, None, "instantiation_failed"
 
 
@@ -255,65 +262,18 @@ class MapEditorWindow(QMainWindow):
         Configure manager cross-communication and signal routing
         =======================================================
 
-        Establishes signal connections between NavigationManager and
-        GenerationOrchestrator for coordinated application behavior.
-        Connects orchestrator events to application-level handlers
-        for UI updates and state management.
+        Die Manager-Querkommunikation läuft direkt über die Manager selbst:
+        Der GenerationOrchestrator hält eine DataLODManager-Referenz und
+        speichert Generation-Ergebnisse dort unmittelbar nach jeder
+        LOD-Completion. Die Tabs verbinden sich in
+        BaseMapTab.setup_manager_connections() eigenständig mit
+        ParameterManager, DataLODManager und GenerationOrchestrator.
+
+        Auf Editor-Ebene ist daher keine zusätzliche Signal-Verdrahtung
+        erforderlich. Diese Methode bleibt als Integrationspunkt für die
+        Manager-Konsolidierung erhalten (ThreadManager-Fluss).
         """
-        # TODO: viele Erfundene Signale? Auf jeden Fall enthält es sicherlich Fehler.
-
-        try:
-            # DataLODManager ↔ GenerationOrchestrator
-            self.data_lod_manager.dependencies_satisfied.connect(
-                self.generation_orchestrator.on_dependencies_ready)
-            self.generation_orchestrator.generation_completed.connect(
-                self.data_lod_manager.on_generation_completed)
-            self.generation_orchestrator.lod_progress.connect(
-                self.data_lod_manager.on_lod_progress)
-            self.logger.info("INFO: Successfully connected Generation Orchestrator with Data-LOD-Manager Signals!")
-        except Exception as e:
-            self.logger.error("ERROR: Failed to connect Generation Orchestrator with Data-LOD-Manager Signals!")
-
-        try:
-            # ParameterManager ↔ DataLODManager (Cache-Invalidation)
-            self.parameter_manager.cache_invalidation_requested.connect(
-                self.data_lod_manager.invalidate_cache)
-            self.parameter_manager.parameter_changed.connect(
-                self.data_lod_manager.on_parameter_changed)
-            self.logger.info("INFO: Successfully connected ParameterManager with Data-LOD-Manager Signals!")
-        except Exception as e:
-            self.logger.error("ERROR: Failed to connect ParameterManager with Data-LOD-Manager Signals!")
-
-        try:
-            # ShaderManager ↔ DataLODManager (Performance-Tracking)
-            self.shader_manager.shader_performance_updated.connect(
-                self.data_lod_manager.update_performance_metrics)
-            self.shader_manager.gpu_memory_warning.connect(
-                self.data_lod_manager.handle_memory_warning)
-            self.data_lod_manager.memory_warning.connect(
-                self.shader_manager.reduce_gpu_usage)
-            self.logger.info("INFO: Successfully connected ShaderManager with Data-LOD-Manager Signals!")
-        except Exception as e:
-            self.logger.error("ERROR: Failed to connect ShaderManager with Data-LOD-Manager Signals!")
-
-        try:
-            # NavigationManager ↔ Window (Tab-Navigation)
-            self.navigation_manager.tab_changed.connect(self._on_tab_navigation_requested)
-            self.logger.info("INFO: Successfully connected NavigationManager Signals!")
-        except Exception as e:
-            self.logger.error("ERROR: Failed to connect NavigationManager Signals!")
-
-        try:
-            # GenerationOrchestrator ↔ Window (Status-Updates)
-            self.generation_orchestrator.generation_completed.connect(self._on_generation_completed)
-            self.generation_orchestrator.lod_progression_completed.connect(self._on_lod_progression_completed)
-            self.generation_orchestrator.generation_progress.connect(self._on_generation_progress)
-            self.generation_orchestrator.dependency_invalidated.connect(self._on_dependency_invalidated)
-            self.generation_orchestrator.batch_generation_completed.connect(self._on_batch_completed)
-            self.generation_orchestrator.queue_status_changed.connect(self._on_queue_status_changed)
-            self.logger.info("INFO: Successfully connected GenerationOrchestrator Status Signals!")
-        except Exception as e:
-            self.logger.error("ERROR: Failed to connect GenerationOrchestrator Status Signals!")
+        self.logger.info("Manager integration: direct manager wiring active, no editor-level signal routing required")
 
     def _create_menu_bar(self):
         """

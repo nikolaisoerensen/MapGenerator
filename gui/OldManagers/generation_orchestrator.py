@@ -937,8 +937,8 @@ class GenerationOrchestrator(QObject):
                     from core.terrain_generator import BaseTerrainGenerator
                     self._generator_instances[generator_type.value] = BaseTerrainGenerator()
                 elif generator_type == GeneratorType.GEOLOGY:
-                    from core.geology_generator import GeologyGenerator
-                    self._generator_instances[generator_type.value] = GeologyGenerator()
+                    from core.geology_generator import GeologySystemGenerator
+                    self._generator_instances[generator_type.value] = GeologySystemGenerator()
                 elif generator_type == GeneratorType.WEATHER:
                     from core.weather_generator import WeatherSystemGenerator
                     self._generator_instances[generator_type.value] = WeatherSystemGenerator()

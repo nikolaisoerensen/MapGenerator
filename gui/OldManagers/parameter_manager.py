@@ -161,6 +161,32 @@ class ParameterManager(QObject):
             self.logger.warning(f"Tab {tab_name} does not support set_parameters")
             return False
 
+    def set_parameter(self, tab_name: str, parameter_name: str, value: Any):
+        """
+        Funktionsweise: Setzt einzelnen Parameter eines Tabs aus UI-Änderungen
+        Aufgabe: Gegenstück zu BaseMapTab.parameter_ui_changed - aktualisiert Cache,
+                 Change-History und benachrichtigt alle Tabs über parameter_changed
+        Parameter: tab_name, parameter_name, value
+        """
+        if tab_name not in self.parameter_cache:
+            self.parameter_cache[tab_name] = {}
+
+        old_value = self.parameter_cache[tab_name].get(parameter_name)
+
+        if old_value == value:
+            return
+
+        self.parameter_cache[tab_name][parameter_name] = value
+
+        self.change_history.append(ParameterChangeEvent(
+            source_tab=tab_name,
+            parameter_name=parameter_name,
+            old_value=old_value,
+            new_value=value
+        ))
+
+        self.parameter_changed.emit(tab_name, parameter_name, old_value, value)
+
     def add_parameter_change_listener(self, tab_name: str, listener_func: Callable):
         """
         Funktionsweise: Fügt Listener für Parameter-Änderungen hinzu

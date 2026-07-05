@@ -18,15 +18,30 @@ import logging
 
 from .base_tab import BaseMapTab
 from gui.config.value_default import BIOME, get_parameter_config, validate_parameter_set, VALIDATION_RULES
-from gui.widgets.widgets import (
-    BaseButton, ParameterSlider, RandomSeedButton,
-    StatusIndicator, ProgressBar, NoWheelSlider
-)
+from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, BiomeLegendDialog
 from core.biome_generator import (
     BiomeClassificationSystem, BaseBiomeClassifier, SuperBiomeOverrideSystem,
-    SupersamplingManager, ProximityBiomeCalculator
+    SupersamplingManager
 )
 
+
+def get_biome_error_decorators():
+    """
+    Funktionsweise: Lazy Loading von Biome Tab Error Decorators
+    Aufgabe: Lädt Memory-Critical, GPU-Shader und Core-Generation Decorators
+    Return: Tuple von Decorator-Funktionen
+    """
+    try:
+        from gui.utils.error_handler import memory_critical_handler, gpu_shader_handler, core_generation_handler
+        return memory_critical_handler, gpu_shader_handler, core_generation_handler
+    except ImportError:
+        def noop_decorator(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+        return noop_decorator, noop_decorator, noop_decorator
+
+memory_critical_handler, gpu_shader_handler, core_generation_handler = get_biome_error_decorators()
 
 class BiomeTab(BaseMapTab):
     """
@@ -53,7 +68,6 @@ class BiomeTab(BaseMapTab):
         self.base_classifier = BaseBiomeClassifier()
         self.super_biome_system = SuperBiomeOverrideSystem()
         self.supersampling_manager = SupersamplingManager()
-        self.proximity_calculator = ProximityBiomeCalculator()
 
         # Parameter und State
         self.current_parameters = {}
@@ -127,18 +141,29 @@ class BiomeTab(BaseMapTab):
         self.visualization_controls = self.create_biome_visualization_controls()
         self.control_panel.layout().addWidget(self.visualization_controls)
 
-        # World Statistics
-        self.world_stats = WorldStatisticsWidget()
-        self.control_panel.layout().addWidget(self.world_stats)
+        # Biome Statistics
+        self.statistics_group = self._create_statistics_display()
+        self.control_panel.layout().addWidget(self.statistics_group)
 
-        # Export Controls
-        self.export_controls = WorldExportWidget()
-        self.export_controls.export_requested.connect(self.export_world_data)
-        self.control_panel.layout().addWidget(self.export_controls)
+    def _create_statistics_display(self) -> QGroupBox:
+        """
+        Funktionsweise: Erstellt Anzeige für Biome-eigene Statistiken
+        Aufgabe: Zeigt Verteilung der Base-Biomes, Super-Biome-Anteil und Diversitaet
+        """
+        group = QGroupBox("Biome Statistics")
+        layout = QVBoxLayout()
 
-        # Dependencies und Navigation
-        self.setup_input_status()
-        self.setup_navigation_panel()
+        self.biome_distribution_label = QLabel("Biome Distribution: -")
+        layout.addWidget(self.biome_distribution_label)
+
+        self.super_biome_label = QLabel("Super-Biome Coverage: -")
+        layout.addWidget(self.super_biome_label)
+
+        self.biome_diversity_label = QLabel("Biome Diversity: -")
+        layout.addWidget(self.biome_diversity_label)
+
+        group.setLayout(layout)
+        return group
 
     def create_biome_parameter_panel(self) -> QGroupBox:
         """
@@ -307,14 +332,11 @@ class BiomeTab(BaseMapTab):
         Funktionsweise: Setup für Input-Dependency Checking
         Aufgabe: Überwacht alle Required Dependencies für Biome-System
         """
-        # Required Dependencies für Biome-System
         self.required_dependencies = VALIDATION_RULES.DEPENDENCIES["biome"]
 
-        # Dependency Status Widget
-        self.dependency_status = MultiDependencyStatusWidget(self.required_dependencies)
+        self.dependency_status = StatusIndicator("Biome Dependencies")
         self.control_panel.layout().addWidget(self.dependency_status)
 
-        # Data Manager Signals
         self.data_lod_manager.data_updated.connect(self.on_data_updated)
 
     def load_default_parameters(self):
@@ -367,11 +389,12 @@ class BiomeTab(BaseMapTab):
         """
         is_complete, missing = self.data_lod_manager.check_dependencies("biome", self.required_dependencies)
 
-        self.dependency_status.update_dependency_status(is_complete, missing)
-        self.manual_generate_button.setEnabled(is_complete)
+        if is_complete:
+            self.dependency_status.set_success("All dependencies available")
+        else:
+            self.dependency_status.set_warning(f"Missing: {', '.join(missing)}")
 
-        # Export nur aktivieren wenn Biome-Generation complete
-        self.export_controls.setEnabled(is_complete and self.biome_generation_complete)
+        self.manual_generate_button.setEnabled(is_complete)
 
         return is_complete
 
@@ -478,78 +501,6 @@ class BiomeTab(BaseMapTab):
         legend_dialog = BiomeLegendDialog(self)
         legend_dialog.exec_()
 
-    @pyqtSlot(str, dict)
-    def export_world_data(self, export_format: str, export_options: dict):
-        """
-        Funktionsweise: Exportiert komplette Welt-Daten in verschiedene Formate
-        Parameter: export_format ("png", "json", "obj"), export_options (dict)
-        """
-        try:
-            self.logger.info(f"Starting world export in format: {export_format}")
-
-            # Alle verfügbaren Daten sammeln
-            world_data = self.collect_all_world_data()
-
-            if export_format == "png":
-                self.export_png_maps(world_data, export_options)
-            elif export_format == "json":
-                self.export_json_data(world_data, export_options)
-            elif export_format == "obj":
-                self.export_3d_terrain(world_data, export_options)
-
-            self.logger.info("World export completed successfully")
-
-        except Exception as e:
-            self.logger.error(f"World export failed: {e}")
-            QMessageBox.critical(self, "Export Error", f"Export failed: {str(e)}")
-
-    def collect_all_world_data(self) -> dict:
-        """
-        Funktionsweise: Sammelt alle verfügbaren Welt-Daten für Export
-        Return: dict mit allen Generator-Outputs
-        """
-        world_data = {
-            "terrain": {
-                "heightmap": self.data_lod_manager.get_terrain_data("heightmap"),
-                "slopemap": self.data_lod_manager.get_terrain_data("slopemap"),
-                "shademap": self.data_lod_manager.get_terrain_data("shademap")
-            },
-            "geology": {
-                "rock_map": self.data_lod_manager.get_geology_data("rock_map"),
-                "hardness_map": self.data_lod_manager.get_geology_data("hardness_map")
-            },
-            "settlements": {
-                "settlement_list": self.data_lod_manager.get_settlement_data("settlement_list"),
-                "landmark_list": self.data_lod_manager.get_settlement_data("landmark_list"),
-                "civ_map": self.data_lod_manager.get_settlement_data("civ_map")
-            },
-            "weather": {
-                "temp_map": self.data_lod_manager.get_weather_data("temp_map"),
-                "precip_map": self.data_lod_manager.get_weather_data("precip_map"),
-                "wind_map": self.data_lod_manager.get_weather_data("wind_map")
-            },
-            "water": {
-                "water_map": self.data_lod_manager.get_water_data("water_map"),
-                "flow_map": self.data_lod_manager.get_water_data("flow_map"),
-                "soil_moist_map": self.data_lod_manager.get_water_data("soil_moist_map")
-            },
-            "biomes": {
-                "biome_map": self.data_lod_manager.get_biome_data("biome_map"),
-                "biome_map_super": self.data_lod_manager.get_biome_data("biome_map_super"),
-                "super_biome_mask": self.data_lod_manager.get_biome_data("super_biome_mask")
-            },
-            "parameters": {
-                "terrain": self.get_all_parameters("terrain"),
-                "geology": self.get_all_parameters("geology"),
-                "settlement": self.get_all_parameters("settlement"),
-                "weather": self.get_all_parameters("weather"),
-                "water": self.get_all_parameters("water"),
-                "biome": self.current_parameters
-            }
-        }
-
-        return world_data
-
     def get_all_parameters(self, generator_type: str) -> dict:
         """
         Funktionsweise: Holt Parameter von anderen Tabs für Export
@@ -559,84 +510,6 @@ class BiomeTab(BaseMapTab):
         # Hier würde normalerweise auf andere Tabs zugegriffen werden
         # Für jetzt leerer dict als Fallback
         return {}
-
-    def export_png_maps(self, world_data: dict, options: dict):
-        """Exportiert alle Maps als PNG-Dateien"""
-        import os
-        from matplotlib import pyplot as plt
-
-        export_dir = options.get("export_directory", ".")
-
-        for category, maps in world_data.items():
-            if category == "parameters":
-                continue
-
-            category_dir = os.path.join(export_dir, category)
-            os.makedirs(category_dir, exist_ok=True)
-
-            for map_name, map_data in maps.items():
-                if map_data is not None and isinstance(map_data, np.ndarray):
-                    plt.figure(figsize=(10, 10))
-                    if len(map_data.shape) == 3:  # RGB Map
-                        plt.imshow(map_data)
-                    else:  # 2D Map
-                        plt.imshow(map_data, cmap='viridis')
-                    plt.title(f"{category.title()} - {map_name.replace('_', ' ').title()}")
-                    plt.colorbar()
-                    plt.savefig(os.path.join(category_dir, f"{map_name}.png"), dpi=300, bbox_inches='tight')
-                    plt.close()
-
-    def export_json_data(self, world_data: dict, options: dict):
-        """Exportiert alle Daten als JSON"""
-        import json
-        import os
-
-        export_file = options.get("export_file", "world_data.json")
-
-        # Numpy Arrays zu Listen konvertieren für JSON
-        json_data = {}
-        for category, data in world_data.items():
-            json_data[category] = {}
-            for key, value in data.items():
-                if isinstance(value, np.ndarray):
-                    json_data[category][key] = value.tolist()
-                else:
-                    json_data[category][key] = value
-
-        with open(export_file, 'w') as f:
-            json.dump(json_data, f, indent=2)
-
-    def export_3d_terrain(self, world_data: dict, options: dict):
-        """Exportiert 3D-Terrain als OBJ-Datei"""
-        heightmap = world_data["terrain"]["heightmap"]
-        if heightmap is None:
-            raise ValueError("Heightmap not available for 3D export")
-
-        export_file = options.get("export_file", "terrain.obj")
-
-        # Vereinfachte OBJ-Export Implementation
-        with open(export_file, 'w') as f:
-            f.write("# Generated by Map Generator\n")
-
-            # Vertices
-            height, width = heightmap.shape
-            for y in range(height):
-                for x in range(width):
-                    z = heightmap[y, x]
-                    f.write(f"v {x} {z} {y}\n")
-
-            # Faces (Triangles)
-            for y in range(height - 1):
-                for x in range(width - 1):
-                    # Indices (1-based for OBJ)
-                    v1 = y * width + x + 1
-                    v2 = y * width + (x + 1) + 1
-                    v3 = (y + 1) * width + x + 1
-                    v4 = (y + 1) * width + (x + 1) + 1
-
-                    # Two triangles per quad
-                    f.write(f"f {v1} {v2} {v3}\n")
-                    f.write(f"f {v2} {v4} {v3}\n")
 
 class BiomeClassificationWidget(QGroupBox):
     """

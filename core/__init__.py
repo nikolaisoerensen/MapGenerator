@@ -15,7 +15,7 @@ from .terrain_generator import (
 
 # Geology Generation
 from .geology_generator import (
-    GeologyGenerator,
+    GeologySystemGenerator,
     RockTypeClassifier,
     MassConservationManager
 )
@@ -45,8 +45,7 @@ from .biome_generator import (
     BiomeClassificationSystem,
     BaseBiomeClassifier,
     SuperBiomeOverrideSystem,
-    SupersamplingManager,
-    ProximityBiomeCalculator
+    SupersamplingManager
 )
 
 # Settlement Generation
@@ -73,7 +72,7 @@ __all__ = [
     'ShadowCalculator',
 
     # Geology
-    'GeologyGenerator',
+    'GeologySystemGenerator',
     'RockTypeClassifier',
     'MassConservationManager',
 
@@ -98,7 +97,6 @@ __all__ = [
     'BaseBiomeClassifier',
     'SuperBiomeOverrideSystem',
     'SupersamplingManager',
-    'ProximityBiomeCalculator',
 
     # Settlement
     'SettlementGenerator',
@@ -118,7 +116,7 @@ def get_basic_generators():
     """
     return {
         'terrain': BaseTerrainGenerator(),
-        'geology': GeologyGenerator(),
+        'geology': GeologySystemGenerator(),
         'weather': WeatherSystemGenerator(),
         'water': HydrologySystemGenerator(),
         'settlement': SettlementGenerator(),
@@ -137,7 +135,7 @@ def get_all_generators():
             'shadow': ShadowCalculator()
         },
         'geology': {
-            'main': GeologyGenerator(),
+            'main': GeologySystemGenerator(),
             'classifier': RockTypeClassifier(),
             'conservation': MassConservationManager()
         },
@@ -167,8 +165,7 @@ def get_all_generators():
             'main': BiomeClassificationSystem(),
             'base': BaseBiomeClassifier(),
             'super': SuperBiomeOverrideSystem(),
-            'sampling': SupersamplingManager(),
-            'proximity': ProximityBiomeCalculator()
+            'sampling': SupersamplingManager()
         }
     }
 

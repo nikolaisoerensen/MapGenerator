@@ -3072,6 +3072,33 @@ class DataLODManager(QObject):
         """Legacy-Methode"""
         return self.get_settlement_data_lod(data_key)
 
+    def check_dependencies(self, generator_type: str, required_dependencies: list) -> tuple:
+        """
+        Funktionsweise: Prüft Verfügbarkeit aller Required Dependencies eines Generators
+        Aufgabe: Gegenstück zu check_input_dependencies() der Tabs
+        Parameter: generator_type (str), required_dependencies (list of data_keys)
+        Return: (is_complete: bool, missing: list of data_keys)
+        """
+        getters = [
+            self.get_terrain_data, self.get_geology_data, self.get_weather_data,
+            self.get_water_data, self.get_biome_data, self.get_settlement_data
+        ]
+
+        missing = []
+        for data_key in required_dependencies:
+            available = False
+            for getter in getters:
+                try:
+                    if getter(data_key) is not None:
+                        available = True
+                        break
+                except Exception:
+                    continue
+            if not available:
+                missing.append(data_key)
+
+        return len(missing) == 0, missing
+
     # =============================================================================
     # MEMORY-MANAGEMENT INTEGRATION - PUNKT 7 ERWEITERT
     # =============================================================================

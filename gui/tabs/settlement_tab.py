@@ -17,11 +17,7 @@ import logging
 
 from .base_tab import BaseMapTab
 from gui.config.value_default import SETTLEMENT, get_parameter_config, validate_parameter_set, VALIDATION_RULES
-from gui.widgets.widgets import (
-    BaseButton, ParameterSlider, RandomSeedButton,
-    StatusIndicator, ProgressBar, NoWheelSlider
-)
-from gui.OldManagers.generation_orchestrator import StandardOrchestratorHandler, OrchestratorRequestBuilder
+from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton
 
 def get_settlement_error_decorators():
     """
@@ -62,7 +58,6 @@ class SettlementTab(BaseMapTab):
         self.logger = logging.getLogger(__name__)
 
         # GenerationOrchestrator Integration
-        self.orchestrator_handler = None
         self.setup_orchestrator_integration()
 
         # Parameter und State
@@ -79,26 +74,12 @@ class SettlementTab(BaseMapTab):
 
     def setup_orchestrator_integration(self):
         """
-        Funktionsweise: Setup für GenerationOrchestrator Integration mit StandardOrchestratorHandler
-        Aufgabe: Eliminiert Code-Duplikation durch wiederverwendbare Orchestrator-Integration
+        Funktionsweise: Verbindet Settlement-spezifische Slots direkt mit dem GenerationOrchestrator
+        Aufgabe: Signal-Anbindung für Generation-Completion und LOD-Progression
         """
         if self.generation_orchestrator:
-            # UI-Update-Methods für Settlement-spezifische Updates
-            ui_update_methods = {
-                'update_system_status': self.update_system_status_display,
-                'update_settlement_statistics': self.update_settlement_statistics,
-                'update_generation_progress': self.update_generation_progress
-            }
-
-            self.orchestrator_handler = StandardOrchestratorHandler(
-                self.generation_orchestrator,
-                ui_update_methods,
-                self.logger
-            )
-
-            # Signal-Connections für Settlement-Tab
-            self.orchestrator_handler.generation_completed.connect(self.on_settlement_generation_completed)
-            self.orchestrator_handler.lod_progression_completed.connect(self.on_lod_progression_completed)
+            self.generation_orchestrator.generation_completed.connect(self.on_settlement_generation_completed)
+            self.generation_orchestrator.lod_progression_completed.connect(self.on_lod_progression_completed)
 
     def generate(self):
         """
@@ -124,16 +105,13 @@ class SettlementTab(BaseMapTab):
             self.start_generation_timing()
             self.generation_in_progress = True
 
-            # OrchestratorRequestBuilder für typ-sichere Request-Erstellung
-            request_builder = OrchestratorRequestBuilder()
-            request = request_builder.build_settlement_request(
+            request_id = self.generation_orchestrator.request_generation(
+                generator_type="settlement",
                 parameters=self.current_parameters.copy(),
                 target_lod=self.target_lod,
                 source_tab="settlement",
                 priority=10
             )
-
-            request_id = self.generation_orchestrator.request_generation(request)
 
             if request_id:
                 self.logger.info(f"Settlement generation requested: {request_id}")
@@ -372,9 +350,7 @@ class SettlementTab(BaseMapTab):
         self.required_dependencies = VALIDATION_RULES.DEPENDENCIES["settlement"]
 
         # Dependency Status Widget
-        self.dependency_status = MultiDependencyStatusWidget(
-            self.required_dependencies, "Settlement Dependencies"
-        )
+        self.dependency_status = StatusIndicator("Settlement Dependencies")
         self.control_panel.layout().addWidget(self.dependency_status)
 
         # Data Manager Signals
@@ -484,12 +460,12 @@ class SettlementTab(BaseMapTab):
             self.logger.error(f"Error processing settlement generation completion: {e}")
             self.handle_generation_error(e)
 
-    @pyqtSlot(str, str)
-    def on_lod_progression_completed(self, result_id: str, lod_level: str):
+    @pyqtSlot(str, int)
+    def on_lod_progression_completed(self, result_id: str, lod_level: int):
         """
         Funktionsweise: Slot für LOD-Progression Updates
         Aufgabe: Aktualisiert Display nach jedem LOD-Level
-        Parameter: result_id (str), lod_level (str) - Result-ID und erreichtes LOD-Level
+        Parameter: result_id (str), lod_level (int) - Result-ID und erreichtes LOD-Level
         """
         try:
             self.logger.info(f"Settlement LOD progression: {lod_level}")
@@ -544,7 +520,11 @@ class SettlementTab(BaseMapTab):
         """
         is_complete, missing = self.data_lod_manager.check_dependencies("settlement", self.required_dependencies)
 
-        self.dependency_status.update_dependency_status(is_complete, missing)
+        if is_complete:
+            self.dependency_status.set_success("All dependencies available")
+        else:
+            self.dependency_status.set_warning(f"Missing: {', '.join(missing)}")
+
         self.manual_generate_button.setEnabled(is_complete)
 
         return is_complete

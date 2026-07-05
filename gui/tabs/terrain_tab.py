@@ -543,12 +543,12 @@ class TerrainTab(BaseMapTab):
     # GENERATION PROGRESS TRACKING
     # =============================================================================
 
-    @pyqtSlot(str, int)
-    def on_generation_progress(self, generator_type: str, progress: int):
+    @pyqtSlot(int, str)
+    def on_generation_progress(self, progress: int, message: str):
         """
         Überschreibt BaseMapTab Progress Handler für LOD-spezifisches Progress.
         """
-        if generator_type != self.generator_type:
+        if not self.generation_active:
             return
 
         try:
@@ -578,11 +578,14 @@ class TerrainTab(BaseMapTab):
         except Exception as e:
             self.logger.error(f"Progress tracking failed: {e}")
 
-    @pyqtSlot(str, bool)
-    def on_generation_completed(self, generator_type: str, success: bool):
+    @pyqtSlot(str, dict)
+    def on_generation_completed(self, result_id: str, result_data: dict):
         """
         Überschreibt BaseMapTab Completion Handler für Terrain-spezifische Completion.
         """
+        generator_type = result_data.get("generator_type", "")
+        success = result_data.get("success", False)
+
         if generator_type != self.generator_type:
             return
 
@@ -616,7 +619,7 @@ class TerrainTab(BaseMapTab):
                         self.data_lod_manager.sync_map_size(int(current_map_size))
 
             # Parent-Class Completion Handler
-            super().on_generation_completed(generator_type, success)
+            super().on_generation_completed(result_id, result_data)
 
         except Exception as e:
             self.logger.error(f"Generation completion handling failed: {e}")
