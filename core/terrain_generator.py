@@ -36,15 +36,6 @@ import hashlib
 import logging
 from typing import Dict, List, Tuple, Optional, Any
 
-try:
-    from core.base_generator import BaseGenerator
-except ImportError:
-    # Fallback wenn BaseGenerator nicht verfügbar
-    class BaseGenerator:
-        def __init__(self, map_seed=42):
-            self.map_seed = map_seed
-            self.logger = logging.getLogger(self.__class__.__name__)
-
 
 class TerrainData:
     """
@@ -973,7 +964,7 @@ class SlopeCalculator:
         return slopemap
 
 
-class BaseTerrainGenerator(BaseGenerator):
+class BaseTerrainGenerator:
     """
     Funktionsweise: Hauptklasse für Terrain-Generierung mit numerischem LOD-System und Manager-Integration
     Aufgabe: Koordiniert alle Terrain-Generierungsschritte, verwaltet Parameter und LOD-Progression
@@ -990,7 +981,8 @@ class BaseTerrainGenerator(BaseGenerator):
         Parameter: map_seed - Globaler Seed für reproduzierbare Ergebnisse
         Parameter: shader_manager - ShaderManager für Performance-Optimierung
         """
-        super().__init__(map_seed)
+        self.map_seed = map_seed
+        self.logger = logging.getLogger(self.__class__.__name__)
 
         self.noise_generator = SimplexNoiseGenerator(seed=map_seed, shader_manager=shader_manager)
         self.shadow_calculator = ShadowCalculator(shader_manager=shader_manager)

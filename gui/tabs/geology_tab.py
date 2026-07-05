@@ -12,7 +12,7 @@ Funktionsweise: Geology-Editor mit vollständiger BaseTab-Integration - CLEAN IM
 
 from PyQt5.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QRadioButton,
-    QCheckBox, QProgressBar, QGridLayout, QComboBox
+    QCheckBox, QProgressBar, QGridLayout, QComboBox, QButtonGroup
 )
 from PyQt5.QtCore import pyqtSlot
 import numpy as np
@@ -61,7 +61,6 @@ class GeologyTab(BaseMapTab):
         self.setup_standard_orchestrator_handlers("geology")
 
         # Setup UI mit standardisierten Patterns
-        self.create_parameter_controls()
         self.create_geology_specific_widgets()
         self.create_enhanced_geology_ui()
 
@@ -216,6 +215,7 @@ class GeologyTab(BaseMapTab):
         self.rock_types_radio = QRadioButton("Rock Types")
         self.rock_types_radio.setStyleSheet("font-size: 11px;")
         self.rock_types_radio.toggled.connect(self.update_display_mode)
+        self.display_mode = QButtonGroup()
         self.display_mode.addButton(self.rock_types_radio, 1)
         layout.insertWidget(1, self.rock_types_radio)
 
@@ -782,19 +782,16 @@ class RockDistributionWidget(QGroupBox):
 
     def setup_standard_orchestrator_handlers(self, generator_type: str):
         """
-        Funktionsweise: Erweiterte Orchestrator-Integration für Geology - ERWEITERT BaseTab
-        Aufgabe: Fügt enhanced Signal-Handler zu BaseTab's Standard-Handlern hinzu
+        Funktionsweise: Geology-spezifische Orchestrator-Integration
+        Aufgabe: Verbindet Orchestrator-Signale zusätzlich mit Geology-eigenen Handlern,
+                 ergänzend zu den Standard-Verbindungen aus BaseMapTab.setup_manager_connections
         """
-        # BaseTab's Standard-Handler
-        super().setup_standard_orchestrator_handlers(generator_type)
-
-        # Geology-spezifische Handler
         if self.generation_orchestrator:
             try:
                 self.generation_orchestrator.generation_started.connect(self._on_generation_started_geology)
                 self.generation_orchestrator.generation_progress.connect(self._on_generation_progress_geology)
                 self.generation_orchestrator.generation_completed.connect(self._on_generation_completed_geology)
 
-                self.logger.debug("Enhanced geology orchestrator handlers connected")
+                self.logger.debug("Geology orchestrator handlers connected")
             except Exception as e:
-                self.logger.warning(f"Enhanced geology orchestrator handler setup failed: {e}")
+                self.logger.warning(f"Geology orchestrator handler setup failed: {e}")

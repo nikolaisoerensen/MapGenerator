@@ -593,8 +593,8 @@ class GeologySystemGenerator:
                 'metamorphic_hardness': GEOLOGY.METAMORPHIC_HARDNESS["default"],
                 'ridge_warping': GEOLOGY.RIDGE_WARPING["default"],
                 'bevel_warping': GEOLOGY.BEVEL_WARPING["default"],
-                'metamorphic_foliation': GEOLOGY.METAMORPHIC_FOLIATION["default"],
-                'metamorphic_folding': GEOLOGY.METAMORPHIC_FOLDING["default"],
+                'metamorphic_foliation': GEOLOGY.METAMORPH_FOLIATION["default"],
+                'metamorphic_folding': GEOLOGY.METAMORPH_FOLDING["default"],
                 'igneous_flowing': GEOLOGY.IGNEOUS_FLOWING["default"]
             }
         except ImportError:

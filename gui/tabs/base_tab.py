@@ -88,6 +88,7 @@ class BaseMapTab(QWidget):
         self.data_lod_manager = data_lod_manager
         self.parameter_manager = parameter_manager
         self.navigation_manager = navigation_manager
+        self.shader_manager = shader_manager
         self.generation_orchestrator = generation_orchestrator
 
         # Core Attributes - müssen von Sub-Classes gesetzt werden

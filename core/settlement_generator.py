@@ -86,11 +86,10 @@ import numpy as np
 from scipy.spatial import Delaunay
 from scipy.interpolate import splprep, splev
 import heapq
-from collections import namedtuple, deque
+import logging
 from dataclasses import dataclass
 from typing import List, Tuple, Dict
 import random
-from core.base_generator import BaseGenerator
 
 
 class SettlementData:
@@ -605,7 +604,7 @@ class PathfindingSystem:
             return path
 
 
-class SettlementGenerator(BaseGenerator):
+class SettlementGenerator:
     """
     Funktionsweise: Hauptklasse für intelligente Settlement-Platzierung mit BaseGenerator-API und LOD-System
     Aufgabe: Koordiniert alle Settlement-Aspekte und erstellt civ_map mit Progress-Updates
@@ -617,7 +616,8 @@ class SettlementGenerator(BaseGenerator):
         Aufgabe: Setup aller Settlement-Systeme und Rng-Seed
         Parameter: map_seed (int) - Globaler Seed für reproduzierbare Settlement-Platzierung
         """
-        super().__init__(map_seed)
+        self.map_seed = map_seed
+        self.logger = logging.getLogger(self.__class__.__name__)
         random.seed(map_seed)
         np.random.seed(map_seed)
 

@@ -42,7 +42,6 @@ from scipy.spatial import distance_matrix
 from collections import deque
 import heapq
 import logging
-from core.base_generator import BaseGenerator
 
 class WaterData:
     """
@@ -1015,14 +1014,15 @@ class BiDirectionalTerrainIntegrator:
             self.data_lod_manager.invalidate_dependent_generators("terrain", lod_level)
 
 
-class HydrologySystemGenerator(BaseGenerator):
+class HydrologySystemGenerator:
     """
-    Funktionsweise: Hauptklasse für dynamisches Hydrologiesystem mit BaseGenerator-API
+    Funktionsweise: Hauptklasse für dynamisches Hydrologiesystem
     Aufgabe: Koordiniert alle hydrologischen Prozesse mit LOD-System und Multi-Dependency-Resolution
     """
 
     def __init__(self, map_seed=42, shader_manager=None, data_lod_manager=None):
-        super().__init__(map_seed)
+        self.map_seed = map_seed
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.shader_manager = shader_manager
         self.data_lod_manager = data_lod_manager
 

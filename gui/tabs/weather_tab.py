@@ -199,6 +199,7 @@ class WeatherTab(BaseMapTab):
         self.temperature_radio = QRadioButton("Temperature")
         self.temperature_radio.setStyleSheet("font-size: 11px;")
         self.temperature_radio.toggled.connect(self.update_display_mode)
+        self.display_mode = QButtonGroup()
         self.display_mode.addButton(self.temperature_radio, 1)
         layout.insertWidget(1, self.temperature_radio)
 
