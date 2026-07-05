@@ -538,10 +538,23 @@ class GenerationOrchestrator(QObject):
         Funktionsweise: Kontinuierliche Dependency-Queue-Resolution mit Threading-Protection
         Aufgabe: Startet alle verfügbaren Requests aus Queue, respektiert Dependencies und Limits
         """
+        first_run = not getattr(self, "_first_resolution_logged", False)
+        if first_run:
+            self._first_resolution_logged = True
+            self.logger.info("Queue resolution: step 1 (get_completed_generators)")
+
+        completed = self.get_completed_generators()
+
+        if first_run:
+            self.logger.info("Queue resolution: step 2 (get_available_requests)")
+
         available_requests = self.dependency_queue.get_available_requests(
-            completed_generators=self.get_completed_generators(),
+            completed_generators=completed,
             active_limit=3  # Max 3 parallele Generationen
         )
+
+        if first_run:
+            self.logger.info("Queue resolution: step 3 (request loop)")
 
         for request in available_requests:
             try:
@@ -564,8 +577,14 @@ class GenerationOrchestrator(QObject):
                 self.state_tracker.set_request_failed(request, str(e))
                 self.processing_requests.discard(request)
 
+        if first_run:
+            self.logger.info("Queue resolution: step 4 (emit_queue_status_update)")
+
         # Queue-Status-Update emittieren
         self.emit_queue_status_update()
+
+        if first_run:
+            self.logger.info("Queue resolution: first tick completed")
 
     def check_generation_timeouts(self):
         """
@@ -619,30 +638,18 @@ class GenerationOrchestrator(QObject):
 
     def get_completed_generators(self) -> Dict[str, Set[str]]:
         """
-        Funktionsweise: Sammelt alle abgeschlossenen Generatoren pro LOD-Level mit DataManager-Integration
+        Funktionsweise: Sammelt alle abgeschlossenen Generatoren pro LOD-Level
+        Aufgabe: Einheitlicher Status-Check über lod_completion_status für alle Generatoren
         Return: Dict[generator_type, Set[completed_lod_levels]]
         """
         completed = {}
         for generator_type in GeneratorType:
             completed[generator_type.value] = set()
 
-            # DataManager-Integration für verfügbare LOD-Levels
-            if generator_type == GeneratorType.TERRAIN:
-                # Terrain-spezifische LOD-Prüfung über DataManager
-                if self.data_lod_manager.has_terrain_lod("LOD64"):
-                    completed[generator_type.value].add("LOD64")
-                if self.data_lod_manager.has_terrain_lod("LOD128"):
-                    completed[generator_type.value].add("LOD128")
-                if self.data_lod_manager.has_terrain_lod("LOD256"):
-                    completed[generator_type.value].add("LOD256")
-                if self.data_lod_manager.has_terrain_lod("FINAL"):
-                    completed[generator_type.value].add("FINAL")
-            else:
-                # Andere Generatoren: Standard-Status-Check
-                status = self.lod_completion_status.get(generator_type.value, {})
-                for lod_level, is_completed in status.items():
-                    if is_completed:
-                        completed[generator_type.value].add(lod_level)
+            status = self.lod_completion_status.get(generator_type.value, {})
+            for lod_level, is_completed in status.items():
+                if is_completed:
+                    completed[generator_type.value].add(lod_level)
 
         return completed
 

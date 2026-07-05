@@ -840,6 +840,10 @@ class GeneratorQueue(QObject):
         """
         Verarbeitet Queue und startet neue Tasks
         """
+        if not getattr(self, "_first_tick_logged", False):
+            self._first_tick_logged = True
+            self.logger.info("GeneratorQueue processing timer: first tick")
+
         with self._queue_lock:
             try:
                 # Entferne abgeschlossene Tasks aus aktiver Liste

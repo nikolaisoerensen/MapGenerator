@@ -233,6 +233,20 @@ def main():
         map_generator_app.logger.info("Starting MapGenerator application")
         map_generator_app.show_main_menu()
 
+        # # Heartbeat Counter for Debugging
+        # heartbeat = QTimer()
+        # heartbeat_state = {"count": 0}
+
+        # def _heartbeat_tick():
+        #     heartbeat_state["count"] += 1
+        #     logging.getLogger("heartbeat").info(
+        #         f"Heartbeat {heartbeat_state['count']} ({heartbeat_state['count'] * 250} ms)")
+        #     if heartbeat_state["count"] >= 40:
+        #         heartbeat.stop()
+        #
+        # heartbeat.timeout.connect(_heartbeat_tick)
+        # heartbeat.start(250)
+
         # Enter event loop
         return app.exec_()
 

@@ -242,27 +242,37 @@ class BaseMapTab(QWidget):
         return DisplayWrapper(label)
 
     def _create_control_panel(self):
-        """Erstellt scrollbares Control Panel"""
-        control_layout = QVBoxLayout()
-        control_layout.setContentsMargins(5, 5, 5, 5)
+        """
+        Erstellt scrollbares Control Panel.
+        ScrollArea, äußeres Layout und Panel-Inhalts-Layout werden als Attribute
+        gehalten: die Ownership-Kette bleibt damit unabhängig vom
+        Garbage-Collector-Timing stabil, und Sub-Classes erhalten mit
+        control_panel_content_layout einen direkten Zugriff auf das
+        Inhalts-Layout, der nicht vom Qt-Layout-Lookup abhängt.
+        """
+        self.control_panel_layout = QVBoxLayout()
+        self.control_panel_layout.setContentsMargins(5, 5, 5, 5)
 
         # Scrollable Area für Parameter
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.control_scroll_area = QScrollArea()
+        self.control_scroll_area.setWidgetResizable(True)
+        self.control_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.control_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         # Control Panel Content
         self.control_panel = QWidget()
-        panel_layout = QVBoxLayout()
-        panel_layout.setContentsMargins(5, 5, 5, 5)
-        panel_layout.setSpacing(10)
-        self.control_panel.setLayout(panel_layout)
+        self.control_panel_content_layout = QVBoxLayout()
+        self.control_panel_content_layout.setContentsMargins(5, 5, 5, 5)
+        self.control_panel_content_layout.setSpacing(10)
+        self.control_panel.setLayout(self.control_panel_content_layout)
 
-        scroll_area.setWidget(self.control_panel)
-        control_layout.addWidget(scroll_area)
+        self.control_scroll_area.setWidget(self.control_panel)
+        self.control_panel_layout.addWidget(self.control_scroll_area)
 
-        self.control_widget.setLayout(control_layout)
+        if self.control_widget.layout() is None:
+            self.control_widget.setLayout(self.control_panel_layout)
+        else:
+            self.control_widget.layout().addLayout(self.control_panel_layout)
 
     def _create_navigation_panel(self):
         """Erstellt Navigation Panel (nicht scrollbar)"""
@@ -278,10 +288,7 @@ class BaseMapTab(QWidget):
         try:
             self.status_display = StatusIndicator("System Status")
             self.status_display.set_success("Ready")
-
-            if self.control_panel and self.control_panel.layout():
-                self.control_panel.layout().addWidget(self.status_display)
-
+            self.control_panel_content_layout.addWidget(self.status_display)
         except Exception as e:
             self.logger.error(f"Status display creation failed: {e}")
 

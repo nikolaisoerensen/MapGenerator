@@ -40,6 +40,7 @@ class TerrainTab(BaseMapTab):
         self.parameter_sliders = {}
         self.generation_button = None
         self.progress_bar = None
+        self.system_status = None
         self.statistics_display = None
         self.display_mode_group = None
         self.current_display_mode = "height"
@@ -71,10 +72,20 @@ class TerrainTab(BaseMapTab):
         """
         Erstellt alle Parameter-Controls für Terrain-Generation.
         Implementiert Required-Method von BaseMapTab.
+        Stellt bei abgetrenntem Panel-Layout ein neues Layout wieder her,
+        damit die Parameter-Erstellung nie leer abbricht.
         """
-        if not self.control_panel or not self.control_panel.layout():
-            self.logger.error("Control panel not available for parameter creation")
+        if not self.control_panel:
+            self.logger.error("Parameter creation skipped: control_panel is None")
             return
+
+        if self.control_panel.layout() is None:
+            repaired_layout = QVBoxLayout()
+            repaired_layout.setContentsMargins(5, 5, 5, 5)
+            repaired_layout.setSpacing(10)
+            self.control_panel.setLayout(repaired_layout)
+            self.control_panel_content_layout = repaired_layout
+            self.logger.info("Control panel layout was detached - reinstalled")
 
         try:
             # Terrain Parameters GroupBox
