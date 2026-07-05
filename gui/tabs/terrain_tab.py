@@ -35,16 +35,8 @@ class TerrainTab(BaseMapTab):
         self.generator_type = "terrain"
         self.required_dependencies = []  # Terrain hat keine Dependencies
 
-        # Manager-Integration
-        super().__init__(
-            data_lod_manager=data_lod_manager,
-            parameter_manager=parameter_manager,
-            navigation_manager=navigation_manager,
-            shader_manager=shader_manager,
-            generation_orchestrator=generation_orchestrator
-        )
-
-        # Terrain-spezifische Attribute
+        # Terrain-spezifische Attribute (vor super(), da create_parameter_controls
+        # während BaseMapTab.setup_ui() darauf zugreift und sie befüllt)
         self.parameter_sliders = {}
         self.generation_button = None
         self.progress_bar = None
@@ -63,6 +55,16 @@ class TerrainTab(BaseMapTab):
         self.max_lod = 6
 
         self.logger = logging.getLogger("TerrainTab")
+
+        # Manager-Integration
+        super().__init__(
+            data_lod_manager=data_lod_manager,
+            parameter_manager=parameter_manager,
+            navigation_manager=navigation_manager,
+            shader_manager=shader_manager,
+            generation_orchestrator=generation_orchestrator
+        )
+
         self.logger.info("TerrainTab initialized")
 
     def create_parameter_controls(self):

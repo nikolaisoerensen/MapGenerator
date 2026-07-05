@@ -150,10 +150,6 @@ class WaterTab(BaseMapTab):
         self.shader_controls = ShaderPerformancePanel(self.shader_manager)
         self.control_panel.layout().addWidget(self.shader_controls)
 
-        # Dependencies und Navigation
-        #self.setup_input_status() #an AI: bitte so wie in anderen Tabs anpassen, hier noch nicht vorhanden
-        self.setup_navigation_panel()
-
     def create_water_parameter_panel(self) -> QGroupBox:
         """
         Funktionsweise: Erstellt Parameter-Panel mit allen Water-Parametern
@@ -294,12 +290,11 @@ class WaterTab(BaseMapTab):
         self.required_dependencies = VALIDATION_RULES.DEPENDENCIES["water"]
 
         # Dependency Status Widget mit Details
-        #self.dependency_status = MultiDependencyStatusWidget(self.required_dependencies)
+        self.dependency_status = StatusIndicator("Water Dependencies")
         self.control_panel.layout().addWidget(self.dependency_status)
 
         # Data Manager Signals
         self.data_lod_manager.data_updated.connect(self.on_data_updated)
-        self.data_lod_manager.dependency_changed.connect(self.on_dependency_changed)
 
     def setup_shader_integration(self):
         """
@@ -311,7 +306,7 @@ class WaterTab(BaseMapTab):
 
         if self.shader_manager:
             try:
-                self.gpu_available = self.shader_manager.check_gpu_support()
+                self.gpu_available = self.shader_manager.gpu_available
             except Exception as e:
                 self.logger.warning(f"GPU support check failed: {e}")
                 self.gpu_available = False
@@ -356,29 +351,24 @@ class WaterTab(BaseMapTab):
         if data_key in self.required_dependencies:
             self.check_input_dependencies()
 
-    @pyqtSlot(str, list)
-    def on_dependency_changed(self, generator_type: str, missing: list):
-        """Slot für Dependency-Änderungen"""
-        if generator_type == "water":
-            self.dependency_status.update_missing_dependencies(missing)
 
     def check_input_dependencies(self):
         """
-        Funktionsweise: Dependency-Check - REPARIERT manual_generate_button None-Check
-        Aufgabe: Robuster Button-Access mit None-Protection
+        Funktionsweise: Prüft alle Required Dependencies für Water-System
+        Aufgabe: Aktiviert/Deaktiviert Generation basierend auf verfügbaren Inputs
         """
         is_complete, missing = self.data_lod_manager.check_dependencies("water", self.required_dependencies)
 
-        # Dependency Status Update
         if hasattr(self, 'dependency_status'):
-            self.dependency_status.update_dependency_status(is_complete, missing)
+            if is_complete:
+                self.dependency_status.set_success("All dependencies available")
+            else:
+                self.dependency_status.set_warning(f"Missing: {', '.join(missing)}")
 
-        # REPARIERT: Sichere Button-Aktivierung mit None-Check
         if hasattr(self, 'auto_simulation_panel') and self.auto_simulation_panel:
             self.auto_simulation_panel.set_manual_button_enabled(is_complete)
         elif hasattr(self, 'manual_generate_button') and self.manual_generate_button:
             self.manual_generate_button.setEnabled(is_complete)
-        # Kein Crash wenn Button nicht existiert
 
         return is_complete
 
@@ -628,7 +618,7 @@ class ShaderPerformancePanel(QGroupBox):
 
         # GPU Status
         self.gpu_status = StatusIndicator("GPU Status")
-        if self.shader_manager and self.shader_manager.check_gpu_support():
+        if self.shader_manager and self.shader_manager.gpu_available:
             self.gpu_status.set_success("GPU Available")
         else:
             self.gpu_status.set_warning("Using CPU Fallback")

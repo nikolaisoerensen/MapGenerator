@@ -18,8 +18,12 @@ Architecture:
 - Professional error handling and resource management
 """
 
-import sys # Für Kommandozeilen Argumente und Python Suchpfade
-import logging # Für Logging statt print("..")
+import sys
+import logging
+import faulthandler
+
+faulthandler.enable()
+
 from pathlib import Path # moderne Art mit Suchpfaden zu arbeiten
 
 from PyQt5.QtWidgets import QApplication

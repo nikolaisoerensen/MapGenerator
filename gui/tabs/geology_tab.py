@@ -56,10 +56,6 @@ class GeologyTab(BaseMapTab):
         self.dependency_validation_enabled = True
         self.data_validation_enabled = True
 
-
-        # Setup standardisierte Orchestrator-Integration
-        self.setup_standard_orchestrator_handlers("geology")
-
         # Setup UI mit standardisierten Patterns
         self.create_geology_specific_widgets()
         self.create_enhanced_geology_ui()
@@ -69,6 +65,77 @@ class GeologyTab(BaseMapTab):
 
         # Initial dependency check
         self.check_input_dependencies()
+
+        # SIGNAL-HANDLER OVERRIDES (erweitern BaseMapTab-Standard-Handler)
+
+        @pyqtSlot(str, int)
+        def on_generation_started(self, generator_type: str, lod_level: int):
+            """
+            Funktionsweise: Überschreibt BaseMapTab Start-Handler für Geology-Progress-Feedback
+            Aufgabe: Initialisiert ProgressBar mit LOD-Information bei Generation-Start
+            """
+            if generator_type != self.generator_type:
+                return
+
+            if hasattr(self, 'generation_progress'):
+                self.generation_progress.setValue(0)
+                self.generation_progress.setFormat(f"Generating Geology LOD {lod_level}...")
+
+            super().on_generation_started(generator_type)
+
+        @pyqtSlot(int, str)
+        def on_generation_progress(self, progress: int, message: str):
+            """
+            Funktionsweise: Überschreibt BaseMapTab Progress-Handler für Geology-ProgressBar
+            Aufgabe: Aktualisiert ProgressBar-Wert und Phasen-Text während der Generierung
+            """
+            if not self.generation_active:
+                return
+
+            if hasattr(self, 'generation_progress'):
+                self.generation_progress.setValue(progress)
+                self.generation_progress.setFormat(f"{message} ({progress}%)")
+
+            super().on_generation_progress(progress, message)
+
+        @pyqtSlot(str, dict)
+        def on_generation_completed(self, result_id: str, result_data: dict):
+            """
+            Funktionsweise: Überschreibt BaseMapTab Completion-Handler für Geology-Abschluss
+            Aufgabe: Schließt ProgressBar ab, aktualisiert Rock-Statistiken und validiert rock_map
+            """
+            generator_type = result_data.get("generator_type", "")
+            success = result_data.get("success", False)
+            lod_level = result_data.get("lod_level", 0)
+
+            if generator_type != self.generator_type:
+                return
+
+            if hasattr(self, 'generation_progress'):
+                if success:
+                    self.generation_progress.setValue(100)
+                    self.generation_progress.setFormat(f"Geology LOD {lod_level} Complete")
+                else:
+                    self.generation_progress.setFormat(f"Geology LOD {lod_level} Failed")
+
+            if success:
+                try:
+                    rock_map = self.data_lod_manager.get_geology_data("rock_map")
+                    hardness_map = self.data_lod_manager.get_geology_data("hardness_map")
+
+                    if rock_map is not None and hardness_map is not None:
+                        self.rock_distribution_widget.update_statistics(rock_map, hardness_map)
+
+                        if self.data_validation_enabled:
+                            if self._validate_rock_map(rock_map):
+                                self.logger.info("Post-generation rock_map validation: PASSED")
+                            else:
+                                self.logger.warning("Post-generation rock_map validation: FAILED")
+
+                except Exception as e:
+                    self.logger.debug(f"Post-generation updates failed: {e}")
+
+            super().on_generation_completed(result_id, result_data)
 
     def create_parameter_controls(self):
         """

@@ -270,6 +270,18 @@ class BiomeTab(BaseMapTab):
         layout.addWidget(softness_group)
 
         panel.setLayout(layout)
+
+        # Generation Control
+        generation_group = QGroupBox("Generation Control")
+        generation_layout = QVBoxLayout()
+
+        self.manual_generate_button = BaseButton("Berechnen", "primary")
+        self.manual_generate_button.clicked.connect(self.generate)
+        generation_layout.addWidget(self.manual_generate_button)
+
+        generation_group.setLayout(generation_layout)
+        layout.addWidget(generation_group)
+
         return panel
 
     def create_biome_visualization_controls(self) -> QGroupBox:

@@ -83,7 +83,6 @@ class WeatherTab(BaseMapTab):
         self.setup_weather_ui()
         self.setup_dependency_checking()
         self.setup_shader_integration()
-        self.setup_orchestrator_integration()
 
         # Initial Load
         self.load_default_parameters()
@@ -282,7 +281,7 @@ class WeatherTab(BaseMapTab):
 
         # GPU Verfügbarkeit prüfen
         if self.shader_manager:
-            self.gpu_available = self.shader_manager.check_gpu_support()
+            self.gpu_available = self.shader_manager.gpu_available
         else:
             self.gpu_available = False
 
@@ -362,9 +361,12 @@ class WeatherTab(BaseMapTab):
         Funktionsweise: Prüft ob alle Required Dependencies verfügbar sind
         Aufgabe: Aktiviert/Deaktiviert Generation Button und zeigt Status
         """
-        is_complete, missing = self.data_lod_manager .check_dependencies("weather", self.required_dependencies)
+        is_complete, missing = self.data_lod_manager.check_dependencies("weather", self.required_dependencies)
 
-        self.dependency_status.update_dependency_status(is_complete, missing)
+        if is_complete:
+            self.dependency_status.set_success("All dependencies available")
+        else:
+            self.dependency_status.set_warning(f"Missing: {', '.join(missing)}")
 
         # FIX: Nutze Public API für Button-Control statt direkten Zugriff
         if hasattr(self, 'auto_simulation_panel') and self.auto_simulation_panel:
@@ -754,7 +756,7 @@ class WeatherShaderPerformanceWidget(QGroupBox):
         layout = QVBoxLayout()
 
         self.gpu_status = StatusIndicator("GPU Status")
-        if self.shader_manager and self.shader_manager.check_gpu_support():  # ← Null-Check hinzufügen
+        if self.shader_manager and self.shader_manager.gpu_available:
             self.gpu_status.set_success("GPU Available")
         else:
             self.gpu_status.set_warning("Using CPU Fallback")
@@ -856,7 +858,7 @@ class WeatherShaderPerformanceWidget(QGroupBox):
         Funktionsweise: Aktualisiert Shader-Loading Status
         Wird nach erfolgreicher Generation aufgerufen
         """
-        if self.shader_manager.check_gpu_support():
+        if self.shader_manager.gpu_available:
             weather_shaders_count = self.shader_manager.get_loaded_weather_shaders_count()
             if weather_shaders_count >= 8:
                 self.shader_loading_status.set_success(f"All {weather_shaders_count}/8 shaders loaded")
