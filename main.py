@@ -20,8 +20,22 @@ Architecture:
 
 import sys
 import logging
-import faulthandler
 
+
+def _log_unhandled_exception(exc_type, exc_value, exc_traceback):
+    """
+    Funktionsweise: Globaler Handler für ungefangene Exceptions
+    Aufgabe: Loggt vollständigen Traceback bevor PyQt den Prozess beendet,
+             damit Slot-Exceptions nie mehr stumm als nativer Crash enden
+    """
+    logging.getLogger("unhandled").critical(
+        "Unhandled exception",
+        exc_info=(exc_type, exc_value, exc_traceback)
+    )
+    
+sys.excepthook = _log_unhandled_exception
+
+import faulthandler
 faulthandler.enable()
 
 from pathlib import Path # moderne Art mit Suchpfaden zu arbeiten

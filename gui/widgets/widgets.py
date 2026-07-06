@@ -365,6 +365,18 @@ class StatusIndicator(QWidget):
         self.status_text.setText(f"{self.label_text}: Unknown")
         self.setToolTip("Status unknown")
 
+    def set_pending(self, message: str = ""):
+        """Setzt Pending-Status für laufende Vorgänge"""
+        self.current_status = "pending"
+        self.status_icon.setText("…")
+        self.status_icon.setStyleSheet("color: #3498db; font-weight: bold;")
+
+        if message:
+            self.status_text.setText(f"{self.label_text}: {message}")
+            self.setToolTip(message)
+        else:
+            self.status_text.setText(f"{self.label_text}: Pending")
+
 
 class ProgressBar(QWidget):
     """
