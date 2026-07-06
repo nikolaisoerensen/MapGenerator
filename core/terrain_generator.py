@@ -1208,7 +1208,7 @@ class BaseTerrainGenerator:
         try:
             from gui.config.value_default import TERRAIN
             return {
-                'map_size': TERRAIN.SIZE["default"],
+                'map_size': TERRAIN.MAPSIZE["default"],
                 'amplitude': TERRAIN.AMPLITUDE["default"],
                 'octaves': TERRAIN.OCTAVES["default"],
                 'frequency': TERRAIN.FREQUENCY["default"],

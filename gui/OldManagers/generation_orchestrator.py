@@ -225,7 +225,7 @@ class GenerationStateTracker:
         """Setzt Thread-Status auf 'Queued'"""
         state = self.thread_states[request.generator_type.value]
         state.status = "Queued"
-        state.current_lod = request.target_lod.value
+        state.current_lod = request.target_lod
         state.progress = 0
         state.start_time = request.timestamp
 
@@ -233,7 +233,7 @@ class GenerationStateTracker:
         """Setzt Thread-Status auf 'Generating'"""
         state = self.thread_states[request.generator_type.value]
         state.status = "Generating"
-        state.current_lod = request.target_lod.value
+        state.current_lod = request.target_lod
         state.progress = 0
 
     def set_request_completed(self, generator_type: str, lod_level: str):
@@ -682,7 +682,7 @@ class GenerationOrchestrator(QObject):
         self.active_request_mapping.pop(request.request_id, None)
 
         # Thread stoppen falls vorhanden
-        thread_key = f"{request.generator_type.value}_{request.target_lod.value}"
+        thread_key = f"{request.generator_type.value}_{request.target_lod}"
         with QMutexLocker(self.thread_mutex):
             if thread_key in self.generation_threads:
                 thread = self.generation_threads[thread_key]
@@ -791,7 +791,7 @@ class GenerationOrchestrator(QObject):
 
         # Thread starten
         with QMutexLocker(self.thread_mutex):
-            thread_key = f"{generator_type.value}_{current_lod.value}"
+            thread_key = f"{generator_type.value}_{current_lod}"
             self.generation_threads[thread_key] = thread
 
         thread.start()
@@ -929,7 +929,7 @@ class GenerationOrchestrator(QObject):
         # result_data für Tab-Kompatibilität zusammenstellen
         result_data = {
             "generator_type": generator_type.value,
-            "lod_level": original_request.target_lod.value,
+            "lod_level": original_request.target_lod,
             "success": True,
             "data": generator_data,
             "source_tab": original_request.source_tab,
@@ -1207,7 +1207,8 @@ class GenerationThread(QThread):
     Aufgabe: Background-Generation ohne UI-Blocking
     """
 
-    generation_completed = pyqtSignal(str, dict)  # (request_id, result_data)
+    generation_completed = pyqtSignal(str, str, int, bool,
+                                      dict)  # (request_id, generator_type, lod_level, success, result_data)
     generation_progress = pyqtSignal(int, str)  # (progress, message) - homogen für alle Tabs
 
     def __init__(self, generator_instance, generator_type: GeneratorType, lod_level: int,
@@ -1233,7 +1234,7 @@ class GenerationThread(QThread):
             if hasattr(self.generator_instance, 'generate'):
                 # BaseGenerator-Interface
                 result = self.generator_instance.generate(
-                    lod=self.lod_level.value,
+                    lod=self.lod_level,
                     dependencies={},  # Dependencies werden über DataManager automatisch geholt
                     parameters=self.parameters,
                     data_lod_manager=self.data_lod_manager,
@@ -1242,7 +1243,7 @@ class GenerationThread(QThread):
             else:
                 # Legacy-Interface fallback
                 result = self.generator_instance.generate_complete(
-                    lod=self.lod_level.value,
+                    lod=self.lod_level,
                     progress=progress_callback,
                     **self.parameters
                 )
@@ -1253,7 +1254,7 @@ class GenerationThread(QThread):
             # result_data für homogene Tab-Integration
             result_data = {
                 "generator_type": self.generator_type.value,
-                "lod_level": self.lod_level.value,
+                "lod_level": self.lod_level,
                 "parameters_used": self.parameters,
                 "timestamp": time.time(),
                 "success": success,
@@ -1263,7 +1264,7 @@ class GenerationThread(QThread):
             self.generation_completed.emit(
                 self.request_id,
                 self.generator_type.value,
-                self.lod_level.value,
+                self.lod_level,
                 success,
                 result_data
             )
@@ -1273,7 +1274,7 @@ class GenerationThread(QThread):
             self.generation_completed.emit(
                 self.request_id,
                 self.generator_type.value,
-                self.lod_level.value,
+                self.lod_level,
                 False,
                 {"error": str(e)}
             )
