@@ -1,5 +1,5 @@
 """
-Path: gui/managers/shader_manager.py
+Path: managers/shader_manager.py
 
 Funktionsweise: GPU-Compute Management für Performance-kritische Operationen
 - OpenGL Compute Shader für Parallel-Processing
@@ -17,26 +17,41 @@ Kommunikationskanäle:
 - Input: Large numpy arrays für GPU-Processing
 - Output: Processed arrays zurück an Data-Manager
 """
+import functools
+import logging
 
 import numpy as np
 import OpenGL.GL as gl
 from PyQt5.QtCore import QObject, pyqtSignal
 
+def _protective_handler(*args, **kwargs):
+    """
+    Funktionsweise: Schützender Dekorator für Shader-Methoden mit GPU-Zugriff
+    Aufgabe: Fängt jede Exception in der dekorierten Methode ab, loggt sie als WARNING und
+             gibt None zurück, damit ein GPU-Fehler nie die aufrufende Verarbeitung abbricht
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*call_args, **call_kwargs):
+            try:
+                return func(*call_args, **call_kwargs)
+            except Exception as e:
+                logging.getLogger(func.__module__).warning(
+                    f"Unhandled exception in {func.__name__}: {e}")
+                return None
+        return wrapper
+    return decorator
+
+
 def get_shader_manager_error_decorators():
     """
-    Funktionsweise: Lazy Loading von Shader Manager Error Decorators
-    Aufgabe: Lädt GPU-Shader und Memory-Critical Decorators
-    Return: Tuple von Decorator-Funktionen
+    Funktionsweise: Liefert die schützenden Dekoratoren für die Shader-Methoden
+    Aufgabe: gpu_shader_handler und initialization_handler kapseln GPU-nahe Methoden so, dass
+             ein Fehler geloggt wird und None zurückkommt, statt die Verarbeitung abzubrechen
+    Return: Tuple von zwei Decorator-Fabriken
     """
-    try:
-        from gui.error_handler import gpu_shader_handler, initialization_handler
-        return gpu_shader_handler, initialization_handler
-    except ImportError:
-        def noop_decorator(*args, **kwargs):
-            def decorator(func):
-                return func
-            return decorator
-        return noop_decorator, noop_decorator
+    return _protective_handler, _protective_handler
+
 
 gpu_shader_handler, initialization_handler = get_shader_manager_error_decorators()
 
@@ -57,13 +72,12 @@ class ShaderManager(QObject):
         Aufgabe: Erkennt OpenGL-Support und lädt Standard-Shader
         """
         super().__init__()
+        self.logger = logging.getLogger(__name__)
         self.gpu_available = False
         self.context = None
         self.shaders = {}
-
-        self._check_gpu_support()
-        if self.gpu_available:
-            self._load_core_shaders()
+        self.textures = {}
+        self._gpu_checked = False
 
     def _compile_shader(self, name, shader_code):
         """Direkte OpenGL-Shader-Kompilierung"""
@@ -150,9 +164,24 @@ class ShaderManager(QObject):
 
         for name, shader_code in core_shaders.items():
             if self._compile_shader(name, shader_code):
-                print(f"Shader '{name}' loaded successfully")
+                self.logger.info(f"Shader '{name}' loaded successfully")
             else:
-                print(f"Failed to load shader '{name}'")
+                self.logger.warning(f"Failed to load shader '{name}'")
+
+    def _ensure_gpu_checked(self):
+        """
+        Funktionsweise: Führt GPU-Prüfung und Laden der Kern-Shader genau einmal aus
+        Aufgabe: Verzögert die GPU-Erkennung bis zum ersten Verarbeitungsaufruf, damit sie erst
+                 läuft, wenn ein OpenGL-Kontext existiert (im Konstruktor gibt es noch keinen).
+                 Wird von jeder process_*-Methode aufgerufen, prüft aber nur beim ersten Mal.
+        """
+        if self._gpu_checked:
+            return
+        self._gpu_checked = True
+
+        self._check_gpu_support()
+        if self.gpu_available:
+            self._load_core_shaders()
 
     def process_noise_generation(self, size, octaves, frequency, persistence, lacunarity, seed):
         """
@@ -161,6 +190,7 @@ class ShaderManager(QObject):
         Parameter: size, octaves, frequency, persistence, lacunarity, seed - Noise-Parameter
         Returns: numpy array mit generiertem Noise oder None bei Fehler
         """
+        self._ensure_gpu_checked()
         if not self.gpu_available:
             return self._cpu_fallback_noise(size, octaves, frequency, persistence, lacunarity, seed)
 
@@ -206,6 +236,7 @@ class ShaderManager(QObject):
         Parameter: heightmap, water_map, velocity_map, sediment_map, dt - Erosions-Daten
         Returns: Tuple (new_heightmap, new_water_map, new_velocity_map, new_sediment_map)
         """
+        self._ensure_gpu_checked()
         if not self.gpu_available:
             return self._cpu_fallback_erosion(heightmap, water_map, velocity_map, sediment_map, dt)
 
@@ -257,6 +288,7 @@ class ShaderManager(QObject):
         Parameter: temperature_map, precipitation_map, elevation_map, moisture_map - Klima-Daten
         Returns: numpy array mit Biome-Indices oder None bei Fehler
         """
+        self._ensure_gpu_checked()
         if not self.gpu_available:
             return self._cpu_fallback_biome_blending(temperature_map, precipitation_map, elevation_map, moisture_map)
 
@@ -301,6 +333,10 @@ class ShaderManager(QObject):
                   shadowmap_size (int), max_distance (float), step_size (float), height_scale (float)
         Returns: numpy array mit Shadow-Map (64x64) oder None bei Fehler
         """
+        self._ensure_gpu_checked()
+        if not self.gpu_available:
+            return self._cpu_fallback_shadow_raycast(heightmap, sun_elevation, sun_azimuth, shadowmap_size)
+
         try:
             # Shader aktivieren
             program = self._use_shader("shadow_raycast")
@@ -336,10 +372,10 @@ class ShaderManager(QObject):
             return result
 
 
+
         except Exception as e:
-            print(f"GPU shadow processing failed: {e}")
-            return self._cpu_fallback_shadow_raycast(heightmap, sun_elevation, sun_azimuth,
-                                                     shadowmap_size)
+            self.logger.warning(f"GPU shadow processing failed: {e}")
+            return self._cpu_fallback_shadow_raycast(heightmap, sun_elevation, sun_azimuth, shadowmap_size)
 
     def _create_noise_shader(self):
         """
@@ -665,7 +701,7 @@ class ShaderManager(QObject):
         return result
 
     def _cpu_fallback_shadow_raycast(self, heightmap, sun_elevation, sun_azimuth,
-                                     shadowmap_size, max_distance, step_size, height_scale):
+                                     shadowmap_size, max_distance=100.0, step_size=1.0, height_scale=1.0):
         """
         Funktionsweise: CPU-Fallback für Shadow-Raycast-Berechnung
         Aufgabe: Software-Implementation der Shadow-Raycasts
@@ -757,15 +793,22 @@ class ShaderManager(QObject):
     def cleanup(self):
         """
         Funktionsweise: Räumt GPU-Ressourcen bei Anwendungs-Beendigung auf
-        Aufgabe: Freigebung aller GPU-Texturen und Shader-Programme
+        Aufgabe: Freigebung aller GPU-Texturen und Shader-Programme, robust auch ohne aktiven
+                 GPU-Kontext, damit das Beenden nie an einer GL-Operation scheitert
         """
         for shader in self.shaders.values():
             if shader:
-                shader.release()
+                try:
+                    shader.release()
+                except Exception as e:
+                    self.logger.warning(f"Shader-Release fehlgeschlagen: {e}")
 
         for texture_id in self.textures.values():
             if texture_id:
-                gl.glDeleteTextures(1, [texture_id])
+                try:
+                    gl.glDeleteTextures(1, [texture_id])
+                except Exception as e:
+                    self.logger.warning(f"Textur-Freigabe fehlgeschlagen: {e}")
 
         self.shaders.clear()
         self.textures.clear()

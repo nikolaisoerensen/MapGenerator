@@ -120,6 +120,7 @@ class BaseMapTab(QWidget):
 
         # Generation-System (vereinfacht)
         self.generation_active = False
+        self.auto_simulation_enabled = False
 
         # Setup-Sequenz
         self.setup_ui()
