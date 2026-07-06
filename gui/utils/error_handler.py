@@ -1,5 +1,5 @@
 """
-Path: gui/error_handler.py
+Path: gui/utils/error_handler.py
 
 Funktionsweise: Zentrale Error-Behandlung für alle Map-Generator Komponenten
 - Paralleles Error Handling zu PyCharm ohne Unterdrückung von Exceptions

@@ -703,16 +703,15 @@ class GradientBackgroundWidget(QWidget):
 class NavigationPanel(QGroupBox):
     """
     Funktionsweise: Navigation Panel für Tab-Wechsel und Workflow-Navigation
-    Aufgabe: Previous/Next Buttons, Tab-Jump, Workflow-Progress
+    Aufgabe: Previous/Next Buttons, Workflow-Progress
     Kommunikation: Signals für Navigation-Requests
     """
 
     navigation_requested = pyqtSignal(str)  # (target_tab)
 
-    def __init__(self, navigation_manager, show_tab_buttons=True, parent=None):
+    def __init__(self, navigation_manager, parent=None):
         super().__init__("Navigation", parent)
         self.navigation_manager = navigation_manager
-        self.show_tab_buttons = show_tab_buttons
         self.current_tab = None
         self.setup_ui()
 
@@ -732,26 +731,6 @@ class NavigationPanel(QGroupBox):
         nav_layout.addWidget(self.next_button)
 
         layout.addLayout(nav_layout)
-
-        # Tab-Jump Buttons (optional)
-        if self.show_tab_buttons:
-            jump_group = QGroupBox("Jump To")
-            jump_layout = QGridLayout()
-
-            self.tab_buttons = {}
-            tabs = ["terrain", "geology", "weather", "water", "biome", "settlement", "overview"]
-
-            for i, tab_name in enumerate(tabs):
-                button = BaseButton(tab_name.title(), "secondary")
-                button.clicked.connect(lambda checked, tab=tab_name: self.jump_to_tab(tab))
-                self.tab_buttons[tab_name] = button
-
-                row, col = divmod(i, 2)
-                jump_layout.addWidget(button, row, col)
-
-            jump_group.setLayout(jump_layout)
-            layout.addWidget(jump_group)
-
         self.setLayout(layout)
 
     def set_current_tab(self, tab_name: str):
@@ -761,7 +740,6 @@ class NavigationPanel(QGroupBox):
         """
         self.current_tab = tab_name
         self.update_navigation_buttons()
-        self.update_tab_buttons()
 
     def update_navigation_buttons(self):
         """Aktualisiert Previous/Next Button States"""
@@ -779,19 +757,6 @@ class NavigationPanel(QGroupBox):
 
             # Next Button
             self.next_button.setEnabled(current_index < len(tab_order) - 1)
-
-    def update_tab_buttons(self):
-        """Aktualisiert Tab-Jump Button States"""
-        if not self.show_tab_buttons:
-            return
-
-        for tab_name, button in self.tab_buttons.items():
-            if tab_name == self.current_tab:
-                button.button_type = "primary"
-                button.setup_styling()
-            else:
-                button.button_type = "secondary"
-                button.setup_styling()
 
     @pyqtSlot()
     def go_previous(self):
@@ -814,7 +779,3 @@ class NavigationPanel(QGroupBox):
             if current_index < len(tab_order) - 1:
                 target_tab = tab_order[current_index + 1]
                 self.navigation_requested.emit(target_tab)
-
-    def jump_to_tab(self, tab_name: str):
-        """Jump zu spezifischem Tab"""
-        self.navigation_requested.emit(tab_name)

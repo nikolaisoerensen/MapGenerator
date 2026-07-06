@@ -178,7 +178,7 @@ class ParameterManager(QObject):
 
         self.parameter_cache[tab_name][parameter_name] = value
 
-        self.change_history.append(ParameterChangeEvent(
+        self._append_history(ParameterChangeEvent(
             source_tab=tab_name,
             parameter_name=parameter_name,
             old_value=old_value,
@@ -283,6 +283,17 @@ class ParameterManager(QObject):
 
         return len(errors) == 0, errors
 
+    def _append_history(self, event: ParameterChangeEvent):
+        """
+        Funktionsweise: Hängt ein Parameter-Änderungs-Event an die History an
+        Aufgabe: Zentrale Stelle für das History-Anhängen inklusive Deckelung, damit die
+                 change_history nie unbegrenzt wächst - auch nicht über den set_parameter-Pfad
+        Parameter: event - das anzuhängende ParameterChangeEvent
+        """
+        self.change_history.append(event)
+        if len(self.change_history) > 1000:
+            self.change_history = self.change_history[-1000:]
+
     def _track_parameter_changes(self, tab_name: str, old_params: Dict[str, Any],
                                 new_params: Dict[str, Any]):
         """
@@ -300,12 +311,8 @@ class ParameterManager(QObject):
                     new_value=new_value
                 )
 
-                self.change_history.append(event)
+                self._append_history(event)
                 self.parameter_changed.emit(tab_name, param_name, old_value, new_value)
-
-        # History-Limit (max 1000 Events)
-        if len(self.change_history) > 1000:
-            self.change_history = self.change_history[-1000:]
 
     def _notify_parameter_change(self, source_tab: str, parameters: Dict[str, Any]):
         """

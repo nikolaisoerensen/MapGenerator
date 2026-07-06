@@ -2890,6 +2890,63 @@ class DataLODManager(QObject):
         """Gibt Generator-Registry zurück für externe Zugriffe"""
         return self.generator_registry
 
+    def _validate_lod_input(self, generator: str, data_key: str, data, lod_level) -> bool:
+        """
+        Funktionsweise: Prüft die Eingabe eines Generator-Setters an der Grenze zum Datenspeicher
+        Aufgabe: Stellt sicher, dass nur gültige Arrays mit gültigem LOD gespeichert werden.
+                 Bei Verstoß wird der Vorgang protokolliert und abgelehnt, ohne eine Exception
+                 zu werfen (kein Absturz in Qt-Slots oder Worker-Threads)
+        Parameter:
+            generator - Generator-Name für Logging ("terrain", "geology", ...)
+            data_key  - betroffener Data-Key
+            data      - zu speicherndes Array
+            lod_level - Ziel-LOD-Level
+        Return: True wenn gültig, sonst False
+        """
+        if not isinstance(lod_level, int) or lod_level < 1:
+            self.logger.warning(f"{generator} '{data_key}': ungültiges LOD-Level {lod_level}, wird nicht gespeichert")
+            return False
+        if not isinstance(data, np.ndarray):
+            self.logger.warning(
+                f"{generator} '{data_key}': kein numpy-Array (Typ {type(data).__name__}), wird nicht gespeichert")
+            return False
+        if data.size == 0:
+            self.logger.warning(f"{generator} '{data_key}': leeres Array, wird nicht gespeichert")
+            return False
+        return True
+
+    def _get_data_lod(self, generator: str, store: dict, data_key: str, lod_level):
+        """
+        Funktionsweise: Gemeinsame LOD-Auflösung für alle Generator-Getter
+        Aufgabe: Löst das Ziel-LOD auf und gibt die gespeicherten Daten zurück. Fehlt das
+                 gewünschte LOD, wird das beste verfügbare LOD darunter geliefert; ist gar nichts
+                 vorhanden, wird None mit DEBUG-Log zurückgegeben statt eines nie existierenden
+                 lod_0-Schlüssels
+        Parameter:
+            generator - Generator-Name für current_lods und Logging ("terrain", ...)
+            store     - zugehöriges Daten-Dict (self._terrain_data, self._geology_data, ...)
+            data_key  - gesuchter Data-Key
+            lod_level - gewünschtes LOD oder None für das höchste verfügbare
+        Return: Gespeicherte Daten oder None
+        """
+        if lod_level is None:
+            lod_level = self._current_lods.get(generator, 0)
+
+        if lod_level < 1:
+            self.logger.debug(f"{generator} '{data_key}': kein Daten-LOD verfügbar")
+            return None
+
+        for candidate in range(lod_level, 0, -1):
+            candidate_key = f"lod_{candidate}_{data_key}"
+            if candidate_key in store:
+                if candidate != lod_level:
+                    self.logger.debug(
+                        f"{generator} '{data_key}': LOD {lod_level} nicht vorhanden, nutze LOD {candidate}")
+                return store[candidate_key]
+
+        self.logger.debug(f"{generator} '{data_key}': kein Daten-LOD verfügbar")
+        return None
+
     # =============================================================================
     # TERRAIN DATA MANAGEMENT - LOD-ERWEITERT (BESTEHEND)
     # =============================================================================
@@ -2898,7 +2955,11 @@ class DataLODManager(QObject):
     def set_terrain_data_lod(self, data_key: str, data: np.ndarray, lod_level: int, parameters: Dict[str, Any]):
         """
         Speichert Terrain-Arrays mit LOD-Level und Resource-Tracking
+        Prüft Typ, Inhalt und LOD-Level am Eingang; ungültige Daten werden abgelehnt statt gespeichert
         """
+        if not self._validate_lod_input("terrain", data_key, data, lod_level):
+            return
+
         lod_key = f"lod_{lod_level}_{data_key}"
         self._terrain_data[lod_key] = data
         self._current_lods["terrain"] = max(self._current_lods["terrain"], lod_level)
@@ -2967,16 +3028,17 @@ class DataLODManager(QObject):
     def get_terrain_data_lod(self, data_key: str, lod_level: int = None):
         """
         Holt Terrain-Daten für spezifisches LOD-Level
+        Fehlt das gewünschte LOD, wird das beste verfügbare darunter geliefert; ist nichts vorhanden,
+        wird None mit DEBUG-Log zurückgegeben statt eines nie existierenden lod_0-Schlüssels
         """
-        if lod_level is None:
-            lod_level = self._current_lods.get("terrain", 0)
-
         if data_key == "complete":
-            lod_key = f"lod_{lod_level}_terrain_data_object"
-            return self._terrain_data.get(lod_key)
-        else:
-            lod_key = f"lod_{lod_level}_{data_key}"
-            return self._terrain_data.get(lod_key)
+            lod = lod_level if lod_level is not None else self._current_lods.get("terrain", 0)
+            if lod < 1:
+                self.logger.debug("terrain 'complete': kein Daten-LOD verfügbar")
+                return None
+            return self._terrain_data.get(f"lod_{lod}_terrain_data_object")
+
+        return self._get_data_lod("terrain", self._terrain_data, data_key, lod_level)
 
     def get_terrain_data(self, data_key: str = None):
         """Legacy-Methode: Gibt höchstes verfügbares LOD zurück"""
@@ -2992,6 +3054,21 @@ class DataLODManager(QObject):
         else:
             return self.get_terrain_data_lod(data_key)
 
+    def get_terrain_data_combined(self, data_key: str, lod_level: int = None):
+        """
+        Funktionsweise: Zugriff auf die kombinierte Heightmap (Terrain plus spätere Erosion/Sedimentation)
+        Aufgabe: Liefert die Datenbasis, die alle nachgelagerten Generatoren als heightmap_combined
+                 erwarten. Solange keine Erosions-/Sedimentations-Verrechnung existiert, entspricht
+                 die kombinierte Heightmap der reinen Terrain-Heightmap (Descriptor-Zustand vor dem
+                 Water-Lauf). Die Verrechnung inklusive LOD- und Shape-Ausrichtung wird in der
+                 Generator-Phase ergänzt.
+        Parameter:
+            data_key  - Terrain-Data-Key, üblicherweise "heightmap"
+            lod_level - gewünschtes LOD oder None für das höchste verfügbare
+        Return: Kombinierte (aktuell: Basis-) Terrain-Daten oder None
+        """
+        return self.get_terrain_data_lod(data_key, lod_level)
+
     # =============================================================================
     # GEOLOGY DATA MANAGEMENT - LOD-ERWEITERT (VEREINFACHT)
     # =============================================================================
@@ -2999,6 +3076,9 @@ class DataLODManager(QObject):
     @data_management_handler("geology_data")
     def set_geology_data_lod(self, data_key: str, data: np.ndarray, lod_level: int, parameters: Dict[str, Any]):
         """Speichert Geology-Generator Output mit LOD"""
+        if not self._validate_lod_input("geology", data_key, data, lod_level):
+            return
+
         lod_key = f"lod_{lod_level}_{data_key}"
         self._geology_data[lod_key] = data
         self._current_lods["geology"] = max(self._current_lods["geology"], lod_level)
@@ -3018,11 +3098,8 @@ class DataLODManager(QObject):
         self.logger.debug(f"Geology data '{data_key}' updated for LOD {lod_level}, shape: {data.shape}")
 
     def get_geology_data_lod(self, data_key: str, lod_level: int = None) -> Optional[np.ndarray]:
-        """Gibt Geology-Daten für LOD-Level zurück"""
-        if lod_level is None:
-            lod_level = self._current_lods.get("geology", 0)
-        lod_key = f"lod_{lod_level}_{data_key}"
-        return self._geology_data.get(lod_key)
+        """Gibt Geology-Daten für LOD-Level zurück (bestes verfügbares LOD als Fallback)"""
+        return self._get_data_lod("geology", self._geology_data, data_key, lod_level)
 
     def get_geology_data(self, data_key: str) -> Optional[np.ndarray]:
         """Legacy-Methode"""
@@ -3033,44 +3110,32 @@ class DataLODManager(QObject):
     # =============================================================================
 
     def get_weather_data_lod(self, data_key: str, lod_level: int = None) -> Optional[np.ndarray]:
-        """Gibt Weather-Daten für LOD-Level zurück"""
-        if lod_level is None:
-            lod_level = self._current_lods.get("weather", 0)
-        lod_key = f"lod_{lod_level}_{data_key}"
-        return self._weather_data.get(lod_key)
+        """Gibt Weather-Daten für LOD-Level zurück (bestes verfügbares LOD als Fallback)"""
+        return self._get_data_lod("weather", self._weather_data, data_key, lod_level)
 
     def get_weather_data(self, data_key: str) -> Optional[np.ndarray]:
         """Legacy-Methode"""
         return self.get_weather_data_lod(data_key)
 
     def get_water_data_lod(self, data_key: str, lod_level: int = None) -> Optional[np.ndarray]:
-        """Gibt Water-Daten für LOD-Level zurück"""
-        if lod_level is None:
-            lod_level = self._current_lods.get("water", 0)
-        lod_key = f"lod_{lod_level}_{data_key}"
-        return self._water_data.get(lod_key)
+        """Gibt Water-Daten für LOD-Level zurück (bestes verfügbares LOD als Fallback)"""
+        return self._get_data_lod("water", self._water_data, data_key, lod_level)
 
     def get_water_data(self, data_key: str) -> Optional[np.ndarray]:
         """Legacy-Methode"""
         return self.get_water_data_lod(data_key)
 
     def get_biome_data_lod(self, data_key: str, lod_level: int = None) -> Optional[np.ndarray]:
-        """Gibt Biome-Daten für LOD-Level zurück"""
-        if lod_level is None:
-            lod_level = self._current_lods.get("biome", 0)
-        lod_key = f"lod_{lod_level}_{data_key}"
-        return self._biome_data.get(lod_key)
+        """Gibt Biome-Daten für LOD-Level zurück (bestes verfügbares LOD als Fallback)"""
+        return self._get_data_lod("biome", self._biome_data, data_key, lod_level)
 
     def get_biome_data(self, data_key: str) -> Optional[np.ndarray]:
         """Legacy-Methode"""
         return self.get_biome_data_lod(data_key)
 
     def get_settlement_data_lod(self, data_key: str, lod_level: int = None) -> Optional[np.ndarray]:
-        """Gibt Settlement-Daten für LOD-Level zurück"""
-        if lod_level is None:
-            lod_level = self._current_lods.get("settlement", 0)
-        lod_key = f"lod_{lod_level}_{data_key}"
-        return self._settlement_data.get(lod_key)
+        """Gibt Settlement-Daten für LOD-Level zurück (bestes verfügbares LOD als Fallback)"""
+        return self._get_data_lod("settlement", self._settlement_data, data_key, lod_level)
 
     def get_settlement_data(self, data_key: str) -> Optional[np.ndarray]:
         """Legacy-Methode"""

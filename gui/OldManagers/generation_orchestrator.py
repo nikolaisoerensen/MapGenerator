@@ -59,6 +59,7 @@ from dataclasses import dataclass
 
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, QMutex, QMutexLocker, QTimer
 from typing import Dict, List, Set, Any
+import functools
 import logging
 import time
 from enum import Enum
@@ -79,6 +80,38 @@ def get_orchestrator_error_decorators():
                 return func
             return decorator
         return noop_decorator, noop_decorator, noop_decorator
+
+def _protective_handler(*args, **kwargs):
+    """
+    Funktionsweise: Schützender Dekorator für Orchestrator-Methoden, die als QTimer-Slot,
+                    Signal-Slot oder im Hintergrund laufen
+    Aufgabe: Fängt jede Exception in der dekorierten Methode ab, loggt sie als WARNING und
+             gibt None zurück, damit ein ungefangener Fehler nie den Qt-Event-Loop beendet (qFatal)
+    Hinweis: Die Handler aus gui.utils.error_handler reichen Exceptions nach dem Logging erneut
+             weiter (raise). Für QTimer- und Signal-Slots würde das einen nativen Absturz auslösen,
+             deshalb kapselt der Orchestrator seine Slots bewusst mit dieser schluckenden Variante.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*call_args, **call_kwargs):
+            try:
+                return func(*call_args, **call_kwargs)
+            except Exception as e:
+                logging.getLogger(func.__module__).warning(
+                    f"Unhandled exception in {func.__name__}: {e}")
+                return None
+        return wrapper
+    return decorator
+
+def get_orchestrator_error_decorators():
+    """
+    Funktionsweise: Liefert die schützenden Dekoratoren für alle Orchestrator-Slots
+    Aufgabe: threading_handler, memory_critical_handler und core_generation_handler kapseln
+             QTimer-, Signal- und Hintergrund-Methoden so, dass keine ungefangene Exception
+             den Qt-Event-Loop beenden kann
+    Return: Tuple von drei Decorator-Fabriken
+    """
+    return _protective_handler, _protective_handler, _protective_handler
 
 threading_handler, memory_critical_handler, core_generation_handler = get_orchestrator_error_decorators()
 
@@ -485,35 +518,61 @@ class GenerationOrchestrator(QObject):
         self.timeout_check_timer.start(30000)  # Alle 30 Sekunden
 
     @core_generation_handler("generation_request")
-    def request_generation(self, request) -> str:
+    def request_generation(self, generator_type, parameters=None, target_lod=None,
+                           source_tab=None, priority: int = 5) -> str:
         """
         Funktionsweise: Einheitlicher Entry-Point für alle Generator-Requests von allen Tabs
-        Parameter: request - OrchestratorRequest von OrchestratorRequestBuilder
-        Return: request_id für Request-Tracking
+        Aufgabe: Nimmt Generator-Anfragen als Keyword-Argumente entgegen und überführt sie in
+                 einen internen GenerationRequest für die Dependency-Queue
+        Parameter:
+            generator_type - Generator-Typ als String ("terrain", "geology", "weather", "water",
+                             "biome", "settlement") oder bereits als GeneratorType
+            parameters     - Parameter-Dict des anfragenden Tabs (None wird zu leerem Dict)
+            target_lod     - Ziel-LOD als int; None oder nicht-numerisch wird aus map_size
+                             berechnet, andernfalls LOD 1
+            source_tab     - Name des anfragenden Tabs für Tracking und Logging
+            priority       - Priorität in der Dependency-Queue
+        Return: request_id für Request-Tracking, oder None bei ungültigem Generator-Typ
         """
-        # Convert zu internem GenerationRequest falls nötig
-        if hasattr(request, 'generator_type') and hasattr(request, 'parameters'):
-            # OrchestratorRequest von orchestrator_manager
+        # Generator-Typ robust in Enum überführen (String oder bereits Enum)
+        if isinstance(generator_type, GeneratorType):
+            gen_type_enum = generator_type
+        else:
             try:
-                gen_type_enum = GeneratorType(request.generator_type)
-            except ValueError as e:
-                self.logger.error(f"Invalid generator_type: {e}")
+                gen_type_enum = GeneratorType(str(generator_type))
+            except ValueError:
+                self.logger.error(f"Invalid generator_type: {generator_type}")
                 return None
 
-            internal_request = GenerationRequest(
-                gen_type_enum,
-                request.parameters,
-                request.target_lod,
-                request.source_tab,
-                request.priority
-            )
-        else:
-            # Fallback für Legacy-Calls
-            self.logger.warning("Legacy request format detected")
-            return None
+        # Parameter absichern
+        if parameters is None:
+            parameters = {}
+
+        # Ziel-LOD robust bestimmen: int direkt, numerischer String, aus map_size, sonst Minimum
+        if not isinstance(target_lod, int):
+            try:
+                target_lod = int(target_lod)
+            except (TypeError, ValueError):
+                map_size = parameters.get("map_size")
+                try:
+                    from gui.OldManagers.data_lod_manager import calculate_max_lod_for_size
+                    target_lod = calculate_max_lod_for_size(int(map_size))
+                except (TypeError, ValueError):
+                    self.logger.info("target_lod nicht bestimmbar, nutze LOD 1")
+                    target_lod = 1
+
+        # Internen Request bauen
+        internal_request = GenerationRequest(
+            gen_type_enum,
+            parameters,
+            target_lod,
+            source_tab or gen_type_enum.value,
+            priority
+        )
 
         # Parameter-Impact-Analyse
-        affected_generators = self.calculate_parameter_impact(internal_request.generator_type, internal_request.parameters)
+        affected_generators = self.calculate_parameter_impact(internal_request.generator_type,
+                                                              internal_request.parameters)
 
         # Cache-Invalidation für betroffene Generatoren
         if affected_generators:
@@ -586,6 +645,7 @@ class GenerationOrchestrator(QObject):
         if first_run:
             self.logger.info("Queue resolution: first tick completed")
 
+    @threading_handler("timeout_check")
     def check_generation_timeouts(self):
         """
         Funktionsweise: Prüft und behandelt Timeout-Situationen für alle aktiven Generationen
