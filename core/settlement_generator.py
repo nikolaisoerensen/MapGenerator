@@ -250,22 +250,25 @@ class TerrainSuitabilityAnalyzer:
     Aufgabe: Erstellt Suitability-Map für optimale Settlement-Platzierung mit LOD-Optimierung
     """
 
-    def __init__(self, terrain_factor_villages=1.0, lod_level="LOD64"):
+    def __init__(self, terrain_factor_villages=1.0, map_size=64):
         """
         Funktionsweise: Initialisiert Suitability-Analyzer mit Terrain-Gewichtungsfaktor und LOD
         Aufgabe: Setup der Terrain-Analyse-Parameter mit LOD-Anpassung
-        Parameter: terrain_factor_villages (float), lod_level (str) - Gewichtung und LOD-Level
+        Parameter: terrain_factor_villages (float), map_size (int) - Gewichtung und tatsächliche Pixel-Größe
         """
         self.terrain_factor = terrain_factor_villages
-        self.lod_level = lod_level
+        self.map_size = map_size
 
-        # LOD-abhängige Optimierungen
-        self.lod_optimizations = {
-            "LOD64": {"analysis_detail": 0.5, "max_distance_check": 20},
-            "LOD128": {"analysis_detail": 0.7, "max_distance_check": 30},
-            "LOD256": {"analysis_detail": 1.0, "max_distance_check": 40},
-            "FINAL": {"analysis_detail": 1.0, "max_distance_check": 50}
-        }
+        # Größenabhängige Optimierungen (map_size ist die tatsächliche Pixel-Auflösung
+        # der übergebenen Arrays, nicht das alte string-basierte LOD-Label)
+        if map_size <= 64:
+            self.analysis_detail, self.max_distance_check = 0.5, 20
+        elif map_size <= 128:
+            self.analysis_detail, self.max_distance_check = 0.7, 30
+        elif map_size <= 256:
+            self.analysis_detail, self.max_distance_check = 1.0, 40
+        else:
+            self.analysis_detail, self.max_distance_check = 1.0, 50
 
     def analyze_slope_suitability(self, slopemap, progress_callback=None):
         """
@@ -281,7 +284,7 @@ class TerrainSuitabilityAnalyzer:
         slope_suitability = np.zeros((height, width), dtype=np.float32)
 
         # LOD-abhängige Detailgrad
-        detail_level = self.lod_optimizations[self.lod_level]["analysis_detail"]
+        detail_level = self.analysis_detail
 
         for y in range(height):
             for x in range(width):
@@ -322,7 +325,7 @@ class TerrainSuitabilityAnalyzer:
         water_suitability = np.zeros((height, width), dtype=np.float32)
 
         # LOD-abhängige Maximal-Distanz
-        max_distance = self.lod_optimizations[self.lod_level]["max_distance_check"]
+        max_distance = self.max_distance_check
 
         # Finde alle Wasser-Pixel
         water_pixels = np.where(water_map > 0)
@@ -441,22 +444,24 @@ class PathfindingSystem:
     Aufgabe: Erstellt realistische Straßenverbindungen mit Spline-Interpolation und LOD-Optimierung
     """
 
-    def __init__(self, road_slope_to_distance_ratio=1.0, lod_level="LOD64"):
+    def __init__(self, road_slope_to_distance_ratio=1.0, map_size=64):
         """
         Funktionsweise: Initialisiert Pathfinding-System mit Slope-Distance-Gewichtung und LOD
         Aufgabe: Setup der Pathfinding-Parameter mit LOD-Anpassung
-        Parameter: road_slope_to_distance_ratio (float), lod_level (str) - Gewichtung und LOD
+        Parameter: road_slope_to_distance_ratio (float), map_size (int) - Gewichtung und tatsächliche Pixel-Größe
         """
         self.slope_distance_ratio = road_slope_to_distance_ratio
-        self.lod_level = lod_level
+        self.map_size = map_size
 
-        # LOD-abhängige Pathfinding-Optimierungen
-        self.lod_settings = {
-            "LOD64": {"max_search_nodes": 500, "path_resolution": 2},
-            "LOD128": {"max_search_nodes": 1000, "path_resolution": 1},
-            "LOD256": {"max_search_nodes": 2000, "path_resolution": 1},
-            "FINAL": {"max_search_nodes": 5000, "path_resolution": 1}
-        }
+        # Größenabhängige Pathfinding-Optimierungen
+        if map_size <= 64:
+            self.max_search_nodes, self.path_resolution = 500, 2
+        elif map_size <= 128:
+            self.max_search_nodes, self.path_resolution = 1000, 1
+        elif map_size <= 256:
+            self.max_search_nodes, self.path_resolution = 2000, 1
+        else:
+            self.max_search_nodes, self.path_resolution = 5000, 1
 
     def calculate_movement_cost(self, slopemap, x, y):
         """
@@ -493,8 +498,8 @@ class PathfindingSystem:
         end_x, end_y = int(end_pos[0]), int(end_pos[1])
 
         # LOD-Einstellungen
-        max_nodes = self.lod_settings[self.lod_level]["max_search_nodes"]
-        path_resolution = self.lod_settings[self.lod_level]["path_resolution"]
+        max_nodes = self.max_search_nodes
+        path_resolution = self.path_resolution
 
         # A*-Datenstrukturen
         open_set = [(0, start_x, start_y)]
@@ -574,7 +579,7 @@ class PathfindingSystem:
             return path
 
         # LOD-abhängige Spline-Qualität
-        if self.lod_level == "LOD64":
+        if self.map_size <= 64:
             smoothing_factor = max(5, smoothing_factor)  # Weniger Punkte bei LOD64
 
         # Nur jeden N-ten Punkt für Spline verwenden
@@ -622,6 +627,14 @@ class SettlementGenerator:
         np.random.seed(map_seed)
 
         self.next_location_id = 0
+
+        # Progress-Callback (step_name, progress_percent, detail_message) -> None.
+        # War nie initialisiert - _execute_generation() ruft self._update_progress()
+        # an mehreren Stellen unbedingt auf (kein "if self._update_progress:"-Guard),
+        # wodurch jede Settlement-Generierung sofort mit AttributeError abbrach.
+        # No-op statt None, damit auch die unguarded Call-Sites sicher sind; ein
+        # echter Callback kann jederzeit durch Zuweisung überschrieben werden.
+        self._update_progress = lambda *args, **kwargs: None
 
         # Standard-Parameter (werden durch _load_default_parameters überschrieben)
         self.settlements = 3
@@ -835,7 +848,7 @@ class SettlementGenerator:
         Parameter: heightmap, slopemap, water_map, lod - Alle Terrain-Daten und LOD-Level
         Returns: numpy.ndarray - Kombinierte Suitability-Map für Settlement-Platzierung
         """
-        analyzer = TerrainSuitabilityAnalyzer(self.terrain_factor_villages, lod)
+        analyzer = TerrainSuitabilityAnalyzer(self.terrain_factor_villages, heightmap.shape[0])
         combined_suitability = analyzer.create_combined_suitability(heightmap, slopemap, water_map, self._update_progress)
         return combined_suitability
 
@@ -910,7 +923,7 @@ class SettlementGenerator:
         if len(settlements) < 2:
             return []
 
-        pathfinder = PathfindingSystem(self.road_slope_to_distance_ratio, lod)
+        pathfinder = PathfindingSystem(self.road_slope_to_distance_ratio, slopemap.shape[0])
         roads = []
 
         # Minimum Spanning Tree für Settlement-Verbindungen
@@ -1118,7 +1131,7 @@ class SettlementGenerator:
         Parameter: civ_map, settlements, heightmap, biome_map, lod - Alle Plot-Daten und LOD-Level
         Returns: Tuple[List[PlotNode], List[Plot]] - PlotNode-Liste und finale Plot-Liste
         """
-        plot_system = PlotNodeSystem(self.plotsize, lod)
+        plot_system = PlotNodeSystem(self.plotsize, heightmap.shape[0])
 
         # PlotNodes generieren
         nodes = plot_system.generate_plot_nodes(civ_map, self.plotnodes, settlements, self._update_progress)
@@ -1174,12 +1187,16 @@ class SettlementGenerator:
         Funktionsweise: Bestimmt Zielgröße basierend auf LOD-Level
         Aufgabe: LOD-System für Settlement mit gleicher Logik wie andere Generatoren
         """
-        lod_sizes = {"LOD64": 64, "LOD128": 128, "LOD256": 256, "LOD512": 512, "LOD1024": 1024}
+        # Legacy-String-LOD ("LOD64" etc.) für Rückwärtskompatibilität
+        if isinstance(lod, str):
+            if lod == "FINAL":
+                return original_size
+            lod_sizes = {"LOD64": 64, "LOD128": 128, "LOD256": 256, "LOD512": 512, "LOD1024": 1024}
+            return lod_sizes.get(lod, original_size)
 
-        if lod == "FINAL":
-            return original_size
-        else:
-            return lod_sizes.get(lod, 64)
+        # Modernes numerisches LOD-System: data_lod_manager liefert die Arrays
+        # bereits in der zur angeforderten LOD-Stufe passenden Pixel-Auflösung.
+        return original_size
 
     def _interpolate_array(self, array, target_size):
         """
@@ -1934,24 +1951,26 @@ class PlotNodeSystem:
     Aufgabe: Erstellt Grundstücks-System für späteres Gameplay mit LOD-abhängiger Dichte
     """
 
-    def __init__(self, plotsize=1.0, lod_level="LOD64"):
+    def __init__(self, plotsize=1.0, map_size=64):
         """
         Funktionsweise: Initialisiert PlotNode-System mit Plot-Größen-Parameter und LOD
         Aufgabe: Setup der Grundstücks-Generierung mit LOD-Anpassung
-        Parameter: plotsize (float), lod_level (str) - Akkumulierter Civ-Wert für Plot-Größe und LOD
+        Parameter: plotsize (float), map_size (int) - Akkumulierter Civ-Wert für Plot-Größe und tatsächliche Pixel-Größe
         """
         self.plotsize_threshold = plotsize
-        self.lod_level = lod_level
+        self.map_size = map_size
         self.next_node_id = 0
         self.next_plot_id = 0
 
-        # LOD-abhängige PlotNode-Dichte
-        self.lod_density_factors = {
-            "LOD64": 0.3,  # 30% der gewünschten Nodes
-            "LOD128": 0.6,  # 60% der gewünschten Nodes
-            "LOD256": 0.9,  # 90% der gewünschten Nodes
-            "FINAL": 1.0  # 100% der gewünschten Nodes
-        }
+        # Größenabhängige PlotNode-Dichte
+        if map_size <= 64:
+            self.density_factor = 0.3  # 30% der gewünschten Nodes
+        elif map_size <= 128:
+            self.density_factor = 0.6  # 60% der gewünschten Nodes
+        elif map_size <= 256:
+            self.density_factor = 0.9  # 90% der gewünschten Nodes
+        else:
+            self.density_factor = 1.0  # 100% der gewünschten Nodes
 
     def generate_plot_nodes(self, civ_map, plotnodes_count, settlements, progress_callback=None):
         """
@@ -1967,7 +1986,7 @@ class PlotNodeSystem:
         nodes = []
 
         # LOD-abhängige Node-Anzahl
-        density_factor = self.lod_density_factors[self.lod_level]
+        density_factor = self.density_factor
         adjusted_count = int(plotnodes_count * density_factor)
 
         # Gültige Bereiche finden (nicht in Städten, nicht in Wilderness)
@@ -2172,7 +2191,7 @@ class PlotNodeSystem:
             progress_callback("Plot Generation", 94, f"Optimizing node positions ({iterations} iterations)...")
 
         # LOD-abhängige Iterations-Anzahl
-        if self.lod_level == "LOD64":
+        if self.map_size <= 64:
             iterations = max(2, iterations // 2)
 
         for iteration in range(iterations):

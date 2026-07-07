@@ -293,5 +293,5 @@ class MainMenuWindow(QMainWindow):
         Aufgabe: Direkte Beendigung ohne Bestätigung
         Parameter: event (QCloseEvent)
         """
-        self.exit_application()
+        self._on_exit_button_clicked()
         event.accept()

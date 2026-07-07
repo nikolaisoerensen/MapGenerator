@@ -12,7 +12,7 @@ Funktionsweise: Dynamisches Wetter- und Feuchtigkeitssystem mit DataLODManager-I
 Parameter Input:
 - air_temp_entry (Lufttemperatur bei Karteneintritt in °C)
 - solar_power (max. solare Gewinne, default 20°C)
-- altitude_cooling (Abkühlen der Luft pro 100m Altitude, default 6°C)
+- altitude_cooling (Abkühlen der Luft pro km Altitude, default 6°C)
 - thermic_effect (Thermische Verformung der Windvektoren durch shademap)
 - wind_speed_factor (Windgeschwindigkeit je Luftdruckdifferenz)
 - terrain_factor (Einfluss von Terrain auf Wind und Temperatur)
@@ -239,7 +239,12 @@ class WeatherSystemGenerator:
 
         if lod_level <= max_lod_before_original:
             # Verdopplung pro LOD-Level: 32 -> 64 -> 128 -> 256 -> 512 -> 1024
-            return base_size * (2 ** (lod_level - 1))
+            # Bei Nicht-Zweierpotenz-Zielgrößen (z.B. 96) wird original_size (die
+            # tatsächlich vom Terrain-Generator gelieferte, bereits korrekt geklemmte
+            # Heightmap-Größe) schon vor Erreichen von max_lod_before_original
+            # überschritten - ohne min() würde hier auf eine größere Auflösung
+            # hochinterpoliert als das Terrain überhaupt hat.
+            return min(base_size * (2 ** (lod_level - 1)), original_size)
         else:
             # Höhere LODs verwenden original_size
             return original_size
@@ -345,7 +350,7 @@ class WeatherSystemGenerator:
         temp_map = np.full(heightmap.shape, parameters['air_temp_entry'], dtype=np.float32)
 
         # Altitude-Cooling (vectorized)
-        altitude_cooling_rate = parameters['altitude_cooling'] / 100.0  # °C pro Meter
+        altitude_cooling_rate = parameters['altitude_cooling'] / 1000.0  # °C pro Meter (Parameter ist °C/km)
         temp_map -= heightmap * altitude_cooling_rate
 
         # Solar-Heating (vectorized)
@@ -378,7 +383,7 @@ class WeatherSystemGenerator:
         temp_map = np.full(heightmap.shape, parameters['air_temp_entry'], dtype=np.float32)
 
         # Nur Altitude-Cooling
-        altitude_cooling_rate = parameters['altitude_cooling'] / 100.0
+        altitude_cooling_rate = parameters['altitude_cooling'] / 1000.0  # Parameter ist °C/km
         temp_map -= heightmap * altitude_cooling_rate
 
         return temp_map
@@ -452,7 +457,8 @@ class WeatherSystemGenerator:
 
         # Initiales Druckfeld (West-Ost-Gradient mit Noise)
         x_coords = np.arange(width).reshape(1, -1)
-        pressure_field = 1.0 - (x_coords / (width - 1)) * 0.3
+        pressure_gradient = 1.0 - (x_coords / (width - 1)) * 0.3
+        pressure_field = np.broadcast_to(pressure_gradient, (height, width)).copy()
 
         # Noise-Modulation
         pressure_noise = self._generate_pressure_noise((height, width))
@@ -1093,8 +1099,8 @@ class TemperatureCalculator:
         # Basis-Temperatur
         temp_map = np.full(heightmap.shape, parameters['air_temp_entry'], dtype=np.float32)
 
-        # Altitude-Cooling (verstärkt: 6°C/100m)
-        altitude_cooling = parameters['altitude_cooling'] / 100.0
+        # Altitude-Cooling (Parameter ist °C/km)
+        altitude_cooling = parameters['altitude_cooling'] / 1000.0
         temp_map -= heightmap * altitude_cooling
 
         # Solar-Heating aus Shadowmap

@@ -70,11 +70,21 @@ def calculate_lod_size(lod_level: int, map_size_min: int = None) -> int:
 
 
 def calculate_max_lod_for_size(target_map_size: int, map_size_min: int = None) -> int:
-    """Berechnet maximale LOD für gegebene Map-Size"""
+    """
+    Berechnet maximale LOD für gegebene Map-Size.
+    Zählt Verdopplungsschritte direkt mit (statt int(log2(...)) - das rundet bei
+    Nicht-Zweierpotenz-Zielgrößen wie 96 oder 288 immer ab und lässt die letzte,
+    von get_map_size_for_lod() ohnehin auf target_map_size geklemmte Stufe weg,
+    wodurch die tatsächlich eingestellte map_size nie erreicht wurde.
+    """
     if map_size_min is None:
         map_size_min = TERRAIN.MAPSIZEMIN
-    import math
-    return int(math.log2(target_map_size / map_size_min)) + 1
+    lod = 1
+    size = map_size_min
+    while size < target_map_size:
+        size *= 2
+        lod += 1
+    return lod
 
 
 class GenerationMode(Enum):
@@ -171,10 +181,8 @@ class LODConfig:
         return calculated_size
 
     def get_max_lod_for_map_size(self) -> int:
-        """Berechnet maximale sinnvolle LOD für target_map_size"""
-        import math
-        max_doubling_lod = int(math.log2(self.target_map_size / self.minimal_map_size)) + 1
-        return max_doubling_lod
+        """Berechnet maximale sinnvolle LOD für target_map_size (siehe calculate_max_lod_for_size)"""
+        return calculate_max_lod_for_size(self.target_map_size, self.minimal_map_size)
 
 
 @dataclass
@@ -215,6 +223,7 @@ DATA_DEPENDENCY_MATRIX = {
     "temp_map": ["heightmap_combined"],
     "precip_map": ["heightmap_combined"],
     "humid_map": ["heightmap_combined"],
+    "water_map": ["heightmap_combined"],
     "flow_map": ["heightmap_combined"],
     "flow_speed": ["heightmap_combined"],
     "cross_section": ["heightmap_combined"],
@@ -1134,6 +1143,30 @@ class ResourceTracker(QObject):
                 cleaned_count += 1
 
         self.logger.info(f"Cleaned {cleaned_count} resources for data key '{data_key}'")
+        return cleaned_count
+
+    def cleanup_by_type(self, generator_type: str) -> int:
+        """
+        NEUE METHODE: Gezieltes Cleanup aller Ressourcen eines Generators anhand
+        des resource_type-Prefixes (Ressourcen werden beim Registrieren als
+        f"{generator_type}_{data_key}" getypt, siehe set_terrain_data_lod etc.)
+        Parameter: generator_type
+        Return: Anzahl bereinigte Ressourcen
+        """
+        prefix = f"{generator_type}_"
+
+        with self._lock:
+            matching_types = [rtype for rtype in self._type_registry if rtype.startswith(prefix)]
+            resource_ids = []
+            for rtype in matching_types:
+                resource_ids.extend(self._type_registry[rtype])
+
+        cleaned_count = 0
+        for resource_id in resource_ids:
+            if self._cleanup_resource(resource_id):
+                cleaned_count += 1
+
+        self.logger.info(f"Cleaned {cleaned_count} resources for generator type '{generator_type}'")
         return cleaned_count
 
     def get_data_key_memory_usage(self, data_key: str) -> int:
@@ -2947,6 +2980,39 @@ class DataLODManager(QObject):
         self.logger.debug(f"{generator} '{data_key}': kein Daten-LOD verfügbar")
         return None
 
+    def _set_data_lod(self, generator: str, store: dict, data_key: str, data, lod_level: int,
+                      parameters: Dict[str, Any], require_array: bool = True):
+        """
+        Funktionsweise: Generischer Ablage-Pfad für ein einzelnes Daten-Produkt eines Generators
+        Aufgabe: Legt ein Daten-Produkt unter seinem LOD-Key im zugehörigen Store ab und aktualisiert
+                 das aktuelle LOD. Array-Produkte durchlaufen die volle Eingangs-Validierung;
+                 Nicht-Array-Produkte (Listen, Dicts, Skalare) werden nur auf Vorhandensein und
+                 gültiges LOD geprüft.
+        Parameter:
+            generator     - Generator-Name für current_lods und Logging ("geology", ...)
+            store         - zugehöriges Daten-Dict (self._geology_data, ...)
+            data_key      - Data-Key des Produkts
+            data          - abzulegendes Produkt
+            lod_level     - Ziel-LOD-Level
+            parameters    - verwendete Parameter (Cache-Metadaten)
+            require_array - True erzwingt die np.ndarray-Validierung, False erlaubt Nicht-Arrays
+        """
+        if require_array:
+            if not self._validate_lod_input(generator, data_key, data, lod_level):
+                return
+        else:
+            if not isinstance(lod_level, int) or lod_level < 1:
+                self.logger.warning(
+                    f"{generator} '{data_key}': ungültiges LOD-Level {lod_level}, wird nicht gespeichert")
+                return
+            if data is None:
+                self.logger.warning(f"{generator} '{data_key}': None, wird nicht gespeichert")
+                return
+
+        lod_key = f"lod_{lod_level}_{data_key}"
+        store[lod_key] = data
+        self._current_lods[generator] = max(self._current_lods.get(generator, 0), lod_level)
+
     # =============================================================================
     # TERRAIN DATA MANAGEMENT - LOD-ERWEITERT (BESTEHEND)
     # =============================================================================
@@ -3096,6 +3162,117 @@ class DataLODManager(QObject):
         self.lod_data_stored.emit("geology", lod_level, [data_key])
 
         self.logger.debug(f"Geology data '{data_key}' updated for LOD {lod_level}, shape: {data.shape}")
+
+    def set_geology_data_complete_lod(self, geology_data, lod_level: int, parameters: Dict[str, Any]):
+        """
+        Speichert komplettes GeologyData-Objekt mit LOD-Level und zerlegt es in seine Data-Keys
+        """
+        self._geology_data[f"lod_{lod_level}_geology_data_object"] = geology_data
+
+        data_keys = []
+        for key in ("rock_map", "hardness_map"):
+            value = getattr(geology_data, key, None)
+            if value is not None:
+                self._set_data_lod("geology", self._geology_data, key, value, lod_level, parameters)
+                data_keys.append(key)
+
+        self._update_cache_timestamp("geology", lod_level, "complete", parameters)
+        data_keys.append("complete")
+        self.lod_data_stored.emit("geology", lod_level, data_keys)
+        self.data_updated.emit("geology", "complete")
+
+    def set_weather_data_complete_lod(self, weather_data, lod_level: int, parameters: Dict[str, Any]):
+        """
+        Speichert komplettes WeatherData-Objekt mit LOD-Level und zerlegt es in seine Data-Keys
+        """
+        self._weather_data[f"lod_{lod_level}_weather_data_object"] = weather_data
+
+        data_keys = []
+        for key in ("wind_map", "temp_map", "precip_map", "humid_map"):
+            value = getattr(weather_data, key, None)
+            if value is not None:
+                self._set_data_lod("weather", self._weather_data, key, value, lod_level, parameters)
+                data_keys.append(key)
+
+        self._update_cache_timestamp("weather", lod_level, "complete", parameters)
+        data_keys.append("complete")
+        self.lod_data_stored.emit("weather", lod_level, data_keys)
+        self.data_updated.emit("weather", "complete")
+
+    def set_water_data_complete_lod(self, water_data, lod_level: int, parameters: Dict[str, Any]):
+        """
+        Speichert komplettes WaterData-Objekt mit LOD-Level und zerlegt es in seine Data-Keys
+        """
+        self._water_data[f"lod_{lod_level}_water_data_object"] = water_data
+
+        data_keys = []
+        for key in ("water_map", "flow_map", "flow_speed", "cross_section", "soil_moist_map",
+                    "erosion_map", "sedimentation_map", "evaporation_map", "water_biomes_map"):
+            value = getattr(water_data, key, None)
+            if value is not None:
+                self._set_data_lod("water", self._water_data, key, value, lod_level, parameters)
+                data_keys.append(key)
+
+        # Nicht-Array-Produkt: ocean_outflow ist ein Skalar
+        if getattr(water_data, "ocean_outflow", None) is not None:
+            self._set_data_lod("water", self._water_data, "ocean_outflow", water_data.ocean_outflow,
+                               lod_level, parameters, require_array=False)
+            data_keys.append("ocean_outflow")
+
+        self._update_cache_timestamp("water", lod_level, "complete", parameters)
+        data_keys.append("complete")
+        self.lod_data_stored.emit("water", lod_level, data_keys)
+        self.data_updated.emit("water", "complete")
+
+    def set_biome_data_complete_lod(self, biome_data, lod_level: int, parameters: Dict[str, Any]):
+        """
+        Speichert komplettes BiomeData-Objekt mit LOD-Level und zerlegt es in seine Data-Keys
+        """
+        self._biome_data[f"lod_{lod_level}_biome_data_object"] = biome_data
+
+        data_keys = []
+        for key in ("biome_map", "biome_map_super", "super_biome_mask", "climate_classification"):
+            value = getattr(biome_data, key, None)
+            if value is not None:
+                self._set_data_lod("biome", self._biome_data, key, value, lod_level, parameters)
+                data_keys.append(key)
+
+        # Nicht-Array-Produkt: biome_statistics ist ein Dict
+        if getattr(biome_data, "biome_statistics", None) is not None:
+            self._set_data_lod("biome", self._biome_data, "biome_statistics", biome_data.biome_statistics,
+                               lod_level, parameters, require_array=False)
+            data_keys.append("biome_statistics")
+
+        self._update_cache_timestamp("biome", lod_level, "complete", parameters)
+        data_keys.append("complete")
+        self.lod_data_stored.emit("biome", lod_level, data_keys)
+        self.data_updated.emit("biome", "complete")
+
+    def set_settlement_data_complete_lod(self, settlement_data, lod_level: int, parameters: Dict[str, Any]):
+        """
+        Speichert komplettes SettlementData-Objekt mit LOD-Level und zerlegt es in seine Data-Keys
+        """
+        self._settlement_data[f"lod_{lod_level}_settlement_data_object"] = settlement_data
+
+        data_keys = []
+        for key in ("plot_map", "civ_map", "combined_suitability_map"):
+            value = getattr(settlement_data, key, None)
+            if value is not None:
+                self._set_data_lod("settlement", self._settlement_data, key, value, lod_level, parameters)
+                data_keys.append(key)
+
+        # Nicht-Array-Produkte: Location-Listen und Straßen/Plot-Strukturen
+        for key in ("settlement_list", "landmark_list", "roadsite_list", "roads", "plots", "plot_nodes"):
+            value = getattr(settlement_data, key, None)
+            if value:
+                self._set_data_lod("settlement", self._settlement_data, key, value, lod_level,
+                                   parameters, require_array=False)
+                data_keys.append(key)
+
+        self._update_cache_timestamp("settlement", lod_level, "complete", parameters)
+        data_keys.append("complete")
+        self.lod_data_stored.emit("settlement", lod_level, data_keys)
+        self.data_updated.emit("settlement", "complete")
 
     def get_geology_data_lod(self, data_key: str, lod_level: int = None) -> Optional[np.ndarray]:
         """Gibt Geology-Daten für LOD-Level zurück (bestes verfügbares LOD als Fallback)"""
@@ -3327,13 +3504,24 @@ class DataLODManager(QObject):
         if lod_level is None:
             self.resource_tracker.cleanup_by_type(generator_type)
 
-            # Daten löschen
-            if generator_type == "terrain":
-                self._terrain_data.clear()
-                self._current_lods["terrain"] = 0
-            elif generator_type == "geology":
-                self._geology_data.clear()
-                self._current_lods["geology"] = 0
+            # Daten löschen - alle 6 Generatoren, nicht nur terrain/geology.
+            # Fehlte vorher für weather/water/biome/settlement: deren
+            # _current_lods blieb auf dem alten (bereits erreichten) Wert
+            # stehen, wodurch create_lod_sequence() bei jeder erneuten
+            # Generation current_lod >= target_lod sah und NICHTS tat - der
+            # Grund, warum ein zweiter Generate-Klick wirkungslos blieb.
+            generator_data_map = {
+                "terrain": self._terrain_data,
+                "geology": self._geology_data,
+                "weather": self._weather_data,
+                "water": self._water_data,
+                "biome": self._biome_data,
+                "settlement": self._settlement_data,
+            }
+            data_dict = generator_data_map.get(generator_type)
+            if data_dict is not None:
+                data_dict.clear()
+                self._current_lods[generator_type] = 0
 
         self.cache_invalidated.emit(generator_type)
         self.logger.info(f"Cache invalidated for {generator_type}" +

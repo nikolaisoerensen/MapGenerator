@@ -2,13 +2,16 @@
 Path: gui/tabs/base_tab.py
 
 BaseMapTab ist die fundamentale Basis-Klasse für alle spezialisierten Map-Editor Tabs.
-Sie implementiert ein standardisiertes 70/30 Layout-System, Cross-Tab-Kommunikation
-und robustes UI-Management mit klarer Trennung zwischen UI-Layer und Business-Logic.
+Sie besitzt KEIN eigenes Fenster-Layout mehr - stattdessen liefert sie drei
+eigenständige Top-Level-Widgets (viewport_widget, parameter_widget,
+statistics_widget), die das MapEditorWindow-Shell-Layout in seine drei
+globalen Spalten (Viewport-Stack / Parameter-Stack / Statistics-Stack) einhängt.
 
 Kernverantwortlichkeiten:
-- Standardisiertes 70/30 Layout mit QSplitter (Canvas links, Controls rechts)
-- 2D/3D Display-Stack mit Toggle-Controls und Fallback-Management
-- Parameter-UI-Controls als Proxy zum ParameterManager
+- viewport_widget: 2D/3D Display-Stack mit Toggle-Controls und Fallback-Management
+- parameter_widget: Parameter-UI-Controls als Proxy zum ParameterManager
+- statistics_widget: Statistics-Anzeige (aktuell noch Platzhalter für die meisten
+  Generatoren, siehe create_statistics_controls())
 - Display-Update-Koordination ohne eigene Business-Logic
 
 Manager-Integration als Proxy:
@@ -76,7 +79,7 @@ class BaseMapTab(QWidget):
     """
 
     # Outgoing Signals (UI → Managers)
-    generate_requested = pyqtSignal(str)  # generator_type
+    generate_requested = pyqtSignal(str, dict)  # generator_type, parameters
     parameter_ui_changed = pyqtSignal(str, str, object)  # generator_type, param_name, value
     display_mode_changed = pyqtSignal(str)  # display_mode
 
@@ -102,10 +105,18 @@ class BaseMapTab(QWidget):
         self.layout_config = LayoutConfiguration()
 
         # UI Components (werden in setup_ui() initialisiert)
-        self.splitter = None
+        # viewport_widget/parameter_widget sind die beiden eigenständigen
+        # Top-Level-Widgets, die das MapEditorWindow-Shell-Layout in Spalte 2
+        # (Viewport-Stack) bzw. Spalte 3 (Parameter-Stack) einhängt. BaseMapTab
+        # besitzt selbst kein Splitter-Layout mehr - canvas_container/control_widget
+        # bleiben als rückwärtskompatible Aliase erhalten, da Sub-Classes darüber
+        # ihre Controls einhängen (self.control_panel.layout().addWidget(...)).
+        self.viewport_widget = None
         self.canvas_container = None
+        self.parameter_widget = None
         self.control_panel = None
         self.control_widget = None
+        self.statistics_widget = None
         self.navigation_panel = None
         self.status_display = None
 
@@ -131,11 +142,13 @@ class BaseMapTab(QWidget):
         self.logger.debug("Setting up UI components")
 
         try:
-            self._create_main_layout()
+            self._create_viewport_container()
             self._create_canvas_area()
+            self._create_parameter_container()
             self._create_control_panel()
             self._create_navigation_panel()
             self._create_status_display()
+            self._create_statistics_widget()
 
             # Sub-Class spezifische Controls
             self.create_parameter_controls()
@@ -146,34 +159,50 @@ class BaseMapTab(QWidget):
             self.logger.error(f"UI setup failed: {e}")
             self._create_fallback_ui(str(e))
 
-    def _create_main_layout(self):
-        """Erstellt 70/30 Splitter-Layout"""
-        main_layout = QHBoxLayout()
-        main_layout.setContentsMargins(5, 5, 5, 5)
-        main_layout.setSpacing(10)
+    def _create_viewport_container(self):
+        """
+        Erstellt den eigenständigen Viewport-Container (Spalte 2 Content).
+        Wird vom MapEditorWindow-Shell-Layout in einen gemeinsamen
+        QStackedWidget eingehängt - BaseMapTab selbst legt kein eigenes
+        Splitter/Fenster-Layout mehr an.
+        """
+        self.viewport_widget = QWidget()
+        self.canvas_container = self.viewport_widget  # Backward-kompatibler Alias
 
-        # Canvas Container (70%)
-        self.canvas_container = QFrame()
-        self.canvas_container.setFrameStyle(QFrame.StyledPanel)
-        self.canvas_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    def _create_parameter_container(self):
+        """
+        Erstellt den eigenständigen Parameter-Container (Spalte 3 Content).
+        Die Breite wird vom Shell-Layout (fixe Spalte 3) vorgegeben, daher
+        legt sich dieses Widget selbst keine feste Breite mehr fest. Kein
+        eigener Rahmen - die Spalte 3 QTabWidget-Chrome übernimmt die
+        visuelle Abgrenzung.
+        """
+        self.parameter_widget = QWidget()
+        self.control_widget = self.parameter_widget  # Backward-kompatibler Alias
 
-        # Control Widget (30%)
-        control_width = self._calculate_optimal_control_width()
-        self.control_widget = QFrame()
-        self.control_widget.setFrameStyle(QFrame.StyledPanel)
-        self.control_widget.setFixedWidth(control_width)
-        self.control_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+    def _create_statistics_widget(self):
+        """
+        KANN von Sub-Classes über create_statistics_controls() befüllt werden.
+        Bis Sub-Classes ihre Statistics-Anzeigen aus dem Parameter-Panel
+        herauslösen, zeigt dieser Tab einen Platzhalter (Statistics stecken
+        aktuell noch mit im Parameter-Panel, siehe create_parameter_controls()).
+        """
+        self.statistics_widget = QWidget()
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignCenter)
+        self.create_statistics_controls(layout)
+        self.statistics_widget.setLayout(layout)
 
-        # Splitter für resizable Layout
-        self.splitter = QSplitter(Qt.Horizontal)
-        self.splitter.addWidget(self.canvas_container)
-        self.splitter.addWidget(self.control_widget)
-        self.splitter.setSizes([700, 300])  # 70/30 ratio
-        self.splitter.setCollapsible(0, False)
-        self.splitter.setCollapsible(1, False)
-
-        main_layout.addWidget(self.splitter)
-        self.setLayout(main_layout)
+    def create_statistics_controls(self, layout: QVBoxLayout):
+        """
+        KANN von Sub-Classes überschrieben werden, um das Statistics-Tab in
+        Spalte 3 zu befüllen. Default: Platzhalter-Hinweis.
+        """
+        placeholder = QLabel("Statistics view not yet separated from Parameter panel for this generator")
+        placeholder.setWordWrap(True)
+        placeholder.setAlignment(Qt.AlignCenter)
+        placeholder.setStyleSheet("color: #7f8c8d; padding: 20px;")
+        layout.addWidget(placeholder)
 
     def _create_canvas_area(self):
         """Erstellt Canvas mit 2D/3D Display-Stack"""
@@ -257,6 +286,7 @@ class BaseMapTab(QWidget):
         # Scrollable Area für Parameter
         self.control_scroll_area = QScrollArea()
         self.control_scroll_area.setWidgetResizable(True)
+        self.control_scroll_area.setFrameShape(QFrame.NoFrame)
         self.control_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.control_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
@@ -338,16 +368,6 @@ class BaseMapTab(QWidget):
             except (AttributeError, TypeError) as e:
                 self.logger.info(f"GenerationOrchestrator connection not established: {e}")
 
-    def _calculate_optimal_control_width(self) -> int:
-        """Berechnet optimale Breite für Control Panel"""
-        total_width = self.width() if self.width() > 0 else 1200
-        target_width = int(total_width * 0.3)  # 30%
-
-        return max(
-            self.layout_config.MIN_CONTROL_WIDTH,
-            min(self.layout_config.MAX_CONTROL_WIDTH, target_width - 40)
-        )
-
     # =============================================================================
     # DISPLAY MANAGEMENT
     # =============================================================================
@@ -411,6 +431,35 @@ class BaseMapTab(QWidget):
             self.logger.debug(f"Get current display failed: {e}")
             return None
 
+    def _push_data_to_current_display(self, data, layer_type: str):
+        """
+        Einheitlicher Versand von Anzeige-Daten ans aktuell aktive Display.
+        Sub-Classes rufen das statt direkt current_display.update_display(),
+        damit 2D und 3D korrekt geroutet werden:
+
+        - 2D: layer_type entscheidet direkt, was gezeichnet wird (unverändert).
+        - 3D: MapDisplay3DWidget.update_heightmap(heightmap, tab_type) erwartet
+          als zweiten Parameter den Tab-Typ ("terrain"/"geology"/...), NICHT den
+          Layer-Namen ("heightmap"/"rock_map"/...). Ohne diese Unterscheidung
+          landete z.B. "rock_map" im tab_type-Feld, paintGL() erkannte keinen
+          bekannten Rendermodus und zeichnete nichts.
+          Overlay-Layer (alles außer "heightmap" selbst) werden im reduzierten
+          3D-Umfang noch nicht als Textur ans Terrain-Mesh geschickt - das
+          Mesh zeigt bei jedem Modus die Basis-Heightmap mit Shading.
+        """
+        current_display = self.get_current_display()
+        if not current_display:
+            return
+
+        if self.current_view == "3d" and hasattr(current_display.display, 'update_heightmap'):
+            heightmap = data if layer_type == "heightmap" else (
+                self.data_lod_manager.get_terrain_data("heightmap") if self.data_lod_manager else None
+            )
+            if heightmap is not None:
+                current_display.display.update_heightmap(heightmap, self.generator_type)
+        elif hasattr(current_display, 'update_display'):
+            current_display.update_display(data, layer_type)
+
     @error_handler
     def update_display_mode(self):
         """Display-Update über DataLODManager"""
@@ -419,16 +468,42 @@ class BaseMapTab(QWidget):
                 # Hole beste verfügbare Daten vom DataLODManager
                 heightmap = self.data_lod_manager.get_terrain_data("heightmap")
                 if heightmap is not None:
-                    current_display = self.get_current_display()
-                    if current_display and hasattr(current_display, 'update_display'):
-                        # Nutze DataLODManager's Change-Detection
-                        display_id = f"{self.__class__.__name__}_{self.current_view}_heightmap"
-                        if self.data_lod_manager.display_update_manager.needs_update(display_id, heightmap, "heightmap"):
-                            current_display.update_display(heightmap, "heightmap")
-                            self.data_lod_manager.display_update_manager.mark_updated(display_id, heightmap, "heightmap")
+                    display_id = f"{self.__class__.__name__}_{self.current_view}_heightmap"
+                    if self.data_lod_manager.display_update_manager.needs_update(display_id, heightmap, "heightmap"):
+                        self._push_data_to_current_display(heightmap, "heightmap")
+                        self.data_lod_manager.display_update_manager.mark_updated(display_id, heightmap, "heightmap")
 
         except Exception as e:
             self.logger.debug(f"Display mode update failed: {e}")
+
+    # =============================================================================
+    # GLOBALE OVERLAY-TOGGLES (Shell-Spalte 2: Contour Lines / Shadows)
+    # =============================================================================
+
+    def set_contour_overlay(self, checked: bool):
+        """
+        Globaler Contour-Lines-Toggle vom Shell-Layout. KANN von Sub-Classes
+        überschrieben werden, falls ein Generator eine abweichende Contour-
+        Semantik braucht. Default delegiert an das aktive Display.
+        """
+        try:
+            current_display = self.get_current_display()
+            if current_display and hasattr(current_display.display, 'set_contour_overlay'):
+                current_display.display.set_contour_overlay(checked)
+        except Exception as e:
+            self.logger.debug(f"Contour overlay toggle failed: {e}")
+
+    def set_shadow_overlay(self, checked: bool):
+        """
+        Globaler Shadows-Toggle vom Shell-Layout. KANN von Sub-Classes
+        überschrieben werden (z.B. Terrain für den Sonnenwinkel-Parameter).
+        """
+        try:
+            current_display = self.get_current_display()
+            if current_display and hasattr(current_display.display, 'set_shadow_overlay'):
+                current_display.display.set_shadow_overlay(checked)
+        except Exception as e:
+            self.logger.debug(f"Shadow overlay toggle failed: {e}")
 
     # =============================================================================
     # GENERATION SYSTEM (nur UI-Proxy)
@@ -448,14 +523,52 @@ class BaseMapTab(QWidget):
             if self.status_display:
                 self.status_display.set_pending("Generation requested...")
 
+            # Aktuelle Parameter aus der zentralen Quelle (ParameterManager) holen
+            parameters = {}
+            if self.parameter_manager:
+                parameters = self.parameter_manager.get_tab_parameters(self.generator_type)
+
             # Signal an GenerationOrchestrator (keine eigene Logic)
-            self.generate_requested.emit(self.generator_type)
+            self.generate_requested.emit(self.generator_type, parameters)
 
         except Exception as e:
             self.generation_active = False
             self.logger.error(f"Generation request failed: {e}")
             if self.status_display:
                 self.status_display.set_error(f"Generation failed: {e}")
+
+    def start_generation_timing(self):
+        """
+        Startet die Zeitmessung für die laufende Generation. Gemeinsamer Helfer für
+        Sub-Classes (Weather/Water/Biome/Settlement), die ihre Requests direkt am
+        GenerationOrchestrator stellen statt über generate()/generate_requested.
+        """
+        self._generation_start_time = time.time()
+
+    def end_generation_timing(self, success: bool = True):
+        """
+        Beendet die Zeitmessung und loggt die Laufzeit der Generation.
+        Parameter: success - ob die Generation erfolgreich war (nur für den Log-Text)
+        """
+        start_time = getattr(self, '_generation_start_time', None)
+        if start_time is not None:
+            elapsed = time.time() - start_time
+            status = "completed" if success else "failed"
+            self.logger.info(f"Generation {status} in {elapsed:.2f}s")
+            self._generation_start_time = None
+
+    def handle_generation_error(self, error: Exception):
+        """
+        Zentrale Fehlerbehandlung für Generation-Requests, die nicht über generate()
+        laufen. Setzt Status auf Fehler und beendet die Zeitmessung, damit ein
+        fehlgeschlagener Request den Tab nicht dauerhaft in "aktiv" hängen lässt.
+        """
+        self.generation_active = False
+        self.generation_in_progress = False
+        self.logger.error(f"Generation error: {error}")
+        if self.status_display:
+            self.status_display.set_error(f"Generation failed: {error}")
+        self.end_generation_timing(success=False)
 
     # =============================================================================
     # SIGNAL HANDLERS (vereinfacht)
@@ -537,15 +650,29 @@ class BaseMapTab(QWidget):
         return widget
 
     def check_input_dependencies(self) -> bool:
-        """KANN von Sub-Classes überschrieben werden - prüft Input-Dependencies"""
+        """
+        KANN von Sub-Classes überschrieben werden - prüft Input-Dependencies.
+
+        War zuvor doppelt kaputt: (1) die literale Zahl 1 wurde statt der
+        Parameter-Liste required_dependencies übergeben, was in
+        DataLODManager.check_dependencies() einen TypeError auslöste (int ist
+        nicht iterierbar), vom umschließenden except abgefangen wurde und
+        immer beim True-Fallback landete; (2) check_dependencies() gibt ein
+        Tuple (bool, missing_list) zurück - ein Tuple ist in Python IMMER
+        truthy, auch (False, [...]), wodurch `if not check_input_dependencies()`
+        selbst nach Fix (1) nie ausgelöst hätte. Dependency-Checks liefen
+        dadurch faktisch nie echt.
+        """
         try:
-            if self.data_lod_manager and hasattr(self, 'required_dependencies'):
-                # Delegiert an DataLODManager's Dependency-System
-                return self.data_lod_manager.check_dependencies(self.generator_type, 1)
+            if self.data_lod_manager and getattr(self, 'required_dependencies', None):
+                is_complete, _missing = self.data_lod_manager.check_dependencies(
+                    self.generator_type, self.required_dependencies
+                )
+                return is_complete
         except Exception as e:
             self.logger.debug(f"Dependency check failed: {e}")
 
-        return True  # Fallback: Dependencies erfüllt
+        return True  # Fallback: keine Dependencies definiert oder Check nicht möglich
 
     def update_parameter_ui(self, param_name: str, value):
         """KANN von Sub-Classes überschrieben werden - aktualisiert Parameter-UI"""

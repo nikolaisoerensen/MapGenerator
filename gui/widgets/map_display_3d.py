@@ -278,6 +278,10 @@ class MapDisplay3D(QOpenGLWidget):
     vertex_selected = pyqtSignal(int, int)  # (x, y)
     rendering_error = pyqtSignal(str)  # Error-Messages
 
+    # Reale Weltgröße, die die Karte immer abdeckt (unabhängig von map_size/
+    # Pixelauflösung) - siehe _calculate_terrain_scaling().
+    WORLD_SIZE_KM = 10.0
+
     def __init__(self, parent=None):
         """
         Funktionsweise: Initialisiert 3D OpenGL-Widget mit Standard-Camera-Position
@@ -287,7 +291,9 @@ class MapDisplay3D(QOpenGLWidget):
 
         # Camera-Parameter - Fixed-Axis (60° Elevation, Azimuth-Rotation)
         self.camera_distance = CanvasSettings.CANVAS_3D["camera_distance"]
-        self.camera_elevation = -60.0  # Feste Elevation
+        # Positive Elevation = Blick von oben herab (Kartenansicht). Negativ
+        # bedeutete Kamera unterhalb der Map, Blick von unten nach oben.
+        self.camera_elevation = 55.0  # Feste Elevation
         self.camera_azimuth = 0.0  # Rotation um Z-Achse
         self.fov = CanvasSettings.CANVAS_3D["fov"]
 
@@ -343,6 +349,7 @@ class MapDisplay3D(QOpenGLWidget):
         # Mesh-Parameter
         self.terrain_scale_factor = 1.0
         self.terrain_height_scale = 1.0
+        self.terrain_center_y = 0.0
 
     def initializeGL(self):
         """
@@ -549,11 +556,25 @@ class MapDisplay3D(QOpenGLWidget):
         max_dimension = max(self.heightmap.shape)
         self.terrain_scale_factor = 10.0 / max_dimension  # Normiert auf 10 Einheiten
 
-        height_range = self.heightmap.max() - self.heightmap.min()
-        if height_range > 0:
-            self.terrain_height_scale = (max_dimension * 0.3) / height_range
-        else:
-            self.terrain_height_scale = 1.0
+        # Feste, map_size- und sample-unabhängige Höhen-Skalierung: Die Karte
+        # deckt real IMMER WORLD_SIZE_KM x WORLD_SIZE_KM ab (siehe
+        # terrain_scale_factor: 10 Render-Einheiten = WORLD_SIZE_KM), egal wie
+        # viele Pixel map_size hat. Vorher wurde relativ zu max_dimension
+        # (Pixelanzahl!) und dem Min/Max der jeweiligen Stichprobe skaliert -
+        # dadurch wirkten baugleiche Berge bei unterschiedlicher map_size oder
+        # unterschiedlichem Seed nicht im selben Verhältnis zueinander, und
+        # jede Heightmap wurde automatisch auf denselben visuellen Höheneindruck
+        # gestreckt. Jetzt: 1 Render-Einheit entspricht immer WORLD_SIZE_KM/10 km.
+        world_size_km = self.WORLD_SIZE_KM
+        self.terrain_height_scale = 10.0 / (world_size_km * 1000.0)  # render units per meter
+
+        # Vertikales Zentrum des Meshs in Welt-Y (Vertices bleiben unverändert
+        # auf ihrer echten Höhe, siehe _generate_terrain_mesh) - die Kamera
+        # zielt darauf statt fix auf (0,0,0). Ohne das lag reales Terrain
+        # (Höhen typischerweise deutlich > 0) komplett außerhalb des
+        # Kamera-Blickfelds und es wurde schlicht nichts gerendert.
+        mid_height = (float(self.heightmap.min()) + float(self.heightmap.max())) / 2.0
+        self.terrain_center_y = mid_height * self.terrain_height_scale
 
     def _load_shader_from_file(self, filepath):
         """
@@ -843,13 +864,14 @@ class MapDisplay3D(QOpenGLWidget):
         elevation_rad = math.radians(self.camera_elevation)
         azimuth_rad = math.radians(self.camera_azimuth)
 
-        # Camera-Position berechnen
+        # Camera-Position berechnen (relativ zum vertikalen Terrain-Zentrum,
+        # nicht zum Welt-Ursprung - reale Höhen liegen nie bei Y=0)
         eye_x = self.camera_distance * math.cos(elevation_rad) * math.sin(azimuth_rad)
-        eye_y = self.camera_distance * math.sin(elevation_rad)
+        eye_y = self.terrain_center_y + self.camera_distance * math.sin(elevation_rad)
         eye_z = self.camera_distance * math.cos(elevation_rad) * math.cos(azimuth_rad)
 
         eye = [eye_x, eye_y, eye_z]
-        target = [0, 0, 0]  # Blick zum Zentrum
+        target = [0, self.terrain_center_y, 0]  # Blick zum Terrain-Zentrum
         up = [0, 1, 0]  # Y ist oben
 
         self.view_matrix = _create_lookat_matrix(eye, target, up)
@@ -869,6 +891,15 @@ class MapDisplay3D(QOpenGLWidget):
         """
         Funktionsweise: Uploaded Matrix-Daten zu GPU-Shadern
         Aufgabe: Setzt Uniform-Variablen für Vertex-Transformationen
+
+        Die Matrizen werden in _create_perspective_matrix()/_create_lookat_matrix()/
+        _create_model_matrix() in Standard-Zeilen-Major-Schreibweise aufgebaut
+        (z.B. matrix[2,3] = Translations-Term). numpy .flatten() liefert diese
+        Daten row-major. glUniformMatrix4fv() mit transpose=GL_FALSE erwartet
+        column-major Daten - ohne Transpose landete z.B. bei der Projection-
+        Matrix der W-Term (matrix[3,2]=-1) an der falschen Stelle, wodurch die
+        perspektivische Division kaputt ging und nichts mehr sichtbar war.
+        transpose=GL_TRUE lässt OpenGL die row-major Daten korrekt transponieren.
         """
         if not self.shader_program:
             return
@@ -877,19 +908,19 @@ class MapDisplay3D(QOpenGLWidget):
         if self.projection_matrix is not None:
             proj_location = gl.glGetUniformLocation(self.shader_program, "projection")
             if proj_location >= 0:
-                gl.glUniformMatrix4fv(proj_location, 1, gl.GL_FALSE, self.projection_matrix.flatten())
+                gl.glUniformMatrix4fv(proj_location, 1, gl.GL_TRUE, self.projection_matrix.flatten())
 
         # View-Matrix
         if self.view_matrix is not None:
             view_location = gl.glGetUniformLocation(self.shader_program, "view")
             if view_location >= 0:
-                gl.glUniformMatrix4fv(view_location, 1, gl.GL_FALSE, self.view_matrix.flatten())
+                gl.glUniformMatrix4fv(view_location, 1, gl.GL_TRUE, self.view_matrix.flatten())
 
         # Model-Matrix
         if self.model_matrix is not None:
             model_location = gl.glGetUniformLocation(self.shader_program, "model")
             if model_location >= 0:
-                gl.glUniformMatrix4fv(model_location, 1, gl.GL_FALSE, self.model_matrix.flatten())
+                gl.glUniformMatrix4fv(model_location, 1, gl.GL_TRUE, self.model_matrix.flatten())
 
     def _render_terrain_tab(self):
         """
@@ -1151,7 +1182,7 @@ class MapDisplay3D(QOpenGLWidget):
         Aufgabe: Reset zu Default-View aus gui_default.py
         """
         self.camera_distance = CanvasSettings.CANVAS_3D["camera_distance"]
-        self.camera_elevation = -60.0
+        self.camera_elevation = 55.0
         self.camera_azimuth = 0.0
 
         self.camera_changed.emit(self.camera_elevation, self.camera_azimuth, self.camera_distance)

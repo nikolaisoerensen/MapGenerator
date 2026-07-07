@@ -282,9 +282,14 @@ class SimplexNoiseGenerator:
         offset_x = parameters.get('offset_x', 0)
         offset_y = parameters.get('offset_y', 0)
 
-        # Koordinaten-Arrays für gesamtes Grid erstellen (vectorized)
-        x_coords = np.linspace(0, 1, size) + offset_x
-        y_coords = np.linspace(0, 1, size) + offset_y
+        # Koordinaten-Arrays für gesamtes Grid erstellen (vectorized).
+        # Pixel-Koordinaten (0..size), NICHT auf [0,1] normalisiert: bei
+        # normalisierten Koordinaten landet frequency*coord (z.B. 0.037*1=0.037)
+        # in einem winzigen Ausschnitt des Noise-Raums nahe (0,0), wo Simplex-
+        # Noise praktisch konstant ist - das Ergebnis war eine fast flache
+        # Heightmap ohne echte Berge, unabhängig von amplitude/redistribute_power.
+        x_coords = np.arange(size, dtype=np.float64) + offset_x
+        y_coords = np.arange(size, dtype=np.float64) + offset_y
         X, Y = np.meshgrid(x_coords, y_coords, indexing='xy')
 
         # Ergebnis-Array initialisieren
@@ -1067,7 +1072,8 @@ class BaseTerrainGenerator:
 
         # 2. Height-Redistribution anwenden
         terrain_data.heightmap = self._apply_redistribution(
-            terrain_data.heightmap, parameters.get('redistribute_power', 1.0)
+            terrain_data.heightmap, parameters.get('redistribute_power', 1.0),
+            parameters.get('amplitude')
         )
         self.logger.debug("Height redistribution completed")
 
@@ -1116,14 +1122,30 @@ class BaseTerrainGenerator:
 
         return heightmap.astype(np.float32)
 
-    def _apply_redistribution(self, heightmap: np.ndarray, redistribute_power: float) -> np.ndarray:
+    def _apply_redistribution(self, heightmap: np.ndarray, redistribute_power: float,
+                               amplitude: float = None) -> np.ndarray:
         """
         Funktionsweise: Wendet Power-Redistribution auf Heightmap an
-        Parameter: heightmap, redistribute_power
+        Parameter: heightmap, redistribute_power, amplitude - theoretische Maximalhöhe
         Returns: numpy.ndarray - Redistributed Heightmap
+
+        Normalisiert gegen die theoretische Maximalhöhe (amplitude), nicht gegen
+        min/max der jeweils erzeugten Stichprobe: Contrast-Stretching gegen das
+        Sample-Minimum würde bei jedem redistribute_power-Wert wieder den vollen
+        Wertebereich ausnutzen und könnte die Landschaft nie absolut Richtung 0m
+        drücken - genau das soll ein hoher redistribute_power aber bewirken
+        (wenige hohe Gipfel, der Großteil der Fläche nahe der Talsohle).
+        Ohne amplitude (z.B. für bereits redistributierte/fremde Daten) fällt die
+        Funktion auf den alten Contrast-Stretch-Modus zurück.
         """
         if redistribute_power == 1.0:
             return heightmap
+
+        if amplitude and amplitude > 0:
+            normalized = np.clip(heightmap / amplitude, 0.0, 1.0)
+            redistributed = np.power(normalized, redistribute_power)
+            result = redistributed * amplitude
+            return result.astype(np.float32)
 
         min_height = np.min(heightmap)
         max_height = np.max(heightmap)
@@ -1132,7 +1154,7 @@ class BaseTerrainGenerator:
         if height_range == 0:
             return heightmap
 
-        # Normalisierung und Power-Redistribution
+        # Fallback: Contrast-Stretch gegen die Stichprobe (altes Verhalten)
         normalized = (heightmap - min_height) / height_range
         redistributed = np.power(normalized, redistribute_power)
         result = redistributed * height_range + min_height
@@ -1175,15 +1197,15 @@ class BaseTerrainGenerator:
             if param not in parameters:
                 raise ValueError(f"Missing required parameter: {param}")
 
-        # Range-Validation
+        # Range-Validation - Grenzen synchron zu gui/config/value_default.py TERRAIN
         validations = {
-            'map_size': lambda x: 32 <= x <= 2048 and (x & (x-1)) == 0,  # Power of 2
-            'amplitude': lambda x: 0 <= x <= 1000,
-            'octaves': lambda x: 1 <= x <= 10,
-            'frequency': lambda x: 0.001 <= x <= 1.0,
-            'persistence': lambda x: 0.0 <= x <= 2.0,
-            'lacunarity': lambda x: 1.0 <= x <= 5.0,
-            'redistribute_power': lambda x: 0.1 <= x <= 3.0
+            'map_size': lambda x: 32 <= x <= 1024 and x % 32 == 0,  # Vielfaches von MAPSIZEMIN (UI-Step)
+            'amplitude': lambda x: 30 <= x <= 6000,
+            'octaves': lambda x: 1 <= x <= 12,
+            'frequency': lambda x: 0.001 <= x <= 0.1,
+            'persistence': lambda x: 0.1 <= x <= 1.0,
+            'lacunarity': lambda x: 1.1 <= x <= 4.0,
+            'redistribute_power': lambda x: 0.5 <= x <= 4.0
         }
 
         for param, validator in validations.items():
@@ -1373,7 +1395,7 @@ def validate_terrain_parameters(parameters: Dict[str, Any]) -> Dict[str, Any]:
 
     # Range-Validation
     validations = {
-        'map_size': (lambda x: 32 <= x <= 2048 and (x & (x-1)) == 0, "Must be power of 2 between 32 and 2048"),
+        'map_size': (lambda x: 32 <= x <= 2048 and x % 32 == 0, "Must be a multiple of 32 between 32 and 2048"),
         'amplitude': (lambda x: 0 <= x <= 1000, "Must be between 0 and 1000"),
         'octaves': (lambda x: 1 <= x <= 10, "Must be between 1 and 10"),
         'frequency': (lambda x: 0.001 <= x <= 1.0, "Must be between 0.001 and 1.0"),

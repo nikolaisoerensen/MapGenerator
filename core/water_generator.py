@@ -12,7 +12,7 @@ Funktionsweise: Dynamisches Hydrologiesystem mit Erosion, Sedimentation und bidi
 
 Parameter Input:
 - lake_volume_threshold (Mindestvolumen für Seebildung, default 0.1m)
-- rain_threshold (Niederschlagsschwelle für Quellbildung, default 5.0 gH2O/m²)
+- rain_threshold (Niederschlagsschwelle für Quellbildung, default 0.02 gH2O/m²)
 - manning_coefficient (Rauheitskoeffizient für Fließgeschwindigkeit, default 0.03)
 - erosion_strength (Erosionsintensitäts-Multiplikator, default 1.0)
 - sediment_capacity_factor (Transportkapazitäts-Faktor, default 0.1)
@@ -40,6 +40,7 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 from scipy.spatial import distance_matrix
 from collections import deque
+from typing import Dict, Any
 import heapq
 import logging
 
@@ -413,11 +414,13 @@ class FlowNetworkBuilder:
 
                 flow_amount = flow_accumulation[y, x]
 
-                if flow_amount >= 100.0:  # Grand River
+                # Schwellen skaliert zur precip_map/rain_threshold-Größenordnung
+                # (siehe WATER.RAIN_THRESHOLD in gui/config/value_default.py)
+                if flow_amount >= 0.4:  # Grand River
                     water_biomes_map[y, x] = 3
-                elif flow_amount >= 20.0:  # River
+                elif flow_amount >= 0.08:  # River
                     water_biomes_map[y, x] = 2
-                elif flow_amount >= 5.0:  # Creek
+                elif flow_amount >= 0.02:  # Creek
                     water_biomes_map[y, x] = 1
 
         return water_biomes_map
@@ -682,7 +685,9 @@ class ErosionSedimentationSystem:
                 flow_rate = flow_accumulation[y, x]
                 velocity = flow_speed[y, x]
 
-                if flow_rate < 1.0 or velocity < 0.1:
+                # Flow-Rate-Schwelle skaliert zur precip_map/rain_threshold-Größenordnung
+                # (siehe WATER.RAIN_THRESHOLD in gui/config/value_default.py)
+                if flow_rate < 0.004 or velocity < 0.1:
                     continue
 
                 # Approximiere Wassertiefe aus Flow-Rate und Geschwindigkeit
@@ -1057,7 +1062,7 @@ class HydrologySystemGenerator:
             # Fallback defaults
             return {
                 'lake_volume_threshold': 0.1,
-                'rain_threshold': 5.0,
+                'rain_threshold': 0.02,
                 'manning_coefficient': 0.03,
                 'erosion_strength': 1.0,
                 'sediment_capacity_factor': 0.1,
@@ -1197,7 +1202,7 @@ class HydrologySystemGenerator:
             # Phase 6: Evaporation (95% - 100%)
             self._update_progress("Evaporation", 96, "Calculating atmospheric evaporation...")
             evaporation_map = self.evaporation.calculate_evaporation(
-                temp_map, humid_map, wind_map, water_biomes_map, parameters
+                temp_map, wind_map, humid_map, water_biomes_map, parameters
             )
 
             # Finale Berechnungen
@@ -1269,40 +1274,47 @@ class HydrologySystemGenerator:
             super().update_seed(new_seed)
 
     def _get_lod_size(self, lod, original_size):
-        """Bestimmt Zielgröße basierend auf LOD-Level"""
-        lod_sizes = {"LOD64": 64, "LOD128": 128, "LOD256": 256}
-
-        if lod == "FINAL":
-            return original_size
-        else:
+        """
+        Bestimmt Zielgröße basierend auf LOD-Level.
+        Unterstützt sowohl das numerische LOD-System (int, alle aktuellen Aufrufer über
+        GenerationOrchestrator/GenerationThread) als auch die alten String-LODs
+        ("LOD64"/"LOD128"/"LOD256"/"FINAL", nur noch für generate_hydrology_system()).
+        """
+        if isinstance(lod, str):
+            if lod == "FINAL":
+                return original_size
+            lod_sizes = {"LOD64": 64, "LOD128": 128, "LOD256": 256}
             return lod_sizes.get(lod, 64)
 
+        from gui.config.value_default import TERRAIN
+        target_size = TERRAIN.MAPSIZEMIN * (2 ** (lod - 1))
+        return min(target_size, original_size)
+
     def _get_lod_iterations(self, lod):
-        """Bestimmt LOD-spezifische Iterationsanzahl für Performance-Optimierung"""
-        if lod == "LOD64":
-            return {
-                'flow': 50,  # Statt height*width//10 (409)
-                'sediment': 3,  # Statt 10
-                'manning': 5  # Statt 20
-            }
-        elif lod == "LOD128":
-            return {
-                'flow': 100,  # Statt 1638
-                'sediment': 5,  # Statt 10
-                'manning': 10  # Statt 20
-            }
-        elif lod == "LOD256":
-            return {
-                'flow': 200,  # Statt 6553
-                'sediment': 7,  # Statt 10
-                'manning': 15  # Statt 20
-            }
-        else:  # FINAL
-            return {
-                'flow': 400,  # Vernünftige Grenze statt //10
-                'sediment': 10,  # Original
-                'manning': 20  # Original
-            }
+        """
+        Bestimmt LOD-spezifische Iterationsanzahl für Performance-Optimierung.
+        Unterstützt sowohl das numerische LOD-System (int) als auch die alten
+        String-LODs (nur noch für generate_hydrology_system()).
+        """
+        if isinstance(lod, str):
+            if lod == "LOD64":
+                return {'flow': 50, 'sediment': 3, 'manning': 5}
+            elif lod == "LOD128":
+                return {'flow': 100, 'sediment': 5, 'manning': 10}
+            elif lod == "LOD256":
+                return {'flow': 200, 'sediment': 7, 'manning': 15}
+            else:  # FINAL
+                return {'flow': 400, 'sediment': 10, 'manning': 20}
+
+        # Numerisches LOD: gleiche Stufen wie bisher, jetzt nach LOD-Level statt String
+        if lod <= 1:
+            return {'flow': 50, 'sediment': 3, 'manning': 5}
+        elif lod == 2:
+            return {'flow': 100, 'sediment': 5, 'manning': 10}
+        elif lod == 3:
+            return {'flow': 200, 'sediment': 7, 'manning': 15}
+        else:
+            return {'flow': 400, 'sediment': 10, 'manning': 20}
 
     def _interpolate_array(self, array, target_size):
         """Interpoliert Arrays aller Typen auf neue Größe"""
@@ -1461,6 +1473,23 @@ class HydrologySystemGenerator:
         """Progress-Update für UI-Integration"""
         if hasattr(self, 'progress_callback') and self.progress_callback:
             self.progress_callback(phase, percentage, message)
+
+    def calculate_hydrology(self, dependencies: Dict[str, Any], parameters: Dict[str, Any],
+                           lod_level: int) -> WaterData:
+        """
+        Hauptmethode für Water-System-Generierung mit numerischem LOD-Level.
+
+        Args:
+            dependencies: dict mit heightmap, slopemap, hardness_map, rock_map,
+                         precip_map, temp_map, wind_map, humid_map (bereits auf
+                         lod_level vorskaliert vom DataLODManager)
+            parameters: Alle Water-Parameter aus ParameterManager
+            lod_level: Numerisches LOD-Level (1-6+)
+
+        Returns:
+            WaterData: Vollständiges Wassersystem mit allen 10 Outputs
+        """
+        return self._execute_generation(lod_level, dependencies, parameters)
 
     # ===== LEGACY-KOMPATIBILITÄT =====
     # Alle alten Methoden bleiben für Rückwärts-Kompatibilität erhalten

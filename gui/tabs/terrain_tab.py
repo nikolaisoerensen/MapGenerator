@@ -14,12 +14,12 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import pyqtSlot, Qt
 from PyQt5.QtGui import QFont
 import logging
+import numpy as np
 from typing import Dict, Any, Optional
 
 from gui.tabs.base_tab import BaseMapTab
 from gui.widgets.widgets import (
-    BaseButton, ParameterSlider, RandomSeedButton,
-    StatusIndicator, ProgressBar, NoWheelSlider
+    ParameterSlider, RandomSeedButton, NoWheelSlider
 )
 from gui.config.value_default import TERRAIN, get_parameter_config, validate_parameter_set
 
@@ -46,9 +46,11 @@ class TerrainTab(BaseMapTab):
         self.current_display_mode = "height"
 
         # Shadow und Overlay Controls
-        self.shadow_checkbox = None
+        # Contour Lines/Shadows selbst sind globale Shell-Checkboxen (Spalte 2,
+        # siehe MapEditorWindow); shadow_enabled wird von set_shadow_overlay()
+        # gesetzt, shadow_angle_slider bleibt Terrain-spezifisch.
+        self.shadow_enabled = False
         self.shadow_angle_slider = None
-        self.contour_checkbox = None
         self.grid_checkbox = None
 
         # LOD-System Tracking
@@ -65,6 +67,13 @@ class TerrainTab(BaseMapTab):
             shader_manager=shader_manager,
             generation_orchestrator=generation_orchestrator
         )
+
+        # Registrierung beim ParameterManager: parameter_sliders sind durch
+        # create_parameter_controls() (innerhalb von super().__init__()) bereits
+        # befüllt, get_current_parameters() liefert damit sofort die Default-Werte
+        # als Startwert des Caches.
+        if self.parameter_manager:
+            self.parameter_manager.register_tab(self.generator_type, self)
 
         self.logger.info("TerrainTab initialized")
 
@@ -90,12 +99,6 @@ class TerrainTab(BaseMapTab):
         try:
             # Terrain Parameters GroupBox
             self._create_terrain_parameters()
-
-            # Generation Control GroupBox
-            self._create_generation_controls()
-
-            # Terrain Statistics GroupBox
-            self._create_statistics_display()
 
             self.logger.debug("Parameter controls created successfully")
 
@@ -177,31 +180,13 @@ class TerrainTab(BaseMapTab):
 
         return seed_layout
 
-    def _create_generation_controls(self):
-        """Erstellt Generation Control GroupBox"""
-        generation_group = QGroupBox("Generation Control")
-        generation_group.setFont(QFont("Arial", 10, QFont.Bold))
-        generation_layout = QVBoxLayout()
-
-        # Berechnen Button
-        self.generation_button = BaseButton("Berechnen", "primary")
-        self.generation_button.clicked.connect(self._on_generate_clicked)
-        generation_layout.addWidget(self.generation_button)
-
-        # Progress Bar für LOD-Progression
-        self.progress_bar = ProgressBar()
-        generation_layout.addWidget(self.progress_bar)
-
-        # System Status
-        self.system_status = StatusIndicator("Generation Status")
-        self.system_status.set_success("Ready")
-        generation_layout.addWidget(self.system_status)
-
-        generation_group.setLayout(generation_layout)
-        self.control_panel.layout().addWidget(generation_group)
-
-    def _create_statistics_display(self):
-        """Erstellt Terrain Statistics GroupBox"""
+    def create_statistics_controls(self, layout: QVBoxLayout):
+        """
+        Überschreibt BaseMapTab: befüllt das Statistics-Tab (Spalte 3) mit den
+        Terrain-Statistics. Generation Control (Berechnen-Button, Ladebalken,
+        System-Status) entfällt hier bewusst - das übernehmen jetzt der globale
+        [GENERIEREN]-Button und die Pipeline-Status-Spalte im Shell-Layout.
+        """
         stats_group = QGroupBox("Terrain Statistics")
         stats_group.setFont(QFont("Arial", 10, QFont.Bold))
         stats_layout = QVBoxLayout()
@@ -223,7 +208,7 @@ class TerrainTab(BaseMapTab):
         stats_layout.addWidget(self.performance_label)
 
         stats_group.setLayout(stats_layout)
-        self.control_panel.layout().addWidget(stats_group)
+        layout.addWidget(stats_group)
 
     def create_visualization_controls(self):
         """
@@ -270,19 +255,17 @@ class TerrainTab(BaseMapTab):
         return layout
 
     def _create_overlay_controls(self):
-        """Erstellt Overlay Controls (Shadow/Contour/Grid)"""
+        """
+        Erstellt Terrain-spezifische Overlay Controls (Shadow-Winkel/Grid).
+        Contour Lines und der Shadow-Toggle selbst sind globale Shell-Checkboxen
+        (Spalte 2, siehe MapEditorWindow) - hier bleibt nur der Terrain-eigene
+        Sonnenwinkel-Parameter, der von set_shadow_overlay() gesteuert wird.
+        """
         layout = QHBoxLayout()
-
-        # Shadow Overlay mit Angle Slider
-        shadow_layout = QVBoxLayout()
-
-        self.shadow_checkbox = QCheckBox("Shadow")
-        self.shadow_checkbox.toggled.connect(self._on_shadow_toggled)
-        shadow_layout.addWidget(self.shadow_checkbox)
 
         # Shadow Angle Slider (0-6 entspricht 7 Sonnenstände)
         shadow_angle_layout = QHBoxLayout()
-        shadow_angle_layout.addWidget(QLabel("Angle:"))
+        shadow_angle_layout.addWidget(QLabel("Shadow Angle:"))
 
         self.shadow_angle_slider = NoWheelSlider(Qt.Horizontal)
         self.shadow_angle_slider.setRange(0, 6)
@@ -291,20 +274,27 @@ class TerrainTab(BaseMapTab):
         self.shadow_angle_slider.valueChanged.connect(self._on_shadow_angle_changed)
         shadow_angle_layout.addWidget(self.shadow_angle_slider)
 
-        shadow_layout.addLayout(shadow_angle_layout)
-        layout.addLayout(shadow_layout)
+        layout.addLayout(shadow_angle_layout)
 
-        # Contour Lines Overlay
-        self.contour_checkbox = QCheckBox("Contour Lines")
-        self.contour_checkbox.toggled.connect(self._on_contour_toggled)
-        layout.addWidget(self.contour_checkbox)
-
-        # Grid Overlay
+        # Grid Overlay (Terrain-spezifisch, nicht Teil der globalen Checkboxen)
         self.grid_checkbox = QCheckBox("Grid")
         self.grid_checkbox.toggled.connect(self._on_grid_toggled)
         layout.addWidget(self.grid_checkbox)
 
         return layout
+
+    def set_shadow_overlay(self, checked: bool):
+        """
+        Überschreibt BaseMapTab: globaler Shadows-Toggle inklusive
+        Terrain-spezifischem Sonnenwinkel-Parameter.
+        """
+        self.shadow_enabled = checked
+        try:
+            current_display = self.get_current_display()
+            if current_display and hasattr(current_display.display, 'set_shadow_overlay'):
+                current_display.display.set_shadow_overlay(checked, self.shadow_angle_slider.value())
+        except Exception as e:
+            self.logger.debug(f"Shadow overlay toggle failed: {e}")
 
     def _create_vertical_separator(self):
         """Erstellt vertikalen Separator für UI-Layout"""
@@ -342,13 +332,22 @@ class TerrainTab(BaseMapTab):
         except Exception as e:
             self.logger.error(f"Random seed setting failed: {e}")
 
+    def get_current_parameters(self) -> Dict[str, Any]:
+        """
+        Sammelt die aktuellen Werte aller Terrain-Parameter-Slider.
+        Wird vom ParameterManager als zentrale Quelle für die Terrain-Parameter
+        genutzt (register_tab()/get_tab_parameters() rufen diese Methode auf,
+        siehe gui/OldManagers/parameter_manager.py).
+        """
+        parameters = {}
+        for param_name, slider in self.parameter_sliders.items():
+            parameters[param_name] = slider.getValue()
+        return parameters
+
     def _validate_parameter_constraints(self):
         """Validiert Cross-Parameter Constraints"""
         try:
-            # Aktuelle Parameter-Werte sammeln
-            parameters = {}
-            for param_name, slider in self.parameter_sliders.items():
-                parameters[param_name] = slider.getValue()
+            parameters = self.get_current_parameters()
 
             # Validation über value_default.py
             is_valid, warnings, errors = validate_parameter_set("terrain", parameters)
@@ -367,8 +366,13 @@ class TerrainTab(BaseMapTab):
         except Exception as e:
             self.logger.error(f"Parameter validation failed: {e}")
 
-    def _on_generate_clicked(self):
-        """Handler für Generate-Button"""
+    def generate(self):
+        """
+        Überschreibt BaseMapTab: Dependency-Check + Parameter-Validation vor
+        der eigentlichen Generation. Wird jetzt ausschließlich über den
+        globalen [GENERIEREN]-Button im Shell-Footer ausgelöst (kein eigener
+        Berechnen-Button mehr im Parameter-Panel).
+        """
         try:
             # Dependency Check (Terrain hat keine Dependencies)
             if not self.check_input_dependencies():
@@ -378,8 +382,7 @@ class TerrainTab(BaseMapTab):
             # Parameter Validation
             self._validate_parameter_constraints()
 
-            # Generation Request über BaseMapTab
-            self.generate()
+            super().generate()
 
             self.logger.info("Terrain generation requested")
 
@@ -395,23 +398,10 @@ class TerrainTab(BaseMapTab):
             self.update_display_mode()
             self.logger.debug(f"Display mode changed to: {mode}")
 
-    def _on_shadow_toggled(self, checked: bool):
-        """Handler für Shadow Overlay Toggle"""
-        try:
-            # Shadow Overlay über Display-System
-            current_display = self.get_current_display()
-            if current_display and hasattr(current_display.display, 'set_shadow_overlay'):
-                current_display.display.set_shadow_overlay(checked, self.shadow_angle_slider.value())
-
-            self.logger.debug(f"Shadow overlay: {checked}")
-
-        except Exception as e:
-            self.logger.debug(f"Shadow overlay toggle failed: {e}")
-
     def _on_shadow_angle_changed(self, angle: int):
-        """Handler für Shadow Angle Changes"""
+        """Handler für Shadow Angle Changes (nur relevant, wenn Shadows global aktiv sind)"""
         try:
-            if self.shadow_checkbox and self.shadow_checkbox.isChecked():
+            if self.shadow_enabled:
                 current_display = self.get_current_display()
                 if current_display and hasattr(current_display.display, 'set_shadow_overlay'):
                     current_display.display.set_shadow_overlay(True, angle)
@@ -420,18 +410,6 @@ class TerrainTab(BaseMapTab):
 
         except Exception as e:
             self.logger.debug(f"Shadow angle change failed: {e}")
-
-    def _on_contour_toggled(self, checked: bool):
-        """Handler für Contour Lines Toggle"""
-        try:
-            current_display = self.get_current_display()
-            if current_display and hasattr(current_display.display, 'set_contour_overlay'):
-                current_display.display.set_contour_overlay(checked)
-
-            self.logger.debug(f"Contour overlay: {checked}")
-
-        except Exception as e:
-            self.logger.debug(f"Contour overlay toggle failed: {e}")
 
     def _on_grid_toggled(self, checked: bool):
         """Handler für Grid Overlay Toggle"""
@@ -466,14 +444,24 @@ class TerrainTab(BaseMapTab):
             if self.current_display_mode == "height":
                 data = self.data_lod_manager.get_terrain_data("heightmap")
                 data_type = "heightmap"
+                display_data = data
             elif self.current_display_mode == "slope":
                 data = self.data_lod_manager.get_terrain_data("slopemap")
                 data_type = "slopemap"
+                # slopemap ist (H,W,2) dx/dy-Gradient - MapDisplay2D kann nur
+                # echte 2D-Bilder zeichnen. Für die Anzeige auf eine
+                # Steigungs-Magnitude in Grad reduzieren (dieselbe Umrechnung
+                # wie in _update_statistics()); die rohen (H,W,2)-Daten bleiben
+                # für Change-Detection/Statistics unverändert.
+                display_data = None
+                if data is not None and hasattr(data, 'shape') and len(data.shape) == 3:
+                    slope_magnitude = np.sqrt(data[:, :, 0] ** 2 + data[:, :, 1] ** 2)
+                    display_data = np.degrees(np.arctan(slope_magnitude)).astype(np.float32)
             else:
                 return
 
             # Display Update mit Change-Detection
-            if data is not None and hasattr(current_display, 'update_display'):
+            if data is not None and display_data is not None and hasattr(current_display, 'update_display'):
                 display_id = f"TerrainTab_{self.current_view}_{data_type}"
 
                 if hasattr(self.data_lod_manager, 'display_update_manager'):
@@ -482,7 +470,7 @@ class TerrainTab(BaseMapTab):
                     )
 
                     if needs_update:
-                        current_display.update_display(data, data_type)
+                        self._push_data_to_current_display(display_data, data_type)
                         self.data_lod_manager.display_update_manager.mark_updated(
                             display_id, data, data_type
                         )
@@ -491,7 +479,7 @@ class TerrainTab(BaseMapTab):
                         self._update_statistics(data, data_type)
                 else:
                     # Fallback ohne Change-Detection
-                    current_display.update_display(data, data_type)
+                    self._push_data_to_current_display(display_data, data_type)
                     self._update_statistics(data, data_type)
 
         except Exception as e:
@@ -500,8 +488,6 @@ class TerrainTab(BaseMapTab):
     def _update_statistics(self, data, data_type: str):
         """Aktualisiert Terrain Statistics basierend auf aktuellen Daten"""
         try:
-            import numpy as np
-
             if data_type == "heightmap" and hasattr(data, 'shape'):
                 # Height Statistics
                 height_min = float(np.min(data))

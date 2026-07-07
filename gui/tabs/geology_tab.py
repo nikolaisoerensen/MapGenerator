@@ -1,42 +1,53 @@
 """
 Path: gui/tabs/geology_tab.py
 
-Funktionsweise: Geology-Editor mit vollständiger BaseTab-Integration - CLEAN IMPLEMENTATION
-- Nutzt BaseTab's generate() als einheitliche Hauptfunktion
-- Vollständige Integration: GenerationOrchestrator, ParameterManager, DataLODManager
-- Auto-Tab-Generation: Automatische Generation bei Dependencies-Erfüllung
-- Eliminiert alle QMetaObject-Patterns und redundante Handler
-- Input: heightmap, slopemap von terrain_tab
-- Output: rock_map (RGB), hardness_map für nachfolgende Generatoren
+GeologyTab implementiert die Geology-Generator UI mit vollständiger BaseMapTab-Integration
+und direkter Anbindung an den GeologySystemGenerator aus core/geology_generator.py. Als von
+Terrain abhängiger Generator (heightmap_combined, slopemap) liefert er rock_map und
+hardness_map für Water und alle nachgelagerten Systeme.
 """
 
 from PyQt5.QtWidgets import (
-    QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QRadioButton,
-    QCheckBox, QProgressBar, QGridLayout, QComboBox, QButtonGroup
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
+    QButtonGroup, QCheckBox, QLabel, QGridLayout, QProgressBar
 )
 from PyQt5.QtCore import pyqtSlot
-import numpy as np
+from PyQt5.QtGui import QFont
 import logging
+import numpy as np
+from typing import Dict, Any
 
-from .base_tab import BaseMapTab
-from gui.config.value_default import GEOLOGY
+from gui.tabs.base_tab import BaseMapTab
 from gui.widgets.widgets import ParameterSlider, StatusIndicator
-from core.geology_generator import GeologySystemGenerator, RockTypeClassifier, MassConservationManager
+from gui.config.value_default import GEOLOGY
 
 
 class GeologyTab(BaseMapTab):
     """
-    Funktionsweise: Geology-Generator Tab mit vollständiger BaseTab-Integration
-    Aufgabe: Koordiniert Geology-Generation über einheitliche BaseTab-Architektur
-    Input: heightmap, slopemap von terrain_tab
-    Output: rock_map (RGB), hardness_map über DataLODManager
+    Geology-Generator Tab mit vollständiger BaseMapTab-Integration.
+    Implementiert rock_map und hardness_map Generation auf Basis der Terrain-Daten
+    (heightmap_combined, slopemap).
     """
 
     def __init__(self, data_lod_manager, parameter_manager, navigation_manager, shader_manager, generation_orchestrator):
+
+        # Generator-Konfiguration vor BaseMapTab.__init__()
         self.generator_type = "geology"
-        # Required dependencies für BaseTab
         self.required_dependencies = ["heightmap", "slopemap"]
 
+        # Geology-spezifische Attribute (vor super(), da create_parameter_controls
+        # und create_visualization_controls während BaseMapTab.setup_ui() darauf
+        # zugreifen und sie befüllen)
+        self.parameter_sliders = {}
+        self.rock_distribution_widget = None
+        self.dependency_status = None
+        self.display_mode_group = None
+        self.terrain_3d_checkbox = None
+        self.current_display_mode = "height"
+
+        self.logger = logging.getLogger("GeologyTab")
+
+        # Manager-Integration
         super().__init__(
             data_lod_manager=data_lod_manager,
             parameter_manager=parameter_manager,
@@ -45,375 +56,356 @@ class GeologyTab(BaseMapTab):
             generation_orchestrator=generation_orchestrator
         )
 
-        self.logger = logging.getLogger(__name__)
+        # Registrierung beim ParameterManager: parameter_sliders sind durch
+        # create_parameter_controls() (innerhalb von super().__init__()) bereits
+        # befüllt, get_current_parameters() liefert damit sofort die Default-Werte
+        # als Startwert des Caches.
+        if self.parameter_manager:
+            self.parameter_manager.register_tab(self.generator_type, self)
 
-        # Core-Generator (nur für direkte Fallback-Generation)
-        self.geology_generator = GeologySystemGenerator()
-        self.rock_classifier = RockTypeClassifier()
-        self.mass_conservation = MassConservationManager()
-
-        # Enhanced Features - WIEDERHERGESTELLT
-        self.dependency_validation_enabled = True
-        self.data_validation_enabled = True
-
-        # Setup UI mit standardisierten Patterns
-        self.create_geology_specific_widgets()
-        self.create_enhanced_geology_ui()
-
-        # Load default parameters
-        self._load_default_geology_parameters()
-
-        # Initial dependency check
+        # Initialer Dependency-Check für die Status-Anzeige
         self.check_input_dependencies()
 
-        # SIGNAL-HANDLER OVERRIDES (erweitern BaseMapTab-Standard-Handler)
-
-        @pyqtSlot(str, int)
-        def on_generation_started(self, generator_type: str, lod_level: int):
-            """
-            Funktionsweise: Überschreibt BaseMapTab Start-Handler für Geology-Progress-Feedback
-            Aufgabe: Initialisiert ProgressBar mit LOD-Information bei Generation-Start
-            """
-            if generator_type != self.generator_type:
-                return
-
-            if hasattr(self, 'generation_progress'):
-                self.generation_progress.setValue(0)
-                self.generation_progress.setFormat(f"Generating Geology LOD {lod_level}...")
-
-            super().on_generation_started(generator_type)
-
-        @pyqtSlot(int, str)
-        def on_generation_progress(self, progress: int, message: str):
-            """
-            Funktionsweise: Überschreibt BaseMapTab Progress-Handler für Geology-ProgressBar
-            Aufgabe: Aktualisiert ProgressBar-Wert und Phasen-Text während der Generierung
-            """
-            if not self.generation_active:
-                return
-
-            if hasattr(self, 'generation_progress'):
-                self.generation_progress.setValue(progress)
-                self.generation_progress.setFormat(f"{message} ({progress}%)")
-
-            super().on_generation_progress(progress, message)
-
-        @pyqtSlot(str, dict)
-        def on_generation_completed(self, result_id: str, result_data: dict):
-            """
-            Funktionsweise: Überschreibt BaseMapTab Completion-Handler für Geology-Abschluss
-            Aufgabe: Schließt ProgressBar ab, aktualisiert Rock-Statistiken und validiert rock_map
-            """
-            generator_type = result_data.get("generator_type", "")
-            success = result_data.get("success", False)
-            lod_level = result_data.get("lod_level", 0)
-
-            if generator_type != self.generator_type:
-                return
-
-            if hasattr(self, 'generation_progress'):
-                if success:
-                    self.generation_progress.setValue(100)
-                    self.generation_progress.setFormat(f"Geology LOD {lod_level} Complete")
-                else:
-                    self.generation_progress.setFormat(f"Geology LOD {lod_level} Failed")
-
-            if success:
-                try:
-                    rock_map = self.data_lod_manager.get_geology_data("rock_map")
-                    hardness_map = self.data_lod_manager.get_geology_data("hardness_map")
-
-                    if rock_map is not None and hardness_map is not None:
-                        self.rock_distribution_widget.update_statistics(rock_map, hardness_map)
-
-                        if self.data_validation_enabled:
-                            if self._validate_rock_map(rock_map):
-                                self.logger.info("Post-generation rock_map validation: PASSED")
-                            else:
-                                self.logger.warning("Post-generation rock_map validation: FAILED")
-
-                except Exception as e:
-                    self.logger.debug(f"Post-generation updates failed: {e}")
-
-            super().on_generation_completed(result_id, result_data)
+        self.logger.info("GeologyTab initialized")
 
     def create_parameter_controls(self):
         """
-        Funktionsweise: Erstellt Geology-Parameter-Controls - STANDARDISIERT
-        Aufgabe: Nutzt BaseTab's control_panel für einheitliches Layout
+        Erstellt alle Parameter-Controls für Geology-Generation.
+        Implementiert Required-Method von BaseMapTab.
+        Stellt bei abgetrenntem Panel-Layout ein neues Layout wieder her,
+        damit die Parameter-Erstellung nie leer abbricht.
         """
-        # Rock Hardness Parameters
-        hardness_panel = QGroupBox("Rock Hardness")
+        if not self.control_panel:
+            self.logger.error("Parameter creation skipped: control_panel is None")
+            return
+
+        if self.control_panel.layout() is None:
+            repaired_layout = QVBoxLayout()
+            repaired_layout.setContentsMargins(5, 5, 5, 5)
+            repaired_layout.setSpacing(10)
+            self.control_panel.setLayout(repaired_layout)
+            self.control_panel_content_layout = repaired_layout
+            self.logger.info("Control panel layout was detached - reinstalled")
+
+        try:
+            self._create_hardness_parameters()
+            self._create_deformation_parameters()
+            self._create_dependency_status()
+
+            self.logger.debug("Parameter controls created successfully")
+
+        except Exception as e:
+            self.logger.error(f"Parameter control creation failed: {e}")
+
+    def _create_hardness_parameters(self):
+        """Erstellt Rock-Hardness Parameter Controls"""
+        hardness_group = QGroupBox("Rock Hardness")
+        hardness_group.setFont(QFont("Arial", 10, QFont.Bold))
         hardness_layout = QVBoxLayout()
 
-        self.parameter_sliders = {}
-
         hardness_params = [
-            ("sedimentary_hardness", "Sedimentary Hardness"),
-            ("igneous_hardness", "Igneous Hardness"),
-            ("metamorphic_hardness", "Metamorphic Hardness")
+            ("sedimentary_hardness", "Sedimentary Hardness", GEOLOGY.SEDIMENTARY_HARDNESS),
+            ("igneous_hardness", "Igneous Hardness", GEOLOGY.IGNEOUS_HARDNESS),
+            ("metamorphic_hardness", "Metamorphic Hardness", GEOLOGY.METAMORPHIC_HARDNESS)
         ]
 
-        for param_key, param_label in hardness_params:
-            param_config = GEOLOGY.__dict__[param_key.upper()]
-
+        for param_key, label, config in hardness_params:
             slider = ParameterSlider(
-                label=param_label,
-                min_val=param_config["min"],
-                max_val=param_config["max"],
-                default_val=param_config["default"],
-                step=param_config.get("step", 1),
-                suffix=param_config.get("suffix", "")
+                label=label,
+                min_val=config["min"],
+                max_val=config["max"],
+                default_val=config["default"],
+                step=config.get("step", 1),
+                suffix=config.get("suffix", "")
             )
-            slider.valueChanged.connect(self._on_parameter_changed)
+            slider.valueChanged.connect(
+                lambda value, key=param_key: self._on_parameter_changed(key, value)
+            )
             self.parameter_sliders[param_key] = slider
             hardness_layout.addWidget(slider)
 
-        hardness_panel.setLayout(hardness_layout)
-        self.control_panel.layout().addWidget(hardness_panel)
+        hardness_group.setLayout(hardness_layout)
+        self.control_panel.layout().addWidget(hardness_group)
 
-        # Tectonic Deformation Parameters
-        deformation_panel = QGroupBox("Tectonic Deformation")
+    def _create_deformation_parameters(self):
+        """Erstellt Tectonic-Deformation Parameter Controls"""
+        deformation_group = QGroupBox("Tectonic Deformation")
+        deformation_group.setFont(QFont("Arial", 10, QFont.Bold))
         deformation_layout = QVBoxLayout()
 
         deformation_params = [
-            ("ridge_warping", "Ridge Warping"),
-            ("bevel_warping", "Bevel Warping"),
-            ("metamorph_foliation", "Metamorphic Foliation"),
-            ("metamorph_folding", "Metamorphic Folding"),
-            ("igneous_flowing", "Igneous Flowing")
+            ("ridge_warping", "Ridge Warping", GEOLOGY.RIDGE_WARPING),
+            ("bevel_warping", "Bevel Warping", GEOLOGY.BEVEL_WARPING),
+            ("metamorph_foliation", "Metamorphic Foliation", GEOLOGY.METAMORPH_FOLIATION),
+            ("metamorph_folding", "Metamorphic Folding", GEOLOGY.METAMORPH_FOLDING),
+            ("igneous_flowing", "Igneous Flowing", GEOLOGY.IGNEOUS_FLOWING)
         ]
 
-        for param_key, param_label in deformation_params:
-            param_config = GEOLOGY.__dict__[param_key.upper()]
-
+        for param_key, label, config in deformation_params:
             slider = ParameterSlider(
-                label=param_label,
-                min_val=param_config["min"],
-                max_val=param_config["max"],
-                default_val=param_config["default"],
-                step=param_config.get("step", 0.1),
-                suffix=param_config.get("suffix", "")
+                label=label,
+                min_val=config["min"],
+                max_val=config["max"],
+                default_val=config["default"],
+                step=config.get("step", 0.1),
+                suffix=config.get("suffix", "")
             )
-            slider.valueChanged.connect(self._on_parameter_changed)
+            slider.valueChanged.connect(
+                lambda value, key=param_key: self._on_parameter_changed(key, value)
+            )
             self.parameter_sliders[param_key] = slider
             deformation_layout.addWidget(slider)
 
-        deformation_panel.setLayout(deformation_layout)
-        self.control_panel.layout().addWidget(deformation_panel)
+        deformation_group.setLayout(deformation_layout)
+        self.control_panel.layout().addWidget(deformation_group)
 
-    def create_enhanced_geology_ui(self):
-        """
-        Funktionsweise: Erstellt erweiterte Geology UI-Komponenten - WIEDERHERGESTELLT
-        Aufgabe: LOD-Control, Progress-Tracking, Dependency-Status
-        """
-        # LOD Control Panel - WIEDERHERGESTELLT
-        self.lod_control_panel = self.create_geology_lod_control_panel()
-        self.control_panel.layout().addWidget(self.lod_control_panel)
-
-        # Enhanced Dependency Status - WIEDERHERGESTELLT
+    def _create_dependency_status(self):
+        """Erstellt Dependency-Status-Anzeige (Verfügbarkeit der Terrain-Inputs)"""
         self.dependency_status = StatusIndicator("Input Dependencies")
         self.control_panel.layout().addWidget(self.dependency_status)
 
-    def create_geology_lod_control_panel(self):
+    def create_statistics_controls(self, layout: QVBoxLayout):
         """
-        Funktionsweise: LOD-Control Panel für Geology - WIEDERHERGESTELLT
-        Aufgabe: Target-LOD Selection und detaillierte Progress-Anzeige
+        Überschreibt BaseMapTab: befüllt das Statistics-Tab (Spalte 3) mit der
+        Rock-Distribution-Anzeige (Härte-Vorschau + Mass-Conservation-Status).
+        Generation Control entfällt hier bewusst - das übernehmen der globale
+        [GENERIEREN]-Button und die Pipeline-Status-Spalte im Shell-Layout.
         """
-        panel = QGroupBox("Geology Quality Control")
-        layout = QVBoxLayout()
-
-        # Target-LOD Selection - WIEDERHERGESTELLT
-        target_layout = QHBoxLayout()
-        target_layout.addWidget(QLabel("Target Quality:"))
-
-        self.target_lod_combo = QComboBox()
-        self.target_lod_combo.addItems([
-            "LOD64 (Fast Preview)",
-            "LOD128 (Medium Quality)",
-            "LOD256 (High Quality)",
-            "FINAL (Best Quality)"
-        ])
-        self.target_lod_combo.setCurrentIndex(3)  # Default: FINAL
-        self.target_lod_combo.currentTextChanged.connect(self._on_target_lod_changed)
-        target_layout.addWidget(self.target_lod_combo)
-
-        layout.addLayout(target_layout)
-
-        # Detaillierte Progress Bar - WIEDERHERGESTELLT
-        self.generation_progress = QProgressBar()
-        self.generation_progress.setRange(0, 100)
-        self.generation_progress.setValue(0)
-        self.generation_progress.setTextVisible(True)
-        self.generation_progress.setFormat("Ready")
-        layout.addWidget(self.generation_progress)
-
-        panel.setLayout(layout)
-        return panel
-
-    def _on_target_lod_changed(self, combo_text: str):
-        """Target-LOD aus Combo-Box extrahieren"""
-        if "LOD64" in combo_text:
-            self.target_lod = "LOD64"
-        elif "LOD128" in combo_text:
-            self.target_lod = "LOD128"
-        elif "LOD256" in combo_text:
-            self.target_lod = "LOD256"
-        elif "FINAL" in combo_text:
-            self.target_lod = "FINAL"
-        else:
-            self.target_lod = "FINAL"  # Fallback
-
-    def create_geology_specific_widgets(self):
-        """Erstellt Geology-spezifische Widgets"""
-        # Rock Distribution Widget
         self.rock_distribution_widget = RockDistributionWidget()
-        self.control_panel.layout().addWidget(self.rock_distribution_widget)
+        layout.addWidget(self.rock_distribution_widget)
 
     def create_visualization_controls(self):
         """
-        Funktionsweise: Erstellt Geology-spezifische Display-Controls - ERWEITERT BaseTab
-        Aufgabe: Fügt Geology-Modi zu BaseTab's Standard-Controls hinzu
+        Erstellt Geology-spezifische Visualization Controls.
+        Überschreibt Optional-Method von BaseMapTab.
         """
-        widget = super().create_visualization_controls()
-        layout = widget.layout()
+        controls_widget = QWidget()
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Rock Types Mode hinzufügen
-        self.rock_types_radio = QRadioButton("Rock Types")
-        self.rock_types_radio.setStyleSheet("font-size: 11px;")
-        self.rock_types_radio.toggled.connect(self.update_display_mode)
-        self.display_mode = QButtonGroup()
-        self.display_mode.addButton(self.rock_types_radio, 1)
-        layout.insertWidget(1, self.rock_types_radio)
+        display_mode_layout = self._create_display_mode_controls()
+        controls_layout.addLayout(display_mode_layout)
 
-        # Hardness Mode hinzufügen
-        self.hardness_radio = QRadioButton("Hardness")
-        self.hardness_radio.setStyleSheet("font-size: 11px;")
-        self.hardness_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.hardness_radio, 2)
-        layout.insertWidget(2, self.hardness_radio)
+        controls_layout.addWidget(self._create_vertical_separator())
 
-        # 3D Terrain Overlay Toggle
+        overlay_layout = self._create_overlay_controls()
+        controls_layout.addLayout(overlay_layout)
+
+        controls_widget.setLayout(controls_layout)
+        return controls_widget
+
+    def _create_display_mode_controls(self):
+        """Erstellt Height/Rock-Types/Hardness Display Mode Controls"""
+        layout = QHBoxLayout()
+
+        self.display_mode_group = QButtonGroup()
+
+        height_radio = QRadioButton("Height")
+        height_radio.setChecked(True)
+        height_radio.toggled.connect(lambda checked: self._on_display_mode_changed("height", checked))
+        self.display_mode_group.addButton(height_radio, 0)
+
+        rock_types_radio = QRadioButton("Rock Types")
+        rock_types_radio.toggled.connect(lambda checked: self._on_display_mode_changed("rock_map", checked))
+        self.display_mode_group.addButton(rock_types_radio, 1)
+
+        hardness_radio = QRadioButton("Hardness")
+        hardness_radio.toggled.connect(lambda checked: self._on_display_mode_changed("hardness_map", checked))
+        self.display_mode_group.addButton(hardness_radio, 2)
+
+        layout.addWidget(height_radio)
+        layout.addWidget(rock_types_radio)
+        layout.addWidget(hardness_radio)
+
+        return layout
+
+    def _create_overlay_controls(self):
+        """Erstellt 3D-Terrain-Overlay-Toggle"""
+        layout = QHBoxLayout()
+
         self.terrain_3d_checkbox = QCheckBox("3D Terrain")
-        self.terrain_3d_checkbox.setStyleSheet("font-size: 10px;")
         self.terrain_3d_checkbox.toggled.connect(self.update_display_mode)
         layout.addWidget(self.terrain_3d_checkbox)
 
-        return widget
+        return layout
+
+    def _create_vertical_separator(self):
+        """Erstellt vertikalen Separator für UI-Layout"""
+        separator = QWidget()
+        separator.setFixedWidth(1)
+        separator.setStyleSheet("background-color: #bdc3c7;")
+        return separator
+
+    # =============================================================================
+    # EVENT HANDLERS
+    # =============================================================================
+
+    def _on_parameter_changed(self, param_name: str, value: float):
+        """Handler für Parameter-Änderungen"""
+        try:
+            if self.parameter_manager:
+                self.parameter_ui_changed.emit(self.generator_type, param_name, value)
+
+            if self.rock_distribution_widget:
+                self.rock_distribution_widget.update_distribution(self.get_current_parameters())
+
+            self.logger.debug(f"Parameter changed: {param_name} = {value}")
+
+        except Exception as e:
+            self.logger.error(f"Parameter change handling failed: {e}")
+
+    def _on_display_mode_changed(self, mode: str, checked: bool):
+        """Handler für Display Mode Changes"""
+        if checked:
+            self.current_display_mode = mode
+            self.update_display_mode()
+            self.logger.debug(f"Display mode changed to: {mode}")
+
+    # =============================================================================
+    # DISPLAY UPDATE SYSTEM
+    # =============================================================================
 
     def update_display_mode(self):
         """
-        Funktionsweise: Geology Display-Mode Handler - NUTZT BaseTab's Renderer
-        Aufgabe: Delegiert an BaseTab's _render_current_mode für konsistente Rendering
+        Überschreibt BaseMapTab Display-Update für Geology-spezifische Modi.
+        Implementiert Height/Rock-Types/Hardness Display-Switching sowie den
+        optionalen 3D-Terrain-Overlay.
         """
-        if not hasattr(self, 'display_mode'):
-            return
-
-        current_mode = self.display_mode.checkedId()
-        current_display = self.get_current_display()
-
-        if not current_display:
-            return
-
         try:
-            if current_mode == 0:  # Heightmap (Base)
-                heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-                if heightmap is not None:
-                    self._render_current_mode(0, current_display, heightmap, "heightmap")
+            if not self.data_lod_manager:
+                return
 
-            elif current_mode == 1:  # Rock Types
-                rock_map = self.data_lod_manager.get_geology_data("rock_map")
-                if rock_map is not None:
-                    self._render_current_mode(1, current_display, rock_map, "rock_map")
+            current_display = self.get_current_display()
+            if not current_display:
+                return
 
-            elif current_mode == 2:  # Hardness Map
-                hardness_map = self.data_lod_manager.get_geology_data("hardness_map")
-                if hardness_map is not None:
-                    self._render_current_mode(2, current_display, hardness_map, "hardness_map")
+            if self.current_display_mode == "height":
+                data = self.data_lod_manager.get_terrain_data("heightmap")
+                data_type = "heightmap"
+            elif self.current_display_mode == "rock_map":
+                data = self.data_lod_manager.get_geology_data("rock_map")
+                data_type = "rock_map"
+            elif self.current_display_mode == "hardness_map":
+                data = self.data_lod_manager.get_geology_data("hardness_map")
+                data_type = "hardness_map"
+            else:
+                return
+
+            if data is not None and hasattr(current_display, 'update_display'):
+                display_id = f"GeologyTab_{self.current_view}_{data_type}"
+
+                if hasattr(self.data_lod_manager, 'display_update_manager'):
+                    needs_update = self.data_lod_manager.display_update_manager.needs_update(
+                        display_id, data, data_type
+                    )
+
+                    if needs_update:
+                        self._push_data_to_current_display(data, data_type)
+                        self.data_lod_manager.display_update_manager.mark_updated(
+                            display_id, data, data_type
+                        )
+                else:
+                    self._push_data_to_current_display(data, data_type)
 
             # 3D Terrain Overlay wenn aktiviert
-            if hasattr(self, 'terrain_3d_checkbox') and self.terrain_3d_checkbox.isChecked():
+            if self.terrain_3d_checkbox and self.terrain_3d_checkbox.isChecked():
                 heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-                if heightmap is not None and hasattr(current_display, 'overlay_3d_terrain'):
-                    current_display.overlay_3d_terrain(heightmap)
+                if heightmap is not None and hasattr(current_display.display, 'overlay_3d_terrain'):
+                    current_display.display.overlay_3d_terrain(heightmap)
 
         except Exception as e:
-            self.logger.error(f"Geology display mode update failed: {e}")
+            self.logger.debug(f"Geology display mode update failed: {e}")
 
-    def generate_geology_system(self):
+    # =============================================================================
+    # GENERATION
+    # =============================================================================
+
+    def generate(self):
         """
-        Funktionsweise: Core Geology-Generation - WIRD VON BaseTab's generate() AUFGERUFEN
-        Aufgabe: Implementiert tab-spezifische Generator-Logic mit Input-Validation
+        Überschreibt BaseMapTab: Dependency-Check vor der eigentlichen Generation.
+        Wird ausschließlich über den globalen [GENERIEREN]-Button im Shell-Footer
+        ausgelöst (kein eigener Berechnen-Button mehr im Parameter-Panel).
         """
         try:
-            # Input-Validation
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-            slopemap = self.data_lod_manager.get_terrain_data("slopemap")
+            if not self.check_input_dependencies():
+                self.logger.warning("Input dependencies (heightmap/slopemap) not met")
+                return
 
-            if heightmap is None or slopemap is None:
-                raise ValueError("Missing terrain data for geology generation")
+            super().generate()
 
-            parameters = self.get_current_parameters()
-
-            # Core-Generation ausführen
-            result = self.geology_generator.generate(parameters, heightmap, slopemap)
-
-            # Results über DataLODManager speichern
-            current_lod = self.data_lod_manager.get_current_lod_level("geology")
-
-            self.data_lod_manager.set_geology_data_lod("rock_map", result.rock_map, current_lod, parameters)
-            self.data_lod_manager.set_geology_data_lod("hardness_map", result.hardness_map, current_lod, parameters)
-
-            # Rock Distribution Widget aktualisieren
-            self.rock_distribution_widget.update_statistics(result.rock_map, result.hardness_map)
-
-            # Signal für andere Tabs (automatisch durch BaseTab)
-            self.data_updated.emit("geology", "rock_map")
-            self.data_updated.emit("geology", "hardness_map")
-
-            self.logger.info(f"Geology generation completed at LOD {current_lod}")
-            return True
+            self.logger.info("Geology generation requested")
 
         except Exception as e:
-            self.logger.error(f"Geology generation failed: {e}")
-            raise
+            self.logger.error(f"Generation request failed: {e}")
 
-    def get_current_parameters(self):
+    @pyqtSlot(str, dict)
+    def on_generation_completed(self, result_id: str, result_data: dict):
         """
-        Funktionsweise: Sammelt aktuelle Parameter von allen Slidern
-        Return: dict mit allen Geology-Parametern
+        Überschreibt BaseMapTab Completion Handler für Geology-spezifische Completion.
+        Aktualisiert Rock-Distribution-Statistics nach erfolgreicher Generation.
+        """
+        generator_type = result_data.get("generator_type", "")
+        success = result_data.get("success", False)
+
+        if generator_type != self.generator_type:
+            return
+
+        try:
+            if success:
+                self.update_display_mode()
+
+                rock_map = self.data_lod_manager.get_geology_data("rock_map")
+                hardness_map = self.data_lod_manager.get_geology_data("hardness_map")
+
+                if rock_map is not None and hardness_map is not None and self.rock_distribution_widget:
+                    self.rock_distribution_widget.update_statistics(rock_map, hardness_map)
+
+            super().on_generation_completed(result_id, result_data)
+
+        except Exception as e:
+            self.logger.error(f"Generation completion handling failed: {e}")
+
+    # =============================================================================
+    # PARAMETER SYNCHRONISATION
+    # =============================================================================
+
+    def get_current_parameters(self) -> Dict[str, Any]:
+        """
+        Sammelt die aktuellen Werte aller Geology-Parameter-Slider.
+        Wird vom ParameterManager als zentrale Quelle für die Geology-Parameter
+        genutzt (register_tab()/get_tab_parameters() rufen diese Methode auf,
+        siehe gui/OldManagers/parameter_manager.py).
         """
         parameters = {}
         for param_name, slider in self.parameter_sliders.items():
             parameters[param_name] = slider.getValue()
         return parameters
 
-    def _on_parameter_changed(self):
+    def update_parameter_ui(self, param_name: str, value):
         """
-        Funktionsweise: Parameter-Change Handler - NUTZT BaseTab's Auto-Simulation
-        Aufgabe: Triggert BaseTab's Auto-Simulation-System
+        Überschreibt BaseMapTab Parameter-UI Update für Geology-Parameter.
+        Synchronisiert UI-Controls mit ParameterManager-Updates.
         """
-        # Parameter-Change an BaseTab weiterleiten
-        parameters = self.get_current_parameters()
-        self.parameter_changed.emit("geology", parameters)
+        try:
+            if param_name in self.parameter_sliders:
+                slider = self.parameter_sliders[param_name]
+                slider.blockSignals(True)
+                slider.setValue(value)
+                slider.blockSignals(False)
 
-        # Rock Distribution Preview aktualisieren
-        self.rock_distribution_widget.update_distribution(parameters)
+                self.logger.debug(f"Parameter UI updated: {param_name} = {value}")
 
-        # Auto-Simulation über BaseTab triggern
-        if self.auto_simulation_enabled:
-            self.auto_simulation_timer.start(500)  # 500ms debounce
+        except Exception as e:
+            self.logger.error(f"Parameter UI update failed: {e}")
 
-    def _load_default_geology_parameters(self):
-        """Lädt Default-Parameter in alle Slider"""
-        for param_name, slider in self.parameter_sliders.items():
-            param_config = GEOLOGY.__dict__[param_name.upper()]
-            slider.setValue(param_config["default"])
+    # =============================================================================
+    # DEPENDENCY SYSTEM
+    # =============================================================================
 
-    def check_input_dependencies(self):
+    def check_input_dependencies(self) -> bool:
         """
-        Funktionsweise: Dependency-Check für Geology - ÜBERSCHREIBT BaseTab
-        Aufgabe: Prüft ob Terrain-Daten verfügbar sind
+        Überschreibt BaseMapTab Dependency Check.
+        Prüft ob die Terrain-Inputs (heightmap, slopemap) verfügbar sind.
         """
         try:
             heightmap = self.data_lod_manager.get_terrain_data("heightmap")
@@ -421,25 +413,16 @@ class GeologyTab(BaseMapTab):
 
             dependencies_met = heightmap is not None and slopemap is not None
 
-            # UI-Status aktualisieren
-            if hasattr(self, 'auto_simulation_panel'):
-                self.auto_simulation_panel.set_manual_button_enabled(dependencies_met)
-
-            # Dependency-Status anzeigen
-            if dependencies_met:
-                status_msg = "All terrain inputs available"
-                if hasattr(self, 'error_status'):
-                    self.error_status.set_success(status_msg)
-            else:
-                missing = []
-                if heightmap is None:
-                    missing.append("heightmap")
-                if slopemap is None:
-                    missing.append("slopemap")
-
-                status_msg = f"Missing terrain data: {', '.join(missing)}"
-                if hasattr(self, 'error_status'):
-                    self.error_status.set_warning(status_msg)
+            if self.dependency_status:
+                if dependencies_met:
+                    self.dependency_status.set_success("Terrain inputs available")
+                else:
+                    missing = []
+                    if heightmap is None:
+                        missing.append("heightmap")
+                    if slopemap is None:
+                        missing.append("slopemap")
+                    self.dependency_status.set_warning(f"Missing terrain data: {', '.join(missing)}")
 
             return dependencies_met
 
@@ -447,24 +430,30 @@ class GeologyTab(BaseMapTab):
             self.logger.error(f"Dependency check failed: {e}")
             return False
 
-    def on_external_data_updated(self, generator_type: str, data_key: str):
-        """
-        Funktionsweise: External Data Handler - ÜBERSCHREIBT BaseTab
-        Aufgabe: Reagiert auf Terrain-Updates und triggert Auto-Generation
-        """
-        if generator_type == "terrain" and data_key in self.required_dependencies:
-            dependencies_met = self.check_input_dependencies()
+    # =============================================================================
+    # RESOURCE MANAGEMENT
+    # =============================================================================
 
-            # AUTO-TAB-GENERATION: Automatisch generieren wenn Dependencies erfüllt
-            if dependencies_met and self.auto_simulation_enabled:
-                self.logger.info("Dependencies satisfied - triggering auto-generation")
-                self.auto_simulation_timer.start(1000)  # 1s delay für Auto-Generation
+    def cleanup_resources(self):
+        """
+        Erweitert BaseMapTab Cleanup für Geology-spezifische Resources.
+        """
+        try:
+            self.logger.debug("Cleaning up geology-specific resources")
+
+            self.parameter_sliders.clear()
+
+            super().cleanup_resources()
+
+        except Exception as e:
+            self.logger.error(f"Geology cleanup failed: {e}")
 
 
 class RockDistributionWidget(QGroupBox):
     """
-    Funktionsweise: Widget für Rock-Distribution Visualization und Statistics
-    Aufgabe: Zeigt Rock-Hardness Preview und Mass-Conservation Status
+    Widget für Rock-Distribution Visualization und Statistics.
+    Zeigt eine Härte-Vorschau (live während Parameter-Änderungen) und die
+    Verteilungs-/Mass-Conservation-Statistik nach abgeschlossener Generation.
     """
 
     def __init__(self):
@@ -475,7 +464,6 @@ class RockDistributionWidget(QGroupBox):
         """Erstellt UI für Rock-Distribution Display"""
         layout = QVBoxLayout()
 
-        # Hardness Preview Bars
         hardness_group = QGroupBox("Rock Hardness Preview")
         hardness_layout = QGridLayout()
 
@@ -500,11 +488,9 @@ class RockDistributionWidget(QGroupBox):
         hardness_group.setLayout(hardness_layout)
         layout.addWidget(hardness_group)
 
-        # Distribution Statistics
         self.distribution_stats = QLabel("Distribution: Not generated")
         layout.addWidget(self.distribution_stats)
 
-        # Mass Conservation Status
         self.mass_conservation_status = StatusIndicator("Mass Conservation")
         layout.addWidget(self.mass_conservation_status)
 
@@ -512,40 +498,37 @@ class RockDistributionWidget(QGroupBox):
 
     def update_distribution(self, parameters: dict):
         """
-        Funktionsweise: Aktualisiert Hardness Preview basierend auf Parametern
+        Aktualisiert Hardness Preview basierend auf aktuellen Parametern.
         Parameter: parameters (dict mit hardness values)
         """
         sed_hardness = parameters.get("sedimentary_hardness", 30)
         ign_hardness = parameters.get("igneous_hardness", 80)
         met_hardness = parameters.get("metamorphic_hardness", 65)
 
-        self.sedimentary_bar.setValue(sed_hardness)
+        self.sedimentary_bar.setValue(int(sed_hardness))
         self.sedimentary_label.setText(f"Sedimentary: {sed_hardness}")
 
-        self.igneous_bar.setValue(ign_hardness)
+        self.igneous_bar.setValue(int(ign_hardness))
         self.igneous_label.setText(f"Igneous: {ign_hardness}")
 
-        self.metamorphic_bar.setValue(met_hardness)
+        self.metamorphic_bar.setValue(int(met_hardness))
         self.metamorphic_label.setText(f"Metamorphic: {met_hardness}")
 
     def update_statistics(self, rock_map: np.ndarray, hardness_map: np.ndarray):
         """
-        Funktionsweise: Aktualisiert Statistiken nach Generation
+        Aktualisiert Statistiken nach abgeschlossener Generation.
         Parameter: rock_map (RGB array), hardness_map (2D array)
         """
         try:
-            # Rock Distribution Percentages berechnen
             total_pixels = rock_map.shape[0] * rock_map.shape[1]
 
             sedimentary_pct = np.sum(rock_map[:, :, 0]) / (total_pixels * 255) * 100
             igneous_pct = np.sum(rock_map[:, :, 1]) / (total_pixels * 255) * 100
             metamorphic_pct = np.sum(rock_map[:, :, 2]) / (total_pixels * 255) * 100
 
-            # Mass Conservation Check
             mass_sums = np.sum(rock_map, axis=2)
             mass_conservation_valid = np.allclose(mass_sums, 255, atol=5)
 
-            # Update Statistics Display
             self.distribution_stats.setText(
                 f"Distribution: Sed {sedimentary_pct:.1f}%, Ign {igneous_pct:.1f}%, Met {metamorphic_pct:.1f}%"
             )
@@ -558,307 +541,3 @@ class RockDistributionWidget(QGroupBox):
         except Exception as e:
             self.distribution_stats.setText("Statistics calculation failed")
             self.mass_conservation_status.set_error(f"Error: {str(e)}")
-
-    def generate_geology_system(self):
-        """
-        Funktionsweise: Core Geology-Generation - WIRD VON BaseTab's generate() AUFGERUFEN
-        Aufgabe: Implementiert tab-spezifische Generator-Logic mit robuster Input-Validation
-        """
-        try:
-            # ENHANCED INPUT-VALIDATION - WIEDERHERGESTELLT für Robustheit
-            if not self._validate_input_data():
-                raise ValueError("Input validation failed - terrain data invalid or missing")
-
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-            slopemap = self.data_lod_manager.get_terrain_data("slopemap")
-            parameters = self.get_current_parameters()
-
-            # Core-Generation ausführen
-            result = self.geology_generator.generate(parameters, heightmap, slopemap)
-
-            # ROCK_MAP-VALIDATION - WIEDERHERGESTELLT für Data-Integrity
-            if not self._validate_rock_map(result.rock_map):
-                self.logger.warning("Generated rock_map failed validation - applying corrections")
-                result.rock_map = self._repair_rock_map(result.rock_map)
-
-            # Results über DataLODManager speichern
-            current_lod = getattr(self, 'target_lod', 'FINAL')
-
-            self.data_lod_manager.set_geology_data_lod("rock_map", result.rock_map, current_lod, parameters)
-            self.data_lod_manager.set_geology_data_lod("hardness_map", result.hardness_map, current_lod, parameters)
-
-            # Rock Distribution Widget aktualisieren
-            self.rock_distribution_widget.update_statistics(result.rock_map, result.hardness_map)
-
-            # Signal für andere Tabs (automatisch durch BaseTab)
-            self.data_updated.emit("geology", "rock_map")
-            self.data_updated.emit("geology", "hardness_map")
-
-            self.logger.info(f"Geology generation completed at LOD {current_lod}")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Geology generation failed: {e}")
-            raise
-
-    def _validate_input_data(self) -> bool:
-        """
-        Funktionsweise: Robuste Input-Validation - WIEDERHERGESTELLT
-        Aufgabe: Validiert Terrain-Inputs vor Generation
-        """
-        try:
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-            slopemap = self.data_lod_manager.get_terrain_data("slopemap")
-
-            if heightmap is None:
-                self.logger.error("Missing heightmap from terrain generation")
-                return False
-
-            if slopemap is None:
-                self.logger.error("Missing slopemap from terrain generation")
-                return False
-
-            # Shape Validation
-            if heightmap.shape != slopemap.shape[:2]:
-                self.logger.error(f"Shape mismatch: heightmap {heightmap.shape} vs slopemap {slopemap.shape[:2]}")
-                return False
-
-            # Data Type Validation
-            if not isinstance(heightmap, np.ndarray) or not isinstance(slopemap, np.ndarray):
-                self.logger.error("Terrain data must be numpy arrays")
-                return False
-
-            # Size Validation
-            h, w = heightmap.shape
-            if h < 32 or w < 32 or h > 2048 or w > 2048:
-                self.logger.error(f"Invalid terrain size: {h}x{w}")
-                return False
-
-            # Data Range Validation
-            if np.any(np.isnan(heightmap)) or np.any(np.isinf(heightmap)):
-                self.logger.error("Invalid values in heightmap (NaN/Inf)")
-                return False
-
-            self.logger.info(f"Geology input validation passed: {heightmap.shape}")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Input validation failed: {e}")
-            return False
-
-    def _validate_rock_map(self, rock_map: np.ndarray) -> bool:
-        """
-        Funktionsweise: Rock_map-Validation - WIEDERHERGESTELLT für Data-Integrity
-        Parameter: rock_map (numpy array)
-        Return: bool - Rock_map ist valide
-        """
-        try:
-            if not isinstance(rock_map, np.ndarray):
-                self.logger.error(f"Rock_map is not numpy array: {type(rock_map)}")
-                return False
-
-            if len(rock_map.shape) != 3 or rock_map.shape[2] != 3:
-                self.logger.error(f"Rock_map wrong shape: {rock_map.shape}, expected (H, W, 3)")
-                return False
-
-            # Data Range Validation
-            if np.any(rock_map < 0) or np.any(rock_map > 255):
-                self.logger.error(f"Rock_map values out of range [0,255]: {np.min(rock_map)}-{np.max(rock_map)}")
-                return False
-
-            # Mass Conservation Check
-            mass_sums = np.sum(rock_map, axis=2)
-            mass_deviation = np.abs(mass_sums - 255)
-            max_deviation = np.max(mass_deviation)
-
-            if max_deviation > 10:  # 10 Tolerance für Rundungsfehler
-                self.logger.warning(f"Rock_map mass conservation issue: max deviation {max_deviation}")
-                return False
-
-            self.logger.info(f"Rock_map validation passed: {rock_map.shape}, mass_dev={max_deviation:.2f}")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Rock_map validation exception: {e}")
-            return False
-
-    def _repair_rock_map(self, rock_map: np.ndarray) -> np.ndarray:
-        """
-        Funktionsweise: Rock_map-Repair für fehlerhafte Daten - WIEDERHERGESTELLT
-        Parameter: rock_map (potentially corrupted)
-        Return: repaired rock_map
-        """
-        try:
-            if rock_map is None or not isinstance(rock_map, np.ndarray):
-                return self._create_fallback_rock_map()
-
-            # Ensure correct shape
-            if len(rock_map.shape) != 3 or rock_map.shape[2] != 3:
-                return self._create_fallback_rock_map()
-
-            # Clamp values to valid range
-            rock_map = np.clip(rock_map, 0, 255)
-
-            # Mass Conservation Repair
-            mass_sums = np.sum(rock_map, axis=2)
-            invalid_pixels = mass_sums != 255
-
-            if np.any(invalid_pixels):
-                self.logger.info(f"Repairing {np.sum(invalid_pixels)} pixels with mass conservation issues")
-
-                # Normalize to 255 for invalid pixels
-                for i in range(rock_map.shape[2]):
-                    rock_map[invalid_pixels, i] = (rock_map[invalid_pixels, i] / mass_sums[invalid_pixels]) * 255
-
-                # Handle division by zero cases
-                zero_mass_pixels = mass_sums == 0
-                if np.any(zero_mass_pixels):
-                    rock_map[zero_mass_pixels, 0] = 128  # Sedimentary
-                    rock_map[zero_mass_pixels, 1] = 64  # Igneous
-                    rock_map[zero_mass_pixels, 2] = 63  # Metamorphic
-
-            return rock_map.astype(np.uint8)
-
-        except Exception as e:
-            self.logger.error(f"Rock_map repair failed: {e}")
-            return self._create_fallback_rock_map()
-
-    def _create_fallback_rock_map(self) -> np.ndarray:
-        """Erstellt Fallback-Rock_map bei Validation/Repair-Fehlern"""
-        try:
-            # Use terrain size if available
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-            if heightmap is not None:
-                h, w = heightmap.shape
-            else:
-                h, w = 256, 256  # Default size
-
-            rock_map = np.zeros((h, w, 3), dtype=np.uint8)
-            rock_map[:, :, 0] = 128  # Sedimentary
-            rock_map[:, :, 1] = 64  # Igneous
-            rock_map[:, :, 2] = 63  # Metamorphic (Sum = 255)
-
-            self.logger.info(f"Created fallback rock_map: {rock_map.shape}")
-            return rock_map
-
-        except Exception as e:
-            self.logger.error(f"Fallback rock_map creation failed: {e}")
-            # Ultimate fallback
-
-    def check_input_dependencies(self):
-        """
-        Funktionsweise: Enhanced Dependency-Check - ERWEITERT für robustere Validation
-        Aufgabe: Prüft Dependencies mit detailliertem Status-Feedback
-        """
-        try:
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-            slopemap = self.data_lod_manager.get_terrain_data("slopemap")
-
-            dependencies_met = True
-            status_messages = []
-
-            # Individual Dependency Checks
-            if heightmap is None:
-                dependencies_met = False
-                status_messages.append("Missing heightmap")
-            else:
-                status_messages.append(f"Heightmap: {heightmap.shape}")
-
-            if slopemap is None:
-                dependencies_met = False
-                status_messages.append("Missing slopemap")
-            else:
-                status_messages.append(f"Slopemap: {slopemap.shape}")
-
-            # Enhanced Validation wenn beide verfügbar
-            if heightmap is not None and slopemap is not None:
-                if heightmap.shape != slopemap.shape[:2]:
-                    dependencies_met = False
-                    status_messages.append("Shape mismatch between terrain data")
-                else:
-                    status_messages.append("Data consistency: OK")
-
-            # UI-Status Updates
-            if hasattr(self, 'auto_simulation_panel'):
-                self.auto_simulation_panel.set_manual_button_enabled(dependencies_met)
-
-            # Enhanced Dependency Status Display - WIEDERHERGESTELLT
-            if hasattr(self, 'dependency_status'):
-                if dependencies_met:
-                    self.dependency_status.set_success(f"Dependencies: {' | '.join(status_messages)}")
-                else:
-                    self.dependency_status.set_warning(f"Issues: {' | '.join(status_messages)}")
-
-            return dependencies_met
-
-        except Exception as e:
-            self.logger.error(f"Enhanced dependency check failed: {e}")
-            if hasattr(self, 'dependency_status'):
-                self.dependency_status.set_error(f"Dependency check error: {str(e)}")
-            return False
-
-    # ENHANCED SIGNAL-HANDLER - WIEDERHERGESTELLT für detailliertes User-Feedback
-
-    def _on_generation_started_geology(self, generator_type: str, lod_level: int):
-        """Enhanced Generation-Start Handler für Geology"""
-        if generator_type != "geology":
-            return
-
-        if hasattr(self, 'generation_progress'):
-            self.generation_progress.setValue(0)
-            self.generation_progress.setFormat(f"Generating Geology LOD {lod_level}...")
-
-    def _on_generation_progress_geology(self, generator_type: str, lod_level: int, progress_percent: int, detail: str):
-        """Enhanced Progress Handler für Geology"""
-        if generator_type != "geology":
-            return
-
-        if hasattr(self, 'generation_progress'):
-            self.generation_progress.setValue(progress_percent)
-            self.generation_progress.setFormat(f"LOD {lod_level}: {detail} ({progress_percent}%)")
-
-    def _on_generation_completed_geology(self, generator_type: str, lod_level: int, success: bool):
-        """Enhanced Completion Handler für Geology"""
-        if generator_type != "geology":
-            return
-
-        if hasattr(self, 'generation_progress'):
-            if success:
-                self.generation_progress.setValue(100)
-                self.generation_progress.setFormat(f"Geology LOD {lod_level} Complete")
-
-                # Sofortiges Statistics-Update - WIEDERHERGESTELLT
-                try:
-                    rock_map = self.data_lod_manager.get_geology_data("rock_map")
-                    hardness_map = self.data_lod_manager.get_geology_data("hardness_map")
-
-                    if rock_map is not None and hardness_map is not None:
-                        self.rock_distribution_widget.update_statistics(rock_map, hardness_map)
-
-                        # Post-Generation Validation - WIEDERHERGESTELLT
-                        if self.data_validation_enabled:
-                            if self._validate_rock_map(rock_map):
-                                self.logger.info("Post-generation rock_map validation: PASSED")
-                            else:
-                                self.logger.warning("Post-generation rock_map validation: FAILED")
-
-                except Exception as e:
-                    self.logger.debug(f"Post-generation updates failed: {e}")
-            else:
-                self.generation_progress.setFormat(f"Geology LOD {lod_level} Failed")
-
-    def setup_standard_orchestrator_handlers(self, generator_type: str):
-        """
-        Funktionsweise: Geology-spezifische Orchestrator-Integration
-        Aufgabe: Verbindet Orchestrator-Signale zusätzlich mit Geology-eigenen Handlern,
-                 ergänzend zu den Standard-Verbindungen aus BaseMapTab.setup_manager_connections
-        """
-        if self.generation_orchestrator:
-            try:
-                self.generation_orchestrator.generation_started.connect(self._on_generation_started_geology)
-                self.generation_orchestrator.generation_progress.connect(self._on_generation_progress_geology)
-                self.generation_orchestrator.generation_completed.connect(self._on_generation_completed_geology)
-
-                self.logger.debug("Geology orchestrator handlers connected")
-            except Exception as e:
-                self.logger.warning(f"Geology orchestrator handler setup failed: {e}")

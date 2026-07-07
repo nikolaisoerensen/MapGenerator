@@ -27,8 +27,8 @@ Architecture:
 # TODO: Exit aus Map Editor muss sauber gemacht werden mit Cleanup.
 # TODO: Exit aus Map Editor vorher Signal jetzt direkt: was ist besser? Ich habe schließlich laufende Berechnungen.
 
-from PyQt5.QtWidgets import QMainWindow, QApplication, QTabWidget, QMenu, QAction, QLabel, QComboBox, QWidget, \
-    QVBoxLayout, QMessageBox, QFileDialog
+from PyQt5.QtWidgets import QMainWindow, QApplication, QTabWidget, QTabBar, QStackedWidget, QMenu, QAction, QLabel, \
+    QComboBox, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QFileDialog, QSplitter
 from PyQt5.QtCore import QTimer, Qt, pyqtSlot
 import logging
 from typing import Optional
@@ -39,7 +39,9 @@ from gui.OldManagers.generation_orchestrator import GenerationOrchestrator
 from gui.OldManagers.navigation_manager import NavigationManager
 from gui.OldManagers.parameter_manager import ParameterManager
 from gui.OldManagers.shader_manager import ShaderManager
-from gui.widgets.widgets import BaseButton, StatusIndicator
+from gui.widgets.widgets import BaseButton, StatusIndicator, ProgressBar
+from gui.widgets.pipeline_status_panel import PipelineStatusPanel
+from gui.utils.progress_weighting import WeightedProgressCalculator
 
 
 # Professional tab imports with comprehensive error handling
@@ -130,12 +132,25 @@ class MapEditorWindow(QMainWindow):
         self._check_managers()
 
         # UI components
-        self.tab_widget = None
+        # main_tab_bar ist der reine Haupt-Tab-Selektor (Overview/Terrain/...).
+        # Spalte 2 (viewport_stack) und Spalte 3 (parameter_stack/statistics_stack)
+        # sind eigene QStackedWidgets, die synchron zum main_tab_bar umschalten.
+        # Spalte 1 (pipeline_status_panel) ist davon unabhängig und bleibt konstant.
+        self.main_tab_bar = None
+        self.viewport_stack = None
+        self.parameter_stack = None
+        self.statistics_stack = None
+        self.side_tab_widget = None
+        self.tab_order = []  # lowercase tab names, Index == main_tab_bar/stack index
         self.tabs = {}
+        self.pipeline_status_panel = None
+        self.footer_progress_bar = None
+        self.generate_button = None
 
         # Generation monitoring
         self.tab_generation_status = {}  # tab_name -> lod_status mapping
         self.active_generations = set()  # Set of active generation keys
+        self.progress_calculator = WeightedProgressCalculator()
 
         # Status monitoring
         self.status_update_timer = QTimer()
@@ -146,6 +161,11 @@ class MapEditorWindow(QMainWindow):
         self._setup_ui()
         self._setup_tabs()
         self._setup_signals()
+
+        # main_tab_bar.currentChanged wird erst nach _setup_tabs() verbunden,
+        # daher feuert es für den initial aktiven Tab (Index 0) nicht - einmalig
+        # manuell nachholen, damit der Default-Render-Modus beim Start sichtbar ist.
+        self._on_tab_changed(self.main_tab_bar.currentIndex())
 
         # Start status monitoring
         self.status_update_timer.start(EditorConstants.STATUS_UPDATE_INTERVAL_MS)
@@ -194,18 +214,117 @@ class MapEditorWindow(QMainWindow):
         toolbar, and status bar with professional styling and
         intuitive navigation structure.
         """
-        # Central widget - tab container
-        self.tab_widget = QTabWidget()
-        self.tab_widget.setTabPosition(QTabWidget.North)
-        self.tab_widget.setTabsClosable(False)
-        self.tab_widget.setMovable(False)
-        self.tab_widget.setDocumentMode(True)
+        # Haupt-Tab-Selektor (Overview/Terrain/...). Reiner Selektor ohne eigene
+        # Inhalts-Seiten - Spalte 2/3 stecken in separaten QStackedWidgets, die
+        # synchron zum main_tab_bar umgeschaltet werden. So bleibt Spalte 1
+        # (Pipeline-Status) unabhängig vom Haupt-Tab sichtbar.
+        self.main_tab_bar = QTabBar()
+        self.main_tab_bar.setShape(QTabBar.RoundedNorth)
+        self.main_tab_bar.setExpanding(False)
 
-        self.setCentralWidget(self.tab_widget)
+        # Spalte 1 (fix): globaler Pipeline-Status, bleibt über alle Haupt-Tabs
+        # hinweg sichtbar.
+        self.pipeline_status_panel = PipelineStatusPanel()
+        self.pipeline_status_panel.setMinimumWidth(190)
+        self.pipeline_status_panel.setMaximumWidth(190)
+
+        # Spalte 2 (flexibel): Viewport der Tabs, per BaseMapTab.viewport_widget befüllt,
+        # darunter die zwei permanenten globalen Checkboxen (Contour Lines/Shadows),
+        # die unabhängig vom Haupt-Tab immer sichtbar sind.
+        self.viewport_stack = QStackedWidget()
+
+        self.contour_checkbox = QCheckBox("Contour Lines (Höhenlinien)")
+        self.shadow_checkbox = QCheckBox("Shadows (Shading)")
+        self.contour_checkbox.toggled.connect(self._on_global_contour_toggled)
+        self.shadow_checkbox.toggled.connect(self._on_global_shadow_toggled)
+
+        global_overlay_row = QWidget()
+        global_overlay_layout = QHBoxLayout(global_overlay_row)
+        global_overlay_layout.setContentsMargins(10, 4, 10, 4)
+        global_overlay_layout.addWidget(self.contour_checkbox)
+        global_overlay_layout.addWidget(self.shadow_checkbox)
+        global_overlay_layout.addStretch()
+
+        self.center_widget = QWidget()
+        center_layout = QVBoxLayout(self.center_widget)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(0)
+        center_layout.addWidget(self.viewport_stack, 1)
+        center_layout.addWidget(global_overlay_row)
+
+        # Spalte 3 (fix): Parameter/Statistics-Tabs. Bleibt als Chrome konstant,
+        # nur der Inhalt der beiden inneren Stacks schaltet je Haupt-Tab um.
+        self.parameter_stack = QStackedWidget()
+        self.statistics_stack = QStackedWidget()
+
+        self.side_tab_widget = QTabWidget()
+        self.side_tab_widget.setDocumentMode(True)
+        self.side_tab_widget.addTab(self.parameter_stack, "Parameter")
+        self.side_tab_widget.addTab(self.statistics_stack, "Statistics")
+        self.side_tab_widget.setMinimumWidth(380)
+        self.side_tab_widget.setMaximumWidth(380)
+
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.addWidget(self.pipeline_status_panel)
+        self.main_splitter.addWidget(self.center_widget)
+        self.main_splitter.addWidget(self.side_tab_widget)
+        # Nur Spalte 2 wächst bei Ultrawide-Auflösungen; Spalte 1 und 3 bleiben fix.
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setStretchFactor(2, 0)
+        self.main_splitter.setCollapsible(0, False)
+        self.main_splitter.setCollapsible(1, False)
+        self.main_splitter.setCollapsible(2, False)
+
+        central_widget = QWidget()
+        central_layout = QVBoxLayout(central_widget)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.main_tab_bar)
+        central_layout.addWidget(self.main_splitter, 1)
+        central_layout.addWidget(self._create_footer_bar())
+
+        self.setCentralWidget(central_widget)
 
         # Create UI components
         self._create_menu_bar()
         self._create_status_bar()
+
+    def _create_footer_bar(self) -> QWidget:
+        """
+        Fußzeile: gewichteter Ladebalken (29 Klassen x LOD-Kosten, siehe
+        WeightedProgressCalculator) links, permanenter [GENERIEREN]-Button rechts.
+        """
+        footer = QWidget()
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(10, 6, 10, 6)
+
+        self.footer_progress_bar = ProgressBar()
+        footer_layout.addWidget(self.footer_progress_bar, 1)
+
+        self.generate_button = BaseButton("GENERIEREN", "primary")
+        self.generate_button.clicked.connect(self._generate_current_tab)
+        footer_layout.addWidget(self.generate_button)
+
+        return footer
+
+    def _refresh_footer_progress(self):
+        """Aktualisiert den gewichteten Ladebalken aus tab_generation_status."""
+        if not self.footer_progress_bar:
+            return
+
+        target_lod_text = self.toolbar_lod_combo.currentText() if hasattr(self, 'toolbar_lod_combo') else None
+        try:
+            target_lod = int(target_lod_text)
+        except (TypeError, ValueError):
+            target_lod = self.progress_calculator.max_lod
+
+        percent, done, total = self.progress_calculator.progress_percent(
+            self.tab_generation_status, target_lod
+        )
+        self.footer_progress_bar.set_progress(
+            percent, f"Pipeline: {percent}%", f"{done:.1f} / {total:.1f} gewichtete Kosten"
+        )
 
     def _setup_managers(self):
         try:
@@ -257,23 +376,6 @@ class MapEditorWindow(QMainWindow):
         else:
             self.logger.info(f"DEBUG: MapEditor received orchestrator: {type(self.generation_orchestrator)}")
 
-    def _setup_manager_integration(self):
-        """
-        Configure manager cross-communication and signal routing
-        =======================================================
-
-        Die Manager-Querkommunikation läuft direkt über die Manager selbst:
-        Der GenerationOrchestrator hält eine DataLODManager-Referenz und
-        speichert Generation-Ergebnisse dort unmittelbar nach jeder
-        LOD-Completion. Die Tabs verbinden sich in
-        BaseMapTab.setup_manager_connections() eigenständig mit
-        ParameterManager, DataLODManager und GenerationOrchestrator.
-
-        Auf Editor-Ebene ist daher keine zusätzliche Signal-Verdrahtung
-        erforderlich. Diese Methode bleibt als Integrationspunkt für die
-        Manager-Konsolidierung erhalten (ThreadManager-Fluss).
-        """
-        self.logger.info("Manager integration: direct manager wiring active, no editor-level signal routing required")
 
     def _create_menu_bar(self):
         """
@@ -398,7 +500,8 @@ class MapEditorWindow(QMainWindow):
         comprehensive error handling and appropriate fallbacks
         for missing or failed tab implementations.
         """
-        # Tab configuration with availability status
+        # Tab configuration with availability status - Terrain startet zuerst,
+        # Overview steht als Abschluss-Übersicht am Ende.
         tab_configs = [
             ("Terrain", TerrainTab, TERRAIN_AVAILABLE, terrain_error),
             ("Geology", GeologyTab, GEOLOGY_AVAILABLE, geology_error),
@@ -475,12 +578,15 @@ class MapEditorWindow(QMainWindow):
             tab_instance: Created tab widget instance
         """
 
-        self.logger.info(f"Adding {tab_name} to TabWidget...")
+        self.logger.info(f"Adding {tab_name} to shell...")
 
         try:
-            self.logger.info(f"DEBUG: About to call addTab...")
-            index = self.tab_widget.addTab(tab_instance, tab_name)
-            self.logger.info(f"DEBUG: addTab successful, index: {index}")
+            index = self.main_tab_bar.addTab(tab_name)
+            self.viewport_stack.addWidget(tab_instance.viewport_widget)
+            self.parameter_stack.addWidget(tab_instance.parameter_widget)
+            self.statistics_stack.addWidget(tab_instance.statistics_widget)
+            self.tab_order.append(tab_name.lower())
+            self.logger.info(f"Tab added to shell at index: {index}")
 
             self.tabs[tab_name.lower()] = tab_instance
             self.tab_generation_status[tab_name.lower()] = {}
@@ -510,8 +616,26 @@ class MapEditorWindow(QMainWindow):
             error_type: Type of error that occurred
         """
         error_tab = self._create_error_tab(tab_name, error_type)
-        self.tab_widget.addTab(error_tab, tab_name)
+
+        self.main_tab_bar.addTab(tab_name)
+        self.viewport_stack.addWidget(error_tab)
+        self.parameter_stack.addWidget(self._create_placeholder_widget("Not available"))
+        self.statistics_stack.addWidget(self._create_placeholder_widget("Not available"))
+        self.tab_order.append(tab_name.lower())
+
         self.tabs[tab_name.lower()] = error_tab
+
+    def _create_placeholder_widget(self, text: str) -> QWidget:
+        """Kleiner Platzhalter für Spalte 3, wenn ein Tab nicht geladen werden konnte."""
+        widget = QWidget()
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignCenter)
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("color: #7f8c8d; padding: 20px;")
+        layout.addWidget(label)
+        widget.setLayout(layout)
+        return widget
 
     def _create_error_tab(self, tab_name: str, error_type: str) -> QWidget:
         """
@@ -590,8 +714,8 @@ class MapEditorWindow(QMainWindow):
         Establishes communication between tab widget, navigation
         manager, and data manager for coordinated operation.
         """
-        # Tab widget signals
-        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+        # Main tab bar signals
+        self.main_tab_bar.currentChanged.connect(self._on_tab_changed)
 
         # Navigation manager signals
         if self.navigation_manager:
@@ -600,6 +724,18 @@ class MapEditorWindow(QMainWindow):
         # Data manager signals
         if self.data_lod_manager:
             self.data_lod_manager.data_updated.connect(self._on_data_updated)
+
+        # Orchestrator signals - treiben die Pipeline-Status-Spalte und den
+        # Footer-Fortschrittsbalken an. Diese Verbindung fehlte bisher komplett
+        # (nur der Disconnect-Cleanup in _disconnect_orchestrator_signals()
+        # existierte), wodurch die Pipeline-Status-Spalte dauerhaft auf
+        # "Unknown" stehen blieb, egal was im Hintergrund generiert wurde.
+        if self.generation_orchestrator:
+            self.generation_orchestrator.generation_started.connect(self._on_generation_started)
+            self.generation_orchestrator.generation_completed.connect(self._on_generation_completed)
+            self.generation_orchestrator.generation_progress.connect(self._on_generation_progress)
+            self.generation_orchestrator.batch_generation_completed.connect(self._on_batch_generation_completed)
+            self.generation_orchestrator.dependency_invalidated.connect(self._on_dependency_invalidated)
 
     def activate_tab(self, tab_name: str) -> bool:
         """
@@ -614,12 +750,11 @@ class MapEditorWindow(QMainWindow):
         """
         tab_name_lower = tab_name.lower()
 
-        for i in range(self.tab_widget.count()):
-            widget = self.tab_widget.widget(i)
-            if tab_name_lower in self.tabs and self.tabs[tab_name_lower] == widget:
-                self.tab_widget.setCurrentIndex(i)
-                self.logger.info(f"Activated {tab_name} tab")
-                return True
+        if tab_name_lower in self.tab_order:
+            index = self.tab_order.index(tab_name_lower)
+            self.main_tab_bar.setCurrentIndex(index)
+            self.logger.info(f"Activated {tab_name} tab")
+            return True
 
         self.logger.warning(f"Tab {tab_name} not found for activation")
         return False
@@ -648,15 +783,67 @@ class MapEditorWindow(QMainWindow):
         Args:
             index: Index of newly active tab
         """
-        if 0 <= index < self.tab_widget.count():
-            tab_text = self.tab_widget.tabText(index)
+        if 0 <= index < len(self.tab_order):
+            tab_name_lower = self.tab_order[index]
+            tab_text = self.main_tab_bar.tabText(index)
+
+            # Spalte 2/3 synchron zum Haupt-Tab umschalten. Spalte 1
+            # (Pipeline-Status) bleibt unabhängig davon unverändert sichtbar.
+            self.viewport_stack.setCurrentIndex(index)
+            self.parameter_stack.setCurrentIndex(index)
+            self.statistics_stack.setCurrentIndex(index)
+
             self.current_tab_label.setText(f"Current: {tab_text}")
 
             # Update navigation manager
             if self.navigation_manager:
-                self.navigation_manager.current_tab = tab_text.lower()
+                self.navigation_manager.current_tab = tab_name_lower
+
+            # Globale Contour/Shadow-Checkboxen gelten tab-übergreifend - beim
+            # Wechsel auf den neu aktiven Tab anwenden, damit dessen Display
+            # den aktuellen globalen Zustand übernimmt.
+            self._apply_global_overlays_to_active_tab()
+
+            # Erzwingt einen Display-Refresh mit dem aktuell gewählten Render-Modus.
+            # Ohne das bleibt der Viewport leer, bis der Nutzer den Modus manuell
+            # umschaltet - der Default-Radio (z.B. "Height") feuert beim Erstellen
+            # kein toggled-Signal, weil setChecked(True) vor dem connect() passiert.
+            tab_instance = self.tabs.get(tab_name_lower)
+            if tab_instance and hasattr(tab_instance, 'update_display_mode'):
+                tab_instance.update_display_mode()
 
             self.logger.debug(f"Tab changed to: {tab_text}")
+
+    def _get_active_tab_instance(self):
+        """Liefert die BaseMapTab-Instanz des aktuell im main_tab_bar aktiven Tabs."""
+        index = self.main_tab_bar.currentIndex()
+        if 0 <= index < len(self.tab_order):
+            return self.tabs.get(self.tab_order[index])
+        return None
+
+    def _apply_global_overlays_to_active_tab(self):
+        """Wendet den aktuellen Zustand der globalen Checkboxen auf den aktiven Tab an."""
+        tab_instance = self._get_active_tab_instance()
+        if not tab_instance:
+            return
+        if hasattr(tab_instance, 'set_contour_overlay'):
+            tab_instance.set_contour_overlay(self.contour_checkbox.isChecked())
+        if hasattr(tab_instance, 'set_shadow_overlay'):
+            tab_instance.set_shadow_overlay(self.shadow_checkbox.isChecked())
+
+    @pyqtSlot(bool)
+    def _on_global_contour_toggled(self, checked: bool):
+        """Globales Contour-Lines-Toggle (Spalte 2) - wirkt auf den aktiven Tab."""
+        tab_instance = self._get_active_tab_instance()
+        if tab_instance and hasattr(tab_instance, 'set_contour_overlay'):
+            tab_instance.set_contour_overlay(checked)
+
+    @pyqtSlot(bool)
+    def _on_global_shadow_toggled(self, checked: bool):
+        """Globales Shadows-Toggle (Spalte 2) - wirkt auf den aktiven Tab."""
+        tab_instance = self._get_active_tab_instance()
+        if tab_instance and hasattr(tab_instance, 'set_shadow_overlay'):
+            tab_instance.set_shadow_overlay(checked)
 
     @pyqtSlot(str, str)
     def _on_navigation_requested(self, from_tab: str, to_tab: str):
@@ -669,52 +856,53 @@ class MapEditorWindow(QMainWindow):
         self.logger.debug(f"Data updated: {generator_type}.{data_key}")
 
     # Generation Event Handlers
+    #
+    # Signaturen richten sich exakt nach GenerationOrchestrator's echten
+    # pyqtSignal-Deklarationen (gui/OldManagers/generation_orchestrator.py):
+    #   generation_started    = pyqtSignal(str, int)   # (generator_type, lod_level)
+    #   generation_completed  = pyqtSignal(str, dict)  # (request_id, result_data)
+    #   generation_progress   = pyqtSignal(int, str)   # (progress, message) - global, kein generator_type
+    # Vorherige Versionen dieser Handler hatten davon abweichende Signaturen
+    # UND waren nie mit den Orchestrator-Signalen verbunden (siehe
+    # _setup_signals()) - die Pipeline-Status-Spalte blieb dadurch dauerhaft
+    # auf "Unknown" stehen.
 
-    @pyqtSlot(str, str)
-    def _on_generation_started(self, generator_type: str, lod_level: str):
-        """
-        Handle generation start events
-        =============================
-
-        Args:
-            generator_type: Type of generator starting
-            lod_level: LOD level being generated
-        """
-        if not generator_type or not lod_level:
+    @pyqtSlot(str, int)
+    def _on_generation_started(self, generator_type: str, lod_level: int):
+        """Handle generation start events (ein LOD-Level beginnt)"""
+        if not generator_type:
             return
 
         generation_key = f"{generator_type}_{lod_level}"
         self.active_generations.add(generation_key)
 
-        # Update status displays
         if hasattr(self, 'active_generations_label'):
             self.active_generations_label.setText(f"Generations: {len(self.active_generations)} active")
 
-        self.status_indicator.set_warning(f"Generating {generator_type} {lod_level}")
+        self.status_indicator.set_warning(f"Generating {generator_type} LOD {lod_level}")
+        if self.pipeline_status_panel:
+            self.pipeline_status_panel.set_calculating(generator_type, lod_level)
         self.logger.debug(f"Generation started: {generation_key}")
 
-    @pyqtSlot(str, str, bool)
-    def _on_generation_completed(self, generator_type: str, lod_level: str, success: bool):
+    @pyqtSlot(str, dict)
+    def _on_generation_completed(self, request_id: str, result_data: dict):
         """
-        Handle generation completion events
-        ==================================
+        Handle final generation completion events (komplette Target-LOD-
+        Progression eines Requests abgeschlossen, nicht pro Zwischen-LOD).
+        """
+        generator_type = result_data.get("generator_type", "")
+        lod_level = result_data.get("lod_level")
+        success = result_data.get("success", False)
 
-        Args:
-            generator_type: Type of generator completed
-            lod_level: LOD level that was generated
-            success: Whether generation succeeded
-        """
-        if not generator_type or not lod_level:
+        if not generator_type:
             return
 
         generation_key = f"{generator_type}_{lod_level}"
         self.active_generations.discard(generation_key)
 
-        # Update tab status tracking
-        if generator_type in self.tab_generation_status:
+        if generator_type in self.tab_generation_status and lod_level is not None:
             self.tab_generation_status[generator_type][lod_level] = "success" if success else "failed"
 
-        # Update status displays
         if hasattr(self, 'active_generations_label'):
             self.active_generations_label.setText(f"Generations: {len(self.active_generations)} active")
 
@@ -722,17 +910,21 @@ class MapEditorWindow(QMainWindow):
             if len(self.active_generations) == 0:
                 self.status_indicator.set_success("All generations complete")
             else:
-                self.status_indicator.set_success(f"{generator_type} {lod_level} complete")
+                self.status_indicator.set_success(f"{generator_type} LOD {lod_level} complete")
+            if self.pipeline_status_panel:
+                self.pipeline_status_panel.set_finished(generator_type, lod_level)
         else:
-            self.status_indicator.set_error(f"{generator_type} {lod_level} failed")
+            self.status_indicator.set_error(f"{generator_type} LOD {lod_level} failed")
+            if self.pipeline_status_panel:
+                self.pipeline_status_panel.set_failed(generator_type, f"LOD {lod_level} failed")
 
+        self._refresh_footer_progress()
         self.logger.info(f"Generation completed: {generation_key} success={success}")
 
-    @pyqtSlot(str, str, int, str)
-    def _on_generation_progress(self, generator_type: str, lod_level: str, progress_percent: int, detail: str):
-        """Handle generation progress updates"""
-        if generator_type and lod_level:
-            self.status_indicator.set_warning(f"{generator_type} {lod_level}: {progress_percent}%")
+    @pyqtSlot(int, str)
+    def _on_generation_progress(self, progress_percent: int, message: str):
+        """Handle generation progress updates (global, ohne generator_type/lod_level)"""
+        self.status_indicator.set_warning(f"{message} ({progress_percent}%)")
 
     @pyqtSlot(bool, str)
     def _on_batch_generation_completed(self, success: bool, summary_message: str):
@@ -873,7 +1065,10 @@ class MapEditorWindow(QMainWindow):
 
     def _export_current_png(self):
         """Export current tab view as PNG"""
-        current_tab = self.tab_widget.currentWidget()
+        current_index = self.main_tab_bar.currentIndex()
+        current_tab = None
+        if 0 <= current_index < len(self.tab_order):
+            current_tab = self.tabs.get(self.tab_order[current_index])
 
         if hasattr(current_tab, 'export_current_view'):
             filename, _ = QFileDialog.getSaveFileName(
@@ -916,8 +1111,8 @@ class MapEditorWindow(QMainWindow):
 
             self.close()
 
-            if hasattr(self, 'main_menu_reference'):
-                self.main_menu_reference.show()
+            if self.parent():
+                self.parent().show()
 
             self.logger.info("Success returning to Main Menu.")
 
@@ -933,9 +1128,9 @@ class MapEditorWindow(QMainWindow):
             QMessageBox.warning(self, "Generation Unavailable", "No GenerationOrchestrator available")
             return
 
-        current_index = self.tab_widget.currentIndex()
-        if current_index >= 0:
-            tab_name = self.tab_widget.tabText(current_index).lower()
+        current_index = self.main_tab_bar.currentIndex()
+        if 0 <= current_index < len(self.tab_order):
+            tab_name = self.tab_order[current_index]
             tab_instance = self.tabs.get(tab_name)
 
             if tab_instance and hasattr(tab_instance, 'generate'):
@@ -988,6 +1183,8 @@ class MapEditorWindow(QMainWindow):
             # Queue all generators
             for generator_type in generator_sequence:
                 if generator_type in self.tabs:
+                    if self.pipeline_status_panel:
+                        self.pipeline_status_panel.set_queued(generator_type)
                     self.generation_orchestrator.request_generation(
                         generator_type=generator_type,
                         parameters={},
@@ -1103,30 +1300,21 @@ class MapEditorWindow(QMainWindow):
         Handle window close event with comprehensive cleanup
         ==================================================
 
-        Provides user confirmation and performs thorough resource
-        cleanup before closing the editor window.
+        Performs thorough resource cleanup before closing the
+        editor window, without asking for confirmation.
 
         Args:
             event: QCloseEvent to accept or ignore
         """
-        reply = QMessageBox.question(
-            self, "Close Map Editor",
-            "Close Map Editor and return to Main Menu?\n\nAny unsaved changes will be lost.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-
-        if reply == QMessageBox.Yes:
-            try:
-                self._perform_cleanup()
-                self.return_to_main_menu.emit()
-                event.accept()
-                self.logger.info("MapEditor closed successfully")
-            except Exception as e:
-                self.logger.error(f"Error during cleanup: {e}")
-                event.accept()  # Close anyway to prevent hanging
-        else:
-            event.ignore()
+        try:
+            self._perform_cleanup()
+            if self.parent():
+                self.parent().show()
+            event.accept()
+            self.logger.info("MapEditor closed successfully")
+        except Exception as e:
+            self.logger.error(f"Error during cleanup: {e}")
+            event.accept()  # Close anyway to prevent hanging
 
     def _perform_cleanup(self):
         """
@@ -1207,9 +1395,9 @@ class MapEditorWindow(QMainWindow):
         try:
             return {
                 "window_info": {
-                    "current_tab": self.tab_widget.tabText(
-                        self.tab_widget.currentIndex()) if self.tab_widget.currentIndex() >= 0 else "None",
-                    "total_tabs": self.tab_widget.count(),
+                    "current_tab": self.main_tab_bar.tabText(
+                        self.main_tab_bar.currentIndex()) if self.main_tab_bar.currentIndex() >= 0 else "None",
+                    "total_tabs": self.main_tab_bar.count(),
                     "window_size": f"{self.width()}x{self.height()}"
                 },
                 "generation_status": {

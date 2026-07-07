@@ -80,14 +80,25 @@ class CanvasSettings:
         "background_color": "#2c3e50",
         "grid_color": "#34495e",
         "contour_colors": ["#3498db", "#e74c3c", "#f39c12"],
-        "dpi": 100
+        "dpi": 100,
+        # Feste Höhen-Farbskala (Meter) statt Auto-Skalierung pro Heightmap,
+        # damit z.B. ein 200m-Hügel und ein 3500m-Berg nicht dieselbe volle
+        # Farbspanne bekommen - entspricht realen topografischen Karten.
+        # Werte oberhalb von elevation_vmax clippen auf die höchste Farbe.
+        "elevation_vmin": 0.0,
+        "elevation_vmax": 4000.0
     }
 
     # 3D Canvas Settings
     CANVAS_3D = {
         "background_color": (0.17, 0.24, 0.31, 1.0),  # RGBA
         "light_position": (1.0, 1.0, 1.0),
-        "camera_distance": 5.0,
+        # Terrain-Mesh wird immer auf ein 10x10-Einheiten XZ-Footprint normiert
+        # (siehe MapDisplay3D.terrain_scale_factor). 5.0 war kleiner als der
+        # Mesh-Diagonal-Halbradius (~7.07) selbst - bei 45° FOV landeten
+        # Vertices dadurch weit außerhalb von NDC [-1,1] und es wurde nichts
+        # sichtbar. ~17 umfasst das Mesh bei 45° FOV mit Rand.
+        "camera_distance": 17.0,
         "fov": 45.0
     }
 

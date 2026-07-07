@@ -72,6 +72,7 @@ class BiomeTab(BaseMapTab):
         # Parameter und State
         self.current_parameters = {}
         self.biome_generation_complete = False
+        self.generation_in_progress = False
 
         # Setup UI
         self.setup_biome_ui()
@@ -101,15 +102,24 @@ class BiomeTab(BaseMapTab):
             return
 
         try:
-            self.logger.info(f"Starting biome generation with target LOD: {self.target_lod}")
+            # target_lod nicht selbst gesetzt - wie bei den anderen Tabs
+            # bestimmt der Orchestrator es aus map_size/aktuellem Terrain-LOD
+            # (request_generation() mit target_lod=None), siehe
+            # GenerationOrchestrator.request_generation().
+            self.logger.info("Starting biome generation")
 
             self.start_generation_timing()
             self.generation_in_progress = True
 
+            # Frisch von den Slidern lesen statt des selbst gepflegten
+            # self.current_parameters-Caches: der wird nur bei manueller
+            # Slider-Interaktion aktualisiert und startet leer (siehe
+            # SettlementTab.generate() für dasselbe Problem).
+            self.current_parameters = self.get_current_parameters()
             request_id = self.generation_orchestrator.request_generation(
                 generator_type="biome",
                 parameters=self.current_parameters.copy(),
-                target_lod=self.target_lod,
+                target_lod=None,
                 source_tab="biome",
                 priority=10
             )
@@ -127,7 +137,10 @@ class BiomeTab(BaseMapTab):
     def setup_biome_ui(self):
         """
         Funktionsweise: Erstellt komplette UI für Biome-System
-        Aufgabe: Parameter, Biome-Preview, World-Overview, Export-Controls
+        Aufgabe: Parameter, Biome-Preview
+        Statistics stecken im Statistics-Tab (siehe create_statistics_controls()),
+        Display-Mode/Overlays in der Viewport-Toolbar (siehe create_visualization_controls()) -
+        beide nicht mehr im Parameter-Panel, wie bei TerrainTab.
         """
         # Parameter Panel
         self.parameter_panel = self.create_biome_parameter_panel()
@@ -137,13 +150,13 @@ class BiomeTab(BaseMapTab):
         self.biome_classification_widget = BiomeClassificationWidget()
         self.control_panel.layout().addWidget(self.biome_classification_widget)
 
-        # Visualization Controls
-        self.visualization_controls = self.create_biome_visualization_controls()
-        self.control_panel.layout().addWidget(self.visualization_controls)
-
-        # Biome Statistics
+    def create_statistics_controls(self, layout: QVBoxLayout):
+        """
+        Überschreibt BaseMapTab: befüllt das Statistics-Tab (Spalte 3) mit den
+        Biome-Statistics statt sie im Parameter-Panel unterzubringen.
+        """
         self.statistics_group = self._create_statistics_display()
-        self.control_panel.layout().addWidget(self.statistics_group)
+        layout.addWidget(self.statistics_group)
 
     def _create_statistics_display(self) -> QGroupBox:
         """
@@ -271,29 +284,34 @@ class BiomeTab(BaseMapTab):
 
         panel.setLayout(layout)
 
-        # Generation Control
-        generation_group = QGroupBox("Generation Control")
-        generation_layout = QVBoxLayout()
-
-        self.manual_generate_button = BaseButton("Berechnen", "primary")
-        self.manual_generate_button.clicked.connect(self.generate)
-        generation_layout.addWidget(self.manual_generate_button)
-
-        generation_group.setLayout(generation_layout)
-        layout.addWidget(generation_group)
-
         return panel
 
-    def create_biome_visualization_controls(self) -> QGroupBox:
+    def create_visualization_controls(self):
         """
-        Funktionsweise: Erstellt Controls für Biome-Visualization
-        Aufgabe: Switcher zwischen biome_map, biome_map_super, super_biome_mask
-        Return: QGroupBox mit Visualization-Controls
+        Überschreibt BaseMapTab: Display-Mode-Radios, Overlay-Checkboxes und
+        Legend-Button sitzen wie bei TerrainTab in der Viewport-Toolbar
+        (Spalte 2), nicht mehr im Parameter-Panel.
         """
-        panel = QGroupBox("Biome Visualization")
-        layout = QVBoxLayout()
+        controls_widget = QWidget()
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Display Mode Selection
+        controls_layout.addLayout(self._create_biome_display_mode_controls())
+        controls_layout.addWidget(self._create_vertical_separator())
+        controls_layout.addLayout(self._create_biome_overlay_controls())
+        controls_layout.addWidget(self._create_vertical_separator())
+
+        self.show_legend_button = BaseButton("Show Biome Legend")
+        self.show_legend_button.clicked.connect(self.show_biome_legend)
+        controls_layout.addWidget(self.show_legend_button)
+
+        controls_widget.setLayout(controls_layout)
+        return controls_widget
+
+    def _create_biome_display_mode_controls(self) -> QHBoxLayout:
+        """Erstellt Switcher zwischen biome_map, biome_map_super, super_biome_mask"""
+        layout = QHBoxLayout()
+
         self.display_mode = QButtonGroup()
 
         self.base_biomes_radio = QRadioButton("Base Biomes")
@@ -302,42 +320,43 @@ class BiomeTab(BaseMapTab):
         self.display_mode.addButton(self.base_biomes_radio, 0)
         layout.addWidget(self.base_biomes_radio)
 
-        self.super_biomes_radio = QRadioButton("Super Biomes (2x2 Supersampled)")
+        self.super_biomes_radio = QRadioButton("Super Biomes")
+        self.super_biomes_radio.setToolTip("Super Biomes (2x2 Supersampled)")
         self.super_biomes_radio.toggled.connect(self.update_display_mode)
         self.display_mode.addButton(self.super_biomes_radio, 1)
         layout.addWidget(self.super_biomes_radio)
 
-        self.override_mask_radio = QRadioButton("Super-Biome Override Mask")
+        self.override_mask_radio = QRadioButton("Override Mask")
+        self.override_mask_radio.setToolTip("Super-Biome Override Mask")
         self.override_mask_radio.toggled.connect(self.update_display_mode)
         self.display_mode.addButton(self.override_mask_radio, 2)
         layout.addWidget(self.override_mask_radio)
 
-        # Overlay Controls
-        overlay_group = QGroupBox("Overlays")
-        overlay_layout = QVBoxLayout()
+        return layout
 
-        self.settlements_overlay = QCheckBox("Show Settlements")
+    def _create_biome_overlay_controls(self) -> QHBoxLayout:
+        """Erstellt Overlay-Checkboxes (Settlements/Rivers/Elevation Contours)"""
+        layout = QHBoxLayout()
+
+        self.settlements_overlay = QCheckBox("Settlements")
         self.settlements_overlay.toggled.connect(self.toggle_settlements_overlay)
-        overlay_layout.addWidget(self.settlements_overlay)
+        layout.addWidget(self.settlements_overlay)
 
-        self.rivers_overlay = QCheckBox("Show Rivers")
+        self.rivers_overlay = QCheckBox("Rivers")
         self.rivers_overlay.toggled.connect(self.toggle_rivers_overlay)
-        overlay_layout.addWidget(self.rivers_overlay)
+        layout.addWidget(self.rivers_overlay)
 
-        self.elevation_contours = QCheckBox("Show Elevation Contours")
+        self.elevation_contours = QCheckBox("Elevation Contours")
         self.elevation_contours.toggled.connect(self.toggle_elevation_contours)
-        overlay_layout.addWidget(self.elevation_contours)
+        layout.addWidget(self.elevation_contours)
 
-        overlay_group.setLayout(overlay_layout)
-        layout.addWidget(overlay_group)
+        return layout
 
-        # Biome Legend Toggle
-        self.show_legend_button = BaseButton("Show Biome Legend")
-        self.show_legend_button.clicked.connect(self.show_biome_legend)
-        layout.addWidget(self.show_legend_button)
-
-        panel.setLayout(layout)
-        return panel
+    def _create_vertical_separator(self) -> QWidget:
+        separator = QWidget()
+        separator.setFixedWidth(1)
+        separator.setStyleSheet("background-color: #bdc3c7;")
+        return separator
 
     def setup_dependency_checking(self):
         """
@@ -406,8 +425,6 @@ class BiomeTab(BaseMapTab):
         else:
             self.dependency_status.set_warning(f"Missing: {', '.join(missing)}")
 
-        self.manual_generate_button.setEnabled(is_complete)
-
         return is_complete
 
     def collect_input_data(self) -> dict:
@@ -439,23 +456,27 @@ class BiomeTab(BaseMapTab):
         """
         Funktionsweise: Aktualisiert Display basierend auf aktuellem Visualization-Mode
         Aufgabe: Zeigt biome_map, biome_map_super oder super_biome_mask mit Overlays
+
+        Nutzt wie die anderen Tabs get_current_display()/_push_data_to_current_display()
+        statt eines nie zugewiesenen self.map_display (siehe MEMORY: Biome/Settlement
+        hatten dadurch nie funktionierendes Rendering, weder 2D noch 3D).
         """
         current_mode = self.display_mode.checkedId()
 
         if current_mode == 0:  # Base Biomes
             biome_map = self.data_lod_manager.get_biome_data("biome_map")
             if biome_map is not None:
-                self.map_display.display_base_biomes(biome_map)
+                self._push_data_to_current_display(biome_map, "biome_map")
 
         elif current_mode == 1:  # Super Biomes (2x2 Supersampled)
             biome_map_super = self.data_lod_manager.get_biome_data("biome_map_super")
             if biome_map_super is not None:
-                self.map_display.display_super_biomes(biome_map_super)
+                self._push_data_to_current_display(biome_map_super, "biome_map")
 
         elif current_mode == 2:  # Super-Biome Override Mask
             super_biome_mask = self.data_lod_manager.get_biome_data("super_biome_mask")
             if super_biome_mask is not None:
-                self.map_display.display_super_biome_mask(super_biome_mask)
+                self._push_data_to_current_display(super_biome_mask, "biome_map")
 
         # Overlays anwenden
         self.apply_overlays()
@@ -465,29 +486,43 @@ class BiomeTab(BaseMapTab):
         Funktionsweise: Wendet alle aktivierten Overlays auf Display an
         Aufgabe: Settlements, Rivers, Elevation Contours basierend auf Checkboxes
         """
+        current_display = self.get_current_display()
+        if not current_display or self.current_view != "2d":
+            return
+        display = current_display.display
+
         # Settlements Overlay
-        if self.settlements_overlay.isChecked():
+        if self.settlements_overlay.isChecked() and hasattr(display, 'overlay_settlements'):
             settlement_list = self.data_lod_manager.get_settlement_data("settlement_list")
             landmark_list = self.data_lod_manager.get_settlement_data("landmark_list")
             if settlement_list is not None:
-                self.map_display.overlay_settlements(settlement_list, landmark_list)
+                display.overlay_settlements(settlement_list, landmark_list)
 
         # Rivers Overlay
-        if self.rivers_overlay.isChecked():
+        if self.rivers_overlay.isChecked() and hasattr(display, 'overlay_river_network'):
             flow_map = self.data_lod_manager.get_water_data("flow_map")
             if flow_map is not None:
-                self.map_display.overlay_river_network(flow_map)
+                display.overlay_river_network(flow_map)
 
         # Elevation Contours Overlay
-        if self.elevation_contours.isChecked():
+        if self.elevation_contours.isChecked() and hasattr(display, 'overlay_elevation_contours'):
             heightmap = self.data_lod_manager.get_terrain_data("heightmap")
             if heightmap is not None:
-                self.map_display.overlay_elevation_contours(heightmap)
+                display.overlay_elevation_contours(heightmap)
 
     @pyqtSlot()
     def update_display_mode(self):
-        """Slot für Visualization-Mode Änderungen"""
-        self.update_biome_display()
+        """
+        Slot für Visualization-Mode Änderungen.
+        update_biome_display() ruft self.map_display auf, das nie zugewiesen
+        wird (die realen Render-Methoden display_base_biomes()/overlay_*()
+        existieren auch nicht auf MapDisplay2D) - Biome-2D/3D-Rendering ist
+        noch nicht implementiert. Bis dahin hier abfangen statt hart zu crashen.
+        """
+        try:
+            self.update_biome_display()
+        except AttributeError as e:
+            self.logger.debug(f"Biome display rendering not yet implemented: {e}")
 
     @pyqtSlot(bool)
     def toggle_settlements_overlay(self, enabled: bool):

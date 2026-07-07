@@ -16,7 +16,15 @@ def _validate_input_data(data):
     if not isinstance(data, np.ndarray):
         return False
 
-    if data.ndim != 2:
+    # Echte 2D-Daten (Skalarfelder) ODER RGB/RGBA-Bilddaten (z.B. Geology
+    # rock_map, (H,W,3) Gesteinsanteile) sind gültig für imshow(). Andere
+    # Kanalzahlen (z.B. (H,W,2) dx/dy-Gradienten wie slopemap/wind_map) sind
+    # NICHT direkt darstellbar - der Aufrufer muss sie vorher auf ein
+    # darstellbares Format reduzieren (siehe TerrainTab/WeatherTab
+    # update_display_mode()).
+    if data.ndim == 3 and data.shape[2] not in (3, 4):
+        return False
+    elif data.ndim not in (2, 3):
         return False
 
     if data.shape[0] < 10 or data.shape[1] < 10:
@@ -78,6 +86,8 @@ class MapDisplay2D(QWidget):
         self.current_data = None
         self.current_layer = "heightmap"
         self.contour_lines_enabled = True
+        self.shadow_overlay_enabled = False
+        self.shadow_angle_index = None
         self.measure_mode = False
         self.measure_start = None
         self.measure_line = None
@@ -105,9 +115,13 @@ class MapDisplay2D(QWidget):
         # Tool-Controls
         tool_layout = QHBoxLayout()
 
+        # Contour Lines wird jetzt über die globale Shell-Checkbox (Spalte 2)
+        # gesteuert (siehe set_contour_overlay()) - intern bleibt das Checkbox
+        # verdrahtet, ist aber ausgeblendet, um Doppel-Bedienelemente zu vermeiden.
         self.contour_checkbox = QCheckBox("Contour Lines")
         self.contour_checkbox.setChecked(self.contour_lines_enabled)
         self.contour_checkbox.toggled.connect(self._toggle_contour_lines)
+        self.contour_checkbox.setVisible(False)
         tool_layout.addWidget(self.contour_checkbox)
 
         self.measure_button = QPushButton("Measure Distance")
@@ -190,6 +204,10 @@ class MapDisplay2D(QWidget):
 
         if layer_type == "heightmap":
             self._render_heightmap(data)
+        elif layer_type == "slopemap":
+            self._render_slopemap(data)
+        elif layer_type == "rock_map":
+            self._render_rock_map(data)
         elif layer_type == "biome_map":
             self._render_biome_map(data)
         elif layer_type == "water_map":
@@ -227,7 +245,11 @@ class MapDisplay2D(QWidget):
         Aufgabe: Spezialisierte Darstellung für Terrain-Daten
         Parameter: heightmap (numpy.ndarray) - Höhendaten zum Rendern
         """
-        im = self.ax.imshow(heightmap, cmap=self.heightmap_cmap, origin='lower', interpolation='bilinear')
+        im = self.ax.imshow(
+            heightmap, cmap=self.heightmap_cmap, origin='lower', interpolation='bilinear',
+            vmin=CanvasSettings.CANVAS_2D["elevation_vmin"],
+            vmax=CanvasSettings.CANVAS_2D["elevation_vmax"]
+        )
 
         if self.contour_lines_enabled:
             contour_levels = _calculate_contour_levels(heightmap)
@@ -238,6 +260,33 @@ class MapDisplay2D(QWidget):
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Elevation (m)')
+
+    def _render_slopemap(self, slope_degrees):
+        """
+        Funktionsweise: Rendert Steigungs-Magnitude (bereits in Grad, 2D) mit
+        Steepness-Colormap
+        Aufgabe: Spezialisierte Darstellung für Slope-Daten. Erwartet ein
+        bereits auf 2D reduziertes Grad-Array (siehe TerrainTab.update_display_mode,
+        das (H,W,2) dx/dy-Gradienten vorher zu einer Magnitude in Grad umrechnet -
+        MapDisplay2D kann nur echte 2D-Bilder zeichnen).
+        Parameter: slope_degrees (numpy.ndarray) - Steigung in Grad zum Rendern
+        """
+        im = self.ax.imshow(slope_degrees, cmap=plt.cm.YlOrRd, origin='lower', interpolation='bilinear')
+
+        self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
+        self.current_colorbar.set_label('Slope (°)')
+
+    def _render_rock_map(self, rock_map):
+        """
+        Funktionsweise: Rendert Gesteinstyp-Anteile als RGB-Bild
+        Aufgabe: rock_map ist (H,W,3) - je Kanal der Anteil eines Gesteinstyps
+        (z.B. igneous/sedimentary/metamorphic). imshow zeigt (H,W,3)-Arrays
+        direkt als Echtfarbbild, dafür OHNE Colorbar (keine skalare Werte-Achse
+        bei RGB-Composite-Daten).
+        Parameter: rock_map (numpy.ndarray) - (H,W,3) Gesteinsanteile, erwartet in [0,1]
+        """
+        display_data = np.clip(rock_map, 0.0, 1.0)
+        self.ax.imshow(display_data, origin='lower', interpolation='nearest')
 
     def _render_biome_map(self, biome_map):
         """
@@ -301,6 +350,101 @@ class MapDisplay2D(QWidget):
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Value')
 
+    def overlay_settlements(self, settlement_list, landmark_list=None, roadsite_list=None):
+        """
+        Funktionsweise: Zeichnet Settlement-/Landmark-/Roadsite-Positionen als
+        Marker über das aktuell angezeigte Bild
+        Aufgabe: Overlay für BiomeTab/SettlementTab - erwartet Objekte mit
+        .x/.y Attributen (core.settlement_generator.Location) oder (x,y)-Tupel
+        Parameter: settlement_list, landmark_list, roadsite_list - Listen von Locations
+        """
+        if self.current_data is None:
+            return
+
+        def _coords(items):
+            xs, ys = [], []
+            for item in items or []:
+                x = getattr(item, 'x', None)
+                y = getattr(item, 'y', None)
+                if x is None and isinstance(item, (tuple, list)) and len(item) >= 2:
+                    x, y = item[0], item[1]
+                if x is not None and y is not None:
+                    xs.append(x)
+                    ys.append(y)
+            return xs, ys
+
+        settle_x, settle_y = _coords(settlement_list)
+        if settle_x:
+            self.ax.scatter(settle_x, settle_y, c='red', marker='o', s=40,
+                             edgecolors='white', linewidths=0.5, label='Settlements', zorder=5)
+
+        landmark_x, landmark_y = _coords(landmark_list)
+        if landmark_x:
+            self.ax.scatter(landmark_x, landmark_y, c='gold', marker='^', s=30,
+                             edgecolors='black', linewidths=0.5, label='Landmarks', zorder=5)
+
+        roadsite_x, roadsite_y = _coords(roadsite_list)
+        if roadsite_x:
+            self.ax.scatter(roadsite_x, roadsite_y, c='saddlebrown', marker='s', s=15,
+                             edgecolors='black', linewidths=0.3, label='Roadsites', zorder=4)
+
+        if settle_x or landmark_x or roadsite_x:
+            self.ax.legend(loc='upper right', fontsize=8, framealpha=0.7)
+        self.canvas.draw()
+
+    def overlay_roads(self, roads):
+        """
+        Funktionsweise: Zeichnet Road-Pfade als Linien über das aktuell
+        angezeigte Bild
+        Aufgabe: Overlay für SettlementTab "Road Network"
+        Parameter: roads (List[List[Tuple]]) - Liste von Pfaden, je Pfad eine
+        Liste von (x,y[,...])-Punkten
+        """
+        if self.current_data is None or not roads:
+            return
+
+        for path in roads:
+            if not path or len(path) < 2:
+                continue
+            xs = [p[0] for p in path]
+            ys = [p[1] for p in path]
+            self.ax.plot(xs, ys, color='darkorange', linewidth=1.2, alpha=0.85, zorder=4)
+
+        self.canvas.draw()
+
+    def overlay_river_network(self, flow_map):
+        """
+        Funktionsweise: Überlagert Fluss-Netzwerk basierend auf Flow-Magnitude
+        Aufgabe: Zellen mit hohem Wasserabfluss (>90. Perzentil) als Flüsse
+        einfärben, Rest transparent lassen
+        Parameter: flow_map (numpy.ndarray) - Wasserabfluss-Werte
+        """
+        if self.current_data is None or not isinstance(flow_map, np.ndarray) or flow_map.ndim != 2:
+            return
+
+        threshold = np.percentile(flow_map, 90) if np.any(flow_map > 0) else np.inf
+        river_mask = np.ma.masked_less_equal(flow_map, threshold)
+
+        self.ax.imshow(river_mask, cmap=plt.cm.Blues, origin='lower',
+                        interpolation='bilinear', alpha=0.7, vmin=threshold)
+        self.canvas.draw()
+
+    def overlay_elevation_contours(self, heightmap):
+        """
+        Funktionsweise: Zeichnet Höhenlinien über das aktuell angezeigte Bild
+        Aufgabe: Overlay für Nicht-Height-Layer (z.B. Biome-Map), damit
+        Gelände-Referenz sichtbar bleibt
+        Parameter: heightmap (numpy.ndarray) - Höhendaten für die Konturlinien
+        """
+        if self.current_data is None or not isinstance(heightmap, np.ndarray) or heightmap.ndim != 2:
+            return
+
+        contour_levels = _calculate_contour_levels(heightmap)
+        contours = self.ax.contour(heightmap, levels=contour_levels, colors='white',
+                                    linewidths=0.5, alpha=0.6)
+        self.ax.clabel(contours, inline=True, fontsize=7)
+        self.canvas.draw()
+
     def _apply_styling(self):
         """
         Funktionsweise: Wendet einheitliches Styling auf Axes an
@@ -313,10 +457,19 @@ class MapDisplay2D(QWidget):
         # Title basierend auf aktuellem Layer
         layer_titles = {
             "heightmap": "Terrain Elevation",
+            "slopemap": "Terrain Slope",
+            "rock_map": "Rock Type Distribution",
             "biome_map": "Biome Distribution",
             "water_map": "Water Bodies",
             "temperature_map": "Temperature Field",
-            "precipitation_map": "Precipitation Field"
+            "precipitation_map": "Precipitation Field",
+            "temp_map": "Temperature Field",
+            "precip_map": "Precipitation Field",
+            "humid_map": "Humidity Field",
+            "wind_map": "Wind Speed",
+            "suitability_map": "Settlement Suitability",
+            "civ_map": "Civilization Influence",
+            "plot_map": "Plot Boundaries"
         }
 
         title = layer_titles.get(self.current_layer, "Map Data")
@@ -331,6 +484,30 @@ class MapDisplay2D(QWidget):
         self.contour_lines_enabled = enabled
         if self.current_data is not None:
             self.update_display(self.current_data, self.current_layer)
+
+    def set_contour_overlay(self, enabled: bool):
+        """
+        Öffentlicher Hook für das globale Shell-Checkbox "Contour Lines"
+        (siehe MapEditorWindow-Spalte 2). Ersetzt das interne Checkbox als
+        Bedienelement - dieses bleibt intern verdrahtet, wird aber ausgeblendet.
+        """
+        if self.contour_lines_enabled == enabled:
+            return
+        self.contour_lines_enabled = enabled
+        self.contour_checkbox.blockSignals(True)
+        self.contour_checkbox.setChecked(enabled)
+        self.contour_checkbox.blockSignals(False)
+        if self.current_data is not None:
+            self.update_display(self.current_data, self.current_layer)
+
+    def set_shadow_overlay(self, enabled: bool, angle_index: int = None):
+        """
+        Platzhalter-Hook für das globale Shell-Checkbox "Shadows". Hillshade-
+        Rendering ist noch nicht implementiert - speichert nur den Zustand,
+        damit eine spätere Shading-Implementierung hier andocken kann.
+        """
+        self.shadow_overlay_enabled = enabled
+        self.shadow_angle_index = angle_index
 
     def _toggle_measure_mode(self, enabled):
         """
