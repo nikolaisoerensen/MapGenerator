@@ -16,12 +16,25 @@ class TERRAIN:
     MAPSIZEMAX = 1024
 
     MAPSIZE = {"min": MAPSIZEMIN, "max": MAPSIZEMAX, "default": 128, "step": 32}
-    AMPLITUDE = {"min": 30, "max": 6000.0, "default": 2000.0, "step": 10, "suffix": "m"}
-    OCTAVES = {"min": 1, "max": 12, "default": 8, "step": 1}
+    # Default 4000m (statt vorher 2000m), damit die Farbskala (0-4000m, siehe
+    # CanvasSettings.CANVAS_2D) beim Default-Seed auch tatsächlich ausgenutzt wird.
+    AMPLITUDE = {"min": 30, "max": 6000.0, "default": 4000.0, "step": 10, "suffix": "m"}
+    # Default 4 (statt vorher 8): die Pixel-Koordinaten-Frequenz ist NICHT auf
+    # die Kartengröße normalisiert (siehe SimplexNoiseGenerator._generate_cpu_optimized),
+    # bei frequency=0.037 und lacunarity=2.3 übersteigt die Oktaven-Frequenz ab
+    # Oktave 5 den Wert 1.0 (Wellenlänge unter einem Pixel) - diese Oktaven fügen
+    # nur noch unkorreliertes "Static"-Rauschen statt Landschaftsdetail hinzu.
+    OCTAVES = {"min": 1, "max": 12, "default": 4, "step": 1}
     FREQUENCY = {"min": 0.001, "max": 0.1, "default": 0.037, "step": 0.001}
-    PERSISTENCE = {"min": 0.1, "max": 1.0, "default": 0.68, "step": 0.01}
+    # Default 0.4 (statt vorher 0.68): bei 0.68 tragen selbst hochfrequente
+    # Oktaven noch spürbar zur Gesamthöhe bei, was zusammen mit den vielen
+    # Oktaven den zerklüfteten "Static"-Look verursacht hat.
+    PERSISTENCE = {"min": 0.1, "max": 1.0, "default": 0.4, "step": 0.01}
     LACUNARITY = {"min": 1.1, "max": 4.0, "default": 2.3, "step": 0.1}
-    REDISTRIBUTE_POWER = {"min": 0.5, "max": 4.0, "default": 2.5, "step": 0.1}
+    # Höher als vorher (2.5 -> 3.5): drückt die Masse der Landschaft näher an
+    # die Talsohle, seit _apply_redistribution() gegen amplitude statt gegen
+    # das Sample-Min/Max normalisiert (siehe core/terrain_generator.py).
+    REDISTRIBUTE_POWER = {"min": 0.5, "max": 4.0, "default": 3.5, "step": 0.1}
     MAP_SEED = {"min": 0, "max": 999999, "default": 542595, "step": 1}
 
 class GEOLOGY:
@@ -61,7 +74,7 @@ class WEATHER:
 class WATER:
     """Parameter für core/water_generator.py"""
     LAKE_VOLUME_THRESHOLD = {"min": 0.01, "max": 1.0, "default": 0.1, "step": 0.01, "suffix": "m"}
-    RAIN_THRESHOLD = {"min": 1.0, "max": 20.0, "default": 5.0, "step": 0.1, "suffix": "gH2O/m²"}
+    RAIN_THRESHOLD = {"min": 0.001, "max": 0.1, "default": 0.02, "step": 0.001, "suffix": "gH2O/m²"}
     MANNING_COEFFICIENT = {"min": 0.01, "max": 0.1, "default": 0.03, "step": 0.005}
     EROSION_STRENGTH = {"min": 0.1, "max": 5.0, "default": 1.0, "step": 0.1}
     SEDIMENT_CAPACITY_FACTOR = {"min": 0.01, "max": 1.0, "default": 0.1, "step": 0.01}

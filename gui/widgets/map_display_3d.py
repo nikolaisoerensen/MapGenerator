@@ -278,6 +278,10 @@ class MapDisplay3D(QOpenGLWidget):
     vertex_selected = pyqtSignal(int, int)  # (x, y)
     rendering_error = pyqtSignal(str)  # Error-Messages
 
+    # Reale Weltgröße, die die Karte immer abdeckt (unabhängig von map_size/
+    # Pixelauflösung) - siehe _calculate_terrain_scaling().
+    WORLD_SIZE_KM = 10.0
+
     def __init__(self, parent=None):
         """
         Funktionsweise: Initialisiert 3D OpenGL-Widget mit Standard-Camera-Position
@@ -287,7 +291,9 @@ class MapDisplay3D(QOpenGLWidget):
 
         # Camera-Parameter - Fixed-Axis (60° Elevation, Azimuth-Rotation)
         self.camera_distance = CanvasSettings.CANVAS_3D["camera_distance"]
-        self.camera_elevation = -60.0  # Feste Elevation
+        # Positive Elevation = Blick von oben herab (Kartenansicht). Negativ
+        # bedeutete Kamera unterhalb der Map, Blick von unten nach oben.
+        self.camera_elevation = 55.0  # Feste Elevation
         self.camera_azimuth = 0.0  # Rotation um Z-Achse
         self.fov = CanvasSettings.CANVAS_3D["fov"]
 
@@ -343,6 +349,7 @@ class MapDisplay3D(QOpenGLWidget):
         # Mesh-Parameter
         self.terrain_scale_factor = 1.0
         self.terrain_height_scale = 1.0
+        self.terrain_center_y = 0.0
 
     def initializeGL(self):
         """
@@ -549,11 +556,25 @@ class MapDisplay3D(QOpenGLWidget):
         max_dimension = max(self.heightmap.shape)
         self.terrain_scale_factor = 10.0 / max_dimension  # Normiert auf 10 Einheiten
 
-        height_range = self.heightmap.max() - self.heightmap.min()
-        if height_range > 0:
-            self.terrain_height_scale = (max_dimension * 0.3) / height_range
-        else:
-            self.terrain_height_scale = 1.0
+        # Feste, map_size- und sample-unabhängige Höhen-Skalierung: Die Karte
+        # deckt real IMMER WORLD_SIZE_KM x WORLD_SIZE_KM ab (siehe
+        # terrain_scale_factor: 10 Render-Einheiten = WORLD_SIZE_KM), egal wie
+        # viele Pixel map_size hat. Vorher wurde relativ zu max_dimension
+        # (Pixelanzahl!) und dem Min/Max der jeweiligen Stichprobe skaliert -
+        # dadurch wirkten baugleiche Berge bei unterschiedlicher map_size oder
+        # unterschiedlichem Seed nicht im selben Verhältnis zueinander, und
+        # jede Heightmap wurde automatisch auf denselben visuellen Höheneindruck
+        # gestreckt. Jetzt: 1 Render-Einheit entspricht immer WORLD_SIZE_KM/10 km.
+        world_size_km = self.WORLD_SIZE_KM
+        self.terrain_height_scale = 10.0 / (world_size_km * 1000.0)  # render units per meter
+
+        # Vertikales Zentrum des Meshs in Welt-Y (Vertices bleiben unverändert
+        # auf ihrer echten Höhe, siehe _generate_terrain_mesh) - die Kamera
+        # zielt darauf statt fix auf (0,0,0). Ohne das lag reales Terrain
+        # (Höhen typischerweise deutlich > 0) komplett außerhalb des
+        # Kamera-Blickfelds und es wurde schlicht nichts gerendert.
+        mid_height = (float(self.heightmap.min()) + float(self.heightmap.max())) / 2.0
+        self.terrain_center_y = mid_height * self.terrain_height_scale
 
     def _load_shader_from_file(self, filepath):
         """
@@ -681,7 +702,11 @@ class MapDisplay3D(QOpenGLWidget):
     def _generate_terrain_mesh(self):
         """
         Funktionsweise: Generiert 3D-Mesh aus 2D-Heightmap mit effizienter Vertex-Struktur
-        Aufgabe: Erstellt Vertices, Normals und Indices für Terrain-Rendering
+        Aufgabe: Erstellt Vertices, Normals und Indices für Terrain-Rendering - vollständig
+        vektorisiert (vorher eine Python-Dreifachschleife: bei 256x256 = 65536 Vertices
+        einzeln mit numpy.cross() berechnet, spürbar langsam bei realen Map-Sizes).
+        Erzeugt bit-identische Ergebnisse zur alten Schleifen-Implementierung (gleiche
+        Rand-Behandlung bei den Gradienten, gleiche Vertex-/Index-Reihenfolge).
         """
         if self.heightmap is None:
             return
@@ -690,82 +715,71 @@ class MapDisplay3D(QOpenGLWidget):
         self._cleanup_mesh_buffers()
 
         height, width = self.heightmap.shape
-        vertices = []
-        indices = []
+        heightmap = self.heightmap.astype(np.float32)
 
-        # Vertices und Normals generieren
-        for y in range(height):
-            for x in range(width):
-                # Position
-                pos_x = (x / (width - 1) - 0.5) * width * self.terrain_scale_factor
-                pos_y = self.heightmap[y, x] * self.terrain_height_scale
-                pos_z = (y / (height - 1) - 0.5) * height * self.terrain_scale_factor
+        # Vertex-Positionen (vectorized, (height, width) Grids)
+        x_idx = np.arange(width, dtype=np.float32)
+        y_idx = np.arange(height, dtype=np.float32)
+        pos_x = np.broadcast_to(
+            (x_idx / (width - 1) - 0.5) * width * self.terrain_scale_factor, (height, width))
+        pos_z = np.broadcast_to(
+            ((y_idx / (height - 1) - 0.5) * height * self.terrain_scale_factor)[:, None], (height, width))
+        pos_y = heightmap * self.terrain_height_scale
 
-                # Normal berechnen
-                normal_x, normal_y, normal_z = self._calculate_vertex_normal(x, y, width, height)
+        # Normalen: gleiche Rand-Behandlung wie die vorherige Pro-Vertex-Schleife
+        # (Rand: einseitige Differenz, Innen: unhalbierte zentrale Differenz - deshalb
+        # kein np.gradient(), das die Differenz innen halbiert).
+        dz_dx = np.empty_like(heightmap)
+        dz_dx[:, 1:-1] = heightmap[:, 2:] - heightmap[:, :-2]
+        dz_dx[:, 0] = heightmap[:, 1] - heightmap[:, 0]
+        dz_dx[:, -1] = heightmap[:, -1] - heightmap[:, -2]
 
-                # Texture-Coordinates
-                tex_u = x / (width - 1)
-                tex_v = y / (height - 1)
+        dz_dy = np.empty_like(heightmap)
+        dz_dy[1:-1, :] = heightmap[2:, :] - heightmap[:-2, :]
+        dz_dy[0, :] = heightmap[1, :] - heightmap[0, :]
+        dz_dy[-1, :] = heightmap[-1, :] - heightmap[-2, :]
 
-                vertices.extend([pos_x, pos_y, pos_z, normal_x, normal_y, normal_z, tex_u, tex_v])
+        dx = dz_dx * self.terrain_height_scale
+        dy = dz_dy * self.terrain_height_scale
 
-        # Indices für Triangles generieren
-        for y in range(height - 1):
-            for x in range(width - 1):
-                # Zwei Triangles pro Quad
-                top_left = y * width + x
-                top_right = y * width + (x + 1)
-                bottom_left = (y + 1) * width + x
-                bottom_right = (y + 1) * width + (x + 1)
+        # Cross-Product [-step,0,dy] x [0,step,dx] ausmultipliziert (siehe alte
+        # _calculate_vertex_normal): (-dy*step, dx*step, -step^2)
+        step_size = self.terrain_scale_factor
+        normal_x = -dy * step_size
+        normal_y = dx * step_size
+        normal_z = np.full((height, width), -step_size ** 2, dtype=np.float32)
 
-                # Triangle 1
-                indices.extend([top_left, bottom_left, top_right])
-                # Triangle 2
-                indices.extend([top_right, bottom_left, bottom_right])
+        length = np.sqrt(normal_x ** 2 + normal_y ** 2 + normal_z ** 2)
+        safe_length = np.where(length > 0, length, 1.0)
+        normal_x = np.where(length > 0, normal_x / safe_length, 0.0)
+        normal_y = np.where(length > 0, normal_y / safe_length, 1.0)
+        normal_z = np.where(length > 0, normal_z / safe_length, 0.0)
 
-        # Mesh-Daten speichern
-        self.mesh_vertices = np.array(vertices, dtype=np.float32)
-        self.mesh_indices = np.array(indices, dtype=np.uint32)
+        # Texture-Coordinates
+        tex_u = np.broadcast_to(x_idx / (width - 1), (height, width))
+        tex_v = np.broadcast_to((y_idx / (height - 1))[:, None], (height, width))
+
+        # Interleaved Vertex-Layout wie zuvor: [pos_x, pos_y, pos_z, nx, ny, nz, u, v]
+        # pro Vertex, in derselben y-major/x-minor Reihenfolge wie die alte Schleife.
+        vertex_grid = np.stack(
+            [pos_x, pos_y, pos_z, normal_x, normal_y, normal_z, tex_u, tex_v], axis=-1)
+        self.mesh_vertices = vertex_grid.reshape(-1).astype(np.float32)
+
+        # Indices für Triangles (zwei pro Quad, gleiche Winkel-Reihenfolge wie zuvor)
+        yy, xx = np.meshgrid(np.arange(height - 1), np.arange(width - 1), indexing='ij')
+        top_left = yy * width + xx
+        top_right = yy * width + (xx + 1)
+        bottom_left = (yy + 1) * width + xx
+        bottom_right = (yy + 1) * width + (xx + 1)
+
+        triangle_1 = np.stack([top_left, bottom_left, top_right], axis=-1)
+        triangle_2 = np.stack([top_right, bottom_left, bottom_right], axis=-1)
+        indices = np.stack([triangle_1, triangle_2], axis=-2)
+
+        self.mesh_indices = indices.reshape(-1).astype(np.uint32)
 
         # OpenGL-Buffers erstellen
         self._create_mesh_buffers()
-
-    def _calculate_vertex_normal(self, x, y, width, height):
-        """
-        Funktionsweise: Berechnet Vertex-Normal für Lighting-Berechnungen
-        Aufgabe: Erstellt Oberflächennormalen basierend auf benachbarten Heightmap-Werten
-        Parameter: x, y (int), width, height (int) - Vertex-Position und Heightmap-Dimensionen
-        Rückgabe: tuple - (normal_x, normal_y, normal_z)
-        """
-        # Gradient in X-Richtung
-        if x > 0 and x < width - 1:
-            dx = (self.heightmap[y, x + 1] - self.heightmap[y, x - 1]) * self.terrain_height_scale
-        elif x == 0:
-            dx = (self.heightmap[y, x + 1] - self.heightmap[y, x]) * self.terrain_height_scale
-        else:
-            dx = (self.heightmap[y, x] - self.heightmap[y, x - 1]) * self.terrain_height_scale
-
-        # Gradient in Y-Richtung
-        if y > 0 and y < height - 1:
-            dy = (self.heightmap[y + 1, x] - self.heightmap[y - 1, x]) * self.terrain_height_scale
-        elif y == 0:
-            dy = (self.heightmap[y + 1, x] - self.heightmap[y, x]) * self.terrain_height_scale
-        else:
-            dy = (self.heightmap[y, x] - self.heightmap[y - 1, x]) * self.terrain_height_scale
-
-        # Cross-Product für Normal
-        step_size = self.terrain_scale_factor
-        normal = np.cross([-step_size, 0, dy], [0, step_size, dx])
-
-        # Normalisieren
-        length = np.linalg.norm(normal)
-        if length > 0:
-            normal = normal / length
-        else:
-            normal = np.array([0, 1, 0])  # Default nach oben
-
-        return normal[0], normal[1], normal[2]
 
     def _create_mesh_buffers(self):
         """
@@ -843,13 +857,14 @@ class MapDisplay3D(QOpenGLWidget):
         elevation_rad = math.radians(self.camera_elevation)
         azimuth_rad = math.radians(self.camera_azimuth)
 
-        # Camera-Position berechnen
+        # Camera-Position berechnen (relativ zum vertikalen Terrain-Zentrum,
+        # nicht zum Welt-Ursprung - reale Höhen liegen nie bei Y=0)
         eye_x = self.camera_distance * math.cos(elevation_rad) * math.sin(azimuth_rad)
-        eye_y = self.camera_distance * math.sin(elevation_rad)
+        eye_y = self.terrain_center_y + self.camera_distance * math.sin(elevation_rad)
         eye_z = self.camera_distance * math.cos(elevation_rad) * math.cos(azimuth_rad)
 
         eye = [eye_x, eye_y, eye_z]
-        target = [0, 0, 0]  # Blick zum Zentrum
+        target = [0, self.terrain_center_y, 0]  # Blick zum Terrain-Zentrum
         up = [0, 1, 0]  # Y ist oben
 
         self.view_matrix = _create_lookat_matrix(eye, target, up)
@@ -869,6 +884,15 @@ class MapDisplay3D(QOpenGLWidget):
         """
         Funktionsweise: Uploaded Matrix-Daten zu GPU-Shadern
         Aufgabe: Setzt Uniform-Variablen für Vertex-Transformationen
+
+        Die Matrizen werden in _create_perspective_matrix()/_create_lookat_matrix()/
+        _create_model_matrix() in Standard-Zeilen-Major-Schreibweise aufgebaut
+        (z.B. matrix[2,3] = Translations-Term). numpy .flatten() liefert diese
+        Daten row-major. glUniformMatrix4fv() mit transpose=GL_FALSE erwartet
+        column-major Daten - ohne Transpose landete z.B. bei der Projection-
+        Matrix der W-Term (matrix[3,2]=-1) an der falschen Stelle, wodurch die
+        perspektivische Division kaputt ging und nichts mehr sichtbar war.
+        transpose=GL_TRUE lässt OpenGL die row-major Daten korrekt transponieren.
         """
         if not self.shader_program:
             return
@@ -877,19 +901,19 @@ class MapDisplay3D(QOpenGLWidget):
         if self.projection_matrix is not None:
             proj_location = gl.glGetUniformLocation(self.shader_program, "projection")
             if proj_location >= 0:
-                gl.glUniformMatrix4fv(proj_location, 1, gl.GL_FALSE, self.projection_matrix.flatten())
+                gl.glUniformMatrix4fv(proj_location, 1, gl.GL_TRUE, self.projection_matrix.flatten())
 
         # View-Matrix
         if self.view_matrix is not None:
             view_location = gl.glGetUniformLocation(self.shader_program, "view")
             if view_location >= 0:
-                gl.glUniformMatrix4fv(view_location, 1, gl.GL_FALSE, self.view_matrix.flatten())
+                gl.glUniformMatrix4fv(view_location, 1, gl.GL_TRUE, self.view_matrix.flatten())
 
         # Model-Matrix
         if self.model_matrix is not None:
             model_location = gl.glGetUniformLocation(self.shader_program, "model")
             if model_location >= 0:
-                gl.glUniformMatrix4fv(model_location, 1, gl.GL_FALSE, self.model_matrix.flatten())
+                gl.glUniformMatrix4fv(model_location, 1, gl.GL_TRUE, self.model_matrix.flatten())
 
     def _render_terrain_tab(self):
         """
@@ -1151,7 +1175,7 @@ class MapDisplay3D(QOpenGLWidget):
         Aufgabe: Reset zu Default-View aus gui_default.py
         """
         self.camera_distance = CanvasSettings.CANVAS_3D["camera_distance"]
-        self.camera_elevation = -60.0
+        self.camera_elevation = 55.0
         self.camera_azimuth = 0.0
 
         self.camera_changed.emit(self.camera_elevation, self.camera_azimuth, self.camera_distance)

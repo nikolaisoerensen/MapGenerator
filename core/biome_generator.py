@@ -39,6 +39,8 @@ from scipy.ndimage import distance_transform_edt, gaussian_filter
 from collections import deque
 import logging
 
+from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
+
 
 class BiomeData:
     """
@@ -301,6 +303,12 @@ class BiomeClassificationSystem:
     def _try_cpu_classification(self, biome_data, input_data):
         """
         CPU-Fallback mit optimierten NumPy-Vectorization und Multiprocessing
+
+        Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
+        Sequenz (siehe gui/OldManagers/calculator_graph.py - Biome-Calculator-
+        Knoten #23-#27 aus docs/generation_pipeline_dependencies.md). Phase des
+        LOD-Lockstep-Umbaus (Tracker #16): nur Biome-intern zerlegt, externes
+        Verhalten (_try_cpu_classification() Signatur/Rückgabe) bleibt unverändert.
         """
         try:
             self.logger.info("Starting CPU-based biome classification")
@@ -316,42 +324,72 @@ class BiomeClassificationSystem:
                     self.sea_level, self.bank_width, self.edge_softness,
                     self.alpine_level, self.snow_level, self.cliff_slope)
 
-            # Schritt 1: Base-Biome-Classification
-            base_biome_map = self.base_biome_classifier.classify_base_biomes(
-                input_data['heightmap'], input_data['temp_map'],
-                input_data['precip_map'], input_data['soil_moist_map'])
+            if not self.supersampling_manager:
+                self.supersampling_manager = SupersamplingManager(self.biome_seed, self.supersampling_quality)
 
-            # Schritt 2: Super-Biome-Override
-            super_biome_mask, super_biome_probabilities = self.super_biome_override_system.apply_super_biome_overrides(
-                input_data['heightmap'], input_data['temp_map'],
-                input_data['water_biomes_map'], input_data['soil_moist_map'])
+            context = {"input_data": input_data}
 
-            # Schritt 3: Integration
-            final_biome_map = self._integrate_biome_layers(base_biome_map, super_biome_mask)
-
-            # Schritt 4: Supersampling (nur bei höheren LODs)
-            biome_map_super = None
-            if biome_data.actual_size >= 256:
-                if not self.supersampling_manager:
-                    self.supersampling_manager = SupersamplingManager(self.biome_seed, self.supersampling_quality)
-                biome_map_super = self.supersampling_manager.apply_supersampling(
-                    final_biome_map, super_biome_probabilities)
-
-            # Climate-Classification
-            climate_classification = self._create_climate_classification(
-                input_data['temp_map'], input_data['precip_map'])
+            scheduler = CalculatorRoundScheduler(
+                calculator_ids=[
+                    "biome.base_classification", "biome.super_override", "biome.integrate_layers",
+                    "biome.supersampling", "biome.climate_classification",
+                ],
+                executors={
+                    "biome.base_classification": self._calc_base_classification,
+                    "biome.super_override": self._calc_super_override,
+                    "biome.integrate_layers": self._calc_integrate_layers,
+                    "biome.supersampling": self._calc_supersampling,
+                    "biome.climate_classification": self._calc_climate_classification,
+                },
+            )
+            scheduler.run_round(target_lod=biome_data.lod_level, context=context)
 
             # Results setzen
-            biome_data.biome_map = final_biome_map
-            biome_data.biome_map_super = biome_map_super
-            biome_data.super_biome_mask = super_biome_mask
-            biome_data.climate_classification = climate_classification
+            biome_data.biome_map = context["final_biome_map"]
+            biome_data.biome_map_super = context["biome_map_super"]
+            biome_data.super_biome_mask = context["super_biome_mask"]
+            biome_data.climate_classification = context["climate_classification"]
 
             return True
 
         except Exception as e:
             self.logger.warning(f"CPU classification error: {e}")
             return False
+
+    def _calc_base_classification(self, context) -> None:
+        """Calculator-Node 'biome.base_classification' (#23) - Sibling zu super_override"""
+        input_data = context["input_data"]
+        context["base_biome_map"] = self.base_biome_classifier.classify_base_biomes(
+            input_data['heightmap'], input_data['temp_map'],
+            input_data['precip_map'], input_data['soil_moist_map'])
+
+    def _calc_super_override(self, context) -> None:
+        """Calculator-Node 'biome.super_override' (#24) - Sibling zu base_classification"""
+        input_data = context["input_data"]
+        super_biome_mask, super_biome_probabilities = self.super_biome_override_system.apply_super_biome_overrides(
+            input_data['heightmap'], input_data['temp_map'],
+            input_data['water_biomes_map'], input_data['soil_moist_map'])
+        context["super_biome_mask"] = super_biome_mask
+        context["super_biome_probabilities"] = super_biome_probabilities
+
+    def _calc_integrate_layers(self, context) -> None:
+        """Calculator-Node 'biome.integrate_layers' (#25)"""
+        context["final_biome_map"] = self._integrate_biome_layers(
+            context["base_biome_map"], context["super_biome_mask"])
+
+    def _calc_supersampling(self, context) -> None:
+        """Calculator-Node 'biome.supersampling' (#26)"""
+        context["biome_map_super"] = self.supersampling_manager.apply_supersampling(
+            context["final_biome_map"], context["super_biome_probabilities"])
+
+    def _calc_climate_classification(self, context) -> None:
+        """
+        Calculator-Node 'biome.climate_classification' (#27) - haengt nur von
+        temp_map/precip_map ab, kann parallel zu allem anderen in Biome laufen.
+        """
+        input_data = context["input_data"]
+        context["climate_classification"] = self._create_climate_classification(
+            input_data['temp_map'], input_data['precip_map'])
 
     def _try_simple_classification(self, biome_data, input_data):
         """

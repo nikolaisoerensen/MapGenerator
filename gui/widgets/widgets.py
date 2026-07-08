@@ -18,6 +18,8 @@ import numpy as np
 from typing import Any, Dict, List, Optional
 import random
 
+from gui.config.gui_default import ColorSchemes
+
 
 class BaseButton(QPushButton):
     """
@@ -581,23 +583,7 @@ class BiomeLegendDialog(QDialog):
         base_group = QGroupBox("Base Biomes (15 Types)")
         base_layout = QGridLayout()
 
-        base_biomes = [
-            ("Ice Cap", "#f8f9fa"),
-            ("Tundra", "#e9ecef"),
-            ("Taiga", "#228b22"),
-            ("Grassland", "#90ee90"),
-            ("Temperate Forest", "#006400"),
-            ("Mediterranean", "#9acd32"),
-            ("Desert", "#daa520"),
-            ("Semi Arid", "#d2691e"),
-            ("Tropical Rainforest", "#008000"),
-            ("Tropical Seasonal", "#32cd32"),
-            ("Savanna", "#bdb76b"),
-            ("Montane Forest", "#2e8b57"),
-            ("Swamp", "#556b2f"),
-            ("Coastal Dunes", "#f4a460"),
-            ("Badlands", "#a0522d")
-        ]
+        base_biomes = ColorSchemes.BIOME_COLOR_TABLE[:15]
 
         for i, (name, color) in enumerate(base_biomes):
             color_box = QLabel()
@@ -616,19 +602,7 @@ class BiomeLegendDialog(QDialog):
         super_group = QGroupBox("Super Biomes (11 Types)")
         super_layout = QGridLayout()
 
-        super_biomes = [
-            ("Ocean", "#0077be"),
-            ("Lake", "#4da6ff"),
-            ("Grand River", "#0066cc"),
-            ("River", "#3399ff"),
-            ("Creek", "#66b3ff"),
-            ("Cliff", "#696969"),
-            ("Beach", "#f5deb3"),
-            ("Lake Edge", "#87ceeb"),
-            ("River Bank", "#98fb98"),
-            ("Snow Level", "#fffafa"),
-            ("Alpine Level", "#d3d3d3")
-        ]
+        super_biomes = ColorSchemes.BIOME_COLOR_TABLE[15:]
 
         for i, (name, color) in enumerate(super_biomes):
             color_box = QLabel()

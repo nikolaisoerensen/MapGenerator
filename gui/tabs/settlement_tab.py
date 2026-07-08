@@ -17,7 +17,7 @@ import logging
 
 from .base_tab import BaseMapTab
 from gui.config.value_default import SETTLEMENT, get_parameter_config, validate_parameter_set, VALIDATION_RULES
-from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton
+from gui.widgets.widgets import ParameterSlider, StatusIndicator
 
 def get_settlement_error_decorators():
     """
@@ -63,6 +63,7 @@ class SettlementTab(BaseMapTab):
         # Parameter und State
         self.current_parameters = {}
         self.settlement_generation_complete = False
+        self.generation_in_progress = False
 
         # Setup UI
         self.setup_settlement_ui()
@@ -100,15 +101,25 @@ class SettlementTab(BaseMapTab):
             return
 
         try:
-            self.logger.info(f"Starting settlement generation with target LOD: {self.target_lod}")
+            # target_lod nicht selbst gesetzt - wie bei den anderen Tabs
+            # bestimmt der Orchestrator es aus map_size/aktuellem Terrain-LOD
+            # (request_generation() mit target_lod=None).
+            self.logger.info("Starting settlement generation")
 
             self.start_generation_timing()
             self.generation_in_progress = True
 
+            # Frisch von den Slidern lesen statt des selbst gepflegten
+            # self.current_parameters-Caches: der wird nur bei manueller
+            # Slider-Interaktion aktualisiert und startet leer, wodurch ohne
+            # UI-Interaktion Pflichtparameter wie "settlements" fehlten
+            # (core/settlement_generator.py griff direkt über
+            # parameters['settlements'] zu, ohne Fallback -> KeyError).
+            self.current_parameters = self.get_current_parameters()
             request_id = self.generation_orchestrator.request_generation(
                 generator_type="settlement",
                 parameters=self.current_parameters.copy(),
-                target_lod=self.target_lod,
+                target_lod=None,
                 source_tab="settlement",
                 priority=10
             )
@@ -127,14 +138,15 @@ class SettlementTab(BaseMapTab):
     def setup_settlement_ui(self):
         """
         Funktionsweise: Erstellt komplette UI für Settlement-System mit terrain_tab-ähnlicher Struktur
-        Aufgabe: Generate Button → System Status → Parameter → Statistics → Navigation (fixiert unten)
+        Aufgabe: System Status → Parameter → Navigation (fixiert unten)
+        Kein eigener Generate-Button mehr (globaler [GENERIEREN]-Button im
+        Shell-Footer übernimmt das). Statistics stecken im Statistics-Tab,
+        Display-Mode/Filter/3D-Controls in der Viewport-Toolbar (siehe
+        create_statistics_controls()/create_visualization_controls()) -
+        beide nicht mehr im Parameter-Panel, wie bei TerrainTab.
         """
-        # Generate Button (oben)
-        self.manual_generate_button = BaseButton("Generate Settlement System", "primary")
-        self.manual_generate_button.clicked.connect(self.generate)
-        self.control_panel.layout().addWidget(self.manual_generate_button)
-
-        # System Status Widget
+        # System Status Widget (detaillierter Multi-Step-Fortschritt, nicht
+        # redundant zur einfachen Pipeline-Status-Spalte - bleibt hier)
         self.system_status_widget = SettlementSystemStatusWidget()
         self.control_panel.layout().addWidget(self.system_status_widget)
 
@@ -142,16 +154,16 @@ class SettlementTab(BaseMapTab):
         self.parameter_panel = self.create_settlement_parameter_panel()
         self.control_panel.layout().addWidget(self.parameter_panel)
 
-        # Settlement Statistics
-        self.settlement_stats = SettlementStatisticsWidget()
-        self.control_panel.layout().addWidget(self.settlement_stats)
-
-        # Visualization Controls
-        self.visualization_controls = self.create_settlement_visualization_controls()
-        self.control_panel.layout().addWidget(self.visualization_controls)
-
         # Dependencies und Navigation (wird von base_tab hinzugefügt)
         self.setup_input_status()
+
+    def create_statistics_controls(self, layout: QVBoxLayout):
+        """
+        Überschreibt BaseMapTab: befüllt das Statistics-Tab (Spalte 3) mit den
+        Settlement-Statistics statt sie im Parameter-Panel unterzubringen.
+        """
+        self.settlement_stats = SettlementStatisticsWidget()
+        layout.addWidget(self.settlement_stats)
 
     def create_settlement_parameter_panel(self) -> QGroupBox:
         """
@@ -263,16 +275,29 @@ class SettlementTab(BaseMapTab):
         panel.setLayout(layout)
         return panel
 
-    def create_settlement_visualization_controls(self) -> QGroupBox:
+    def create_visualization_controls(self):
         """
-        Funktionsweise: Erstellt Controls für Settlement-Visualization
-        Aufgabe: Switcher zwischen verschiedenen Settlement-Darstellungen
-        Return: QGroupBox mit Visualization-Controls
+        Überschreibt BaseMapTab: Display-Mode-Radios und Filter-/3D-Checkboxes
+        sitzen wie bei TerrainTab in der Viewport-Toolbar (Spalte 2), nicht
+        mehr im Parameter-Panel.
         """
-        panel = QGroupBox("Settlement Visualization")
-        layout = QVBoxLayout()
+        controls_widget = QWidget()
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Display Mode Selection
+        controls_layout.addLayout(self._create_settlement_display_mode_controls())
+        controls_layout.addWidget(self._create_vertical_separator())
+        controls_layout.addLayout(self._create_settlement_filter_controls())
+        controls_layout.addWidget(self._create_vertical_separator())
+        controls_layout.addLayout(self._create_settlement_3d_controls())
+
+        controls_widget.setLayout(controls_layout)
+        return controls_widget
+
+    def _create_settlement_display_mode_controls(self) -> QHBoxLayout:
+        """Erstellt Switcher zwischen den 5 Settlement-Darstellungen"""
+        layout = QHBoxLayout()
+
         self.display_mode = QButtonGroup()
 
         self.suitability_radio = QRadioButton("Terrain Suitability")
@@ -301,45 +326,48 @@ class SettlementTab(BaseMapTab):
         self.display_mode.addButton(self.plot_map_radio, 4)
         layout.addWidget(self.plot_map_radio)
 
-        # Settlement Type Filters
-        filter_group = QGroupBox("Settlement Filters")
-        filter_layout = QVBoxLayout()
+        return layout
 
-        self.show_settlements_cb = QCheckBox("Show Settlements")
+    def _create_settlement_filter_controls(self) -> QHBoxLayout:
+        """Erstellt Settlement-Type-Filter (nur relevant im 'Settlements & Landmarks'-Modus)"""
+        layout = QHBoxLayout()
+
+        self.show_settlements_cb = QCheckBox("Settlements")
         self.show_settlements_cb.setChecked(True)
         self.show_settlements_cb.toggled.connect(self.update_display_mode)
-        filter_layout.addWidget(self.show_settlements_cb)
+        layout.addWidget(self.show_settlements_cb)
 
-        self.show_landmarks_cb = QCheckBox("Show Landmarks")
+        self.show_landmarks_cb = QCheckBox("Landmarks")
         self.show_landmarks_cb.setChecked(True)
         self.show_landmarks_cb.toggled.connect(self.update_display_mode)
-        filter_layout.addWidget(self.show_landmarks_cb)
+        layout.addWidget(self.show_landmarks_cb)
 
-        self.show_roadsites_cb = QCheckBox("Show Roadsites")
+        self.show_roadsites_cb = QCheckBox("Roadsites")
         self.show_roadsites_cb.setChecked(True)
         self.show_roadsites_cb.toggled.connect(self.update_display_mode)
-        filter_layout.addWidget(self.show_roadsites_cb)
+        layout.addWidget(self.show_roadsites_cb)
 
-        filter_group.setLayout(filter_layout)
-        layout.addWidget(filter_group)
+        return layout
 
-        # 3D Controls
-        d3_group = QGroupBox("3D Visualization")
-        d3_layout = QVBoxLayout()
+    def _create_settlement_3d_controls(self) -> QHBoxLayout:
+        """Erstellt 3D-Overlay-Checkboxes (aktuell ohne Effekt, siehe apply_3d_overlays())"""
+        layout = QHBoxLayout()
 
-        self.terrain_3d_cb = QCheckBox("Show 3D Terrain")
+        self.terrain_3d_cb = QCheckBox("3D Terrain")
         self.terrain_3d_cb.toggled.connect(self.toggle_3d_terrain)
-        d3_layout.addWidget(self.terrain_3d_cb)
+        layout.addWidget(self.terrain_3d_cb)
 
         self.settlement_markers_3d_cb = QCheckBox("3D Settlement Markers")
         self.settlement_markers_3d_cb.toggled.connect(self.toggle_3d_markers)
-        d3_layout.addWidget(self.settlement_markers_3d_cb)
+        layout.addWidget(self.settlement_markers_3d_cb)
 
-        d3_group.setLayout(d3_layout)
-        layout.addWidget(d3_group)
+        return layout
 
-        panel.setLayout(layout)
-        return panel
+    def _create_vertical_separator(self) -> QWidget:
+        separator = QWidget()
+        separator.setFixedWidth(1)
+        separator.setStyleSheet("background-color: #bdc3c7;")
+        return separator
 
     def setup_dependency_checking(self):
         """
@@ -436,15 +464,22 @@ class SettlementTab(BaseMapTab):
         Aufgabe: Verarbeitet Settlement-Results und aktualisiert UI
         Parameter: result_id (str), result_data (dict) - Result-ID und Settlement-Daten
         """
+        if result_data.get("generator_type") != "settlement":
+            return
+
         try:
             self.generation_in_progress = False
             self.settlement_generation_complete = True
 
             self.logger.info(f"Settlement generation completed: {result_id}")
 
-            # Settlement-Results verarbeiten
-            settlement_data = result_data.get("settlement_data")
-            if settlement_data:
+            # Settlement-Results verarbeiten. emit_final_completion_signal() liefert
+            # die Ergebnisse unter "data" (siehe
+            # GenerationOrchestrator.get_generator_data_from_data_lod_manager()),
+            # nicht unter "settlement_data" - der alte Key existierte nie, wodurch
+            # dieser Block trotz erfolgreicher Generation nie ausgeführt wurde.
+            settlement_data = result_data.get("data")
+            if result_data.get("success") and settlement_data:
                 # Statistics aktualisieren
                 self.update_settlement_statistics()
 
@@ -525,8 +560,6 @@ class SettlementTab(BaseMapTab):
         else:
             self.dependency_status.set_warning(f"Missing: {', '.join(missing)}")
 
-        self.manual_generate_button.setEnabled(is_complete)
-
         return is_complete
 
     def update_input_status(self):
@@ -535,8 +568,9 @@ class SettlementTab(BaseMapTab):
         Aufgabe: Zeigt Qualität der Terrain-Daten für Settlement-Placement
         """
         try:
-            # Terrain Quality Check
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            # Terrain Quality Check (kombiniert - reflektiert das tatsächliche
+            # Endgelände nach Erosion/Sedimentation, nicht die Rohausgabe)
+            heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
             slopemap = self.data_lod_manager.get_terrain_data("slopemap")
 
             if heightmap is not None and slopemap is not None:
@@ -583,69 +617,85 @@ class SettlementTab(BaseMapTab):
         """
         Funktionsweise: Aktualisiert Display basierend auf aktuellem Visualization-Mode
         Aufgabe: Zeigt verschiedene Settlement-Darstellungen mit Filtern
+
+        Nutzt wie die anderen Tabs get_current_display()/_push_data_to_current_display()
+        statt eines nie zugewiesenen self.map_display.
         """
         current_mode = self.display_mode.checkedId()
 
         if current_mode == 0:  # Terrain Suitability
             suitability_map = self.data_lod_manager.get_settlement_data("combined_suitability_map")
             if suitability_map is not None:
-                self.map_display.display_terrain_suitability(suitability_map)
+                self._push_data_to_current_display(suitability_map, "suitability_map")
 
         elif current_mode == 1:  # Settlements & Landmarks
-            settlements = self.data_lod_manager.get_settlement_data("settlement_list")
-            landmarks = self.data_lod_manager.get_settlement_data("landmark_list")
-            roadsites = self.data_lod_manager.get_settlement_data("roadsite_list")
+            # Heightmap als Hintergrund (kombiniert), Settlements/Landmarks/Roadsites
+            # als Marker-Overlay
+            heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
+            if heightmap is not None:
+                self._push_data_to_current_display(heightmap, "heightmap")
 
-            if settlements is not None:
-                # Filter basierend auf Checkboxes
+            current_display = self.get_current_display()
+            if current_display and self.current_view == "2d" and hasattr(current_display.display, 'overlay_settlements'):
+                settlements = self.data_lod_manager.get_settlement_data("settlement_list")
+                landmarks = self.data_lod_manager.get_settlement_data("landmark_list")
+                roadsites = self.data_lod_manager.get_settlement_data("roadsite_list")
+
                 display_settlements = settlements if self.show_settlements_cb.isChecked() else []
                 display_landmarks = landmarks if self.show_landmarks_cb.isChecked() else []
                 display_roadsites = roadsites if self.show_roadsites_cb.isChecked() else []
 
-                self.map_display.display_settlements(
+                current_display.display.overlay_settlements(
                     display_settlements, display_landmarks, display_roadsites
                 )
 
         elif current_mode == 2:  # Road Network
+            heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
+            if heightmap is not None:
+                self._push_data_to_current_display(heightmap, "heightmap")
+
             roads = self.data_lod_manager.get_settlement_data("roads")
-            if roads is not None:
-                self.map_display.display_road_network(roads)
+            current_display = self.get_current_display()
+            if roads and current_display and self.current_view == "2d" and hasattr(current_display.display, 'overlay_roads'):
+                current_display.display.overlay_roads(roads)
 
         elif current_mode == 3:  # Civilization Map
             civ_map = self.data_lod_manager.get_settlement_data("civ_map")
             if civ_map is not None:
-                self.map_display.display_civilization_map(civ_map)
+                self._push_data_to_current_display(civ_map, "civ_map")
 
         elif current_mode == 4:  # Plot Boundaries
             plot_map = self.data_lod_manager.get_settlement_data("plot_map")
             if plot_map is not None:
-                self.map_display.display_plot_boundaries(plot_map)
+                self._push_data_to_current_display(plot_map, "plot_map")
 
         # 3D Overlays
         self.apply_3d_overlays()
 
     def apply_3d_overlays(self):
         """
-        Funktionsweise: Wendet 3D-Overlays basierend auf Checkboxes an
-        Aufgabe: 3D Terrain und Settlement-Markers
+        Funktionsweise: 3D-Overlays (Terrain/Settlement-Marker) für Settlement
+        Aufgabe: Aktuell bewusst kein Effekt - der 3D-Ausbau wurde auf den
+        Basis-Routing-Fix reduziert (siehe [[project-ui-redesign]]), echte
+        Overlay-Texturen/Marker-Geometrie in MapDisplay3D existieren noch nicht.
+        Die Checkboxen bleiben bedienbar, lösen aber (noch) nichts aus.
         """
-        # 3D Terrain Overlay
-        if self.terrain_3d_cb.isChecked():
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-            if heightmap is not None:
-                self.map_display.overlay_3d_terrain(heightmap)
-
-        # 3D Settlement Markers
-        if self.settlement_markers_3d_cb.isChecked():
-            settlements = self.data_lod_manager.get_settlement_data("settlement_list")
-            landmarks = self.data_lod_manager.get_settlement_data("landmark_list")
-            if settlements is not None:
-                self.map_display.overlay_3d_settlement_markers(settlements, landmarks)
+        pass
 
     @pyqtSlot()
     def update_display_mode(self):
-        """Slot für Visualization-Mode Änderungen"""
-        self.update_settlement_display()
+        """
+        Slot für Visualization-Mode Änderungen.
+        update_settlement_display() ruft self.map_display auf, das nie
+        zugewiesen wird (die realen Render-Methoden display_settlements()/
+        overlay_3d_terrain()/etc. existieren auch nicht auf MapDisplay2D) -
+        Settlement-2D/3D-Rendering ist noch nicht implementiert. Bis dahin
+        hier abfangen statt hart zu crashen.
+        """
+        try:
+            self.update_settlement_display()
+        except AttributeError as e:
+            self.logger.debug(f"Settlement display rendering not yet implemented: {e}")
 
     @pyqtSlot(bool)
     def toggle_3d_terrain(self, enabled: bool):

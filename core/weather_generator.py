@@ -12,7 +12,7 @@ Funktionsweise: Dynamisches Wetter- und Feuchtigkeitssystem mit DataLODManager-I
 Parameter Input:
 - air_temp_entry (Lufttemperatur bei Karteneintritt in °C)
 - solar_power (max. solare Gewinne, default 20°C)
-- altitude_cooling (Abkühlen der Luft pro 100m Altitude, default 6°C)
+- altitude_cooling (Abkühlen der Luft pro km Altitude, default 6°C)
 - thermic_effect (Thermische Verformung der Windvektoren durch shademap)
 - wind_speed_factor (Windgeschwindigkeit je Luftdruckdifferenz)
 - terrain_factor (Einfluss von Terrain auf Wind und Temperatur)
@@ -38,6 +38,8 @@ import numpy as np
 from opensimplex import OpenSimplex
 import logging
 from typing import Dict, Any, Tuple
+
+from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
 
 
 class WeatherData:
@@ -157,27 +159,38 @@ class WeatherSystemGenerator:
             # Input-Data auf Target-Size interpolieren
             heightmap, shadowmap = self._prepare_input_data(heightmap_combined, shadowmap, target_size)
 
-            # Schritt 1: Temperature Field Calculation (20% - 30%)
-            self._update_progress("Temperature", 20, "Calculating temperature field with orographic effects...")
-            temp_map = self._calculate_temperature_field(heightmap, shadowmap, parameters, target_size)
+            # Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
+            # Sequenz (siehe gui/OldManagers/calculator_graph.py - Weather-Calculator-
+            # Knoten #11-#14 aus docs/generation_pipeline_dependencies.md). Phase des
+            # LOD-Lockstep-Umbaus (Tracker #16): nur Weather-intern zerlegt, externes
+            # Verhalten (calculate_weather_system() Signatur/Rückgabe) bleibt
+            # unverändert. Weather hat - anders als Geology/Water - keinen
+            # Cross-LOD-Akkumulationszustand, jeder Aufruf ist eigenständig.
+            context = {
+                "heightmap": heightmap,
+                "shadowmap": shadowmap,
+                "parameters": parameters,
+                "target_size": target_size,
+                "cfd_iterations": cfd_iterations,
+            }
 
-            # Schritt 2: Wind Field CFD-Simulation (30% - 60%)
-            self._update_progress("Wind Field", 30, f"CFD simulation with {cfd_iterations} iterations...")
-            wind_map = self._simulate_wind_field_cfd(heightmap, temp_map, shadowmap, parameters,
-                                                   target_size, cfd_iterations)
-
-            # Schritt 3: Atmospheric Moisture Management (60% - 80%)
-            self._update_progress("Humidity", 60, "Calculating atmospheric moisture transport...")
-            humid_map = self._calculate_atmospheric_moisture(heightmap, temp_map, wind_map, parameters)
-
-            # Schritt 4: Precipitation System (80% - 95%)
-            self._update_progress("Precipitation", 80, "Calculating orographic precipitation...")
-            precip_map = self._calculate_precipitation_system(humid_map, temp_map, wind_map,
-                                                            heightmap, parameters)
+            scheduler = CalculatorRoundScheduler(
+                calculator_ids=[
+                    "weather.temperature", "weather.wind", "weather.humidity", "weather.precipitation",
+                ],
+                executors={
+                    "weather.temperature": self._calc_temperature,
+                    "weather.wind": self._calc_wind,
+                    "weather.humidity": self._calc_humidity,
+                    "weather.precipitation": self._calc_precipitation,
+                },
+            )
+            scheduler.run_round(target_lod=lod_level, context=context)
 
             # WeatherData-Objekt erstellen und validieren
-            weather_data = self._create_weather_data(wind_map, temp_map, precip_map, humid_map,
-                                                   lod_level, target_size, parameters)
+            weather_data = self._create_weather_data(
+                context["wind_map"], context["temp_map"], context["precip_map"], context["humid_map"],
+                lod_level, target_size, parameters)
 
             # Performance-Stats aktualisieren
             self._update_performance_stats(weather_data, cfd_iterations)
@@ -190,6 +203,32 @@ class WeatherSystemGenerator:
             self.logger.error(f"Weather generation failed: {str(e)}")
             # Error-Recovery: Fallback zu Simplified-Weather-System
             return self._create_fallback_weather_data(heightmap_combined.shape[0], lod_level, parameters)
+
+    def _calc_temperature(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'weather.temperature' (#11)"""
+        self._update_progress("Temperature", 20, "Calculating temperature field with orographic effects...")
+        context["temp_map"] = self._calculate_temperature_field(
+            context["heightmap"], context["shadowmap"], context["parameters"], context["target_size"])
+
+    def _calc_wind(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'weather.wind' (#12)"""
+        self._update_progress("Wind Field", 30, f"CFD simulation with {context['cfd_iterations']} iterations...")
+        context["wind_map"] = self._simulate_wind_field_cfd(
+            context["heightmap"], context["temp_map"], context["shadowmap"], context["parameters"],
+            context["target_size"], context["cfd_iterations"])
+
+    def _calc_humidity(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'weather.humidity' (#13)"""
+        self._update_progress("Humidity", 60, "Calculating atmospheric moisture transport...")
+        context["humid_map"] = self._calculate_atmospheric_moisture(
+            context["heightmap"], context["temp_map"], context["wind_map"], context["parameters"])
+
+    def _calc_precipitation(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'weather.precipitation' (#14)"""
+        self._update_progress("Precipitation", 80, "Calculating orographic precipitation...")
+        context["precip_map"] = self._calculate_precipitation_system(
+            context["humid_map"], context["temp_map"], context["wind_map"], context["heightmap"],
+            context["parameters"])
 
     def _validate_inputs(self, heightmap_combined: np.ndarray, shadowmap: np.ndarray,
                         parameters: Dict[str, Any], lod_level: int):
@@ -239,7 +278,12 @@ class WeatherSystemGenerator:
 
         if lod_level <= max_lod_before_original:
             # Verdopplung pro LOD-Level: 32 -> 64 -> 128 -> 256 -> 512 -> 1024
-            return base_size * (2 ** (lod_level - 1))
+            # Bei Nicht-Zweierpotenz-Zielgrößen (z.B. 96) wird original_size (die
+            # tatsächlich vom Terrain-Generator gelieferte, bereits korrekt geklemmte
+            # Heightmap-Größe) schon vor Erreichen von max_lod_before_original
+            # überschritten - ohne min() würde hier auf eine größere Auflösung
+            # hochinterpoliert als das Terrain überhaupt hat.
+            return min(base_size * (2 ** (lod_level - 1)), original_size)
         else:
             # Höhere LODs verwenden original_size
             return original_size
@@ -345,7 +389,7 @@ class WeatherSystemGenerator:
         temp_map = np.full(heightmap.shape, parameters['air_temp_entry'], dtype=np.float32)
 
         # Altitude-Cooling (vectorized)
-        altitude_cooling_rate = parameters['altitude_cooling'] / 100.0  # °C pro Meter
+        altitude_cooling_rate = parameters['altitude_cooling'] / 1000.0  # °C pro Meter (Parameter ist °C/km)
         temp_map -= heightmap * altitude_cooling_rate
 
         # Solar-Heating (vectorized)
@@ -378,7 +422,7 @@ class WeatherSystemGenerator:
         temp_map = np.full(heightmap.shape, parameters['air_temp_entry'], dtype=np.float32)
 
         # Nur Altitude-Cooling
-        altitude_cooling_rate = parameters['altitude_cooling'] / 100.0
+        altitude_cooling_rate = parameters['altitude_cooling'] / 1000.0  # Parameter ist °C/km
         temp_map -= heightmap * altitude_cooling_rate
 
         return temp_map
@@ -452,7 +496,8 @@ class WeatherSystemGenerator:
 
         # Initiales Druckfeld (West-Ost-Gradient mit Noise)
         x_coords = np.arange(width).reshape(1, -1)
-        pressure_field = 1.0 - (x_coords / (width - 1)) * 0.3
+        pressure_gradient = 1.0 - (x_coords / (width - 1)) * 0.3
+        pressure_field = np.broadcast_to(pressure_gradient, (height, width)).copy()
 
         # Noise-Modulation
         pressure_noise = self._generate_pressure_noise((height, width))
@@ -1093,8 +1138,8 @@ class TemperatureCalculator:
         # Basis-Temperatur
         temp_map = np.full(heightmap.shape, parameters['air_temp_entry'], dtype=np.float32)
 
-        # Altitude-Cooling (verstärkt: 6°C/100m)
-        altitude_cooling = parameters['altitude_cooling'] / 100.0
+        # Altitude-Cooling (Parameter ist °C/km)
+        altitude_cooling = parameters['altitude_cooling'] / 1000.0
         temp_map -= heightmap * altitude_cooling
 
         # Solar-Heating aus Shadowmap

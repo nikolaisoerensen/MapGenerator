@@ -312,7 +312,7 @@ class DependencyQueue:
         """
         return self.queued_requests.pop(request_id, None)
 
-    def get_available_requests(self, completed_generators: Dict[str, Set[str]], active_limit: int = 3) -> List[GenerationRequest]:
+    def get_available_requests(self, completed_generators: Dict[str, Set[int]], active_limit: int = 3) -> List[GenerationRequest]:
         """
         Funktionsweise: Findet alle Requests die gestartet werden können
         Parameter: completed_generators - Dict[generator_type, Set[completed_lods]], active_limit
@@ -331,18 +331,18 @@ class DependencyQueue:
         available.sort(key=lambda r: (-r.priority, r.timestamp))
         return available[:active_limit]
 
-    def can_start_request(self, request: GenerationRequest, completed_generators: Dict[str, Set[str]]) -> bool:
+    def can_start_request(self, request: GenerationRequest, completed_generators: Dict[str, Set[int]]) -> bool:
         """
         Funktionsweise: Prüft ob Request gestartet werden kann basierend auf Dependencies
-        Parameter: request, completed_generators
+        Parameter: request, completed_generators - Dict[generator_type, Set[abgeschlossene LOD-Level]]
         Return: bool - Request kann gestartet werden
         """
         required_deps = self.dependencies.get(request.generator_type, set())
 
         for dep_type in required_deps:
             dep_key = dep_type.value
-            # Mindestens LOD64 muss verfügbar sein
-            if dep_key not in completed_generators or "LOD64" not in completed_generators[dep_key]:
+            # Mindestens ein LOD-Level muss abgeschlossen sein
+            if not completed_generators.get(dep_key):
                 return False
 
         return True
@@ -443,6 +443,12 @@ class GenerationOrchestrator(QObject):
                 "low_impact": ["plotsize", "landmark_wilderness", "road_slope_to_distance_ratio"]
             }
         }
+
+        # Zuletzt verwendete Parameter je Generator - Baseline für
+        # calculate_parameter_impact()/get_current_parameters(). Ohne das
+        # war get_current_parameters() ein Platzhalter, der immer {} zurückgab,
+        # wodurch Parameter-Vergleiche wirkungslos waren.
+        self._last_parameters: Dict[GeneratorType, Dict[str, Any]] = {}
 
         # Generator-Instanzen (Lazy Loading)
         self._generator_instances = {}
@@ -548,7 +554,10 @@ class GenerationOrchestrator(QObject):
         if parameters is None:
             parameters = {}
 
-        # Ziel-LOD robust bestimmen: int direkt, numerischer String, aus map_size, sonst Minimum
+        # Ziel-LOD robust bestimmen: int direkt, numerischer String, aus map_size, sonst
+        # (für alle Nicht-Terrain-Generatoren) das aktuelle Terrain-LOD, sonst Minimum.
+        # Nachgelagerte Generatoren haben keinen eigenen map_size-Parameter - ihre Auflösung
+        # richtet sich nach der bereits erreichten Terrain-Auflösung.
         if not isinstance(target_lod, int):
             try:
                 target_lod = int(target_lod)
@@ -558,8 +567,19 @@ class GenerationOrchestrator(QObject):
                     from gui.OldManagers.data_lod_manager import calculate_max_lod_for_size
                     target_lod = calculate_max_lod_for_size(int(map_size))
                 except (TypeError, ValueError):
-                    self.logger.info("target_lod nicht bestimmbar, nutze LOD 1")
-                    target_lod = 1
+                    terrain_lod = self.data_lod_manager.get_current_lod_level("terrain")
+                    if gen_type_enum != GeneratorType.TERRAIN and terrain_lod:
+                        self.logger.info(f"target_lod aus map_size nicht bestimmbar, übernehme Terrain-LOD {terrain_lod}")
+                        target_lod = terrain_lod
+                    else:
+                        self.logger.info("target_lod nicht bestimmbar, nutze LOD 1")
+                        target_lod = 1
+
+        # Eine noch laufende oder wartende Generation für DENSELBEN Generator wird
+        # hart abgebrochen, bevor der neue Request gestellt wird - verhindert dass
+        # ein alter Thread mit veralteten Parametern parallel weiterläuft und seine
+        # (dann falschen) Ergebnisse noch in den DataLODManager schreibt.
+        self.cancel_generation(gen_type_enum.value)
 
         # Internen Request bauen
         internal_request = GenerationRequest(
@@ -570,13 +590,30 @@ class GenerationOrchestrator(QObject):
             priority
         )
 
-        # Parameter-Impact-Analyse
+        # Parameter-Impact-Analyse: welche NACHGELAGERTEN Generatoren betroffen sind
         affected_generators = self.calculate_parameter_impact(internal_request.generator_type,
                                                               internal_request.parameters)
 
-        # Cache-Invalidation für betroffene Generatoren
+        # Der angefragte Generator MUSS bei geänderten Parametern auch sich selbst
+        # invalidieren - sonst sieht create_lod_sequence() weiterhin den alten
+        # current_lod >= target_lod und die Generation tut schlicht nichts (das
+        # war der Grund, warum ein zweiter Generate-Klick wirkungslos blieb und
+        # nur ein Programmneustart wieder half). Baseline-Vergleich verhindert
+        # unnötige Neu-Generierung bei unverändertem Re-Klick.
+        previous_parameters = self.get_current_parameters(gen_type_enum)
+        self_changed = (not previous_parameters) or any(
+            previous_parameters.get(key) != value for key, value in internal_request.parameters.items()
+        )
+        if self_changed:
+            affected_generators = set(affected_generators)
+            affected_generators.add(gen_type_enum)
+
+        # Cache-Invalidation für betroffene Generatoren (inkl. sich selbst bei Parameter-Änderung)
         if affected_generators:
             self.invalidate_downstream_dependencies(internal_request.generator_type, affected_generators)
+
+        # Baseline für künftige Parameter-Vergleiche aktualisieren
+        self._last_parameters[gen_type_enum] = dict(internal_request.parameters)
 
         # Request zur DependencyQueue hinzufügen
         self.dependency_queue.add_request(internal_request)
@@ -696,7 +733,7 @@ class GenerationOrchestrator(QObject):
 
         self.logger.info(f"Cleaned up timed-out request: {request.request_id}")
 
-    def get_completed_generators(self) -> Dict[str, Set[str]]:
+    def get_completed_generators(self) -> Dict[str, Set[int]]:
         """
         Funktionsweise: Sammelt alle abgeschlossenen Generatoren pro LOD-Level
         Aufgabe: Einheitlicher Status-Check über lod_completion_status für alle Generatoren
@@ -766,6 +803,11 @@ class GenerationOrchestrator(QObject):
 
         # Nächstes LOD-Level aus Queue
         current_lod = self.lod_progression_queue[queue_key].pop(0)
+
+        # War deklariert, wurde aber nirgends emittiert - dadurch blieb die
+        # Pipeline-Status-Spalte im Shell-Layout permanent auf "Unknown"
+        # stehen, obwohl im Hintergrund tatsächlich generiert wurde.
+        self.generation_started.emit(generator_type.value, current_lod)
 
         # Generator-Instanz holen
         generator_instance = self.get_generator_instance(generator_type)
@@ -846,60 +888,36 @@ class GenerationOrchestrator(QObject):
         # Queue-Resolution triggern falls neue Dependencies verfügbar
         QTimer.singleShot(100, self.resolve_dependency_queue)
 
-    def save_generation_result_to_data_lod_manager(self, generator_type: str, lod_level: str, result_data: dict):
+    def save_generation_result_to_data_lod_manager(self, generator_type: str, lod_level, result_data: dict):
         """
-        Funktionsweise: Speichert Generation-Ergebnis automatisch im DataManager
-        Parameter: generator_type, lod_level, result_data
+        Funktionsweise: Legt das Generierungs-Ergebnis über den passenden Complete-Setter im DataLODManager ab
+        Aufgabe: Routet das fertige Data-Objekt eines Generators an set_<domain>_data_complete_lod, das es
+                 in seine einzelnen Data-Keys zerlegt und pro LOD speichert
+        Parameter: generator_type, lod_level, result_data (enthält generator_output und parameters_used)
         """
         try:
             generator_output = result_data.get("generator_output")
             parameters_used = result_data.get("parameters_used", {})
 
-            if generator_type == "terrain" and generator_output:
-                # TerrainData-Objekt speichern
-                self.data_lod_manager.set_terrain_data_complete(generator_output, parameters_used)
-                self.logger.debug(f"Terrain data saved to DataManager for {lod_level}")
+            if generator_output is None:
+                return
 
-            elif generator_type == "geology" and generator_output:
-                # Geology-Daten speichern (rock_map, hardness_map)
-                if hasattr(generator_output, 'rock_map'):
-                    self.data_lod_manager.set_geology_data("rock_map", generator_output.rock_map, parameters_used)
-                if hasattr(generator_output, 'hardness_map'):
-                    self.data_lod_manager.set_geology_data("hardness_map", generator_output.hardness_map, parameters_used)
+            complete_setters = {
+                "terrain": self.data_lod_manager.set_terrain_data_complete_lod,
+                "geology": self.data_lod_manager.set_geology_data_complete_lod,
+                "weather": self.data_lod_manager.set_weather_data_complete_lod,
+                "water": self.data_lod_manager.set_water_data_complete_lod,
+                "biome": self.data_lod_manager.set_biome_data_complete_lod,
+                "settlement": self.data_lod_manager.set_settlement_data_complete_lod,
+            }
 
-            elif generator_type == "weather" and generator_output:
-                # Weather-Daten speichern
-                weather_outputs = ["wind_map", "temp_map", "precip_map", "humid_map"]
-                for output_key in weather_outputs:
-                    if hasattr(generator_output, output_key):
-                        output_data = getattr(generator_output, output_key)
-                        self.data_lod_manager.set_weather_data(output_key, output_data, parameters_used)
+            setter = complete_setters.get(generator_type)
+            if setter is None:
+                self.logger.warning(f"Kein Complete-Setter für Generator-Typ '{generator_type}'")
+                return
 
-            elif generator_type == "water" and generator_output:
-                # Water-Daten speichern
-                water_outputs = ["water_map", "flow_map", "flow_speed", "cross_section", "soil_moist_map",
-                               "erosion_map", "sedimentation_map", "rock_map_updated", "evaporation_map",
-                               "ocean_outflow", "water_biomes_map"]
-                for output_key in water_outputs:
-                    if hasattr(generator_output, output_key):
-                        output_data = getattr(generator_output, output_key)
-                        self.data_lod_manager.set_water_data(output_key, output_data, parameters_used)
-
-            elif generator_type == "biome" and generator_output:
-                # Biome-Daten speichern
-                biome_outputs = ["biome_map", "biome_map_super", "super_biome_mask"]
-                for output_key in biome_outputs:
-                    if hasattr(generator_output, output_key):
-                        output_data = getattr(generator_output, output_key)
-                        self.data_lod_manager.set_biome_data(output_key, output_data, parameters_used)
-
-            elif generator_type == "settlement" and generator_output:
-                # Settlement-Daten speichern
-                settlement_outputs = ["settlement_list", "landmark_list", "roadsite_list", "plot_map", "civ_map"]
-                for output_key in settlement_outputs:
-                    if hasattr(generator_output, output_key):
-                        output_data = getattr(generator_output, output_key)
-                        self.data_lod_manager.set_settlement_data(output_key, output_data, parameters_used)
+            setter(generator_output, lod_level, parameters_used)
+            self.logger.debug(f"{generator_type}-Daten für LOD {lod_level} abgelegt")
 
         except Exception as e:
             self.logger.error(f"Failed to save generation result to DataManager: {e}")
@@ -1106,7 +1124,7 @@ class GenerationOrchestrator(QObject):
         """
         for affected_type in affected_generators:
             # DataManager Cache invalidieren
-            self.data_lod_manager.invalidate_cache(affected_type.value)
+            self.data_lod_manager.invalidate_cache_lod(affected_type.value)
 
             # LOD-Status zurücksetzen
             self.reset_lod_status(affected_type)
@@ -1127,12 +1145,12 @@ class GenerationOrchestrator(QObject):
 
     def get_current_parameters(self, generator_type: GeneratorType) -> Dict[str, Any]:
         """
-        Funktionsweise: Holt aktuelle Parameter für Generator (Placeholder - würde aus DataManager/Parameter-System geholt)
+        Funktionsweise: Holt die beim letzten erfolgreich gestellten Request
+        verwendeten Parameter für Generator (Baseline für Parameter-Impact-Vergleich)
         Parameter: generator_type
         Return: Parameter-Dictionary
         """
-        # Placeholder - würde normalerweise aus DataManager oder Parameter-System geholt werden
-        return {}
+        return self._last_parameters.get(generator_type, {})
 
     def get_memory_usage_summary(self) -> Dict[str, Any]:
         """
@@ -1230,23 +1248,80 @@ class GenerationThread(QThread):
             def progress_callback(step_name, progress_percent, detail_message):
                 self.generation_progress.emit(progress_percent, f"{step_name}: {detail_message}")
 
-            # Generator ausführen mit BaseGenerator-Interface
-            if hasattr(self.generator_instance, 'generate'):
-                # BaseGenerator-Interface
-                result = self.generator_instance.generate(
-                    lod=self.lod_level,
-                    dependencies={},  # Dependencies werden über DataManager automatisch geholt
-                    parameters=self.parameters,
-                    data_lod_manager=self.data_lod_manager,
-                    progress=progress_callback
-                )
+            # Generator ausführen: pro Generator-Typ die passende Einstiegsmethode
+            if self.generator_type == GeneratorType.TERRAIN:
+                result = self.generator_instance.calculate_heightmap(self.parameters, self.lod_level)
+            elif self.generator_type == GeneratorType.GEOLOGY:
+                heightmap_combined = self.data_lod_manager.get_terrain_data_combined("heightmap", self.lod_level)
+                slopemap = self.data_lod_manager.get_terrain_data_lod("slopemap", self.lod_level)
+                if heightmap_combined is None or slopemap is None:
+                    raise ValueError("Missing terrain dependencies (heightmap_combined/slopemap) for geology generation")
+
+                # Kumuliertes Tektonik-Höhen-Delta aus dem letzten abgeschlossenen Geology-LOD
+                # holen (None beim allerersten Lauf) - derselbe Akkumulations-Ansatz wie bei Water.
+                previous_height_delta = self.data_lod_manager.get_geology_data_lod("height_delta", self.lod_level)
+
+                result = self.generator_instance.calculate_geology(
+                    heightmap_combined, slopemap, self.parameters, self.lod_level,
+                    previous_height_delta=previous_height_delta)
+            elif self.generator_type == GeneratorType.WEATHER:
+                heightmap_combined = self.data_lod_manager.get_terrain_data_combined("heightmap", self.lod_level)
+                shadowmap = self.data_lod_manager.get_terrain_data_lod("shadowmap", self.lod_level)
+                if heightmap_combined is None or shadowmap is None:
+                    raise ValueError("Missing terrain dependencies (heightmap_combined/shadowmap) for weather generation")
+                result = self.generator_instance.calculate_weather_system(
+                    heightmap_combined, shadowmap, self.parameters, self.lod_level)
+            elif self.generator_type == GeneratorType.WATER:
+                dependencies = {
+                    "heightmap": self.data_lod_manager.get_terrain_data_combined("heightmap", self.lod_level),
+                    "slopemap": self.data_lod_manager.get_terrain_data_lod("slopemap", self.lod_level),
+                    "hardness_map": self.data_lod_manager.get_geology_data_lod("hardness_map", self.lod_level),
+                    "rock_map": self.data_lod_manager.get_geology_data_lod("rock_map", self.lod_level),
+                    "precip_map": self.data_lod_manager.get_weather_data_lod("precip_map", self.lod_level),
+                    "temp_map": self.data_lod_manager.get_weather_data_lod("temp_map", self.lod_level),
+                    "wind_map": self.data_lod_manager.get_weather_data_lod("wind_map", self.lod_level),
+                    "humid_map": self.data_lod_manager.get_weather_data_lod("humid_map", self.lod_level),
+                }
+                missing = [key for key, value in dependencies.items() if value is None]
+                if missing:
+                    raise ValueError(f"Missing dependencies for water generation: {', '.join(missing)}")
+
+                # Kumulierte Erosion/Sedimentation aus dem letzten abgeschlossenen Water-LOD holen
+                # (None beim allerersten Lauf) - der Generator addiert seine frische Berechnung
+                # dieser Passage darauf, statt bei der Basis-Heightmap neu zu starten.
+                previous_erosion_map = self.data_lod_manager.get_water_data_lod("erosion_map", self.lod_level)
+                previous_sedimentation_map = self.data_lod_manager.get_water_data_lod(
+                    "sedimentation_map", self.lod_level)
+
+                result = self.generator_instance.calculate_hydrology(
+                    dependencies, self.parameters, self.lod_level,
+                    previous_erosion_map=previous_erosion_map,
+                    previous_sedimentation_map=previous_sedimentation_map)
+            elif self.generator_type == GeneratorType.BIOME:
+                multi_input_data = {
+                    "heightmap": self.data_lod_manager.get_terrain_data_combined("heightmap", self.lod_level),
+                    "temp_map": self.data_lod_manager.get_weather_data_lod("temp_map", self.lod_level),
+                    "precip_map": self.data_lod_manager.get_weather_data_lod("precip_map", self.lod_level),
+                    "soil_moist_map": self.data_lod_manager.get_water_data_lod("soil_moist_map", self.lod_level),
+                    "water_biomes_map": self.data_lod_manager.get_water_data_lod("water_biomes_map", self.lod_level),
+                }
+                missing = [key for key, value in multi_input_data.items() if value is None]
+                if missing:
+                    raise ValueError(f"Missing dependencies for biome generation: {', '.join(missing)}")
+                result = self.generator_instance.calculate_biomes(
+                    multi_input_data, self.parameters, self.lod_level)
+            elif self.generator_type == GeneratorType.SETTLEMENT:
+                # SettlementGenerator holt seine Dependencies selbst über _get_dependencies() -
+                # jetzt LOD-genau wie bei den anderen 5 Generatoren (self.lod_level als
+                # explizites Ceiling), nicht mehr "bestes global verfügbares LOD" (siehe
+                # [[project-generation-pipeline-dependencies]] zur LOD-Synchronisation).
+                dependencies = self.generator_instance._get_dependencies(self.data_lod_manager, self.lod_level)
+                result = self.generator_instance._execute_generation(
+                    self.lod_level, dependencies, self.parameters)
             else:
-                # Legacy-Interface fallback
-                result = self.generator_instance.generate_complete(
-                    lod=self.lod_level,
-                    progress=progress_callback,
-                    **self.parameters
-                )
+                logging.getLogger(__name__).warning(
+                    f"Generator-Dispatch für {self.generator_type.value} noch nicht verdrahtet")
+                result = None
 
             # Success basierend auf Result
             success = result is not None

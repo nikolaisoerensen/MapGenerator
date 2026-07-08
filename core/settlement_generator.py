@@ -91,6 +91,8 @@ from dataclasses import dataclass
 from typing import List, Tuple, Dict
 import random
 
+from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
+
 
 class SettlementData:
     """
@@ -250,22 +252,25 @@ class TerrainSuitabilityAnalyzer:
     Aufgabe: Erstellt Suitability-Map für optimale Settlement-Platzierung mit LOD-Optimierung
     """
 
-    def __init__(self, terrain_factor_villages=1.0, lod_level="LOD64"):
+    def __init__(self, terrain_factor_villages=1.0, map_size=64):
         """
         Funktionsweise: Initialisiert Suitability-Analyzer mit Terrain-Gewichtungsfaktor und LOD
         Aufgabe: Setup der Terrain-Analyse-Parameter mit LOD-Anpassung
-        Parameter: terrain_factor_villages (float), lod_level (str) - Gewichtung und LOD-Level
+        Parameter: terrain_factor_villages (float), map_size (int) - Gewichtung und tatsächliche Pixel-Größe
         """
         self.terrain_factor = terrain_factor_villages
-        self.lod_level = lod_level
+        self.map_size = map_size
 
-        # LOD-abhängige Optimierungen
-        self.lod_optimizations = {
-            "LOD64": {"analysis_detail": 0.5, "max_distance_check": 20},
-            "LOD128": {"analysis_detail": 0.7, "max_distance_check": 30},
-            "LOD256": {"analysis_detail": 1.0, "max_distance_check": 40},
-            "FINAL": {"analysis_detail": 1.0, "max_distance_check": 50}
-        }
+        # Größenabhängige Optimierungen (map_size ist die tatsächliche Pixel-Auflösung
+        # der übergebenen Arrays, nicht das alte string-basierte LOD-Label)
+        if map_size <= 64:
+            self.analysis_detail, self.max_distance_check = 0.5, 20
+        elif map_size <= 128:
+            self.analysis_detail, self.max_distance_check = 0.7, 30
+        elif map_size <= 256:
+            self.analysis_detail, self.max_distance_check = 1.0, 40
+        else:
+            self.analysis_detail, self.max_distance_check = 1.0, 50
 
     def analyze_slope_suitability(self, slopemap, progress_callback=None):
         """
@@ -281,7 +286,7 @@ class TerrainSuitabilityAnalyzer:
         slope_suitability = np.zeros((height, width), dtype=np.float32)
 
         # LOD-abhängige Detailgrad
-        detail_level = self.lod_optimizations[self.lod_level]["analysis_detail"]
+        detail_level = self.analysis_detail
 
         for y in range(height):
             for x in range(width):
@@ -322,7 +327,7 @@ class TerrainSuitabilityAnalyzer:
         water_suitability = np.zeros((height, width), dtype=np.float32)
 
         # LOD-abhängige Maximal-Distanz
-        max_distance = self.lod_optimizations[self.lod_level]["max_distance_check"]
+        max_distance = self.max_distance_check
 
         # Finde alle Wasser-Pixel
         water_pixels = np.where(water_map > 0)
@@ -441,22 +446,24 @@ class PathfindingSystem:
     Aufgabe: Erstellt realistische Straßenverbindungen mit Spline-Interpolation und LOD-Optimierung
     """
 
-    def __init__(self, road_slope_to_distance_ratio=1.0, lod_level="LOD64"):
+    def __init__(self, road_slope_to_distance_ratio=1.0, map_size=64):
         """
         Funktionsweise: Initialisiert Pathfinding-System mit Slope-Distance-Gewichtung und LOD
         Aufgabe: Setup der Pathfinding-Parameter mit LOD-Anpassung
-        Parameter: road_slope_to_distance_ratio (float), lod_level (str) - Gewichtung und LOD
+        Parameter: road_slope_to_distance_ratio (float), map_size (int) - Gewichtung und tatsächliche Pixel-Größe
         """
         self.slope_distance_ratio = road_slope_to_distance_ratio
-        self.lod_level = lod_level
+        self.map_size = map_size
 
-        # LOD-abhängige Pathfinding-Optimierungen
-        self.lod_settings = {
-            "LOD64": {"max_search_nodes": 500, "path_resolution": 2},
-            "LOD128": {"max_search_nodes": 1000, "path_resolution": 1},
-            "LOD256": {"max_search_nodes": 2000, "path_resolution": 1},
-            "FINAL": {"max_search_nodes": 5000, "path_resolution": 1}
-        }
+        # Größenabhängige Pathfinding-Optimierungen
+        if map_size <= 64:
+            self.max_search_nodes, self.path_resolution = 500, 2
+        elif map_size <= 128:
+            self.max_search_nodes, self.path_resolution = 1000, 1
+        elif map_size <= 256:
+            self.max_search_nodes, self.path_resolution = 2000, 1
+        else:
+            self.max_search_nodes, self.path_resolution = 5000, 1
 
     def calculate_movement_cost(self, slopemap, x, y):
         """
@@ -493,8 +500,8 @@ class PathfindingSystem:
         end_x, end_y = int(end_pos[0]), int(end_pos[1])
 
         # LOD-Einstellungen
-        max_nodes = self.lod_settings[self.lod_level]["max_search_nodes"]
-        path_resolution = self.lod_settings[self.lod_level]["path_resolution"]
+        max_nodes = self.max_search_nodes
+        path_resolution = self.path_resolution
 
         # A*-Datenstrukturen
         open_set = [(0, start_x, start_y)]
@@ -574,7 +581,7 @@ class PathfindingSystem:
             return path
 
         # LOD-abhängige Spline-Qualität
-        if self.lod_level == "LOD64":
+        if self.map_size <= 64:
             smoothing_factor = max(5, smoothing_factor)  # Weniger Punkte bei LOD64
 
         # Nur jeden N-ten Punkt für Spline verwenden
@@ -623,6 +630,14 @@ class SettlementGenerator:
 
         self.next_location_id = 0
 
+        # Progress-Callback (step_name, progress_percent, detail_message) -> None.
+        # War nie initialisiert - _execute_generation() ruft self._update_progress()
+        # an mehreren Stellen unbedingt auf (kein "if self._update_progress:"-Guard),
+        # wodurch jede Settlement-Generierung sofort mit AttributeError abbrach.
+        # No-op statt None, damit auch die unguarded Call-Sites sicher sind; ein
+        # echter Callback kann jederzeit durch Zuweisung überschrieben werden.
+        self._update_progress = lambda *args, **kwargs: None
+
         # Standard-Parameter (werden durch _load_default_parameters überschrieben)
         self.settlements = 3
         self.landmarks = 3
@@ -654,11 +669,20 @@ class SettlementGenerator:
             'plotsize': SETTLEMENT.PLOTSIZE["default"]
         }
 
-    def _get_dependencies(self, data_manager):
+    def _get_dependencies(self, data_manager, lod_level=None):
         """
         Funktionsweise: Holt benötigte Dependencies mit intelligenten Fallback-Werten
         Aufgabe: Dependency-Resolution für Settlement-Generierung mit optionalen Inputs
         Parameter: data_manager - DataManager-Instanz
+        Parameter: lod_level - Exaktes LOD-Ceiling für alle Fetches, analog zu den anderen
+            5 Generatoren (GenerationThread.run() übergibt dort überall self.lod_level).
+            Vorher holte diese Methode für jede Dependency unabhängig das jeweils
+            "beste global verfügbare LOD" (get_terrain_data("complete")/get_water_data()/
+            get_biome_data() ohne LOD-Argument) - dadurch konnte Settlement z.B. eine
+            Terrain-Heightmap von LOD 5 mit einer Biome-Map von LOD 2 mischen, statt wie
+            die anderen Generatoren konsistent auf einem LOD zu bleiben. None (Default)
+            erhält das alte "bestes verfügbares LOD"-Verhalten für Aufrufer außerhalb
+            des Orchestrators (z.B. Legacy-Skripte).
         Returns: dict - Alle Input-Daten (required + optional mit Fallbacks)
         """
         if not data_manager:
@@ -666,44 +690,40 @@ class SettlementGenerator:
 
         dependencies = {}
 
-        # REQUIRED Dependencies - müssen vorhanden sein
-        required_deps = ['heightmap', 'slopemap', 'water_map']
+        # Kombiniert (Geology-Tektonik + Water-Erosion/-Sedimentation) statt der
+        # unbearbeiteten Terrain-Rohausgabe - dieselbe Datenbasis, die auch die
+        # anderen 5 Generatoren als heightmap_combined bekommen (siehe
+        # DataLODManager.get_terrain_data_combined()). Vorher las diese Methode
+        # TerrainData.heightmap direkt aus dem "complete"-Objekt - das ist die rohe,
+        # unbearbeitete Heightmap.
+        heightmap = data_manager.get_terrain_data_combined("heightmap", lod_level)
+        slopemap = data_manager.get_terrain_data_lod("slopemap", lod_level)
 
-        for dep_name in required_deps:
-            data = None
+        if heightmap is None:
+            raise Exception("Required dependency 'heightmap' not available in DataManager")
+        if slopemap is None:
+            raise Exception("Required dependency 'slopemap' not available in DataManager")
 
-            # Terrain-Daten
-            if dep_name in ['heightmap', 'slopemap']:
-                terrain_data = data_manager.get_terrain_data("complete")
-                if terrain_data:
-                    data = getattr(terrain_data, dep_name, None)
-                if data is None:
-                    data = data_manager.get_terrain_data(dep_name)
+        dependencies['heightmap'] = heightmap
+        dependencies['slopemap'] = slopemap
 
-            # Water-Daten
-            elif dep_name == 'water_map':
-                data = data_manager.get_water_data('water_map')
-                if data is None:
-                    # Fallback: versuche water_biomes_map
-                    data = data_manager.get_water_data('water_biomes_map')
+        # Water-Daten, mit Fallback auf water_biomes_map falls water_map (noch) nicht existiert
+        water_map = data_manager.get_water_data_lod('water_map', lod_level)
+        if water_map is None:
+            water_map = data_manager.get_water_data_lod('water_biomes_map', lod_level)
+        if water_map is None:
+            raise Exception("Required dependency 'water_map' not available in DataManager")
+        dependencies['water_map'] = water_map
 
-            if data is None:
-                raise Exception(f"Required dependency '{dep_name}' not available in DataManager")
-
-            dependencies[dep_name] = data
-
-        # OPTIONAL Dependencies - erstelle Fallback-Werte wenn nicht vorhanden
-        heightmap = dependencies['heightmap']
-
+        # OPTIONAL Dependency - erstelle Fallback-Wert wenn nicht vorhanden
         # biome_map: Fallback basierend auf Höhe (für MoveCost-Berechnung)
-        biome_map = data_manager.get_biome_data('biome_map')
+        biome_map = data_manager.get_biome_data_lod('biome_map', lod_level)
         if biome_map is None:
             self.logger.warning("biome_map not available, creating height-based fallback")
             biome_map = self._create_fallback_biome_map(heightmap)
         dependencies['biome_map'] = biome_map
 
         self.logger.debug(f"Dependencies loaded - heightmap: {heightmap.shape}, water_map: {dependencies['water_map'].shape}")
-        self.logger.debug(f"Optional deps - biome_map: {'fallback' if biome_map is dependencies.get('biome_map') else 'original'}")
 
         return dependencies
 
@@ -784,49 +804,103 @@ class SettlementGenerator:
         settlement_data.actual_size = target_size
         settlement_data.parameters = parameters.copy()
 
-        # Phase 1: Terrain Suitability Analysis (5% - 15%)
-        self._update_progress("Terrain Analysis", 5, "Analyzing terrain suitability for settlements...")
-        settlement_data.combined_suitability_map = self.calculate_terrain_suitability(heightmap, slopemap, water_map, lod)
-        settlement_data.terrain_suitability_valid = True
+        # Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
+        # Sequenz (siehe gui/OldManagers/calculator_graph.py - Settlement-Calculator-
+        # Knoten #28-#34 aus docs/generation_pipeline_dependencies.md). Phase des
+        # LOD-Lockstep-Umbaus (Tracker #16): nur Settlement-intern zerlegt, externes
+        # Verhalten (_execute_generation() Signatur/Rückgabe) bleibt unverändert.
+        context = {
+            "heightmap": heightmap, "slopemap": slopemap, "water_map": water_map,
+            "biome_map": biome_map, "lod": lod, "settlement_data": settlement_data,
+        }
 
-        # Phase 2: Settlement Placement (15% - 25%)
-        self._update_progress("Settlement Placement", 15, "Placing settlements based on suitability...")
-        settlement_data.settlement_list = self.calculate_settlements(settlement_data.combined_suitability_map, heightmap, lod)
-        settlement_data.settlements_valid = True
-
-        # Phase 3: Road Network Creation (25% - 40%)
-        self._update_progress("Road Building", 25, "Creating road networks between settlements...")
-        settlement_data.roads = self.calculate_road_network(settlement_data.settlement_list, slopemap, lod)
-        settlement_data.road_network_valid = True
-
-        # Phase 4: Roadsite Placement (40% - 50%)
-        self._update_progress("Roadsite Placement", 40, "Placing roadsites along roads...")
-        settlement_data.roadsite_list = self.calculate_roadsites(settlement_data.roads, lod)
-        settlement_data.roadsites_valid = True
-
-        # Phase 5: Civilization Mapping (50% - 65%)
-        self._update_progress("Civilization Mapping", 50, "Creating civilization influence map...")
-        settlement_data.civ_map = self.calculate_civilization_mapping(heightmap, slopemap, settlement_data.settlement_list,
-                                                                     settlement_data.roads, settlement_data.roadsite_list)
-        settlement_data.civilization_mapping_valid = True
-
-        # Phase 6: Landmark Placement (65% - 75%)
-        self._update_progress("Landmark Placement", 65, "Placing landmarks in wilderness areas...")
-        settlement_data.landmark_list = self.calculate_landmarks(settlement_data.civ_map, heightmap, slopemap, lod)
-        settlement_data.landmarks_valid = True
-
-        # Phase 7: Plot Generation (75% - 95%)
-        self._update_progress("Plot Generation", 75, "Generating plot system...")
-        settlement_data.plot_nodes, settlement_data.plots = self.calculate_plots(settlement_data.civ_map,
-                                                                                 settlement_data.settlement_list,
-                                                                                 heightmap, biome_map, lod)
-        settlement_data.plot_map = self._create_plot_map(heightmap.shape, settlement_data.plots)
-        settlement_data.plots_valid = True
+        scheduler = CalculatorRoundScheduler(
+            calculator_ids=[
+                "settlement.suitability", "settlement.settlements", "settlement.pathfinding",
+                "settlement.roadsites", "settlement.civ_influence", "settlement.landmarks",
+                "settlement.plot_nodes",
+            ],
+            executors={
+                "settlement.suitability": self._calc_suitability,
+                "settlement.settlements": self._calc_settlements,
+                "settlement.pathfinding": self._calc_pathfinding,
+                "settlement.roadsites": self._calc_roadsites,
+                "settlement.civ_influence": self._calc_civ_influence,
+                "settlement.landmarks": self._calc_landmarks,
+                "settlement.plot_nodes": self._calc_plot_nodes,
+            },
+        )
+        # target_lod ist hier reine interne Scheduler-Buchführung für EINEN Aufruf
+        # (lod kann historisch auch ein String wie "LOD64" sein, siehe
+        # _get_lod_size() - der Scheduler braucht nur einen festen int für den
+        # Abhängigkeits-Vergleich innerhalb dieser einen Runde).
+        scheduler.run_round(target_lod=1, context=context)
 
         self.logger.debug(f"Settlement generation complete - LOD: {lod}, size: {target_size}")
         self.logger.debug(f"Generated: {len(settlement_data.settlement_list)} settlements, {len(settlement_data.roads)} roads, {len(settlement_data.plots)} plots")
 
         return settlement_data
+
+    def _calc_suitability(self, context) -> None:
+        """Calculator-Node 'settlement.suitability' (#28)"""
+        settlement_data = context["settlement_data"]
+        self._update_progress("Terrain Analysis", 5, "Analyzing terrain suitability for settlements...")
+        settlement_data.combined_suitability_map = self.calculate_terrain_suitability(
+            context["heightmap"], context["slopemap"], context["water_map"], context["lod"])
+        settlement_data.terrain_suitability_valid = True
+
+    def _calc_settlements(self, context) -> None:
+        """Calculator-Node 'settlement.settlements' (#29)"""
+        settlement_data = context["settlement_data"]
+        self._update_progress("Settlement Placement", 15, "Placing settlements based on suitability...")
+        settlement_data.settlement_list = self.calculate_settlements(
+            settlement_data.combined_suitability_map, context["heightmap"], context["lod"])
+        settlement_data.settlements_valid = True
+
+    def _calc_pathfinding(self, context) -> None:
+        """Calculator-Node 'settlement.pathfinding' (#30)"""
+        settlement_data = context["settlement_data"]
+        self._update_progress("Road Building", 25, "Creating road networks between settlements...")
+        settlement_data.roads = self.calculate_road_network(
+            settlement_data.settlement_list, context["slopemap"], context["lod"])
+        settlement_data.road_network_valid = True
+
+    def _calc_roadsites(self, context) -> None:
+        """Calculator-Node 'settlement.roadsites' (#31)"""
+        settlement_data = context["settlement_data"]
+        self._update_progress("Roadsite Placement", 40, "Placing roadsites along roads...")
+        settlement_data.roadsite_list = self.calculate_roadsites(settlement_data.roads, context["lod"])
+        settlement_data.roadsites_valid = True
+
+    def _calc_civ_influence(self, context) -> None:
+        """Calculator-Node 'settlement.civ_influence' (#32)"""
+        settlement_data = context["settlement_data"]
+        self._update_progress("Civilization Mapping", 50, "Creating civilization influence map...")
+        settlement_data.civ_map = self.calculate_civilization_mapping(
+            context["heightmap"], context["slopemap"], settlement_data.settlement_list,
+            settlement_data.roads, settlement_data.roadsite_list)
+        settlement_data.civilization_mapping_valid = True
+
+    def _calc_landmarks(self, context) -> None:
+        """Calculator-Node 'settlement.landmarks' (#33)"""
+        settlement_data = context["settlement_data"]
+        self._update_progress("Landmark Placement", 65, "Placing landmarks in wilderness areas...")
+        settlement_data.landmark_list = self.calculate_landmarks(
+            settlement_data.civ_map, context["heightmap"], context["slopemap"], context["lod"])
+        settlement_data.landmarks_valid = True
+
+    def _calc_plot_nodes(self, context) -> None:
+        """
+        Calculator-Node 'settlement.plot_nodes' (#34) - einzige Settlement-Phase,
+        die biome_map braucht (siehe docs/generation_pipeline_dependencies.md).
+        """
+        settlement_data = context["settlement_data"]
+        self._update_progress("Plot Generation", 75, "Generating plot system...")
+        settlement_data.plot_nodes, settlement_data.plots = self.calculate_plots(
+            settlement_data.civ_map, settlement_data.settlement_list, context["heightmap"],
+            context["biome_map"], context["lod"])
+        settlement_data.plot_map = self._create_plot_map(context["heightmap"].shape, settlement_data.plots)
+        settlement_data.plots_valid = True
 
     def calculate_terrain_suitability(self, heightmap, slopemap, water_map, lod):
         """
@@ -835,7 +909,7 @@ class SettlementGenerator:
         Parameter: heightmap, slopemap, water_map, lod - Alle Terrain-Daten und LOD-Level
         Returns: numpy.ndarray - Kombinierte Suitability-Map für Settlement-Platzierung
         """
-        analyzer = TerrainSuitabilityAnalyzer(self.terrain_factor_villages, lod)
+        analyzer = TerrainSuitabilityAnalyzer(self.terrain_factor_villages, heightmap.shape[0])
         combined_suitability = analyzer.create_combined_suitability(heightmap, slopemap, water_map, self._update_progress)
         return combined_suitability
 
@@ -910,7 +984,7 @@ class SettlementGenerator:
         if len(settlements) < 2:
             return []
 
-        pathfinder = PathfindingSystem(self.road_slope_to_distance_ratio, lod)
+        pathfinder = PathfindingSystem(self.road_slope_to_distance_ratio, slopemap.shape[0])
         roads = []
 
         # Minimum Spanning Tree für Settlement-Verbindungen
@@ -1118,7 +1192,7 @@ class SettlementGenerator:
         Parameter: civ_map, settlements, heightmap, biome_map, lod - Alle Plot-Daten und LOD-Level
         Returns: Tuple[List[PlotNode], List[Plot]] - PlotNode-Liste und finale Plot-Liste
         """
-        plot_system = PlotNodeSystem(self.plotsize, lod)
+        plot_system = PlotNodeSystem(self.plotsize, heightmap.shape[0])
 
         # PlotNodes generieren
         nodes = plot_system.generate_plot_nodes(civ_map, self.plotnodes, settlements, self._update_progress)
@@ -1174,12 +1248,16 @@ class SettlementGenerator:
         Funktionsweise: Bestimmt Zielgröße basierend auf LOD-Level
         Aufgabe: LOD-System für Settlement mit gleicher Logik wie andere Generatoren
         """
-        lod_sizes = {"LOD64": 64, "LOD128": 128, "LOD256": 256, "LOD512": 512, "LOD1024": 1024}
+        # Legacy-String-LOD ("LOD64" etc.) für Rückwärtskompatibilität
+        if isinstance(lod, str):
+            if lod == "FINAL":
+                return original_size
+            lod_sizes = {"LOD64": 64, "LOD128": 128, "LOD256": 256, "LOD512": 512, "LOD1024": 1024}
+            return lod_sizes.get(lod, original_size)
 
-        if lod == "FINAL":
-            return original_size
-        else:
-            return lod_sizes.get(lod, 64)
+        # Modernes numerisches LOD-System: data_lod_manager liefert die Arrays
+        # bereits in der zur angeforderten LOD-Stufe passenden Pixel-Auflösung.
+        return original_size
 
     def _interpolate_array(self, array, target_size):
         """
@@ -1934,24 +2012,26 @@ class PlotNodeSystem:
     Aufgabe: Erstellt Grundstücks-System für späteres Gameplay mit LOD-abhängiger Dichte
     """
 
-    def __init__(self, plotsize=1.0, lod_level="LOD64"):
+    def __init__(self, plotsize=1.0, map_size=64):
         """
         Funktionsweise: Initialisiert PlotNode-System mit Plot-Größen-Parameter und LOD
         Aufgabe: Setup der Grundstücks-Generierung mit LOD-Anpassung
-        Parameter: plotsize (float), lod_level (str) - Akkumulierter Civ-Wert für Plot-Größe und LOD
+        Parameter: plotsize (float), map_size (int) - Akkumulierter Civ-Wert für Plot-Größe und tatsächliche Pixel-Größe
         """
         self.plotsize_threshold = plotsize
-        self.lod_level = lod_level
+        self.map_size = map_size
         self.next_node_id = 0
         self.next_plot_id = 0
 
-        # LOD-abhängige PlotNode-Dichte
-        self.lod_density_factors = {
-            "LOD64": 0.3,  # 30% der gewünschten Nodes
-            "LOD128": 0.6,  # 60% der gewünschten Nodes
-            "LOD256": 0.9,  # 90% der gewünschten Nodes
-            "FINAL": 1.0  # 100% der gewünschten Nodes
-        }
+        # Größenabhängige PlotNode-Dichte
+        if map_size <= 64:
+            self.density_factor = 0.3  # 30% der gewünschten Nodes
+        elif map_size <= 128:
+            self.density_factor = 0.6  # 60% der gewünschten Nodes
+        elif map_size <= 256:
+            self.density_factor = 0.9  # 90% der gewünschten Nodes
+        else:
+            self.density_factor = 1.0  # 100% der gewünschten Nodes
 
     def generate_plot_nodes(self, civ_map, plotnodes_count, settlements, progress_callback=None):
         """
@@ -1967,7 +2047,7 @@ class PlotNodeSystem:
         nodes = []
 
         # LOD-abhängige Node-Anzahl
-        density_factor = self.lod_density_factors[self.lod_level]
+        density_factor = self.density_factor
         adjusted_count = int(plotnodes_count * density_factor)
 
         # Gültige Bereiche finden (nicht in Städten, nicht in Wilderness)
@@ -2172,7 +2252,7 @@ class PlotNodeSystem:
             progress_callback("Plot Generation", 94, f"Optimizing node positions ({iterations} iterations)...")
 
         # LOD-abhängige Iterations-Anzahl
-        if self.lod_level == "LOD64":
+        if self.map_size <= 64:
             iterations = max(2, iterations // 2)
 
         for iteration in range(iterations):

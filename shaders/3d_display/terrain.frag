@@ -119,11 +119,15 @@ void main() {
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 diffuse = diff * color;
 
-    // Specular lighting
+    // Specular lighting - Terrain (Fels/Erde/Gras) ist eine raue, matte Oberfläche
+    // ohne nennenswerte Spiegelung. Vorher: Shininess 32 bei 30% Stärke - das ist ein
+    // Material-Modell für glatte/glänzende Oberflächen (Metall, Kunststoff, nasses
+    // Material) und erzeugte den gemeldeten "glossy"-Eindruck. Jetzt: breiter, viel
+    // schwächerer Streulicht-Anteil statt eines scharfen Glanzpunkts.
     vec3 viewDir = normalize(-FragPos);  // Camera at origin
     vec3 reflectDir = reflect(-lightDir, norm);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32);
-    vec3 specular = 0.3 * spec * vec3(1.0, 1.0, 1.0);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), 4);
+    vec3 specular = 0.03 * spec * vec3(1.0, 1.0, 1.0);
 
     // Combine lighting with shadow
     vec3 result = (ambient + diffuse + specular) * shadow;

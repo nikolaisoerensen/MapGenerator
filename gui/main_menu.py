@@ -233,7 +233,7 @@ class MainMenuWindow(QMainWindow):
 
             # Erstelle Map Editor, übergebe Main Menu und zeige es
             self.logger.info("Create and show Map Editor")
-            self.map_editor = MapEditorWindow(parent=self)
+            self.map_editor = MapEditorWindow(main_menu=self)
             self.map_editor.show()
         except Exception as e:
             self.show_error_message("Error", f"Failed to start Map Editor:\n{str(e)}")
@@ -293,5 +293,5 @@ class MainMenuWindow(QMainWindow):
         Aufgabe: Direkte Beendigung ohne Bestätigung
         Parameter: event (QCloseEvent)
         """
-        self.exit_application()
+        self._on_exit_button_clicked()
         event.accept()
