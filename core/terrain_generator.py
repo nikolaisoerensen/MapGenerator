@@ -36,6 +36,8 @@ import hashlib
 import logging
 from typing import Dict, List, Tuple, Optional, Any
 
+from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
+
 
 class TerrainData:
     """
@@ -151,7 +153,7 @@ class SimplexNoiseGenerator:
     LOD-Optimiert: generate_noise_grid() für Batch-Verarbeitung, interpolate_existing_grid() für LOD-Upgrades
 
     Spezifische Fallbacks:
-    - GPU-Optimal: request_noise_generation() für parallele Multi-Octave-Berechnung
+    - GPU-Optimal: ShaderManager.process_noise_generation() für parallele Multi-Octave-Berechnung
     - CPU-Fallback: Optimierte NumPy-Implementierung mit vectorization
     - Simple-Fallback: Direkte Random-Noise-Generation (5-10 Zeilen)
     """
@@ -163,6 +165,7 @@ class SimplexNoiseGenerator:
         Parameter: shader_manager - ShaderManager-Instanz für GPU-Acceleration
         """
         self.generator = OpenSimplex(seed=seed)
+        self.seed = seed
         self.shader_manager = shader_manager
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -185,16 +188,21 @@ class SimplexNoiseGenerator:
             'offset_y': offset_y
         }
 
-        # GPU-Fallback (Optimal)
-        if self._gpu_available():
+        # GPU-Fallback (Optimal) - ShaderManager.process_noise_generation() unterstützt
+        # keine Offsets (in der aktuellen Pipeline ohnehin immer 0); bei Offsets != 0
+        # wird direkt auf CPU ausgewichen statt sie stillschweigend zu ignorieren.
+        # process_noise_generation() prüft GPU-Verfügbarkeit selbst nochmal und hat
+        # bereits einen eigenen internen CPU-Fallback - hier zählt nur "lieferte es
+        # überhaupt ein Ergebnis", nicht "war es wirklich die GPU".
+        if self._gpu_available() and offset_x == 0 and offset_y == 0:
             try:
-                result = self.shader_manager.request_noise_generation(
-                    operation_type="multi_octave_noise",
-                    parameters=parameters
+                result = self.shader_manager.process_noise_generation(
+                    size=size, octaves=octaves, frequency=frequency,
+                    persistence=persistence, lacunarity=lacunarity, seed=self.seed
                 )
-                if result.get('success', False):
+                if result is not None:
                     self.logger.debug("GPU noise generation successful")
-                    return result['data']
+                    return result
             except Exception as e:
                 self.logger.warning(f"GPU noise generation failed: {e}")
 
@@ -220,20 +228,9 @@ class SimplexNoiseGenerator:
         if old_size == new_size:
             return existing_grid.copy()
 
-        # GPU-Interpolation falls verfügbar
-        if self._gpu_available():
-            try:
-                result = self.shader_manager.request_interpolation(
-                    operation_type="bicubic_interpolation",
-                    input_data=existing_grid,
-                    target_size=new_size
-                )
-                if result.get('success', False):
-                    return result['data']
-            except Exception as e:
-                self.logger.warning(f"GPU interpolation failed: {e}")
-
-        # CPU-Fallback mit optimierter Interpolation
+        # Keine GPU-Beschleunigung: ShaderManager bietet keine Interpolations-Methode an
+        # (im Gegensatz zu Noise-Generierung und Shadow-Raycast gibt es hier keine
+        # process_*-Entsprechung) - direkt auf die CPU-Interpolation gehen.
         return self._interpolate_cpu_optimized(existing_grid, new_size)
 
     def add_detail_noise(self, base_grid: np.ndarray, detail_frequency: float,
@@ -481,19 +478,14 @@ class ShadowCalculator:
         Parameter: existing_lod - LOD-Level der bestehenden Shadows
         Returns: numpy.ndarray - Shadow-Map konstant 64x64
         """
-        # GPU-Fallback (Optimal)
+        # GPU-Fallback (Optimal) - ShaderManager.process_shadow_raycast() rechnet nur
+        # einen Sonnenwinkel pro Aufruf, daher hier über die LOD-Winkel loopen und wie
+        # im CPU-Pfad gewichtet kombinieren. Progressive Shadow-Enhancement (existing_
+        # shadows/existing_lod) wird hier nicht nachgebildet, da calculate_heightmap()
+        # sie in der aktuellen Pipeline nie mit gesetzten Werten aufruft.
         if self._gpu_available():
             try:
-                result = self.shader_manager.request_shadow_calculation(
-                    operation_type="multi_angle_shadows",
-                    heightmap=heightmap,
-                    lod_level=lod_level,
-                    existing_shadows=existing_shadows,
-                    existing_lod=existing_lod
-                )
-                if result.get('success', False):
-                    self.logger.debug("GPU shadow calculation successful")
-                    return result['data']
+                return self._calculate_gpu_shadows(heightmap, lod_level)
             except Exception as e:
                 self.logger.warning(f"GPU shadow calculation failed: {e}")
 
@@ -542,16 +534,17 @@ class ShadowCalculator:
         """
         Funktionsweise: Optimierte CPU-Raycast-Implementierung
         Parameter: heightmap, lod_level, existing_shadows, existing_lod
-        Returns: numpy.ndarray - Shadow-Map 64x64
+        Returns: numpy.ndarray - Shadow-Map in heightmap-Auflösung (intern bei 64x64 gerechnet)
         """
         shadow_resolution = 64
         original_size = heightmap.shape[0]
 
-        # Heightmap für Shadow-Berechnung auf 64x64 reduzieren falls nötig
-        if original_size > shadow_resolution:
-            shadow_heightmap = self._downsample_heightmap(heightmap, shadow_resolution)
-        else:
-            shadow_heightmap = heightmap
+        # Heightmap für Shadow-Berechnung immer auf 64x64 bringen (in beide Richtungen -
+        # vorher wurde bei original_size < 64, z.B. LOD1 mit 32x32, nicht hochskaliert,
+        # wodurch shadow_heightmap bei 32x32 blieb während "shadows" weiter hart auf
+        # 64x64 initialisiert wurde: "operands could not be broadcast together with
+        # shapes (64,64) (32,32) (64,64)" bei jedem LOD1-Lauf)
+        shadow_heightmap = self._resize_2d(heightmap, shadow_resolution)
 
         # Progressive Shadow-Enhancement falls bestehende Shadows vorhanden
         if existing_shadows is not None and existing_lod != lod_level:
@@ -570,9 +563,41 @@ class ShadowCalculator:
         # Normalisierung
         shadows /= total_weight
 
-        # Upscale auf Original-Größe falls nötig
-        if original_size > shadow_resolution:
-            shadows = self._upsample_shadows(shadows, original_size)
+        # Auf Original-Größe zurückskalieren falls nötig (in beide Richtungen)
+        if original_size != shadow_resolution:
+            shadows = self._resize_2d(shadows, original_size)
+
+        return shadows
+
+    def _calculate_gpu_shadows(self, heightmap: np.ndarray, lod_level: int) -> np.ndarray:
+        """
+        Funktionsweise: GPU-Raycast-Implementierung über ShaderManager.process_shadow_raycast()
+        Aufgabe: Rechnet - wie der CPU-Pfad - pro LOD-Sonnenwinkel einen Raycast-Pass und
+                 kombiniert die Ergebnisse gewichtet; process_shadow_raycast() selbst rechnet
+                 nur einen Winkel pro Aufruf (kein Batch-Modus vorhanden).
+        Parameter: heightmap, lod_level
+        Returns: numpy.ndarray - Shadow-Map in heightmap-Auflösung (intern bei 64x64 gerechnet)
+        """
+        shadow_resolution = 64
+        original_size = heightmap.shape[0]
+        shadow_heightmap = self._resize_2d(heightmap, shadow_resolution)
+
+        sun_angles, sun_weights = self.get_sun_angles_for_lod(lod_level)
+        shadows = np.zeros((shadow_resolution, shadow_resolution), dtype=np.float32)
+        total_weight = sum(sun_weights)
+
+        for (elevation, azimuth), weight in zip(sun_angles, sun_weights):
+            shadow_map = self.shader_manager.process_shadow_raycast(
+                shadow_heightmap, elevation, azimuth, shadow_resolution
+            )
+            if shadow_map is None:
+                raise RuntimeError("process_shadow_raycast returned no data")
+            shadows += shadow_map * weight
+
+        shadows /= total_weight
+
+        if original_size != shadow_resolution:
+            shadows = self._resize_2d(shadows, original_size)
 
         return shadows
 
@@ -747,41 +772,29 @@ class ShadowCalculator:
 
         return h0 * (1 - fy) + h1 * fy
 
-    def _downsample_heightmap(self, heightmap: np.ndarray, target_size: int) -> np.ndarray:
-        """Reduziert Heightmap für Shadow-Berechnung"""
-        original_size = heightmap.shape[0]
+    def _resize_2d(self, grid: np.ndarray, target_size: int) -> np.ndarray:
+        """
+        Bilineare Größenänderung eines 2D-Grids in beide Richtungen (vereinheitlicht
+        die vormals getrennten, nur-eine-Richtung-fähigen _downsample_heightmap()/
+        _upsample_shadows() - deren Richtungs-Guards ließen z.B. eine 32x32-Heightmap
+        bei einer Ziel-Shadow-Resolution von 64 unverändert bei 32x32, siehe
+        _calculate_cpu_shadows()).
+        """
+        original_size = grid.shape[0]
 
-        if original_size <= target_size:
-            return heightmap
+        if original_size == target_size:
+            return grid
 
         scale_factor = (original_size - 1) / (target_size - 1)
-        downsampled = np.zeros((target_size, target_size), dtype=np.float32)
+        resized = np.zeros((target_size, target_size), dtype=np.float32)
 
         for y in range(target_size):
             for x in range(target_size):
                 orig_x = x * scale_factor
                 orig_y = y * scale_factor
-                downsampled[y, x] = self._interpolate_height_cpu(heightmap, orig_x, orig_y)
+                resized[y, x] = self._interpolate_height_cpu(grid, orig_x, orig_y)
 
-        return downsampled
-
-    def _upsample_shadows(self, shadows: np.ndarray, target_size: int) -> np.ndarray:
-        """Vergrößert Shadow-Map auf Zielgröße"""
-        current_size = shadows.shape[0]
-
-        if current_size >= target_size:
-            return shadows
-
-        scale_factor = (current_size - 1) / (target_size - 1)
-        upsampled = np.zeros((target_size, target_size), dtype=np.float32)
-
-        for y in range(target_size):
-            for x in range(target_size):
-                shadow_x = x * scale_factor
-                shadow_y = y * scale_factor
-                upsampled[y, x] = self._interpolate_height_cpu(shadows, shadow_x, shadow_y)
-
-        return upsampled
+        return resized
 
 
 class SlopeCalculator:
@@ -793,7 +806,7 @@ class SlopeCalculator:
     Validation: Gradient-Range-Checks und Consistency mit heightmap-Shape
 
     Spezifische Fallbacks:
-    - GPU-Optimal: Parallele Gradient-Berechnung mit GPU-Compute-Shader
+    - Kein GPU-Pfad: ShaderManager bietet keine Slope-/Gradient-Berechnung an
     - CPU-Fallback: NumPy gradient() mit optimierten Parametern
     - Simple-Fallback: Einfache Finite-Difference-Approximation
     """
@@ -812,19 +825,9 @@ class SlopeCalculator:
         Parameter: parameters - Slope-Parameter (spacing, smoothing, etc.)
         Returns: numpy.ndarray - Slope-Map mit Shape (H,W,2) für dz/dx und dz/dy
         """
-        # GPU-Fallback (Optimal)
-        if self._gpu_available():
-            try:
-                result = self.shader_manager.request_slope_calculation(
-                    operation_type="gradient_calculation",
-                    heightmap=heightmap,
-                    parameters=parameters
-                )
-                if result.get('success', False):
-                    self.logger.debug("GPU slope calculation successful")
-                    return result['data']
-            except Exception as e:
-                self.logger.warning(f"GPU slope calculation failed: {e}")
+        # Keine GPU-Beschleunigung: ShaderManager bietet keine Slope-/Gradient-Methode
+        # an (im Gegensatz zu Noise-Generierung und Shadow-Raycast gibt es hier keine
+        # process_*-Entsprechung) - direkt auf die CPU-Berechnung gehen.
 
         # CPU-Fallback (Gut)
         try:
@@ -1055,6 +1058,14 @@ class BaseTerrainGenerator:
         Funktionsweise: Koordiniert alle Terrain-Generierungsschritte
         Parameter: parameters, lod_level
         Returns: TerrainData - Generierte Terrain-Daten
+
+        Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
+        Sequenz (siehe gui/OldManagers/calculator_graph.py - Terrain-Calculator-
+        Knoten #1-#4 aus docs/generation_pipeline_dependencies.md). Phase 1 des
+        LOD-Lockstep-Umbaus (Tracker #16): nur Terrain-intern zerlegt, externes
+        Verhalten (calculate_heightmap() Signatur/Rückgabe) bleibt unverändert -
+        die anderen 5 Generatoren laufen unverändert über den bisherigen
+        generation_orchestrator.py-Pfad.
         """
         # LOD-Größe berechnen
         lod_size = self._lod_level_to_size(lod_level, parameters.get('map_size', 512))
@@ -1066,61 +1077,80 @@ class BaseTerrainGenerator:
 
         self.logger.debug(f"Starting terrain generation: LOD {lod_level}, Size {lod_size}")
 
-        # 1. Heightmap generieren
-        terrain_data.heightmap = self._generate_heightmap(parameters, lod_size)
-        self.logger.debug("Heightmap generation completed")
+        context = {"parameters": parameters, "lod_size": lod_size, "lod_level": lod_level}
 
-        # 2. Height-Redistribution anwenden
-        terrain_data.heightmap = self._apply_redistribution(
-            terrain_data.heightmap, parameters.get('redistribute_power', 1.0),
-            parameters.get('amplitude')
+        scheduler = CalculatorRoundScheduler(
+            calculator_ids=["terrain.noise", "terrain.redistribution", "terrain.slope", "terrain.shadow"],
+            executors={
+                "terrain.noise": self._calc_noise,
+                "terrain.redistribution": self._calc_redistribution,
+                "terrain.slope": self._calc_slope,
+                "terrain.shadow": self._calc_shadow,
+            },
         )
-        self.logger.debug("Height redistribution completed")
+        scheduler.run_round(target_lod=lod_level, context=context)
 
-        # 3. Slopemap berechnen
-        terrain_data.slopemap = self.slope_calculator.calculate_slopes(
-            terrain_data.heightmap, parameters
-        )
-        self.logger.debug("Slope calculation completed")
-
-        # 4. Shadowmap generieren
-        terrain_data.shadowmap = self.shadow_calculator.calculate_shadows(
-            terrain_data.heightmap, lod_level
-        )
-        terrain_data.calculated_sun_angles = self.shadow_calculator.get_sun_angles_for_lod(lod_level)[0]
-        self.logger.debug("Shadow calculation completed")
+        terrain_data.heightmap = context["heightmap"]
+        terrain_data.slopemap = context["slopemap"]
+        terrain_data.shadowmap = context["shadowmap"]
+        terrain_data.calculated_sun_angles = context["calculated_sun_angles"]
 
         return terrain_data
 
-    def _generate_heightmap(self, parameters: Dict[str, Any], size: int) -> np.ndarray:
-        """
-        Funktionsweise: Generiert Heightmap mit Noise-Generator
-        Parameter: parameters, size
-        Returns: numpy.ndarray - Generierte Heightmap
-        """
-        # Noise-Parameter extrahieren
+    def _calc_noise(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'terrain.noise' (#1): rohes Noise-Grid [-1,1]"""
+        parameters = context["parameters"]
+        size = context["lod_size"]
+
         frequency = parameters.get('frequency', 0.01)
         octaves = parameters.get('octaves', 4)
         persistence = parameters.get('persistence', 0.5)
         lacunarity = parameters.get('lacunarity', 2.0)
-        amplitude = parameters.get('amplitude', 100)
 
         # Frequency für LOD-Größe anpassen
         adjusted_frequency = frequency * (64 / size)  # Referenz: LOD 64
 
-        # Noise-Grid generieren
-        noise_grid = self.noise_generator.generate_noise_grid(
+        context["noise_grid"] = self.noise_generator.generate_noise_grid(
             size=size,
             frequency=adjusted_frequency,
             octaves=octaves,
             persistence=persistence,
             lacunarity=lacunarity
         )
+        self.logger.debug("Noise generation completed")
+
+    def _calc_redistribution(self, context: Dict[str, Any]) -> None:
+        """
+        Calculator-Node 'terrain.redistribution' (#2): Noise -> amplitudenskalierte
+        Heightmap -> Power-Redistribution, ergibt die finale heightmap.
+        """
+        parameters = context["parameters"]
+        amplitude = parameters.get('amplitude', 100)
 
         # Auf [0, amplitude] skalieren
-        heightmap = (noise_grid + 1.0) * 0.5 * amplitude
+        heightmap = (context["noise_grid"] + 1.0) * 0.5 * amplitude
+        heightmap = heightmap.astype(np.float32)
 
-        return heightmap.astype(np.float32)
+        context["heightmap"] = self._apply_redistribution(
+            heightmap, parameters.get('redistribute_power', 1.0), amplitude
+        )
+        self.logger.debug("Heightmap generation + redistribution completed")
+
+    def _calc_slope(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'terrain.slope' (#3)"""
+        context["slopemap"] = self.slope_calculator.calculate_slopes(
+            context["heightmap"], context["parameters"]
+        )
+        self.logger.debug("Slope calculation completed")
+
+    def _calc_shadow(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'terrain.shadow' (#4)"""
+        context["shadowmap"] = self.shadow_calculator.calculate_shadows(
+            context["heightmap"], context["lod_level"]
+        )
+        context["calculated_sun_angles"] = self.shadow_calculator.get_sun_angles_for_lod(
+            context["lod_level"])[0]
+        self.logger.debug("Shadow calculation completed")
 
     def _apply_redistribution(self, heightmap: np.ndarray, redistribute_power: float,
                                amplitude: float = None) -> np.ndarray:

@@ -458,6 +458,14 @@ class BaseMapTab(QWidget):
             if heightmap is not None:
                 current_display.display.update_heightmap(heightmap, self.generator_type)
         elif hasattr(current_display, 'update_display'):
+            # Referenz-Heightmap fürs Contour-Overlay mitschicken, damit Höhenlinien
+            # auch auf Nicht-Heightmap-Layern erscheinen (z.B. Water > Flowmap),
+            # nicht nur wenn die Heightmap selbst der angezeigte Layer ist.
+            if (layer_type != "heightmap" and self.data_lod_manager
+                    and hasattr(current_display.display, 'set_contour_reference_heightmap')):
+                reference_heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+                if reference_heightmap is not None:
+                    current_display.display.set_contour_reference_heightmap(reference_heightmap)
             current_display.update_display(data, layer_type)
 
     @error_handler

@@ -1256,8 +1256,14 @@ class GenerationThread(QThread):
                 slopemap = self.data_lod_manager.get_terrain_data_lod("slopemap", self.lod_level)
                 if heightmap_combined is None or slopemap is None:
                     raise ValueError("Missing terrain dependencies (heightmap_combined/slopemap) for geology generation")
+
+                # Kumuliertes Tektonik-Höhen-Delta aus dem letzten abgeschlossenen Geology-LOD
+                # holen (None beim allerersten Lauf) - derselbe Akkumulations-Ansatz wie bei Water.
+                previous_height_delta = self.data_lod_manager.get_geology_data_lod("height_delta", self.lod_level)
+
                 result = self.generator_instance.calculate_geology(
-                    heightmap_combined, slopemap, self.parameters, self.lod_level)
+                    heightmap_combined, slopemap, self.parameters, self.lod_level,
+                    previous_height_delta=previous_height_delta)
             elif self.generator_type == GeneratorType.WEATHER:
                 heightmap_combined = self.data_lod_manager.get_terrain_data_combined("heightmap", self.lod_level)
                 shadowmap = self.data_lod_manager.get_terrain_data_lod("shadowmap", self.lod_level)
@@ -1279,8 +1285,18 @@ class GenerationThread(QThread):
                 missing = [key for key, value in dependencies.items() if value is None]
                 if missing:
                     raise ValueError(f"Missing dependencies for water generation: {', '.join(missing)}")
+
+                # Kumulierte Erosion/Sedimentation aus dem letzten abgeschlossenen Water-LOD holen
+                # (None beim allerersten Lauf) - der Generator addiert seine frische Berechnung
+                # dieser Passage darauf, statt bei der Basis-Heightmap neu zu starten.
+                previous_erosion_map = self.data_lod_manager.get_water_data_lod("erosion_map", self.lod_level)
+                previous_sedimentation_map = self.data_lod_manager.get_water_data_lod(
+                    "sedimentation_map", self.lod_level)
+
                 result = self.generator_instance.calculate_hydrology(
-                    dependencies, self.parameters, self.lod_level)
+                    dependencies, self.parameters, self.lod_level,
+                    previous_erosion_map=previous_erosion_map,
+                    previous_sedimentation_map=previous_sedimentation_map)
             elif self.generator_type == GeneratorType.BIOME:
                 multi_input_data = {
                     "heightmap": self.data_lod_manager.get_terrain_data_combined("heightmap", self.lod_level),

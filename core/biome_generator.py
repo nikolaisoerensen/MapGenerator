@@ -329,13 +329,11 @@ class BiomeClassificationSystem:
             # Schritt 3: Integration
             final_biome_map = self._integrate_biome_layers(base_biome_map, super_biome_mask)
 
-            # Schritt 4: Supersampling (nur bei höheren LODs)
-            biome_map_super = None
-            if biome_data.actual_size >= 256:
-                if not self.supersampling_manager:
-                    self.supersampling_manager = SupersamplingManager(self.biome_seed, self.supersampling_quality)
-                biome_map_super = self.supersampling_manager.apply_supersampling(
-                    final_biome_map, super_biome_probabilities)
+            # Schritt 4: Supersampling (2x2, unabhängig von der Kartengröße)
+            if not self.supersampling_manager:
+                self.supersampling_manager = SupersamplingManager(self.biome_seed, self.supersampling_quality)
+            biome_map_super = self.supersampling_manager.apply_supersampling(
+                final_biome_map, super_biome_probabilities)
 
             # Climate-Classification
             climate_classification = self._create_climate_classification(

@@ -116,8 +116,14 @@ class MapEditorWindow(QMainWindow):
     - Comprehensive error recovery
     """
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, main_menu=None):
+        # Kein Qt-Parent: ein Top-Level-Fenster MIT Parent bekommt unter Windows
+        # keinen eigenen Taskbar-Eintrag (besonders wenn der Owner nur versteckt,
+        # nicht geschlossen ist - siehe main_menu.py._on_map_editor_button_clicked).
+        # main_menu wird separat gehalten, nur um beim Schließen dorthin
+        # zurückzukehren (_return_to_main_menu/closeEvent), nicht für Qt-Ownership.
+        super().__init__(None)
+        self._main_menu = main_menu
 
         self.logger = logging.getLogger(__name__)
 
@@ -1111,8 +1117,8 @@ class MapEditorWindow(QMainWindow):
 
             self.close()
 
-            if self.parent():
-                self.parent().show()
+            if self._main_menu:
+                self._main_menu.show()
 
             self.logger.info("Success returning to Main Menu.")
 
@@ -1308,8 +1314,8 @@ class MapEditorWindow(QMainWindow):
         """
         try:
             self._perform_cleanup()
-            if self.parent():
-                self.parent().show()
+            if self._main_menu:
+                self._main_menu.show()
             event.accept()
             self.logger.info("MapEditor closed successfully")
         except Exception as e:

@@ -116,13 +116,42 @@ class ColorSchemes:
         "high": "#ecf0f1"  # White
     }
 
-    BIOMES = {
-        "ocean": "#2980b9",
-        "desert": "#f39c12",
-        "forest": "#27ae60",
-        "tundra": "#95a5a6",
-        "grassland": "#2ecc71"
-    }
+    # Einzige Quelle für Biome-Index -> (Name, Farbe), genutzt von
+    # BiomeLegendDialog (gui/widgets/widgets.py) UND MapDisplay2D._render_biome_map
+    # (gui/widgets/map_display_2d.py) - Index entspricht exakt den Werten aus
+    # core/biome_generator.py (0-14 Base-Biomes, 15-25 Super-Biomes über
+    # SuperBiomeOverrideSystem.super_biome_offset=15). Vorher hatten Legende und
+    # Darstellung getrennte, auseinandergelaufene Farbdefinitionen.
+    BIOME_COLOR_TABLE = [
+        # Base Biomes (Index 0-14)
+        ("Ice Cap", "#f8f9fa"),
+        ("Tundra", "#e9ecef"),
+        ("Taiga", "#228b22"),
+        ("Grassland", "#90ee90"),
+        ("Temperate Forest", "#006400"),
+        ("Mediterranean", "#9acd32"),
+        ("Desert", "#daa520"),
+        ("Semi Arid", "#d2691e"),
+        ("Tropical Rainforest", "#008000"),
+        ("Tropical Seasonal", "#32cd32"),
+        ("Savanna", "#bdb76b"),
+        ("Montane Forest", "#2e8b57"),
+        ("Swamp", "#556b2f"),
+        ("Coastal Dunes", "#f4a460"),
+        ("Badlands", "#a0522d"),
+        # Super Biomes (Index 15-25)
+        ("Ocean", "#0077be"),
+        ("Lake", "#4da6ff"),
+        ("Grand River", "#0066cc"),
+        ("River", "#3399ff"),
+        ("Creek", "#66b3ff"),
+        ("Cliff", "#696969"),
+        ("Beach", "#f5deb3"),
+        ("Lake Edge", "#87ceeb"),
+        ("River Bank", "#98fb98"),
+        ("Snow Level", "#fffafa"),
+        ("Alpine Level", "#d3d3d3"),
+    ]
 
 
 class LayoutSettings:

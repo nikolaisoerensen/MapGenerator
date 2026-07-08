@@ -335,7 +335,12 @@ class BiomeTab(BaseMapTab):
         return layout
 
     def _create_biome_overlay_controls(self) -> QHBoxLayout:
-        """Erstellt Overlay-Checkboxes (Settlements/Rivers/Elevation Contours)"""
+        """
+        Erstellt Overlay-Checkboxes (Settlements/Rivers). Elevation-Contours
+        gibt es hier bewusst NICHT mehr lokal - das ist jetzt die globale
+        Shell-Checkbox (Spalte 2, siehe BaseMapTab.set_contour_overlay()),
+        die seit der Contour-Generalisierung auch auf Biome-Layern wirkt.
+        """
         layout = QHBoxLayout()
 
         self.settlements_overlay = QCheckBox("Settlements")
@@ -345,10 +350,6 @@ class BiomeTab(BaseMapTab):
         self.rivers_overlay = QCheckBox("Rivers")
         self.rivers_overlay.toggled.connect(self.toggle_rivers_overlay)
         layout.addWidget(self.rivers_overlay)
-
-        self.elevation_contours = QCheckBox("Elevation Contours")
-        self.elevation_contours.toggled.connect(self.toggle_elevation_contours)
-        layout.addWidget(self.elevation_contours)
 
         return layout
 
@@ -484,7 +485,8 @@ class BiomeTab(BaseMapTab):
     def apply_overlays(self):
         """
         Funktionsweise: Wendet alle aktivierten Overlays auf Display an
-        Aufgabe: Settlements, Rivers, Elevation Contours basierend auf Checkboxes
+        Aufgabe: Settlements, Rivers basierend auf Checkboxes (Elevation
+        Contours läuft über die globale Shell-Checkbox, siehe set_contour_overlay())
         """
         current_display = self.get_current_display()
         if not current_display or self.current_view != "2d":
@@ -503,12 +505,6 @@ class BiomeTab(BaseMapTab):
             flow_map = self.data_lod_manager.get_water_data("flow_map")
             if flow_map is not None:
                 display.overlay_river_network(flow_map)
-
-        # Elevation Contours Overlay
-        if self.elevation_contours.isChecked() and hasattr(display, 'overlay_elevation_contours'):
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-            if heightmap is not None:
-                display.overlay_elevation_contours(heightmap)
 
     @pyqtSlot()
     def update_display_mode(self):
@@ -532,11 +528,6 @@ class BiomeTab(BaseMapTab):
     @pyqtSlot(bool)
     def toggle_rivers_overlay(self, enabled: bool):
         """Toggle für Rivers Overlay"""
-        self.update_biome_display()
-
-    @pyqtSlot(bool)
-    def toggle_elevation_contours(self, enabled: bool):
-        """Toggle für Elevation Contours Overlay"""
         self.update_biome_display()
 
     @pyqtSlot()

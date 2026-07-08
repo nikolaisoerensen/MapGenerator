@@ -32,7 +32,11 @@ Dependencies (über DataLODManager):
 Output:
 - WaterData-Objekt mit water_map, flow_map, flow_speed, soil_moist_map, water_biomes_map,
   erosion_map, sedimentation_map, validity_state und LOD-Metadaten
-- Bidirektionale Terrain-Integration: erosion_map und sedimentation_map für DataLODManager.composite_heightmap
+- Bidirektionale Terrain-Integration: DataLODManager.get_terrain_data_combined() liest erosion_map/
+  sedimentation_map und liefert base_heightmap - erosion_map + sedimentation_map an alle
+  nachgelagerten Generatoren; jeder neue Water-LOD-Durchlauf bekommt seinerseits diese bereits
+  erodierte Heightmap als Input und akkumuliert seine frische Erosion/Sedimentation on top
+  (siehe calculate_hydrology(previous_erosion_map=..., previous_sedimentation_map=...))
 - DataLODManager-Storage für nachfolgende Generatoren (biome, settlement)
 """
 
@@ -980,45 +984,6 @@ class EvaporationCalculator:
         return limited_evaporation
 
 
-class BiDirectionalTerrainIntegrator:
-    """
-    Funktionsweise: Koordiniert bidirektionale Terrain-Modifikation zwischen Water-Generator und DataLODManager
-    Aufgabe: Überträgt erosion_map/sedimentation_map für composite_heightmap-Erstellung
-    """
-
-    def __init__(self, data_lod_manager):
-        self.data_lod_manager = data_lod_manager
-
-    def transfer_erosion_data(self, erosion_map, sedimentation_map, lod_level):
-        """
-        Funktionsweise: Überträgt Erosions-/Sedimentations-Daten für composite_heightmap
-        Aufgabe: Automatische Cache-Invalidation und Signal-Emission bei Terrain-Änderungen
-        """
-        if self.data_lod_manager:
-            try:
-                # Übertrage Erosions-/Sedimentationsdaten
-                self.data_lod_manager.set_terrain_modification_data(
-                    "erosion_map", erosion_map, lod_level
-                )
-                self.data_lod_manager.set_terrain_modification_data(
-                    "sedimentation_map", sedimentation_map, lod_level
-                )
-
-                # Trigger composite_heightmap update
-                self.data_lod_manager.update_composite_heightmap(lod_level)
-
-                # Signal emission für nachgelagerte Generatoren
-                self.data_lod_manager.emit_terrain_modification_signal("water", lod_level)
-
-            except Exception as e:
-                logging.warning(f"Terrain integration failed: {e}")
-
-    def coordinate_composite_heightmap_updates(self, lod_level):
-        """Koordiniert composite_heightmap-Updates mit DataLODManager"""
-        if self.data_lod_manager:
-            self.data_lod_manager.invalidate_dependent_generators("terrain", lod_level)
-
-
 class HydrologySystemGenerator:
     """
     Funktionsweise: Hauptklasse für dynamisches Hydrologiesystem
@@ -1038,9 +1003,6 @@ class HydrologySystemGenerator:
         self.erosion_system = ErosionSedimentationSystem(shader_manager=shader_manager)
         self.soil_moisture = SoilMoistureCalculator(shader_manager=shader_manager)
         self.evaporation = EvaporationCalculator(shader_manager=shader_manager)
-
-        # Terrain-Integration
-        self.terrain_integrator = BiDirectionalTerrainIntegrator(data_lod_manager)
 
     def _load_default_parameters(self):
         """Lädt WATER-Parameter aus value_default.py"""
@@ -1133,8 +1095,16 @@ class HydrologySystemGenerator:
 
         return dependencies
 
-    def _execute_generation(self, lod, dependencies, parameters):
-        """Führt Water-Generierung mit LOD-optimierten Algorithmen aus"""
+    def _execute_generation(self, lod, dependencies, parameters,
+                           previous_erosion_map=None, previous_sedimentation_map=None):
+        """
+        Führt Water-Generierung mit LOD-optimierten Algorithmen aus.
+        previous_erosion_map/previous_sedimentation_map: kumulierte Erosion/Sedimentation aus dem
+        letzten abgeschlossenen Water-LOD (vom Aufrufer über DataLODManager geholt). Wenn gesetzt,
+        wird die in dieser Passage frisch berechnete Erosion/Sedimentation dazuaddiert statt sie zu
+        ersetzen - so erodiert jeder LOD-Durchlauf die bereits erodierte Landschaft weiter, statt
+        immer wieder bei der Basis-Heightmap neu anzufangen.
+        """
         self.logger.info(f"Starting water generation for LOD {lod}")
 
         # Dependencies extrahieren
@@ -1193,6 +1163,17 @@ class HydrologySystemGenerator:
                 flow_accumulation, flow_speed, flow_directions, hardness_map, parameters, lod_iterations
             )
 
+            # Kumulative Akkumulation über LOD-Durchläufe: die frische Erosion/Sedimentation
+            # dieser Passage kommt zur bereits akkumulierten Menge aus dem letzten LOD dazu.
+            if previous_erosion_map is not None:
+                if previous_erosion_map.shape[0] != target_size:
+                    previous_erosion_map = self._interpolate_2d(previous_erosion_map, target_size)
+                erosion_map = erosion_map + previous_erosion_map
+            if previous_sedimentation_map is not None:
+                if previous_sedimentation_map.shape[0] != target_size:
+                    previous_sedimentation_map = self._interpolate_2d(previous_sedimentation_map, target_size)
+                sedimentation_map = sedimentation_map + previous_sedimentation_map
+
             # Phase 5: Soil Moisture (85% - 95%)
             self._update_progress("Soil Moisture", 88, "Calculating gaussian diffusion...")
             soil_moist_map = self.soil_moisture.calculate_soil_moisture(
@@ -1227,9 +1208,6 @@ class HydrologySystemGenerator:
             water_data.parameters = parameters.copy()
             water_data.validity_state = "valid"
             water_data.parameter_hash = self._calculate_parameter_hash(parameters)
-
-            # Bidirektionale Terrain-Integration
-            self.terrain_integrator.transfer_erosion_data(erosion_map, sedimentation_map, lod)
 
             self.logger.debug(f"Water generation complete - LOD: {lod}, size: {target_size}")
             return water_data
@@ -1475,7 +1453,8 @@ class HydrologySystemGenerator:
             self.progress_callback(phase, percentage, message)
 
     def calculate_hydrology(self, dependencies: Dict[str, Any], parameters: Dict[str, Any],
-                           lod_level: int) -> WaterData:
+                           lod_level: int, previous_erosion_map=None,
+                           previous_sedimentation_map=None) -> WaterData:
         """
         Hauptmethode für Water-System-Generierung mit numerischem LOD-Level.
 
@@ -1485,11 +1464,17 @@ class HydrologySystemGenerator:
                          lod_level vorskaliert vom DataLODManager)
             parameters: Alle Water-Parameter aus ParameterManager
             lod_level: Numerisches LOD-Level (1-6+)
+            previous_erosion_map, previous_sedimentation_map: kumulierte Werte aus dem
+                letzten abgeschlossenen Water-LOD (None beim allerersten Lauf) - werden
+                zur in dieser Passage neu berechneten Erosion/Sedimentation addiert, damit
+                die Landschaftsveränderung über LOD-Durchläufe hinweg iterativ akkumuliert
+                statt bei jedem Lauf wieder bei der Basis-Heightmap neu zu starten.
 
         Returns:
             WaterData: Vollständiges Wassersystem mit allen 10 Outputs
         """
-        return self._execute_generation(lod_level, dependencies, parameters)
+        return self._execute_generation(lod_level, dependencies, parameters,
+                                       previous_erosion_map, previous_sedimentation_map)
 
     # ===== LEGACY-KOMPATIBILITÄT =====
     # Alle alten Methoden bleiben für Rückwärts-Kompatibilität erhalten

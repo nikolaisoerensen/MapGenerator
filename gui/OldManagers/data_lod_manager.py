@@ -269,7 +269,7 @@ AUTO_GENERATION_DATA_KEYS = {
 
     # Biome: Abhängig von heightmap_combined
     "biome_map": {"auto": True, "priority": GenerationPriority.NORMAL},
-    "biome_map_super": {"auto": False, "priority": GenerationPriority.LOW},  # Zu ressourcenintensiv
+    "biome_map_super": {"auto": True, "priority": GenerationPriority.LOW},
 }
 
 # Data-Key zu Tab-Mapping
@@ -3122,18 +3122,43 @@ class DataLODManager(QObject):
 
     def get_terrain_data_combined(self, data_key: str, lod_level: int = None):
         """
-        Funktionsweise: Zugriff auf die kombinierte Heightmap (Terrain plus spätere Erosion/Sedimentation)
+        Funktionsweise: Zugriff auf die kombinierte Heightmap (Terrain plus Geology-Tektonik
+                 plus Water-Erosion/-Sedimentation)
         Aufgabe: Liefert die Datenbasis, die alle nachgelagerten Generatoren als heightmap_combined
-                 erwarten. Solange keine Erosions-/Sedimentations-Verrechnung existiert, entspricht
-                 die kombinierte Heightmap der reinen Terrain-Heightmap (Descriptor-Zustand vor dem
-                 Water-Lauf). Die Verrechnung inklusive LOD- und Shape-Ausrichtung wird in der
-                 Generator-Phase ergänzt.
+                 erwarten: base_heightmap + geology_height_delta - erosion_map + sedimentation_map
+                 (erosion_map/sedimentation_map sind laut water_generator.py positive Magnituden -
+                 Erosion trägt Material ab, Sedimentation lagert es an; geology_height_delta ist
+                 vorzeichenbehaftet, siehe core/geology_generator.py:_apply_tectonic_deformation).
+                 Jeder der drei Anteile wird unabhängig von den anderen angewendet, wenn verfügbar
+                 (z.B. Geology fertig, Water noch nicht). Ohne jede Zusatz-Daten (vor dem ersten
+                 Geology-/Water-Lauf) entspricht das Ergebnis der reinen Terrain-Heightmap. Anteile
+                 in falscher Auflösung (jeweiliger Generator noch nicht auf demselben LOD) werden
+                 übersprungen statt mit falscher Form zu verrechnen.
         Parameter:
             data_key  - Terrain-Data-Key, üblicherweise "heightmap"
             lod_level - gewünschtes LOD oder None für das höchste verfügbare
-        Return: Kombinierte (aktuell: Basis-) Terrain-Daten oder None
+        Return: Kombinierte Terrain-Daten oder None
         """
-        return self.get_terrain_data_lod(data_key, lod_level)
+        base = self.get_terrain_data_lod(data_key, lod_level)
+
+        if data_key != "heightmap" or base is None:
+            return base
+
+        combined = base.copy()
+
+        geology_height_delta = self.get_geology_data_lod("height_delta", lod_level)
+        if geology_height_delta is not None and geology_height_delta.shape == base.shape:
+            combined = combined + geology_height_delta
+
+        erosion_map = self.get_water_data_lod("erosion_map", lod_level)
+        if erosion_map is not None and erosion_map.shape == base.shape:
+            combined = combined - erosion_map
+
+        sedimentation_map = self.get_water_data_lod("sedimentation_map", lod_level)
+        if sedimentation_map is not None and sedimentation_map.shape == base.shape:
+            combined = combined + sedimentation_map
+
+        return combined
 
     # =============================================================================
     # GEOLOGY DATA MANAGEMENT - LOD-ERWEITERT (VEREINFACHT)
@@ -3170,7 +3195,7 @@ class DataLODManager(QObject):
         self._geology_data[f"lod_{lod_level}_geology_data_object"] = geology_data
 
         data_keys = []
-        for key in ("rock_map", "hardness_map"):
+        for key in ("rock_map", "hardness_map", "height_delta"):
             value = getattr(geology_data, key, None)
             if value is not None:
                 self._set_data_lod("geology", self._geology_data, key, value, lod_level, parameters)

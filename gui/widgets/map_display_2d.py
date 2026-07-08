@@ -1,10 +1,12 @@
 import numpy as np
+from scipy.ndimage import zoom
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QLabel
 from PyQt5.QtCore import pyqtSignal
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
-from gui.config.gui_default import CanvasSettings
+from gui.config.gui_default import CanvasSettings, ColorSchemes
 
 def _validate_input_data(data):
     """
@@ -86,6 +88,7 @@ class MapDisplay2D(QWidget):
         self.current_data = None
         self.current_layer = "heightmap"
         self.contour_lines_enabled = True
+        self._contour_reference_heightmap = None  # für Contour-Overlay auf Nicht-Heightmap-Layern
         self.shadow_overlay_enabled = False
         self.shadow_angle_index = None
         self.measure_mode = False
@@ -153,7 +156,15 @@ class MapDisplay2D(QWidget):
 
         # Standard-Colormap für Heightmaps
         self.heightmap_cmap = plt.cm.terrain
-        self.biome_cmap = plt.cm.Set3
+
+        # Feste Biome-Colormap aus ColorSchemes.BIOME_COLOR_TABLE (dieselbe Quelle
+        # wie BiomeLegendDialog) - vorher plt.cm.Set3, ein generischer 12-Farben-
+        # Colormap, der sich bei jedem Rendern automatisch auf den in der jeweiligen
+        # Karte vorkommenden Wertebereich neu normalisierte. Dadurch stimmten Karte
+        # und Legende nie zuverlässig überein, und ab Index 12 wiederholten sich
+        # Farben. Jetzt: Index -> Farbe ist fix (26 Einträge, vmin/vmax beim
+        # imshow() entsprechend fest gesetzt, siehe _render_biome_map).
+        self.biome_cmap = ListedColormap([hex_color for _, hex_color in ColorSchemes.BIOME_COLOR_TABLE])
 
         self.figure.tight_layout()
 
@@ -219,8 +230,25 @@ class MapDisplay2D(QWidget):
         else:
             self._render_generic_map(data)
 
+        # Contour-Lines-Overlay auf Nicht-Heightmap-Layern (Heightmap zeichnet
+        # ihre eigenen Konturen bereits in _render_heightmap direkt aus den
+        # Layer-Daten selbst - dieselbe Quelle, kein zweites Overlay nötig).
+        if (layer_type != "heightmap" and self.contour_lines_enabled
+                and self._contour_reference_heightmap is not None):
+            self._draw_contour_lines(self._contour_reference_heightmap)
+
         self._apply_styling()
         self.canvas.draw()
+
+    def set_contour_reference_heightmap(self, heightmap):
+        """
+        Öffentlicher Hook: hinterlegt die Heightmap, die als Referenz für das
+        Contour-Overlay dient, wenn gerade ein anderer Layer angezeigt wird
+        (z.B. Water > Flowmap). Wird von BaseMapTab._push_data_to_current_display()
+        bei jedem Display-Update mitgeschickt. Löst kein eigenes Redraw aus -
+        die Layer-Daten kommen im selben Zug über update_display().
+        """
+        self._contour_reference_heightmap = heightmap
 
     def _reset_measure_tools(self):
         """
@@ -252,14 +280,38 @@ class MapDisplay2D(QWidget):
         )
 
         if self.contour_lines_enabled:
-            contour_levels = _calculate_contour_levels(heightmap)
-            contours = self.ax.contour(heightmap, levels=contour_levels,
-                                       colors=CanvasSettings.CANVAS_2D["contour_colors"],
-                                       linewidths=0.5, alpha=0.7)
-            self.ax.clabel(contours, inline=True, fontsize=8)
+            self._draw_contour_lines(heightmap)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Elevation (m)')
+
+    def _draw_contour_lines(self, heightmap):
+        """
+        Funktionsweise: Zeichnet Höhenlinien über das aktuell aktive Axes
+        Aufgabe: Gemeinsamer Contour-Rendering-Schritt für Heightmap-Layer
+        (direkt aus den eigenen Layer-Daten) und alle anderen Layer (aus der
+        per set_contour_reference_heightmap() hinterlegten Referenz-Heightmap)
+        Parameter: heightmap (numpy.ndarray) - Höhendaten für die Konturlinien
+
+        Verschiedene Layer/Generatoren liegen nicht zwangsläufig in derselben
+        Auflösung vor wie die aktuell angezeigte Karte (z.B. Biome-Supersampling
+        2x, Geology-Zwischenschritte auf Bruchteilen der Kartengröße). ax.contour()
+        zeichnet ohne explizite Achsen einfach in Pixel-Index-Koordinaten der
+        heightmap - bei einer kleineren Referenz-Heightmap als der angezeigte
+        Layer erscheinen die Konturen dadurch nur in einem Teilbereich der Karte
+        (z.B. exakt einem Viertel bei halber Auflösung je Achse). Deshalb hier
+        auf die tatsächliche Auflösung des angezeigten Layers hochskalieren.
+        """
+        target_shape = self.current_data.shape[:2] if self.current_data is not None else heightmap.shape
+        if heightmap.shape[:2] != target_shape:
+            zoom_factors = (target_shape[0] / heightmap.shape[0], target_shape[1] / heightmap.shape[1])
+            heightmap = zoom(heightmap, zoom_factors, order=1)
+
+        contour_levels = _calculate_contour_levels(heightmap)
+        contours = self.ax.contour(heightmap, levels=contour_levels,
+                                   colors=CanvasSettings.CANVAS_2D["contour_colors"],
+                                   linewidths=0.5, alpha=0.7)
+        self.ax.clabel(contours, inline=True, fontsize=8)
 
     def _render_slopemap(self, slope_degrees):
         """
@@ -282,10 +334,13 @@ class MapDisplay2D(QWidget):
         Aufgabe: rock_map ist (H,W,3) - je Kanal der Anteil eines Gesteinstyps
         (z.B. igneous/sedimentary/metamorphic). imshow zeigt (H,W,3)-Arrays
         direkt als Echtfarbbild, dafür OHNE Colorbar (keine skalare Werte-Achse
-        bei RGB-Composite-Daten).
-        Parameter: rock_map (numpy.ndarray) - (H,W,3) Gesteinsanteile, erwartet in [0,1]
+        bei RGB-Composite-Daten). rock_map kommt vom Generator als uint8 mit
+        R+G+B=255 (Mass-Conservation, siehe core/geology_generator.py) - vorher
+        wurde direkt auf [0,1] geclippt, wodurch praktisch jeder Kanalwert (>1)
+        auf 1.0 kappte und die Karte fast überall reinweiß erschien.
+        Parameter: rock_map (numpy.ndarray) - (H,W,3) Gesteinsanteile, uint8 [0,255]
         """
-        display_data = np.clip(rock_map, 0.0, 1.0)
+        display_data = np.clip(rock_map.astype(np.float32) / 255.0, 0.0, 1.0)
         self.ax.imshow(display_data, origin='lower', interpolation='nearest')
 
     def _render_biome_map(self, biome_map):
@@ -294,17 +349,24 @@ class MapDisplay2D(QWidget):
         Aufgabe: Spezialisierte Darstellung für Biome-Klassifikation
         Parameter: biome_map (numpy.ndarray) - Biome-Daten zum Rendern
         """
-        im = self.ax.imshow(biome_map, cmap=self.biome_cmap, origin='lower', interpolation='nearest')
+        n_categories = len(ColorSchemes.BIOME_COLOR_TABLE)
+        im = self.ax.imshow(biome_map, cmap=self.biome_cmap, origin='lower', interpolation='nearest',
+                             vmin=0, vmax=n_categories - 1)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Biome Type')
 
-        # Biome-Namen als Colorbar-Labels
-        biome_names = ['Ocean', 'Tundra', 'Taiga', 'Desert', 'Temperate', 'Tropical']
+        # Biome-Namen als Colorbar-Labels, nur für tatsächlich vorkommende Indizes.
+        # biome_map kann Base-Biome-Indizes (0-14) UND Super-Biome-Indizes (15-25,
+        # SuperBiomeOverrideSystem.super_biome_offset in core/biome_generator.py)
+        # gleichzeitig enthalten (z.B. super_biome_mask, biome_map_super) - die
+        # Namensliste muss deshalb beide Bereiche abdecken.
         unique_values = np.unique(biome_map)
-        if len(unique_values) <= len(biome_names):
-            self.current_colorbar.set_ticks(unique_values)
-            self.current_colorbar.set_ticklabels([biome_names[int(val)] for val in unique_values])
+        valid_values = [val for val in unique_values if 0 <= int(val) < n_categories]
+        if valid_values:
+            self.current_colorbar.set_ticks(valid_values)
+            self.current_colorbar.set_ticklabels(
+                [ColorSchemes.BIOME_COLOR_TABLE[int(val)][0] for val in valid_values])
 
     def _render_water_map(self, water_map):
         """
