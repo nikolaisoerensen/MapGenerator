@@ -258,7 +258,9 @@ class WeatherTab(BaseMapTab):
                 return
 
             if self.current_display_mode == "height":
-                data = self.data_lod_manager.get_terrain_data("heightmap")
+                # Kombiniert, nicht die unbearbeitete Terrain-Rohausgabe - siehe
+                # DataLODManager.get_terrain_data_combined()
+                data = self.data_lod_manager.get_terrain_data_combined("heightmap")
                 data_type = "heightmap"
                 display_data = data
             elif self.current_display_mode in ("temp_map", "precip_map", "humid_map", "wind_map"):

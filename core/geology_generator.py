@@ -28,6 +28,8 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any
 
+from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
+
 
 @dataclass
 class GeologyData:
@@ -816,49 +818,43 @@ class GeologySystemGenerator:
             # Input-Validation
             self._validate_inputs(heightmap_combined, slopemap, merged_params)
 
-            # Schritt 1: Elevation-basierte Klassifizierung (20%)
-            self._update_progress("Rock Classification", 20, "Classifying rocks by elevation...")
-            rock_map = self.rock_classifier.classify_by_elevation(heightmap_combined)
+            # Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
+            # Sequenz (siehe gui/OldManagers/calculator_graph.py - Geology-Calculator-
+            # Knoten #5-#10 + faceted_boundaries aus docs/generation_pipeline_
+            # dependencies.md). Phase des LOD-Lockstep-Umbaus (Tracker #16): nur
+            # Geology-intern zerlegt, externes Verhalten (calculate_geology()
+            # Signatur/Rückgabe inkl. previous_height_delta-Akkumulation) bleibt
+            # unverändert.
+            context = {
+                "heightmap_combined": heightmap_combined,
+                "slopemap": slopemap,
+                "parameters": merged_params,
+                "lod_level": lod_level,
+                "previous_height_delta": previous_height_delta,
+            }
 
-            # Schritt 2: Slope-Härtung (35%)
-            self._update_progress("Rock Classification", 35, "Applying slope hardening...")
-            rock_map = self.rock_classifier.apply_slope_hardening(rock_map, slopemap)
-
-            # Schritt 3: Geologische Zonen mit LOD-Enhancement (50%)
-            self._update_progress("Geological Zones", 50, "Blending geological zones...")
-            rock_map = self.rock_classifier.blend_geological_zones(rock_map)
-
-            # Schritt 4: Tektonische Deformation mit LOD-Detail (65%)
-            self._update_progress("Tectonic Deformation", 65, "Applying tectonic deformation...")
-            rock_map, height_delta = self._apply_tectonic_deformation(
-                rock_map, heightmap_combined, merged_params, lod_level, previous_height_delta
+            scheduler = CalculatorRoundScheduler(
+                calculator_ids=[
+                    "geology.classify_elevation", "geology.slope_hardening", "geology.blend_zones",
+                    "geology.tectonic_deformation", "geology.faceted_boundaries",
+                    "geology.mass_conservation", "geology.hardness",
+                ],
+                executors={
+                    "geology.classify_elevation": self._calc_classify_elevation,
+                    "geology.slope_hardening": self._calc_slope_hardening,
+                    "geology.blend_zones": self._calc_blend_zones,
+                    "geology.tectonic_deformation": self._calc_tectonic_deformation,
+                    "geology.faceted_boundaries": self._calc_faceted_boundaries,
+                    "geology.mass_conservation": self._calc_mass_conservation,
+                    "geology.hardness": self._calc_hardness,
+                },
             )
-
-            # Schritt 4b: Facettierung - scharfe, gezackte Gesteinsgrenzen statt
-            # glattem Verlauf (wie auf einer echten geologischen Karte)
-            self._update_progress("Faceting", 72, "Sharpening rock boundaries...")
-            rock_map = self.rock_classifier.apply_faceted_boundaries(rock_map)
-
-            # Schritt 5: Mass-Conservation (80%)
-            self._update_progress("Mass Conservation", 80, "Normalizing rock masses...")
-            rock_map_uint8 = self._ensure_mass_conservation(rock_map)
-
-            # Schritt 6: Hardness-Berechnung mit 9-Stufen-System (95%)
-            self._update_progress("Hardness Calculation", 95, "Calculating hardness map...")
-            hardness_tier_mask = self.rock_classifier.calculate_hardness_tier_mask(
-                heightmap_combined.shape)
-            hardness_map = self.hardness_calculator.calculate_hardness_map(
-                rock_map_uint8,
-                merged_params['sedimentary_hardness'],
-                merged_params['igneous_hardness'],
-                merged_params['metamorphic_hardness'],
-                heightmap_combined,
-                hardness_tier_mask
-            )
+            scheduler.run_round(target_lod=lod_level, context=context)
 
             # GeologyData-Objekt erstellen
             geology_data = self._create_geology_data(
-                rock_map_uint8, hardness_map, lod_level, merged_params, height_delta
+                context["rock_map_uint8"], context["hardness_map"], lod_level, merged_params,
+                context["height_delta"]
             )
 
             self._update_progress("Generation Complete", 100, "Geology generation completed successfully")
@@ -870,6 +866,60 @@ class GeologySystemGenerator:
             self.logger.error(f"Geology generation failed: {e}")
             # Fallback zu Default-Rock-Distribution
             return self._create_fallback_geology_data(heightmap_combined, merged_params, lod_level)
+
+    def _calc_classify_elevation(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'geology.classify_elevation' (#5)"""
+        self._update_progress("Rock Classification", 20, "Classifying rocks by elevation...")
+        context["rock_map"] = self.rock_classifier.classify_by_elevation(context["heightmap_combined"])
+
+    def _calc_slope_hardening(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'geology.slope_hardening' (#6)"""
+        self._update_progress("Rock Classification", 35, "Applying slope hardening...")
+        context["rock_map"] = self.rock_classifier.apply_slope_hardening(
+            context["rock_map"], context["slopemap"])
+
+    def _calc_blend_zones(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'geology.blend_zones' (#7)"""
+        self._update_progress("Geological Zones", 50, "Blending geological zones...")
+        context["rock_map"] = self.rock_classifier.blend_geological_zones(context["rock_map"])
+
+    def _calc_tectonic_deformation(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'geology.tectonic_deformation' (#8)"""
+        self._update_progress("Tectonic Deformation", 65, "Applying tectonic deformation...")
+        rock_map, height_delta = self._apply_tectonic_deformation(
+            context["rock_map"], context["heightmap_combined"], context["parameters"],
+            context["lod_level"], context["previous_height_delta"]
+        )
+        context["rock_map"] = rock_map
+        context["height_delta"] = height_delta
+
+    def _calc_faceted_boundaries(self, context: Dict[str, Any]) -> None:
+        """
+        Calculator-Node 'geology.faceted_boundaries' - scharfe, gezackte
+        Gesteinsgrenzen statt glattem Verlauf (wie auf einer echten geologischen
+        Karte); nicht in docs/generation_pipeline_dependencies.md erfasst.
+        """
+        self._update_progress("Faceting", 72, "Sharpening rock boundaries...")
+        context["rock_map"] = self.rock_classifier.apply_faceted_boundaries(context["rock_map"])
+
+    def _calc_mass_conservation(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'geology.mass_conservation' (#9)"""
+        self._update_progress("Mass Conservation", 80, "Normalizing rock masses...")
+        context["rock_map_uint8"] = self._ensure_mass_conservation(context["rock_map"])
+
+    def _calc_hardness(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'geology.hardness' (#10)"""
+        self._update_progress("Hardness Calculation", 95, "Calculating hardness map...")
+        hardness_tier_mask = self.rock_classifier.calculate_hardness_tier_mask(
+            context["heightmap_combined"].shape)
+        context["hardness_map"] = self.hardness_calculator.calculate_hardness_map(
+            context["rock_map_uint8"],
+            context["parameters"]['sedimentary_hardness'],
+            context["parameters"]['igneous_hardness'],
+            context["parameters"]['metamorphic_hardness'],
+            context["heightmap_combined"],
+            hardness_tier_mask
+        )
 
     def _validate_inputs(self, heightmap_combined: np.ndarray, slopemap: np.ndarray,
                         parameters: Dict[str, Any]):

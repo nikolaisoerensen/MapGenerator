@@ -568,8 +568,9 @@ class SettlementTab(BaseMapTab):
         Aufgabe: Zeigt Qualität der Terrain-Daten für Settlement-Placement
         """
         try:
-            # Terrain Quality Check
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            # Terrain Quality Check (kombiniert - reflektiert das tatsächliche
+            # Endgelände nach Erosion/Sedimentation, nicht die Rohausgabe)
+            heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
             slopemap = self.data_lod_manager.get_terrain_data("slopemap")
 
             if heightmap is not None and slopemap is not None:
@@ -628,8 +629,9 @@ class SettlementTab(BaseMapTab):
                 self._push_data_to_current_display(suitability_map, "suitability_map")
 
         elif current_mode == 1:  # Settlements & Landmarks
-            # Heightmap als Hintergrund, Settlements/Landmarks/Roadsites als Marker-Overlay
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            # Heightmap als Hintergrund (kombiniert), Settlements/Landmarks/Roadsites
+            # als Marker-Overlay
+            heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
             if heightmap is not None:
                 self._push_data_to_current_display(heightmap, "heightmap")
 
@@ -648,7 +650,7 @@ class SettlementTab(BaseMapTab):
                 )
 
         elif current_mode == 2:  # Road Network
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
             if heightmap is not None:
                 self._push_data_to_current_display(heightmap, "heightmap")
 

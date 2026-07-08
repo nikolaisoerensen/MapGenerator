@@ -268,7 +268,9 @@ class WaterTab(BaseMapTab):
                 return
 
             if self.current_display_mode == "height":
-                data = self.data_lod_manager.get_terrain_data("heightmap")
+                # Kombiniert, nicht die unbearbeitete Terrain-Rohausgabe - siehe
+                # DataLODManager.get_terrain_data_combined()
+                data = self.data_lod_manager.get_terrain_data_combined("heightmap")
                 data_type = "heightmap"
             else:
                 data = self.data_lod_manager.get_water_data(self.current_display_mode)
@@ -298,7 +300,7 @@ class WaterTab(BaseMapTab):
 
             # 3D Terrain Overlay
             if self.terrain_3d_checkbox and self.terrain_3d_checkbox.isChecked():
-                heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+                heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
                 if heightmap is not None and hasattr(current_display.display, 'overlay_3d_terrain'):
                     current_display.display.overlay_3d_terrain(heightmap)
 

@@ -48,6 +48,8 @@ from typing import Dict, Any
 import heapq
 import logging
 
+from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
+
 class WaterData:
     """
     Funktionsweise: Container für alle Water-Daten mit Metainformationen und LOD-System
@@ -1137,72 +1139,62 @@ class HydrologySystemGenerator:
         lod_iterations = self._get_lod_iterations(lod)
 
         try:
-            # Phase 1: Lake Detection (0% - 15%)
-            self._update_progress("Lake Detection", 5, "Detecting local minima...")
-            lake_map, valid_lakes = self.lake_detection.detect_lakes(heightmap, parameters)
+            # Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
+            # Sequenz (siehe gui/OldManagers/calculator_graph.py - Water-Calculator-
+            # Knoten #15-#21 aus docs/generation_pipeline_dependencies.md, #22
+            # erosion_feedback bewusst ausgeschlossen - bekannt kaputt). Phase des
+            # LOD-Lockstep-Umbaus (Tracker #16): nur Water-intern zerlegt, externes
+            # Verhalten (calculate_hydrology()/_execute_generation() Signatur/
+            # Rückgabe inkl. previous_erosion_map/previous_sedimentation_map-
+            # Akkumulation) bleibt unverändert.
+            context = {
+                "heightmap": heightmap, "slopemap": slopemap, "hardness_map": hardness_map,
+                "rock_map": rock_map, "precip_map": precip_map, "temp_map": temp_map,
+                "wind_map": wind_map, "humid_map": humid_map,
+                "parameters": parameters, "lod_iterations": lod_iterations,
+                "target_size": target_size,
+                "previous_erosion_map": previous_erosion_map,
+                "previous_sedimentation_map": previous_sedimentation_map,
+            }
 
-            # Phase 2: Flow Network Building (15% - 40%)
-            self._update_progress("Flow Network", 20, "Calculating steepest descent...")
-            flow_accumulation, water_biomes_map = self.flow_network.build_flow_network(
-                heightmap, precip_map, lake_map, parameters, lod_iterations
+            scheduler = CalculatorRoundScheduler(
+                calculator_ids=[
+                    "water.lake_detection", "water.flow_network", "water.steepest_descent",
+                    "water.manning_flow", "water.erosion_sedimentation", "water.soil_moisture",
+                    "water.evaporation",
+                ],
+                executors={
+                    "water.lake_detection": self._calc_lake_detection,
+                    "water.flow_network": self._calc_flow_network,
+                    "water.steepest_descent": self._calc_steepest_descent,
+                    "water.manning_flow": self._calc_manning_flow,
+                    "water.erosion_sedimentation": self._calc_erosion_sedimentation,
+                    "water.soil_moisture": self._calc_soil_moisture,
+                    "water.evaporation": self._calc_evaporation,
+                },
             )
+            scheduler.run_round(target_lod=lod, context=context)
 
-            # Phase 3: Manning Flow Calculation (40% - 60%)
-            self._update_progress("Manning Flow", 45, "Solving Manning equation...")
-            flow_speed, cross_section = self.manning_calculator.calculate_flow_properties(
-                flow_accumulation, slopemap, heightmap, parameters, lod_iterations
-            )
-
-            # Phase 4: Erosion-Sedimentation (60% - 85%)
-            self._update_progress("Erosion-Sedimentation", 65, "Calculating stream power...")
-
-            # Berechne Flow-Directions für Sediment-Transport
-            flow_directions = self.flow_network._calculate_steepest_descent(heightmap)
-
-            erosion_map, sedimentation_map = self.erosion_system.simulate_erosion_sedimentation(
-                flow_accumulation, flow_speed, flow_directions, hardness_map, parameters, lod_iterations
-            )
-
-            # Kumulative Akkumulation über LOD-Durchläufe: die frische Erosion/Sedimentation
-            # dieser Passage kommt zur bereits akkumulierten Menge aus dem letzten LOD dazu.
-            if previous_erosion_map is not None:
-                if previous_erosion_map.shape[0] != target_size:
-                    previous_erosion_map = self._interpolate_2d(previous_erosion_map, target_size)
-                erosion_map = erosion_map + previous_erosion_map
-            if previous_sedimentation_map is not None:
-                if previous_sedimentation_map.shape[0] != target_size:
-                    previous_sedimentation_map = self._interpolate_2d(previous_sedimentation_map, target_size)
-                sedimentation_map = sedimentation_map + previous_sedimentation_map
-
-            # Phase 5: Soil Moisture (85% - 95%)
-            self._update_progress("Soil Moisture", 88, "Calculating gaussian diffusion...")
-            soil_moist_map = self.soil_moisture.calculate_soil_moisture(
-                water_biomes_map, flow_accumulation, parameters
-            )
-
-            # Phase 6: Evaporation (95% - 100%)
-            self._update_progress("Evaporation", 96, "Calculating atmospheric evaporation...")
-            evaporation_map = self.evaporation.calculate_evaporation(
-                temp_map, wind_map, humid_map, water_biomes_map, parameters
-            )
-
-            # Finale Berechnungen
+            # Finale Berechnungen (reine Output-Formatierung, kein eigener
+            # Calculator-Knoten aus docs/generation_pipeline_dependencies.md)
             self._update_progress("Finalization", 98, "Creating water depth map...")
-            water_map = self._create_water_depth_map(water_biomes_map, flow_accumulation, cross_section)
-            ocean_outflow = self._calculate_ocean_outflow(flow_accumulation, flow_directions, heightmap.shape)
+            water_map = self._create_water_depth_map(
+                context["water_biomes_map"], context["flow_accumulation"], context["cross_section"])
+            ocean_outflow = self._calculate_ocean_outflow(
+                context["flow_accumulation"], context["flow_directions"], heightmap.shape)
 
             # WaterData-Objekt erstellen
             water_data = WaterData()
             water_data.water_map = water_map
-            water_data.flow_map = flow_accumulation
-            water_data.flow_speed = flow_speed
-            water_data.cross_section = cross_section
-            water_data.soil_moist_map = soil_moist_map
-            water_data.erosion_map = erosion_map
-            water_data.sedimentation_map = sedimentation_map
-            water_data.evaporation_map = evaporation_map
+            water_data.flow_map = context["flow_accumulation"]
+            water_data.flow_speed = context["flow_speed"]
+            water_data.cross_section = context["cross_section"]
+            water_data.soil_moist_map = context["soil_moist_map"]
+            water_data.erosion_map = context["erosion_map"]
+            water_data.sedimentation_map = context["sedimentation_map"]
+            water_data.evaporation_map = context["evaporation_map"]
             water_data.ocean_outflow = ocean_outflow
-            water_data.water_biomes_map = water_biomes_map
+            water_data.water_biomes_map = context["water_biomes_map"]
             water_data.lod_level = lod
             water_data.actual_size = target_size
             water_data.parameters = parameters.copy()
@@ -1216,6 +1208,88 @@ class HydrologySystemGenerator:
             self.logger.error(f"Water generation failed: {e}")
             # Fallback zu minimal water data
             return self._create_minimal_water_data(target_size, lod, parameters)
+
+    def _calc_lake_detection(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'water.lake_detection' (#15)"""
+        self._update_progress("Lake Detection", 5, "Detecting local minima...")
+        lake_map, valid_lakes = self.lake_detection.detect_lakes(context["heightmap"], context["parameters"])
+        context["lake_map"] = lake_map
+        context["valid_lakes"] = valid_lakes
+
+    def _calc_flow_network(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'water.flow_network' (#16)"""
+        self._update_progress("Flow Network", 20, "Calculating steepest descent...")
+        flow_accumulation, water_biomes_map = self.flow_network.build_flow_network(
+            context["heightmap"], context["precip_map"], context["lake_map"], context["parameters"],
+            context["lod_iterations"]
+        )
+        context["flow_accumulation"] = flow_accumulation
+        context["water_biomes_map"] = water_biomes_map
+
+    def _calc_steepest_descent(self, context: Dict[str, Any]) -> None:
+        """
+        Calculator-Node 'water.steepest_descent' (#17) - Sibling zu flow_network,
+        haengt nur von heightmap ab. flow_network berechnet Flow-Directions intern
+        nochmal fuer die eigene Upstream-Akkumulation (privates Detail von
+        FlowNetworkBuilder) - dieser Knoten liefert das fuer die
+        Erosion-Sedimentation benoetigte flow_directions-Array.
+        """
+        context["flow_directions"] = self.flow_network._calculate_steepest_descent(context["heightmap"])
+
+    def _calc_manning_flow(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'water.manning_flow' (#18)"""
+        self._update_progress("Manning Flow", 45, "Solving Manning equation...")
+        flow_speed, cross_section = self.manning_calculator.calculate_flow_properties(
+            context["flow_accumulation"], context["slopemap"], context["heightmap"], context["parameters"],
+            context["lod_iterations"]
+        )
+        context["flow_speed"] = flow_speed
+        context["cross_section"] = cross_section
+
+    def _calc_erosion_sedimentation(self, context: Dict[str, Any]) -> None:
+        """
+        Calculator-Node 'water.erosion_sedimentation' (#19) - inkl. Kumulation
+        über LOD-Durchläufe (previous_erosion_map/previous_sedimentation_map),
+        analog zu Geology._calc_tectonic_deformation().
+        """
+        self._update_progress("Erosion-Sedimentation", 65, "Calculating stream power...")
+        erosion_map, sedimentation_map = self.erosion_system.simulate_erosion_sedimentation(
+            context["flow_accumulation"], context["flow_speed"], context["flow_directions"],
+            context["hardness_map"], context["parameters"], context["lod_iterations"]
+        )
+
+        target_size = context["target_size"]
+        previous_erosion_map = context["previous_erosion_map"]
+        previous_sedimentation_map = context["previous_sedimentation_map"]
+
+        # Kumulative Akkumulation über LOD-Durchläufe: die frische Erosion/Sedimentation
+        # dieser Passage kommt zur bereits akkumulierten Menge aus dem letzten LOD dazu.
+        if previous_erosion_map is not None:
+            if previous_erosion_map.shape[0] != target_size:
+                previous_erosion_map = self._interpolate_2d(previous_erosion_map, target_size)
+            erosion_map = erosion_map + previous_erosion_map
+        if previous_sedimentation_map is not None:
+            if previous_sedimentation_map.shape[0] != target_size:
+                previous_sedimentation_map = self._interpolate_2d(previous_sedimentation_map, target_size)
+            sedimentation_map = sedimentation_map + previous_sedimentation_map
+
+        context["erosion_map"] = erosion_map
+        context["sedimentation_map"] = sedimentation_map
+
+    def _calc_soil_moisture(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'water.soil_moisture' (#20)"""
+        self._update_progress("Soil Moisture", 88, "Calculating gaussian diffusion...")
+        context["soil_moist_map"] = self.soil_moisture.calculate_soil_moisture(
+            context["water_biomes_map"], context["flow_accumulation"], context["parameters"]
+        )
+
+    def _calc_evaporation(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'water.evaporation' (#21) - Sibling zu soil_moisture"""
+        self._update_progress("Evaporation", 96, "Calculating atmospheric evaporation...")
+        context["evaporation_map"] = self.evaporation.calculate_evaporation(
+            context["temp_map"], context["wind_map"], context["humid_map"], context["water_biomes_map"],
+            context["parameters"]
+        )
 
     def _update_parameters(self, parameters):
         """Aktualisiert alle Sub-System Parameter"""

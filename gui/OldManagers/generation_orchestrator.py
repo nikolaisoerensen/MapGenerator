@@ -1311,10 +1311,11 @@ class GenerationThread(QThread):
                 result = self.generator_instance.calculate_biomes(
                     multi_input_data, self.parameters, self.lod_level)
             elif self.generator_type == GeneratorType.SETTLEMENT:
-                # SettlementGenerator holt seine Dependencies selbst über _get_dependencies()
-                # (bestes verfügbares LOD, nicht LOD-genau wie bei den anderen Generatoren -
-                # siehe [[project-generation-pipeline-dependencies]] zur LOD-Synchronisation).
-                dependencies = self.generator_instance._get_dependencies(self.data_lod_manager)
+                # SettlementGenerator holt seine Dependencies selbst über _get_dependencies() -
+                # jetzt LOD-genau wie bei den anderen 5 Generatoren (self.lod_level als
+                # explizites Ceiling), nicht mehr "bestes global verfügbares LOD" (siehe
+                # [[project-generation-pipeline-dependencies]] zur LOD-Synchronisation).
+                dependencies = self.generator_instance._get_dependencies(self.data_lod_manager, self.lod_level)
                 result = self.generator_instance._execute_generation(
                     self.lod_level, dependencies, self.parameters)
             else:

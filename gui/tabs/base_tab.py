@@ -451,9 +451,14 @@ class BaseMapTab(QWidget):
         if not current_display:
             return
 
+        # get_terrain_data_combined() statt get_terrain_data(): für jede visuelle
+        # Referenz auf "die Heightmap" wollen wir das tatsächliche Endergebnis nach
+        # Geology-Tektonik/Water-Erosion/-Sedimentation sehen (dieselbe Datenbasis,
+        # die auch alle nachgelagerten Generatoren als heightmap_combined bekommen),
+        # nicht die unbearbeitete Terrain-Rohausgabe.
         if self.current_view == "3d" and hasattr(current_display.display, 'update_heightmap'):
             heightmap = data if layer_type == "heightmap" else (
-                self.data_lod_manager.get_terrain_data("heightmap") if self.data_lod_manager else None
+                self.data_lod_manager.get_terrain_data_combined("heightmap") if self.data_lod_manager else None
             )
             if heightmap is not None:
                 current_display.display.update_heightmap(heightmap, self.generator_type)
@@ -463,7 +468,7 @@ class BaseMapTab(QWidget):
             # nicht nur wenn die Heightmap selbst der angezeigte Layer ist.
             if (layer_type != "heightmap" and self.data_lod_manager
                     and hasattr(current_display.display, 'set_contour_reference_heightmap')):
-                reference_heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+                reference_heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
                 if reference_heightmap is not None:
                     current_display.display.set_contour_reference_heightmap(reference_heightmap)
             current_display.update_display(data, layer_type)
@@ -473,8 +478,9 @@ class BaseMapTab(QWidget):
         """Display-Update über DataLODManager"""
         try:
             if self.data_lod_manager:
-                # Hole beste verfügbare Daten vom DataLODManager
-                heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+                # Hole beste verfügbare Daten vom DataLODManager (kombiniert, siehe
+                # _push_data_to_current_display())
+                heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
                 if heightmap is not None:
                     display_id = f"{self.__class__.__name__}_{self.current_view}_heightmap"
                     if self.data_lod_manager.display_update_manager.needs_update(display_id, heightmap, "heightmap"):

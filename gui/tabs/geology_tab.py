@@ -280,7 +280,9 @@ class GeologyTab(BaseMapTab):
                 return
 
             if self.current_display_mode == "height":
-                data = self.data_lod_manager.get_terrain_data("heightmap")
+                # Kombiniert, nicht die unbearbeitete Terrain-Rohausgabe - siehe
+                # DataLODManager.get_terrain_data_combined()
+                data = self.data_lod_manager.get_terrain_data_combined("heightmap")
                 data_type = "heightmap"
             elif self.current_display_mode == "rock_map":
                 data = self.data_lod_manager.get_geology_data("rock_map")
@@ -309,7 +311,7 @@ class GeologyTab(BaseMapTab):
 
             # 3D Terrain Overlay wenn aktiviert
             if self.terrain_3d_checkbox and self.terrain_3d_checkbox.isChecked():
-                heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+                heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
                 if heightmap is not None and hasattr(current_display.display, 'overlay_3d_terrain'):
                     current_display.display.overlay_3d_terrain(heightmap)
 

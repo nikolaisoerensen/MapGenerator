@@ -39,6 +39,8 @@ from opensimplex import OpenSimplex
 import logging
 from typing import Dict, Any, Tuple
 
+from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
+
 
 class WeatherData:
     """
@@ -157,27 +159,38 @@ class WeatherSystemGenerator:
             # Input-Data auf Target-Size interpolieren
             heightmap, shadowmap = self._prepare_input_data(heightmap_combined, shadowmap, target_size)
 
-            # Schritt 1: Temperature Field Calculation (20% - 30%)
-            self._update_progress("Temperature", 20, "Calculating temperature field with orographic effects...")
-            temp_map = self._calculate_temperature_field(heightmap, shadowmap, parameters, target_size)
+            # Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
+            # Sequenz (siehe gui/OldManagers/calculator_graph.py - Weather-Calculator-
+            # Knoten #11-#14 aus docs/generation_pipeline_dependencies.md). Phase des
+            # LOD-Lockstep-Umbaus (Tracker #16): nur Weather-intern zerlegt, externes
+            # Verhalten (calculate_weather_system() Signatur/Rückgabe) bleibt
+            # unverändert. Weather hat - anders als Geology/Water - keinen
+            # Cross-LOD-Akkumulationszustand, jeder Aufruf ist eigenständig.
+            context = {
+                "heightmap": heightmap,
+                "shadowmap": shadowmap,
+                "parameters": parameters,
+                "target_size": target_size,
+                "cfd_iterations": cfd_iterations,
+            }
 
-            # Schritt 2: Wind Field CFD-Simulation (30% - 60%)
-            self._update_progress("Wind Field", 30, f"CFD simulation with {cfd_iterations} iterations...")
-            wind_map = self._simulate_wind_field_cfd(heightmap, temp_map, shadowmap, parameters,
-                                                   target_size, cfd_iterations)
-
-            # Schritt 3: Atmospheric Moisture Management (60% - 80%)
-            self._update_progress("Humidity", 60, "Calculating atmospheric moisture transport...")
-            humid_map = self._calculate_atmospheric_moisture(heightmap, temp_map, wind_map, parameters)
-
-            # Schritt 4: Precipitation System (80% - 95%)
-            self._update_progress("Precipitation", 80, "Calculating orographic precipitation...")
-            precip_map = self._calculate_precipitation_system(humid_map, temp_map, wind_map,
-                                                            heightmap, parameters)
+            scheduler = CalculatorRoundScheduler(
+                calculator_ids=[
+                    "weather.temperature", "weather.wind", "weather.humidity", "weather.precipitation",
+                ],
+                executors={
+                    "weather.temperature": self._calc_temperature,
+                    "weather.wind": self._calc_wind,
+                    "weather.humidity": self._calc_humidity,
+                    "weather.precipitation": self._calc_precipitation,
+                },
+            )
+            scheduler.run_round(target_lod=lod_level, context=context)
 
             # WeatherData-Objekt erstellen und validieren
-            weather_data = self._create_weather_data(wind_map, temp_map, precip_map, humid_map,
-                                                   lod_level, target_size, parameters)
+            weather_data = self._create_weather_data(
+                context["wind_map"], context["temp_map"], context["precip_map"], context["humid_map"],
+                lod_level, target_size, parameters)
 
             # Performance-Stats aktualisieren
             self._update_performance_stats(weather_data, cfd_iterations)
@@ -190,6 +203,32 @@ class WeatherSystemGenerator:
             self.logger.error(f"Weather generation failed: {str(e)}")
             # Error-Recovery: Fallback zu Simplified-Weather-System
             return self._create_fallback_weather_data(heightmap_combined.shape[0], lod_level, parameters)
+
+    def _calc_temperature(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'weather.temperature' (#11)"""
+        self._update_progress("Temperature", 20, "Calculating temperature field with orographic effects...")
+        context["temp_map"] = self._calculate_temperature_field(
+            context["heightmap"], context["shadowmap"], context["parameters"], context["target_size"])
+
+    def _calc_wind(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'weather.wind' (#12)"""
+        self._update_progress("Wind Field", 30, f"CFD simulation with {context['cfd_iterations']} iterations...")
+        context["wind_map"] = self._simulate_wind_field_cfd(
+            context["heightmap"], context["temp_map"], context["shadowmap"], context["parameters"],
+            context["target_size"], context["cfd_iterations"])
+
+    def _calc_humidity(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'weather.humidity' (#13)"""
+        self._update_progress("Humidity", 60, "Calculating atmospheric moisture transport...")
+        context["humid_map"] = self._calculate_atmospheric_moisture(
+            context["heightmap"], context["temp_map"], context["wind_map"], context["parameters"])
+
+    def _calc_precipitation(self, context: Dict[str, Any]) -> None:
+        """Calculator-Node 'weather.precipitation' (#14)"""
+        self._update_progress("Precipitation", 80, "Calculating orographic precipitation...")
+        context["precip_map"] = self._calculate_precipitation_system(
+            context["humid_map"], context["temp_map"], context["wind_map"], context["heightmap"],
+            context["parameters"])
 
     def _validate_inputs(self, heightmap_combined: np.ndarray, shadowmap: np.ndarray,
                         parameters: Dict[str, Any], lod_level: int):
