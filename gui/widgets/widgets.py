@@ -11,9 +11,9 @@ Funktionsweise: Erweiterte wiederverwendbare UI-Komponenten für Manual-Only Sys
 - Memory-Management und Thread-Safety Verbesserungen
 """
 
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
+from PyQt6.QtWidgets import *
+from PyQt6.QtCore import *
+from PyQt6.QtGui import *
 import numpy as np
 from typing import Any, Dict, List, Optional
 import random
@@ -185,7 +185,7 @@ class ParameterSlider(QWidget):
         self.label.setStyleSheet("font-size: 11px; font-weight: bold;")
 
         self.value_display = QLabel(f"{self.current_value}{self.suffix}")
-        self.value_display.setAlignment(Qt.AlignRight)
+        self.value_display.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.value_display.setMinimumWidth(60)
         self.value_display.setStyleSheet("font-size: 11px; color: #3498db;")
 
@@ -197,7 +197,7 @@ class ParameterSlider(QWidget):
         slider_layout = QHBoxLayout()
 
         # Hauptslider mit No-Wheel-Events
-        self.slider = NoWheelSlider(Qt.Horizontal)
+        self.slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.slider.setMinimum(int(self.min_val / self.step))
         self.slider.setMaximum(int(self.max_val / self.step))
         self.slider.valueChanged.connect(self.on_slider_changed)
@@ -317,7 +317,7 @@ class StatusIndicator(QWidget):
         # Status Icon
         self.status_icon = QLabel("◯")
         self.status_icon.setFixedSize(16, 16)
-        self.status_icon.setAlignment(Qt.AlignCenter)
+        self.status_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Status Text
         self.status_text = QLabel(self.label_text)

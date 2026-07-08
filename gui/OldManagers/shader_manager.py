@@ -22,7 +22,7 @@ import logging
 
 import numpy as np
 import OpenGL.GL as gl
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 
 def _protective_handler(*args, **kwargs):
     """

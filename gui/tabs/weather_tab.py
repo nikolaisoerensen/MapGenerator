@@ -7,12 +7,12 @@ Terrain abhängiger Generator (heightmap_combined, shadowmap) liefert er wind_ma
 precip_map und humid_map für Water und alle nachgelagerten Systeme.
 """
 
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
     QButtonGroup, QLabel
 )
-from PyQt5.QtCore import pyqtSlot
-from PyQt5.QtGui import QFont
+from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtGui import QFont
 import logging
 import numpy as np
 from typing import Dict, Any
@@ -101,7 +101,7 @@ class WeatherTab(BaseMapTab):
     def _create_temperature_parameters(self):
         """Erstellt Temperature-System Parameter Controls"""
         temp_group = QGroupBox("Temperature System")
-        temp_group.setFont(QFont("Arial", 10, QFont.Bold))
+        temp_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         temp_layout = QVBoxLayout()
 
         for param_key in ("air_temp_entry", "solar_power", "altitude_cooling"):
@@ -127,7 +127,7 @@ class WeatherTab(BaseMapTab):
     def _create_wind_parameters(self):
         """Erstellt Wind-System Parameter Controls"""
         wind_group = QGroupBox("Wind System")
-        wind_group.setFont(QFont("Arial", 10, QFont.Bold))
+        wind_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         wind_layout = QVBoxLayout()
 
         for param_key in ("thermic_effect", "wind_speed_factor", "terrain_factor"):

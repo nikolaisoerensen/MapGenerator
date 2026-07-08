@@ -57,7 +57,7 @@
 """
 from dataclasses import dataclass
 
-from PyQt5.QtCore import QObject, pyqtSignal, QThread, QMutex, QMutexLocker, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QThread, QMutex, QMutexLocker, QTimer
 from typing import Dict, List, Set, Any
 import functools
 import logging

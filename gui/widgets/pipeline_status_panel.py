@@ -6,8 +6,8 @@ den globalen Pipeline-Status aller Generatoren (unabhängig vom aktuell
 gewählten Haupt-Tab) und bleibt beim Tab-Wechsel unverändert sichtbar.
 """
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame
 
 from gui.widgets.widgets import StatusIndicator
 
@@ -38,7 +38,7 @@ class PipelineStatusPanel(QWidget):
         layout.addWidget(title)
 
         separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShape(QFrame.Shape.HLine)
         layout.addWidget(separator)
 
         for generator_type in self.generators:

@@ -10,9 +10,9 @@ Funktionsweise: Finale Biome-Klassifizierung mit vollständiger Core-Integration
 - Gauß-basierte Klassifikation mit konfigurierbaren Gewichtungen
 """
 
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
+from PyQt6.QtWidgets import *
+from PyQt6.QtCore import *
+from PyQt6.QtGui import *
 import numpy as np
 import logging
 
@@ -537,7 +537,7 @@ class BiomeTab(BaseMapTab):
         Aufgabe: Übersichtliche Darstellung aller Base- und Super-Biomes
         """
         legend_dialog = BiomeLegendDialog(self)
-        legend_dialog.exec_()
+        legend_dialog.exec()
 
     def get_all_parameters(self, generator_type: str) -> dict:
         """

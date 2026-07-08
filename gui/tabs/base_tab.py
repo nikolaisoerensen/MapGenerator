@@ -25,11 +25,11 @@ Extensibility für Sub-Classes:
 - Optional: create_visualization_controls(), update_display_mode(), check_input_dependencies()
 """
 
-from PyQt5.QtCore import (
+from PyQt6.QtCore import (
     Qt, pyqtSignal, pyqtSlot, QTimer
 )
-from PyQt5.QtGui import QFont, QPalette
-from PyQt5.QtWidgets import (
+from PyQt6.QtGui import QFont, QPalette
+from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QFrame, QSizePolicy, QLabel, QVBoxLayout,
     QScrollArea, QSplitter, QGroupBox, QStackedWidget, QRadioButton,
     QButtonGroup, QProgressBar
@@ -189,7 +189,7 @@ class BaseMapTab(QWidget):
         """
         self.statistics_widget = QWidget()
         layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.create_statistics_controls(layout)
         self.statistics_widget.setLayout(layout)
 
@@ -200,7 +200,7 @@ class BaseMapTab(QWidget):
         """
         placeholder = QLabel("Statistics view not yet separated from Parameter panel for this generator")
         placeholder.setWordWrap(True)
-        placeholder.setAlignment(Qt.AlignCenter)
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         placeholder.setStyleSheet("color: #7f8c8d; padding: 20px;")
         layout.addWidget(placeholder)
 
@@ -267,7 +267,7 @@ class BaseMapTab(QWidget):
     def _create_fallback_display(self, text: str) -> DisplayWrapper:
         """Erstellt Fallback-Display für fehlerhafte Display-Creation"""
         label = QLabel(text)
-        label.setAlignment(Qt.AlignCenter)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; color: #6c757d;")
         return DisplayWrapper(label)
 
@@ -286,9 +286,9 @@ class BaseMapTab(QWidget):
         # Scrollable Area für Parameter
         self.control_scroll_area = QScrollArea()
         self.control_scroll_area.setWidgetResizable(True)
-        self.control_scroll_area.setFrameShape(QFrame.NoFrame)
-        self.control_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.control_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.control_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.control_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.control_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         # Control Panel Content
         self.control_panel = QWidget()
@@ -328,7 +328,7 @@ class BaseMapTab(QWidget):
         try:
             fallback_layout = QVBoxLayout()
             error_label = QLabel(f"UI Setup Error:\n{error_message}")
-            error_label.setAlignment(Qt.AlignCenter)
+            error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             error_label.setStyleSheet("color: red; padding: 20px; font-size: 12px;")
             fallback_layout.addWidget(error_label)
             self.setLayout(fallback_layout)
