@@ -44,11 +44,9 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 from scipy.spatial import distance_matrix
 from collections import deque
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 import heapq
 import logging
-
-from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
 
 class WaterData:
     """
@@ -1006,6 +1004,26 @@ class HydrologySystemGenerator:
         self.soil_moisture = SoilMoistureCalculator(shader_manager=shader_manager)
         self.evaporation = EvaporationCalculator(shader_manager=shader_manager)
 
+        # Parameter der aktuell laufenden Generierungs-Anfrage - vom
+        # GenerationOrchestrator einmal pro frischer Anfrage über
+        # set_active_parameters() gesetzt, bleibt über alle LOD-Runden dieser
+        # Anfrage hinweg konstant.
+        self._current_parameters: Dict[str, Any] = {}
+
+    def set_active_parameters(self, parameters: Dict[str, Any]):
+        """Setzt die Parameter, die alle _calc_*-Methoden bis zur nächsten frischen
+        Anfrage verwenden (vom GenerationOrchestrator aufgerufen)."""
+        self._current_parameters = parameters
+
+    def _ensure_data_lod_manager(self):
+        """Lazy-Fallback für Standalone-Nutzung (Tests, calculate_hydrology() ohne
+        injizierten Manager) - die echte Pipeline injiziert immer einen über
+        GenerationOrchestrator.get_generator_instance()."""
+        if self.data_lod_manager is None:
+            from gui.OldManagers.data_lod_manager import DataLODManager
+            self.data_lod_manager = DataLODManager()
+        return self.data_lod_manager
+
     def _load_default_parameters(self):
         """Lädt WATER-Parameter aus value_default.py"""
         try:
@@ -1109,99 +1127,68 @@ class HydrologySystemGenerator:
         """
         self.logger.info(f"Starting water generation for LOD {lod}")
 
-        # Dependencies extrahieren
+        # Dependencies extrahieren (rock_map bewusst ungenutzt - war bereits vorher
+        # nie an eine der calculate_*-Methoden weitergereicht)
         heightmap = dependencies['heightmap']
         slopemap = dependencies['slopemap']
         hardness_map = dependencies['hardness_map']
-        rock_map = dependencies['rock_map']
         precip_map = dependencies['precip_map']
         temp_map = dependencies['temp_map']
         wind_map = dependencies['wind_map']
         humid_map = dependencies['humid_map']
 
-        # Parameter aktualisieren
         self._update_parameters(parameters)
+        self._ensure_data_lod_manager()
+        self.set_active_parameters(parameters)
 
-        # LOD-Größe bestimmen
         target_size = self._get_lod_size(lod, heightmap.shape[0])
 
-        # Alle Arrays auf Zielgröße interpolieren
-        heightmap = self._interpolate_array(heightmap, target_size)
-        slopemap = self._interpolate_array(slopemap, target_size)
-        hardness_map = self._interpolate_array(hardness_map, target_size)
-        rock_map = self._interpolate_array(rock_map, target_size)
-        precip_map = self._interpolate_array(precip_map, target_size)
-        temp_map = self._interpolate_array(temp_map, target_size)
-        wind_map = self._interpolate_array(wind_map, target_size)
-        humid_map = self._interpolate_array(humid_map, target_size)
-
-        # LOD-spezifische Iterationsanzahl
-        lod_iterations = self._get_lod_iterations(lod)
-
         try:
-            # Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
-            # Sequenz (siehe gui/OldManagers/calculator_graph.py - Water-Calculator-
-            # Knoten #15-#21 aus docs/generation_pipeline_dependencies.md, #22
-            # erosion_feedback bewusst ausgeschlossen - bekannt kaputt). Phase des
-            # LOD-Lockstep-Umbaus (Tracker #16): nur Water-intern zerlegt, externes
-            # Verhalten (calculate_hydrology()/_execute_generation() Signatur/
-            # Rückgabe inkl. previous_erosion_map/previous_sedimentation_map-
-            # Akkumulation) bleibt unverändert.
-            context = {
-                "heightmap": heightmap, "slopemap": slopemap, "hardness_map": hardness_map,
-                "rock_map": rock_map, "precip_map": precip_map, "temp_map": temp_map,
-                "wind_map": wind_map, "humid_map": humid_map,
-                "parameters": parameters, "lod_iterations": lod_iterations,
-                "target_size": target_size,
-                "previous_erosion_map": previous_erosion_map,
-                "previous_sedimentation_map": previous_sedimentation_map,
-            }
+            # Standalone-Convenience-Pfad (Legacy-Kompatibilität + Tests): dependencies
+            # kommen hier als direktes dict, nicht aus dem DataLODManager - für die
+            # _calc_*-Methoden (die jetzt IMMER aus dem Storage lesen) gespiegelt,
+            # analog zu Geology/Weather. Erwartet lod als int (die einzig noch aktiv
+            # genutzte LOD-Form - der alte String-LOD-Pfad ist nur noch in der
+            # separat markierten Legacy-Methode generate_hydrology_system() relevant,
+            # die keinen calculator-graph-basierten Storage mehr nutzt).
+            self.data_lod_manager.set_calculator_output("terrain.redistribution", lod, {"heightmap": heightmap})
+            self.data_lod_manager.set_calculator_output("terrain.slope", lod, {"slopemap": slopemap})
+            self.data_lod_manager.set_calculator_output(
+                "geology.hardness", lod, {"hardness_map": hardness_map})
+            self.data_lod_manager.set_calculator_output(
+                "weather.precipitation", lod, {"precip_map": precip_map})
+            self.data_lod_manager.set_calculator_output(
+                "weather.temperature", lod, {"temp_map": temp_map})
+            self.data_lod_manager.set_calculator_output("weather.wind", lod, {"wind_map": wind_map})
+            self.data_lod_manager.set_calculator_output(
+                "weather.humidity", lod, {"humid_map": humid_map})
 
-            scheduler = CalculatorRoundScheduler(
-                calculator_ids=[
-                    "water.lake_detection", "water.flow_network", "water.steepest_descent",
-                    "water.manning_flow", "water.erosion_sedimentation", "water.soil_moisture",
-                    "water.evaporation",
-                ],
-                executors={
-                    "water.lake_detection": self._calc_lake_detection,
-                    "water.flow_network": self._calc_flow_network,
-                    "water.steepest_descent": self._calc_steepest_descent,
-                    "water.manning_flow": self._calc_manning_flow,
-                    "water.erosion_sedimentation": self._calc_erosion_sedimentation,
-                    "water.soil_moisture": self._calc_soil_moisture,
-                    "water.evaporation": self._calc_evaporation,
-                },
-            )
-            scheduler.run_round(target_lod=lod, context=context)
+            if previous_erosion_map is not None or previous_sedimentation_map is not None:
+                previous_outputs = {}
+                if previous_erosion_map is not None:
+                    previous_outputs["erosion_map"] = previous_erosion_map
+                if previous_sedimentation_map is not None:
+                    previous_outputs["sedimentation_map"] = previous_sedimentation_map
+                self.data_lod_manager.set_calculator_output(
+                    "water.erosion_sedimentation", lod - 1, previous_outputs)
 
-            # Finale Berechnungen (reine Output-Formatierung, kein eigener
-            # Calculator-Knoten aus docs/generation_pipeline_dependencies.md)
-            self._update_progress("Finalization", 98, "Creating water depth map...")
-            water_map = self._create_water_depth_map(
-                context["water_biomes_map"], context["flow_accumulation"], context["cross_section"])
-            ocean_outflow = self._calculate_ocean_outflow(
-                context["flow_accumulation"], context["flow_directions"], heightmap.shape)
+            # Läuft über die einzeln aufrufbaren _calc_*-Methoden (siehe
+            # gui/OldManagers/calculator_graph.py - Water-Calculator-Knoten #15-#21
+            # aus docs/generation_pipeline_dependencies.md, #22 erosion_feedback
+            # bewusst ausgeschlossen - bekannt kaputt). Die echte GUI-Pipeline
+            # (GenerationOrchestrator) ruft dieselben Methoden ab jetzt einzeln über
+            # den globalen CalculatorDispatcher auf (Tracker #16 LOD-Lockstep-Umbau)
+            # - der Effekt ist identisch, da beide Wege denselben Storage nutzen.
+            for calculator_id in (
+                "water.lake_detection", "water.flow_network", "water.steepest_descent",
+                "water.manning_flow", "water.erosion_sedimentation", "water.soil_moisture",
+                "water.evaporation",
+            ):
+                getattr(self, "_calc_" + calculator_id.split(".", 1)[1])(calculator_id, lod)
 
-            # WaterData-Objekt erstellen
-            water_data = WaterData()
-            water_data.water_map = water_map
-            water_data.flow_map = context["flow_accumulation"]
-            water_data.flow_speed = context["flow_speed"]
-            water_data.cross_section = context["cross_section"]
-            water_data.soil_moist_map = context["soil_moist_map"]
-            water_data.erosion_map = context["erosion_map"]
-            water_data.sedimentation_map = context["sedimentation_map"]
-            water_data.evaporation_map = context["evaporation_map"]
-            water_data.ocean_outflow = ocean_outflow
-            water_data.water_biomes_map = context["water_biomes_map"]
-            water_data.lod_level = lod
-            water_data.actual_size = target_size
-            water_data.parameters = parameters.copy()
-            water_data.validity_state = "valid"
-            water_data.parameter_hash = self._calculate_parameter_hash(parameters)
+            water_data = self.assemble_water_data(lod, parameters)
 
-            self.logger.debug(f"Water generation complete - LOD: {lod}, size: {target_size}")
+            self.logger.debug(f"Water generation complete - LOD: {lod}, size: {water_data.actual_size}")
             return water_data
 
         except Exception as e:
@@ -1209,24 +1196,142 @@ class HydrologySystemGenerator:
             # Fallback zu minimal water data
             return self._create_minimal_water_data(target_size, lod, parameters)
 
-    def _calc_lake_detection(self, context: Dict[str, Any]) -> None:
+    def assemble_water_data(self, lod_level: int, parameters: Dict[str, Any]) -> WaterData:
+        """
+        Funktionsweise: Baut das finale WaterData-Objekt aus den einzeln
+        gespeicherten Calculator-Outputs zusammen (inkl. der reinen
+        Output-Formatierungs-Schritte water_map/ocean_outflow, die keine eigenen
+        Calculator-Knoten sind)
+        Aufgabe: Wird vom GenerationOrchestrator aufgerufen, sobald alle 7 Water-
+            Calculator-Knoten ein LOD abgeschlossen haben (siehe Task 18 im
+            LOD-Lockstep-Umbau)
+        """
+        flow_accumulation = self.data_lod_manager.get_calculator_output(
+            "water.flow_network", "flow_accumulation", lod_level)
+        water_biomes_map = self.data_lod_manager.get_calculator_output(
+            "water.flow_network", "water_biomes_map", lod_level)
+        flow_speed = self.data_lod_manager.get_calculator_output("water.manning_flow", "flow_speed", lod_level)
+        cross_section = self.data_lod_manager.get_calculator_output(
+            "water.manning_flow", "cross_section", lod_level)
+        flow_directions = self.data_lod_manager.get_calculator_output(
+            "water.steepest_descent", "flow_directions", lod_level)
+        erosion_map = self.data_lod_manager.get_calculator_output(
+            "water.erosion_sedimentation", "erosion_map", lod_level)
+        sedimentation_map = self.data_lod_manager.get_calculator_output(
+            "water.erosion_sedimentation", "sedimentation_map", lod_level)
+        soil_moist_map = self.data_lod_manager.get_calculator_output(
+            "water.soil_moisture", "soil_moist_map", lod_level)
+        evaporation_map = self.data_lod_manager.get_calculator_output(
+            "water.evaporation", "evaporation_map", lod_level)
+
+        missing = [name for name, value in (
+            ("flow_accumulation", flow_accumulation), ("water_biomes_map", water_biomes_map),
+            ("flow_speed", flow_speed), ("cross_section", cross_section),
+            ("flow_directions", flow_directions), ("erosion_map", erosion_map),
+            ("sedimentation_map", sedimentation_map), ("soil_moist_map", soil_moist_map),
+            ("evaporation_map", evaporation_map),
+        ) if value is None]
+        if missing:
+            raise ValueError(f"assemble_water_data: fehlende Calculator-Outputs für LOD {lod_level}: "
+                              f"{', '.join(missing)}")
+
+        target_size = flow_accumulation.shape[0]
+
+        self._update_progress("Finalization", 98, "Creating water depth map...")
+        water_map = self._create_water_depth_map(water_biomes_map, flow_accumulation, cross_section)
+        ocean_outflow = self._calculate_ocean_outflow(
+            flow_accumulation, flow_directions, (target_size, target_size))
+
+        water_data = WaterData()
+        water_data.water_map = water_map
+        water_data.flow_map = flow_accumulation
+        water_data.flow_speed = flow_speed
+        water_data.cross_section = cross_section
+        water_data.soil_moist_map = soil_moist_map
+        water_data.erosion_map = erosion_map
+        water_data.sedimentation_map = sedimentation_map
+        water_data.evaporation_map = evaporation_map
+        water_data.ocean_outflow = ocean_outflow
+        water_data.water_biomes_map = water_biomes_map
+        water_data.lod_level = lod_level
+        water_data.actual_size = target_size
+        water_data.parameters = parameters.copy()
+        water_data.validity_state = "valid"
+        water_data.parameter_hash = self._calculate_parameter_hash(parameters)
+
+        return water_data
+
+    def _get_prepared_water_inputs(self, lod_level: int, needed: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Holt NUR die tatsächlich angeforderten Water-Dependencies
+        (Terrain/Geology/Weather-Outputs) für dieses LOD und bringt sie auf
+        Water's eigene Ziel-Auflösung (_get_lod_size()). `needed` (Teilmenge von
+        "heightmap"/"slopemap"/"hardness_map"/"precip_map"/"temp_map"/"wind_map"/
+        "humid_map") MUSS pro _calc_*-Methode exakt deren echte
+        CALCULATOR_GRAPH-Abhängigkeiten widerspiegeln - sonst würde z.B.
+        water.lake_detection (haengt laut Graph NUR von terrain.redistribution
+        ab) hier fälschlich auch auf geology.hardness/weather.* warten, obwohl
+        der Dispatcher diesen Knoten bereits für bereit hält, sobald nur die
+        Heightmap existiert. Alle nicht angeforderten Werte werden gar nicht
+        erst abgefragt (kein unnötiges Warten auf Generatoren, die dieser
+        Knoten laut Graph nicht braucht).
+        target_size wird immer mitgeliefert (basiert auf heightmap, falls
+        angefordert, sonst auf dem ersten verfügbaren angeforderten Wert).
+        """
+        if needed is None:
+            needed = ["heightmap", "slopemap", "hardness_map", "precip_map", "temp_map", "wind_map", "humid_map"]
+
+        fetchers = {
+            "heightmap": lambda: self.data_lod_manager.get_calculator_combined_heightmap(lod_level),
+            "slopemap": lambda: self.data_lod_manager.get_calculator_output(
+                "terrain.slope", "slopemap", lod_level),
+            "hardness_map": lambda: self.data_lod_manager.get_calculator_output(
+                "geology.hardness", "hardness_map", lod_level),
+            "precip_map": lambda: self.data_lod_manager.get_calculator_output(
+                "weather.precipitation", "precip_map", lod_level),
+            "temp_map": lambda: self.data_lod_manager.get_calculator_output(
+                "weather.temperature", "temp_map", lod_level),
+            "wind_map": lambda: self.data_lod_manager.get_calculator_output("weather.wind", "wind_map", lod_level),
+            "humid_map": lambda: self.data_lod_manager.get_calculator_output(
+                "weather.humidity", "humid_map", lod_level),
+        }
+
+        values = {key: fetchers[key]() for key in needed}
+        missing = [name for name, value in values.items() if value is None]
+        if missing:
+            raise ValueError(f"Water: fehlende Dependencies für LOD {lod_level}: {', '.join(missing)}")
+
+        reference = values["heightmap"] if values.get("heightmap") is not None else next(iter(values.values()))
+        target_size = self._get_lod_size(lod_level, reference.shape[0])
+
+        result = {key: self._interpolate_array(value, target_size) for key, value in values.items()}
+        result["target_size"] = target_size
+        return result
+
+    def _calc_lake_detection(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'water.lake_detection' (#15)"""
         self._update_progress("Lake Detection", 5, "Detecting local minima...")
-        lake_map, valid_lakes = self.lake_detection.detect_lakes(context["heightmap"], context["parameters"])
-        context["lake_map"] = lake_map
-        context["valid_lakes"] = valid_lakes
+        inputs = self._get_prepared_water_inputs(lod_level, needed=["heightmap"])
+        lake_map, _valid_lakes = self.lake_detection.detect_lakes(inputs["heightmap"], self._current_parameters)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"lake_map": lake_map})
 
-    def _calc_flow_network(self, context: Dict[str, Any]) -> None:
+    def _calc_flow_network(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'water.flow_network' (#16)"""
         self._update_progress("Flow Network", 20, "Calculating steepest descent...")
-        flow_accumulation, water_biomes_map = self.flow_network.build_flow_network(
-            context["heightmap"], context["precip_map"], context["lake_map"], context["parameters"],
-            context["lod_iterations"]
-        )
-        context["flow_accumulation"] = flow_accumulation
-        context["water_biomes_map"] = water_biomes_map
+        inputs = self._get_prepared_water_inputs(lod_level, needed=["heightmap", "precip_map"])
+        lod_iterations = self._get_lod_iterations(lod_level)
+        lake_map = self.data_lod_manager.get_calculator_output("water.lake_detection", "lake_map", lod_level)
+        if lake_map is None:
+            raise ValueError(f"water.flow_network: lake_map für LOD {lod_level} nicht verfügbar")
 
-    def _calc_steepest_descent(self, context: Dict[str, Any]) -> None:
+        flow_accumulation, water_biomes_map = self.flow_network.build_flow_network(
+            inputs["heightmap"], inputs["precip_map"], lake_map, self._current_parameters, lod_iterations
+        )
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level,
+            {"flow_accumulation": flow_accumulation, "water_biomes_map": water_biomes_map})
+
+    def _calc_steepest_descent(self, calculator_id: str, lod_level: int) -> None:
         """
         Calculator-Node 'water.steepest_descent' (#17) - Sibling zu flow_network,
         haengt nur von heightmap ab. flow_network berechnet Flow-Directions intern
@@ -1234,33 +1339,55 @@ class HydrologySystemGenerator:
         FlowNetworkBuilder) - dieser Knoten liefert das fuer die
         Erosion-Sedimentation benoetigte flow_directions-Array.
         """
-        context["flow_directions"] = self.flow_network._calculate_steepest_descent(context["heightmap"])
+        inputs = self._get_prepared_water_inputs(lod_level, needed=["heightmap"])
+        flow_directions = self.flow_network._calculate_steepest_descent(inputs["heightmap"])
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"flow_directions": flow_directions})
 
-    def _calc_manning_flow(self, context: Dict[str, Any]) -> None:
+    def _calc_manning_flow(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'water.manning_flow' (#18)"""
         self._update_progress("Manning Flow", 45, "Solving Manning equation...")
-        flow_speed, cross_section = self.manning_calculator.calculate_flow_properties(
-            context["flow_accumulation"], context["slopemap"], context["heightmap"], context["parameters"],
-            context["lod_iterations"]
-        )
-        context["flow_speed"] = flow_speed
-        context["cross_section"] = cross_section
+        inputs = self._get_prepared_water_inputs(lod_level, needed=["heightmap", "slopemap"])
+        lod_iterations = self._get_lod_iterations(lod_level)
+        flow_accumulation = self.data_lod_manager.get_calculator_output(
+            "water.flow_network", "flow_accumulation", lod_level)
+        if flow_accumulation is None:
+            raise ValueError(f"water.manning_flow: flow_accumulation für LOD {lod_level} nicht verfügbar")
 
-    def _calc_erosion_sedimentation(self, context: Dict[str, Any]) -> None:
+        flow_speed, cross_section = self.manning_calculator.calculate_flow_properties(
+            flow_accumulation, inputs["slopemap"], inputs["heightmap"], self._current_parameters, lod_iterations
+        )
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"flow_speed": flow_speed, "cross_section": cross_section})
+
+    def _calc_erosion_sedimentation(self, calculator_id: str, lod_level: int) -> None:
         """
         Calculator-Node 'water.erosion_sedimentation' (#19) - inkl. Kumulation
-        über LOD-Durchläufe (previous_erosion_map/previous_sedimentation_map),
-        analog zu Geology._calc_tectonic_deformation().
+        über LOD-Durchläufe: liest sein EIGENES Ergebnis aus der vorherigen Runde
+        (lod_level - 1) als previous_erosion_map/previous_sedimentation_map, statt
+        wie früher vom Aufrufer übergeben zu bekommen (analog zu
+        Geology._calc_tectonic_deformation()).
         """
         self._update_progress("Erosion-Sedimentation", 65, "Calculating stream power...")
+        inputs = self._get_prepared_water_inputs(lod_level, needed=["hardness_map"])
+        lod_iterations = self._get_lod_iterations(lod_level)
+        flow_accumulation = self.data_lod_manager.get_calculator_output(
+            "water.flow_network", "flow_accumulation", lod_level)
+        flow_speed = self.data_lod_manager.get_calculator_output("water.manning_flow", "flow_speed", lod_level)
+        flow_directions = self.data_lod_manager.get_calculator_output(
+            "water.steepest_descent", "flow_directions", lod_level)
+        if flow_accumulation is None or flow_speed is None or flow_directions is None:
+            raise ValueError(f"water.erosion_sedimentation: fehlende Inputs für LOD {lod_level}")
+
         erosion_map, sedimentation_map = self.erosion_system.simulate_erosion_sedimentation(
-            context["flow_accumulation"], context["flow_speed"], context["flow_directions"],
-            context["hardness_map"], context["parameters"], context["lod_iterations"]
+            flow_accumulation, flow_speed, flow_directions, inputs["hardness_map"],
+            self._current_parameters, lod_iterations
         )
 
-        target_size = context["target_size"]
-        previous_erosion_map = context["previous_erosion_map"]
-        previous_sedimentation_map = context["previous_sedimentation_map"]
+        target_size = inputs["target_size"]
+        previous_erosion_map = self.data_lod_manager.get_calculator_output(
+            calculator_id, "erosion_map", lod_level - 1)
+        previous_sedimentation_map = self.data_lod_manager.get_calculator_output(
+            calculator_id, "sedimentation_map", lod_level - 1)
 
         # Kumulative Akkumulation über LOD-Durchläufe: die frische Erosion/Sedimentation
         # dieser Passage kommt zur bereits akkumulierten Menge aus dem letzten LOD dazu.
@@ -1273,23 +1400,36 @@ class HydrologySystemGenerator:
                 previous_sedimentation_map = self._interpolate_2d(previous_sedimentation_map, target_size)
             sedimentation_map = sedimentation_map + previous_sedimentation_map
 
-        context["erosion_map"] = erosion_map
-        context["sedimentation_map"] = sedimentation_map
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"erosion_map": erosion_map, "sedimentation_map": sedimentation_map})
 
-    def _calc_soil_moisture(self, context: Dict[str, Any]) -> None:
+    def _calc_soil_moisture(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'water.soil_moisture' (#20)"""
         self._update_progress("Soil Moisture", 88, "Calculating gaussian diffusion...")
-        context["soil_moist_map"] = self.soil_moisture.calculate_soil_moisture(
-            context["water_biomes_map"], context["flow_accumulation"], context["parameters"]
-        )
+        flow_accumulation = self.data_lod_manager.get_calculator_output(
+            "water.flow_network", "flow_accumulation", lod_level)
+        water_biomes_map = self.data_lod_manager.get_calculator_output(
+            "water.flow_network", "water_biomes_map", lod_level)
+        if flow_accumulation is None or water_biomes_map is None:
+            raise ValueError(f"water.soil_moisture: fehlende Inputs für LOD {lod_level}")
 
-    def _calc_evaporation(self, context: Dict[str, Any]) -> None:
+        soil_moist_map = self.soil_moisture.calculate_soil_moisture(
+            water_biomes_map, flow_accumulation, self._current_parameters)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"soil_moist_map": soil_moist_map})
+
+    def _calc_evaporation(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'water.evaporation' (#21) - Sibling zu soil_moisture"""
         self._update_progress("Evaporation", 96, "Calculating atmospheric evaporation...")
-        context["evaporation_map"] = self.evaporation.calculate_evaporation(
-            context["temp_map"], context["wind_map"], context["humid_map"], context["water_biomes_map"],
-            context["parameters"]
-        )
+        inputs = self._get_prepared_water_inputs(lod_level, needed=["temp_map", "wind_map", "humid_map"])
+        water_biomes_map = self.data_lod_manager.get_calculator_output(
+            "water.flow_network", "water_biomes_map", lod_level)
+        if water_biomes_map is None:
+            raise ValueError(f"water.evaporation: water_biomes_map für LOD {lod_level} nicht verfügbar")
+
+        evaporation_map = self.evaporation.calculate_evaporation(
+            inputs["temp_map"], inputs["wind_map"], inputs["humid_map"], water_biomes_map,
+            self._current_parameters)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"evaporation_map": evaporation_map})
 
     def _update_parameters(self, parameters):
         """Aktualisiert alle Sub-System Parameter"""

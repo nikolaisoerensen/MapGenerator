@@ -39,8 +39,6 @@ from opensimplex import OpenSimplex
 import logging
 from typing import Dict, Any, Tuple
 
-from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
-
 
 class WeatherData:
     """
@@ -124,10 +122,37 @@ class WeatherSystemGenerator:
         # Progress-Callback für UI-Updates
         self.progress_callback = None
 
+        # Parameter der aktuell laufenden Generierungs-Anfrage - vom
+        # GenerationOrchestrator einmal pro frischer Anfrage über
+        # set_active_parameters() gesetzt, bleibt über alle LOD-Runden dieser
+        # Anfrage hinweg konstant.
+        self._current_parameters: Dict[str, Any] = {}
+
+    def set_active_parameters(self, parameters: Dict[str, Any]):
+        """Setzt die Parameter, die alle _calc_*-Methoden bis zur nächsten frischen
+        Anfrage verwenden (vom GenerationOrchestrator aufgerufen)."""
+        self._current_parameters = parameters
+
+    def _ensure_data_lod_manager(self):
+        """Lazy-Fallback für Standalone-Nutzung (Tests, calculate_weather_system()
+        ohne injizierten Manager) - die echte Pipeline injiziert immer einen über
+        GenerationOrchestrator.get_generator_instance()."""
+        if self.data_lod_manager is None:
+            from gui.OldManagers.data_lod_manager import DataLODManager
+            self.data_lod_manager = DataLODManager()
+        return self.data_lod_manager
+
     def calculate_weather_system(self, heightmap_combined: np.ndarray, shadowmap: np.ndarray,
                                 parameters: Dict[str, Any], lod_level: int) -> WeatherData:
         """
-        Hauptmethode für Weather-System-Generierung mit vollständiger LOD-Progression
+        Funktionsweise: Standalone-Convenience-Entry-Point (Legacy-Kompatibilität + Tests)
+        Aufgabe: Führt alle 4 Weather-Calculator-Knoten synchron für EIN LOD aus und
+            liefert das fertige WeatherData-Objekt. Die echte GUI-Pipeline
+            (GenerationOrchestrator) ruft dieselben _calc_*-Methoden ab jetzt einzeln
+            über den globalen CalculatorDispatcher auf (Tracker #16 LOD-Lockstep-
+            Umbau) - der Effekt ist identisch, da beide Wege denselben Storage nutzen.
+            Weather hat - anders als Geology/Water - keinen Cross-LOD-
+            Akkumulationszustand, jeder Aufruf ist eigenständig.
 
         Args:
             heightmap_combined: Post-Erosion Heightmap vom Water-Generator oder Original-Heightmap
@@ -145,55 +170,26 @@ class WeatherSystemGenerator:
         try:
             self.logger.debug(f"Starting weather generation - LOD {lod_level}, size: {heightmap_combined.shape}")
 
-            # Input-Validation
             self._validate_inputs(heightmap_combined, shadowmap, parameters, lod_level)
+            self._ensure_data_lod_manager()
+            self.set_active_parameters(parameters)
 
-            # Target-Size für LOD bestimmen
-            target_size = self._get_lod_size(lod_level, heightmap_combined.shape[0])
+            # Standalone-Convenience-Pfad: heightmap_combined/shadowmap kommen hier
+            # als direkte Parameter, nicht aus dem DataLODManager - für die
+            # _calc_*-Methoden (die jetzt IMMER aus dem feingranularen Calculator-
+            # Storage lesen, siehe get_calculator_combined_heightmap()) dort
+            # gespiegelt, analog zu Geology/Water.
+            self.data_lod_manager.set_calculator_output(
+                "terrain.redistribution", lod_level, {"heightmap": heightmap_combined})
+            self.data_lod_manager.set_calculator_output(
+                "terrain.shadow", lod_level, {"shadowmap": shadowmap})
 
-            # CFD-Iterations für LOD bestimmen
-            cfd_iterations = self._get_cfd_iterations(lod_level)
+            for calculator_id in (
+                "weather.temperature", "weather.wind", "weather.humidity", "weather.precipitation",
+            ):
+                getattr(self, "_calc_" + calculator_id.split(".", 1)[1])(calculator_id, lod_level)
 
-            self.logger.debug(f"Weather generation - target_size: {target_size}, CFD iterations: {cfd_iterations}")
-
-            # Input-Data auf Target-Size interpolieren
-            heightmap, shadowmap = self._prepare_input_data(heightmap_combined, shadowmap, target_size)
-
-            # Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
-            # Sequenz (siehe gui/OldManagers/calculator_graph.py - Weather-Calculator-
-            # Knoten #11-#14 aus docs/generation_pipeline_dependencies.md). Phase des
-            # LOD-Lockstep-Umbaus (Tracker #16): nur Weather-intern zerlegt, externes
-            # Verhalten (calculate_weather_system() Signatur/Rückgabe) bleibt
-            # unverändert. Weather hat - anders als Geology/Water - keinen
-            # Cross-LOD-Akkumulationszustand, jeder Aufruf ist eigenständig.
-            context = {
-                "heightmap": heightmap,
-                "shadowmap": shadowmap,
-                "parameters": parameters,
-                "target_size": target_size,
-                "cfd_iterations": cfd_iterations,
-            }
-
-            scheduler = CalculatorRoundScheduler(
-                calculator_ids=[
-                    "weather.temperature", "weather.wind", "weather.humidity", "weather.precipitation",
-                ],
-                executors={
-                    "weather.temperature": self._calc_temperature,
-                    "weather.wind": self._calc_wind,
-                    "weather.humidity": self._calc_humidity,
-                    "weather.precipitation": self._calc_precipitation,
-                },
-            )
-            scheduler.run_round(target_lod=lod_level, context=context)
-
-            # WeatherData-Objekt erstellen und validieren
-            weather_data = self._create_weather_data(
-                context["wind_map"], context["temp_map"], context["precip_map"], context["humid_map"],
-                lod_level, target_size, parameters)
-
-            # Performance-Stats aktualisieren
-            self._update_performance_stats(weather_data, cfd_iterations)
+            weather_data = self.assemble_weather_data(lod_level, parameters)
 
             self.logger.info(f"Weather generation completed successfully - LOD {lod_level}")
 
@@ -204,31 +200,95 @@ class WeatherSystemGenerator:
             # Error-Recovery: Fallback zu Simplified-Weather-System
             return self._create_fallback_weather_data(heightmap_combined.shape[0], lod_level, parameters)
 
-    def _calc_temperature(self, context: Dict[str, Any]) -> None:
+    def assemble_weather_data(self, lod_level: int, parameters: Dict[str, Any]) -> WeatherData:
+        """
+        Funktionsweise: Baut das finale WeatherData-Objekt aus den einzeln
+        gespeicherten Calculator-Outputs zusammen
+        Aufgabe: Wird vom GenerationOrchestrator aufgerufen, sobald alle 4 Weather-
+            Calculator-Knoten ein LOD abgeschlossen haben (siehe Task 18 im
+            LOD-Lockstep-Umbau)
+        """
+        temp_map = self.data_lod_manager.get_calculator_output("weather.temperature", "temp_map", lod_level)
+        wind_map = self.data_lod_manager.get_calculator_output("weather.wind", "wind_map", lod_level)
+        humid_map = self.data_lod_manager.get_calculator_output("weather.humidity", "humid_map", lod_level)
+        precip_map = self.data_lod_manager.get_calculator_output("weather.precipitation", "precip_map", lod_level)
+
+        if temp_map is None or wind_map is None or humid_map is None or precip_map is None:
+            raise ValueError(f"assemble_weather_data: fehlende Calculator-Outputs für LOD {lod_level}")
+
+        target_size = temp_map.shape[0]
+        weather_data = self._create_weather_data(
+            wind_map, temp_map, precip_map, humid_map, lod_level, target_size, parameters)
+
+        cfd_iterations = self._get_cfd_iterations(lod_level)
+        self._update_performance_stats(weather_data, cfd_iterations)
+
+        return weather_data
+
+    def _get_prepared_terrain_inputs(self, lod_level: int):
+        """
+        Holt heightmap_combined/shadowmap für dieses LOD und bringt sie auf die
+        Weather-eigene Ziel-Auflösung (siehe _get_lod_size()) - Ersatz für das
+        frühere context-basierte Vorab-Interpolieren, das nur innerhalb EINES
+        calculate_weather_system()-Aufrufs existierte. Jede _calc_*-Methode ruft
+        das unabhängig auf (billige, reine Operation - kein gemeinsamer Zustand
+        zwischen separaten Dispatch-Aufrufen nötig).
+        """
+        heightmap_combined = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
+        shadowmap = self.data_lod_manager.get_calculator_output("terrain.shadow", "shadowmap", lod_level)
+        if heightmap_combined is None or shadowmap is None:
+            raise ValueError(f"Weather: heightmap_combined/shadowmap für LOD {lod_level} nicht verfügbar")
+
+        target_size = self._get_lod_size(lod_level, heightmap_combined.shape[0])
+        heightmap, shadowmap = self._prepare_input_data(heightmap_combined, shadowmap, target_size)
+        return heightmap, shadowmap, target_size
+
+    def _calc_temperature(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'weather.temperature' (#11)"""
         self._update_progress("Temperature", 20, "Calculating temperature field with orographic effects...")
-        context["temp_map"] = self._calculate_temperature_field(
-            context["heightmap"], context["shadowmap"], context["parameters"], context["target_size"])
+        heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
+        temp_map = self._calculate_temperature_field(
+            heightmap, shadowmap, self._current_parameters, target_size)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"temp_map": temp_map})
 
-    def _calc_wind(self, context: Dict[str, Any]) -> None:
+    def _calc_wind(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'weather.wind' (#12)"""
-        self._update_progress("Wind Field", 30, f"CFD simulation with {context['cfd_iterations']} iterations...")
-        context["wind_map"] = self._simulate_wind_field_cfd(
-            context["heightmap"], context["temp_map"], context["shadowmap"], context["parameters"],
-            context["target_size"], context["cfd_iterations"])
+        cfd_iterations = self._get_cfd_iterations(lod_level)
+        self._update_progress("Wind Field", 30, f"CFD simulation with {cfd_iterations} iterations...")
+        heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
+        temp_map = self.data_lod_manager.get_calculator_output("weather.temperature", "temp_map", lod_level)
+        if temp_map is None:
+            raise ValueError(f"weather.wind: temp_map für LOD {lod_level} nicht verfügbar")
 
-    def _calc_humidity(self, context: Dict[str, Any]) -> None:
+        wind_map = self._simulate_wind_field_cfd(
+            heightmap, temp_map, shadowmap, self._current_parameters, target_size, cfd_iterations)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"wind_map": wind_map})
+
+    def _calc_humidity(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'weather.humidity' (#13)"""
         self._update_progress("Humidity", 60, "Calculating atmospheric moisture transport...")
-        context["humid_map"] = self._calculate_atmospheric_moisture(
-            context["heightmap"], context["temp_map"], context["wind_map"], context["parameters"])
+        heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
+        temp_map = self.data_lod_manager.get_calculator_output("weather.temperature", "temp_map", lod_level)
+        wind_map = self.data_lod_manager.get_calculator_output("weather.wind", "wind_map", lod_level)
+        if temp_map is None or wind_map is None:
+            raise ValueError(f"weather.humidity: fehlende Inputs für LOD {lod_level}")
 
-    def _calc_precipitation(self, context: Dict[str, Any]) -> None:
+        humid_map = self._calculate_atmospheric_moisture(heightmap, temp_map, wind_map, self._current_parameters)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"humid_map": humid_map})
+
+    def _calc_precipitation(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'weather.precipitation' (#14)"""
         self._update_progress("Precipitation", 80, "Calculating orographic precipitation...")
-        context["precip_map"] = self._calculate_precipitation_system(
-            context["humid_map"], context["temp_map"], context["wind_map"], context["heightmap"],
-            context["parameters"])
+        heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
+        temp_map = self.data_lod_manager.get_calculator_output("weather.temperature", "temp_map", lod_level)
+        wind_map = self.data_lod_manager.get_calculator_output("weather.wind", "wind_map", lod_level)
+        humid_map = self.data_lod_manager.get_calculator_output("weather.humidity", "humid_map", lod_level)
+        if temp_map is None or wind_map is None or humid_map is None:
+            raise ValueError(f"weather.precipitation: fehlende Inputs für LOD {lod_level}")
+
+        precip_map = self._calculate_precipitation_system(
+            humid_map, temp_map, wind_map, heightmap, self._current_parameters)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"precip_map": precip_map})
 
     def _validate_inputs(self, heightmap_combined: np.ndarray, shadowmap: np.ndarray,
                         parameters: Dict[str, Any], lod_level: int):
