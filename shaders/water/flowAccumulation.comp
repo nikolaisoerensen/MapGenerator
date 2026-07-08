@@ -1,0 +1,40 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Richtungsindex 0-7 als float, -1.0 = keiner (aus steepestDescent.comp)
+layout(r32f, binding = 0) uniform readonly image2D flowDirections;
+layout(r32f, binding = 1) uniform readonly image2D initialWater;
+layout(r32f, binding = 2) uniform readonly image2D accumIn;
+layout(r32f, binding = 3) uniform writeonly image2D accumOut;
+
+uniform int u_size;
+
+// Portierung von FlowNetworkBuilder._accumulate_upstream_flow() (core/water_generator.py):
+// EIN Jacobi-Iterationsschritt der Upstream-Akkumulation. Der Host (Python) ruft diesen
+// Shader max_iterations-mal mit Ping-Pong zwischen zwei Puffern auf - identisch zum
+// CPU-Original, nur ohne dessen Early-Exit-Konvergenzpruefung (ein bereits konvergierter
+// Fixpunkt bleibt unter dieser Update-Regel ohnehin unveraendert, zusaetzliche Iterationen
+// danach aendern also nichts am Endergebnis).
+const ivec2 OFFSETS[8] = ivec2[8](
+    ivec2(1, 0), ivec2(1, 1), ivec2(0, 1), ivec2(-1, 1),
+    ivec2(-1, 0), ivec2(-1, -1), ivec2(0, -1), ivec2(1, -1)
+);
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float incoming = 0.0;
+    for (int source_dir = 0; source_dir < 8; source_dir++) {
+        ivec2 scoord = coord - OFFSETS[source_dir];
+        if (scoord.x < 0 || scoord.x >= u_size || scoord.y < 0 || scoord.y >= u_size) continue;
+
+        float source_direction = imageLoad(flowDirections, scoord).r;
+        if (int(source_direction) == source_dir) {
+            incoming += imageLoad(accumIn, scoord).r;
+        }
+    }
+
+    float initial = imageLoad(initialWater, coord).r;
+    imageStore(accumOut, coord, vec4(initial + incoming, 0.0, 0.0, 0.0));
+}

@@ -88,10 +88,8 @@ from scipy.interpolate import splprep, splev
 import heapq
 import logging
 from dataclasses import dataclass
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any
 import random
-
-from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
 
 
 class SettlementData:
@@ -617,11 +615,15 @@ class SettlementGenerator:
     Aufgabe: Koordiniert alle Settlement-Aspekte und erstellt civ_map mit Progress-Updates
     """
 
-    def __init__(self, map_seed=42):
+    def __init__(self, map_seed=42, data_lod_manager=None):
         """
         Funktionsweise: Initialisiert Settlement-Generator mit BaseGenerator und Sub-Komponenten
         Aufgabe: Setup aller Settlement-Systeme und Rng-Seed
         Parameter: map_seed (int) - Globaler Seed für reproduzierbare Settlement-Platzierung
+        Parameter: data_lod_manager - DataLODManager für feingranularen Calculator-Storage
+            (siehe set_calculator_output()/get_calculator_output()). Die echte Pipeline
+            injiziert immer eine Instanz über GenerationOrchestrator.get_generator_instance();
+            bleibt sie None (Standalone/Tests), wird beim ersten Bedarf lazy eine eigene erzeugt.
         """
         self.map_seed = map_seed
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -629,6 +631,7 @@ class SettlementGenerator:
         np.random.seed(map_seed)
 
         self.next_location_id = 0
+        self.data_lod_manager = data_lod_manager
 
         # Progress-Callback (step_name, progress_percent, detail_message) -> None.
         # War nie initialisiert - _execute_generation() ruft self._update_progress()
@@ -648,6 +651,33 @@ class SettlementGenerator:
         self.road_slope_to_distance_ratio = 1.5
         self.landmark_wilderness = 0.3
         self.plotsize = 2.0
+
+    def set_active_parameters(self, parameters):
+        """
+        Setzt die Parameter, die alle calculate_*()/_calc_*-Methoden bis zur
+        nächsten frischen Anfrage verwenden (vom GenerationOrchestrator
+        aufgerufen). Settlement speichert Parameter als Instanz-Attribute
+        (self.settlements etc.), nicht als eigenes dict - entspricht dem, was
+        _execute_generation() vorher direkt inline gemacht hat.
+        """
+        self.settlements = parameters['settlements']
+        self.landmarks = parameters['landmarks']
+        self.roadsites = parameters['roadsites']
+        self.plotnodes = parameters['plotnodes']
+        self.civ_influence_decay = parameters['civ_influence_decay']
+        self.terrain_factor_villages = parameters['terrain_factor_villages']
+        self.road_slope_to_distance_ratio = parameters['road_slope_to_distance_ratio']
+        self.landmark_wilderness = parameters['landmark_wilderness']
+        self.plotsize = parameters['plotsize']
+
+    def _ensure_data_lod_manager(self):
+        """Lazy-Fallback für Standalone-Nutzung (Tests, _execute_generation() ohne
+        injizierten Manager) - die echte Pipeline injiziert immer einen über
+        GenerationOrchestrator.get_generator_instance()."""
+        if self.data_lod_manager is None:
+            from gui.OldManagers.data_lod_manager import DataLODManager
+            self.data_lod_manager = DataLODManager()
+        return self.data_lod_manager
 
     def _load_default_parameters(self):
         """
@@ -777,16 +807,8 @@ class SettlementGenerator:
         water_map = dependencies['water_map']
         biome_map = dependencies['biome_map']
 
-        # Parameter aktualisieren
-        self.settlements = parameters['settlements']
-        self.landmarks = parameters['landmarks']
-        self.roadsites = parameters['roadsites']
-        self.plotnodes = parameters['plotnodes']
-        self.civ_influence_decay = parameters['civ_influence_decay']
-        self.terrain_factor_villages = parameters['terrain_factor_villages']
-        self.road_slope_to_distance_ratio = parameters['road_slope_to_distance_ratio']
-        self.landmark_wilderness = parameters['landmark_wilderness']
-        self.plotsize = parameters['plotsize']
+        self.set_active_parameters(parameters)
+        self._ensure_data_lod_manager()
 
         # LOD-Größe bestimmen
         target_size = self._get_lod_size(lod, heightmap.shape[0])
@@ -798,109 +820,211 @@ class SettlementGenerator:
             water_map = self._interpolate_array(water_map, target_size)
             biome_map = self._interpolate_array(biome_map, target_size)
 
-        # SettlementData-Objekt erstellen
-        settlement_data = SettlementData()
-        settlement_data.lod_level = lod
-        settlement_data.actual_size = target_size
-        settlement_data.parameters = parameters.copy()
+        try:
+            # Standalone-Convenience-Pfad (Legacy-Kompatibilität + Tests): dependencies
+            # kommen hier als direktes dict, nicht aus dem DataLODManager - für die
+            # _calc_*-Methoden (die jetzt IMMER aus dem Storage lesen) gespiegelt,
+            # analog zu Geology/Water/Biome. Erwartet lod als int (siehe
+            # _get_prepared_settlement_inputs()/set_calculator_output() - der
+            # String-LOD-Pfad ist nur noch für ungenutzten Legacy-Code relevant).
+            self.data_lod_manager.set_calculator_output("terrain.redistribution", lod, {"heightmap": heightmap})
+            self.data_lod_manager.set_calculator_output("terrain.slope", lod, {"slopemap": slopemap})
+            self.data_lod_manager.set_calculator_output(
+                "water.flow_network", lod, {"water_biomes_map": water_map})
+            self.data_lod_manager.set_calculator_output(
+                "biome.integrate_layers", lod, {"biome_map": biome_map})
 
-        # Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
-        # Sequenz (siehe gui/OldManagers/calculator_graph.py - Settlement-Calculator-
-        # Knoten #28-#34 aus docs/generation_pipeline_dependencies.md). Phase des
-        # LOD-Lockstep-Umbaus (Tracker #16): nur Settlement-intern zerlegt, externes
-        # Verhalten (_execute_generation() Signatur/Rückgabe) bleibt unverändert.
-        context = {
-            "heightmap": heightmap, "slopemap": slopemap, "water_map": water_map,
-            "biome_map": biome_map, "lod": lod, "settlement_data": settlement_data,
-        }
-
-        scheduler = CalculatorRoundScheduler(
-            calculator_ids=[
+            # Läuft über die einzeln aufrufbaren _calc_*-Methoden (siehe
+            # gui/OldManagers/calculator_graph.py - Settlement-Calculator-Knoten
+            # #28-#34 aus docs/generation_pipeline_dependencies.md). Die echte
+            # GUI-Pipeline (GenerationOrchestrator) ruft dieselben Methoden ab jetzt
+            # einzeln über den globalen CalculatorDispatcher auf (Tracker #16
+            # LOD-Lockstep-Umbau) - nur #34 (plot_nodes) braucht biome_map, die
+            # anderen 6 Phasen können unabhängig von Biome starten.
+            for calculator_id in (
                 "settlement.suitability", "settlement.settlements", "settlement.pathfinding",
                 "settlement.roadsites", "settlement.civ_influence", "settlement.landmarks",
                 "settlement.plot_nodes",
-            ],
-            executors={
-                "settlement.suitability": self._calc_suitability,
-                "settlement.settlements": self._calc_settlements,
-                "settlement.pathfinding": self._calc_pathfinding,
-                "settlement.roadsites": self._calc_roadsites,
-                "settlement.civ_influence": self._calc_civ_influence,
-                "settlement.landmarks": self._calc_landmarks,
-                "settlement.plot_nodes": self._calc_plot_nodes,
-            },
-        )
-        # target_lod ist hier reine interne Scheduler-Buchführung für EINEN Aufruf
-        # (lod kann historisch auch ein String wie "LOD64" sein, siehe
-        # _get_lod_size() - der Scheduler braucht nur einen festen int für den
-        # Abhängigkeits-Vergleich innerhalb dieser einen Runde).
-        scheduler.run_round(target_lod=1, context=context)
+            ):
+                getattr(self, "_calc_" + calculator_id.split(".", 1)[1])(calculator_id, lod)
 
-        self.logger.debug(f"Settlement generation complete - LOD: {lod}, size: {target_size}")
-        self.logger.debug(f"Generated: {len(settlement_data.settlement_list)} settlements, {len(settlement_data.roads)} roads, {len(settlement_data.plots)} plots")
+            settlement_data = self.assemble_settlement_data(lod, parameters)
+
+            self.logger.debug(f"Settlement generation complete - LOD: {lod}, size: {target_size}")
+            self.logger.debug(
+                f"Generated: {len(settlement_data.settlement_list)} settlements, "
+                f"{len(settlement_data.roads)} roads, {len(settlement_data.plots)} plots")
+
+            return settlement_data
+
+        except Exception as e:
+            self.logger.error(f"Settlement generation failed: {e}")
+            raise
+
+    def assemble_settlement_data(self, lod_level: int, parameters) -> SettlementData:
+        """
+        Funktionsweise: Baut das finale SettlementData-Objekt aus den einzeln
+        gespeicherten Calculator-Outputs zusammen
+        Aufgabe: Wird vom GenerationOrchestrator aufgerufen, sobald alle 7
+            Settlement-Calculator-Knoten ein LOD abgeschlossen haben (siehe
+            Task 18 im LOD-Lockstep-Umbau)
+        """
+        combined_suitability_map = self.data_lod_manager.get_calculator_output(
+            "settlement.suitability", "combined_suitability_map", lod_level)
+        settlement_list = self.data_lod_manager.get_calculator_output(
+            "settlement.settlements", "settlement_list", lod_level)
+        roads = self.data_lod_manager.get_calculator_output("settlement.pathfinding", "roads", lod_level)
+        roadsite_list = self.data_lod_manager.get_calculator_output(
+            "settlement.roadsites", "roadsite_list", lod_level)
+        civ_map = self.data_lod_manager.get_calculator_output("settlement.civ_influence", "civ_map", lod_level)
+        landmark_list = self.data_lod_manager.get_calculator_output(
+            "settlement.landmarks", "landmark_list", lod_level)
+        plot_nodes = self.data_lod_manager.get_calculator_output(
+            "settlement.plot_nodes", "plot_nodes", lod_level)
+        plots = self.data_lod_manager.get_calculator_output("settlement.plot_nodes", "plots", lod_level)
+        plot_map = self.data_lod_manager.get_calculator_output("settlement.plot_nodes", "plot_map", lod_level)
+
+        if combined_suitability_map is None or settlement_list is None or civ_map is None:
+            raise ValueError(f"assemble_settlement_data: fehlende Calculator-Outputs für LOD {lod_level}")
+
+        settlement_data = SettlementData()
+        settlement_data.lod_level = lod_level
+        settlement_data.actual_size = combined_suitability_map.shape[0]
+        settlement_data.parameters = parameters.copy()
+        settlement_data.combined_suitability_map = combined_suitability_map
+        settlement_data.settlement_list = settlement_list
+        settlement_data.roads = roads if roads is not None else []
+        settlement_data.roadsite_list = roadsite_list if roadsite_list is not None else []
+        settlement_data.civ_map = civ_map
+        settlement_data.landmark_list = landmark_list if landmark_list is not None else []
+        settlement_data.plot_nodes = plot_nodes if plot_nodes is not None else []
+        settlement_data.plots = plots if plots is not None else []
+        settlement_data.plot_map = plot_map
+
+        settlement_data.terrain_suitability_valid = True
+        settlement_data.settlements_valid = True
+        settlement_data.road_network_valid = roads is not None
+        settlement_data.roadsites_valid = roadsite_list is not None
+        settlement_data.civilization_mapping_valid = True
+        settlement_data.landmarks_valid = landmark_list is not None
+        settlement_data.plots_valid = plot_nodes is not None
 
         return settlement_data
 
-    def _calc_suitability(self, context) -> None:
+    def _get_prepared_settlement_inputs(self, lod_level: int) -> Dict[str, Any]:
+        """
+        Holt alle Settlement-Dependencies (Terrain/Water-Outputs) für dieses LOD.
+        water_map wird bewusst direkt aus water.flow_network's water_biomes_map
+        gelesen (Calculator-Graph-Ebene), nicht aus der zusammengesetzten
+        Domain-Ebene (DataLODManager.get_water_data_lod('water_map')) - funktional
+        äquivalent für die reine Wasser-Präsenz-Prüfung in
+        TerrainSuitabilityAnalyzer.calculate_water_proximity() (prüft nur
+        `water_map > 0`), aber verfügbar sobald DIESER EINE Water-Knoten fertig
+        ist, ohne auf die vollständige Water-Generator-Assemblierung zu warten.
+        """
+        heightmap = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
+        slopemap = self.data_lod_manager.get_calculator_output("terrain.slope", "slopemap", lod_level)
+        water_map = self.data_lod_manager.get_calculator_output(
+            "water.flow_network", "water_biomes_map", lod_level)
+
+        missing = [name for name, value in (
+            ("heightmap", heightmap), ("slopemap", slopemap), ("water_map", water_map)
+        ) if value is None]
+        if missing:
+            raise ValueError(f"Settlement: fehlende Dependencies für LOD {lod_level}: {', '.join(missing)}")
+
+        return {"heightmap": heightmap, "slopemap": slopemap, "water_map": water_map}
+
+    def _calc_suitability(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.suitability' (#28)"""
-        settlement_data = context["settlement_data"]
         self._update_progress("Terrain Analysis", 5, "Analyzing terrain suitability for settlements...")
-        settlement_data.combined_suitability_map = self.calculate_terrain_suitability(
-            context["heightmap"], context["slopemap"], context["water_map"], context["lod"])
-        settlement_data.terrain_suitability_valid = True
+        inputs = self._get_prepared_settlement_inputs(lod_level)
+        suitability_map = self.calculate_terrain_suitability(
+            inputs["heightmap"], inputs["slopemap"], inputs["water_map"], lod_level)
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"combined_suitability_map": suitability_map})
 
-    def _calc_settlements(self, context) -> None:
+    def _calc_settlements(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.settlements' (#29)"""
-        settlement_data = context["settlement_data"]
         self._update_progress("Settlement Placement", 15, "Placing settlements based on suitability...")
-        settlement_data.settlement_list = self.calculate_settlements(
-            settlement_data.combined_suitability_map, context["heightmap"], context["lod"])
-        settlement_data.settlements_valid = True
+        inputs = self._get_prepared_settlement_inputs(lod_level)
+        suitability_map = self.data_lod_manager.get_calculator_output(
+            "settlement.suitability", "combined_suitability_map", lod_level)
+        if suitability_map is None:
+            raise ValueError(f"settlement.settlements: combined_suitability_map für LOD {lod_level} nicht verfügbar")
 
-    def _calc_pathfinding(self, context) -> None:
+        settlement_list = self.calculate_settlements(suitability_map, inputs["heightmap"], lod_level)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"settlement_list": settlement_list})
+
+    def _calc_pathfinding(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.pathfinding' (#30)"""
-        settlement_data = context["settlement_data"]
         self._update_progress("Road Building", 25, "Creating road networks between settlements...")
-        settlement_data.roads = self.calculate_road_network(
-            settlement_data.settlement_list, context["slopemap"], context["lod"])
-        settlement_data.road_network_valid = True
+        inputs = self._get_prepared_settlement_inputs(lod_level)
+        settlement_list = self.data_lod_manager.get_calculator_output(
+            "settlement.settlements", "settlement_list", lod_level)
+        if settlement_list is None:
+            raise ValueError(f"settlement.pathfinding: settlement_list für LOD {lod_level} nicht verfügbar")
 
-    def _calc_roadsites(self, context) -> None:
+        roads = self.calculate_road_network(settlement_list, inputs["slopemap"], lod_level)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roads": roads})
+
+    def _calc_roadsites(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.roadsites' (#31)"""
-        settlement_data = context["settlement_data"]
         self._update_progress("Roadsite Placement", 40, "Placing roadsites along roads...")
-        settlement_data.roadsite_list = self.calculate_roadsites(settlement_data.roads, context["lod"])
-        settlement_data.roadsites_valid = True
+        roads = self.data_lod_manager.get_calculator_output("settlement.pathfinding", "roads", lod_level)
+        if roads is None:
+            raise ValueError(f"settlement.roadsites: roads für LOD {lod_level} nicht verfügbar")
 
-    def _calc_civ_influence(self, context) -> None:
+        roadsite_list = self.calculate_roadsites(roads, lod_level)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roadsite_list": roadsite_list})
+
+    def _calc_civ_influence(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.civ_influence' (#32)"""
-        settlement_data = context["settlement_data"]
         self._update_progress("Civilization Mapping", 50, "Creating civilization influence map...")
-        settlement_data.civ_map = self.calculate_civilization_mapping(
-            context["heightmap"], context["slopemap"], settlement_data.settlement_list,
-            settlement_data.roads, settlement_data.roadsite_list)
-        settlement_data.civilization_mapping_valid = True
+        inputs = self._get_prepared_settlement_inputs(lod_level)
+        settlement_list = self.data_lod_manager.get_calculator_output(
+            "settlement.settlements", "settlement_list", lod_level)
+        roads = self.data_lod_manager.get_calculator_output("settlement.pathfinding", "roads", lod_level)
+        roadsite_list = self.data_lod_manager.get_calculator_output(
+            "settlement.roadsites", "roadsite_list", lod_level)
+        if settlement_list is None or roads is None or roadsite_list is None:
+            raise ValueError(f"settlement.civ_influence: fehlende Inputs für LOD {lod_level}")
 
-    def _calc_landmarks(self, context) -> None:
+        civ_map = self.calculate_civilization_mapping(
+            inputs["heightmap"], inputs["slopemap"], settlement_list, roads, roadsite_list)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"civ_map": civ_map})
+
+    def _calc_landmarks(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.landmarks' (#33)"""
-        settlement_data = context["settlement_data"]
         self._update_progress("Landmark Placement", 65, "Placing landmarks in wilderness areas...")
-        settlement_data.landmark_list = self.calculate_landmarks(
-            settlement_data.civ_map, context["heightmap"], context["slopemap"], context["lod"])
-        settlement_data.landmarks_valid = True
+        inputs = self._get_prepared_settlement_inputs(lod_level)
+        civ_map = self.data_lod_manager.get_calculator_output("settlement.civ_influence", "civ_map", lod_level)
+        if civ_map is None:
+            raise ValueError(f"settlement.landmarks: civ_map für LOD {lod_level} nicht verfügbar")
 
-    def _calc_plot_nodes(self, context) -> None:
+        landmark_list = self.calculate_landmarks(civ_map, inputs["heightmap"], inputs["slopemap"], lod_level)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"landmark_list": landmark_list})
+
+    def _calc_plot_nodes(self, calculator_id: str, lod_level: int) -> None:
         """
         Calculator-Node 'settlement.plot_nodes' (#34) - einzige Settlement-Phase,
         die biome_map braucht (siehe docs/generation_pipeline_dependencies.md).
         """
-        settlement_data = context["settlement_data"]
         self._update_progress("Plot Generation", 75, "Generating plot system...")
-        settlement_data.plot_nodes, settlement_data.plots = self.calculate_plots(
-            settlement_data.civ_map, settlement_data.settlement_list, context["heightmap"],
-            context["biome_map"], context["lod"])
-        settlement_data.plot_map = self._create_plot_map(context["heightmap"].shape, settlement_data.plots)
-        settlement_data.plots_valid = True
+        inputs = self._get_prepared_settlement_inputs(lod_level)
+        civ_map = self.data_lod_manager.get_calculator_output("settlement.civ_influence", "civ_map", lod_level)
+        settlement_list = self.data_lod_manager.get_calculator_output(
+            "settlement.settlements", "settlement_list", lod_level)
+        biome_map = self.data_lod_manager.get_calculator_output(
+            "biome.integrate_layers", "biome_map", lod_level)
+        if civ_map is None or settlement_list is None or biome_map is None:
+            raise ValueError(f"settlement.plot_nodes: fehlende Inputs für LOD {lod_level}")
+
+        plot_nodes, plots = self.calculate_plots(
+            civ_map, settlement_list, inputs["heightmap"], biome_map, lod_level)
+        plot_map = self._create_plot_map(inputs["heightmap"].shape, plots)
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"plot_nodes": plot_nodes, "plots": plots, "plot_map": plot_map})
 
     def calculate_terrain_suitability(self, heightmap, slopemap, water_map, lod):
         """

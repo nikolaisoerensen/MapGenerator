@@ -1,0 +1,44 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D srcImage;
+layout(r32f, binding = 1) uniform writeonly image2D dstImage;
+
+uniform int u_size;
+uniform float u_sigma;
+uniform int u_radius;      // int(4.0*sigma + 0.5), auf CPU-Seite berechnet (scipy-Default truncate=4.0)
+uniform int u_horizontal;  // 1 = horizontale Passe, 0 = vertikale Passe
+
+// Gemeinsamer, wiederverwendbarer Gauss-Weichzeichner (separabel: 2 Passes H dann V) -
+// Portierung von scipy.ndimage.gaussian_filter()-Aufrufen (z.B. SoilMoistureCalculator,
+// core/water_generator.py). Randbehandlung entspricht scipys Default mode='reflect'
+// (Index -1 -> 0, -2 -> 1, ...; Index n -> n-1, n+1 -> n-2, ...) - "halbes Sample"
+// symmetrisch, OHNE den Randpixel doppelt zu zaehlen.
+int reflectIndex(int i, int n) {
+    if (i < 0) i = -i - 1;
+    else if (i >= n) i = 2 * n - i - 1;
+    return clamp(i, 0, n - 1);
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float weightSum = 0.0;
+    float valueSum = 0.0;
+
+    for (int k = -u_radius; k <= u_radius; k++) {
+        float weight = exp(-float(k * k) / (2.0 * u_sigma * u_sigma));
+        weightSum += weight;
+
+        ivec2 sampleCoord = coord;
+        if (u_horizontal == 1) {
+            sampleCoord.x = reflectIndex(coord.x + k, u_size);
+        } else {
+            sampleCoord.y = reflectIndex(coord.y + k, u_size);
+        }
+        valueSum += weight * imageLoad(srcImage, sampleCoord).r;
+    }
+
+    imageStore(dstImage, coord, vec4(valueSum / weightSum, 0.0, 0.0, 0.0));
+}

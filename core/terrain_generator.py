@@ -186,13 +186,19 @@ class SimplexNoiseGenerator:
             'offset_y': offset_y
         }
 
-        # GPU-Fallback (Optimal) - ShaderManager.process_noise_generation() unterstützt
-        # keine Offsets (in der aktuellen Pipeline ohnehin immer 0); bei Offsets != 0
-        # wird direkt auf CPU ausgewichen statt sie stillschweigend zu ignorieren.
-        # process_noise_generation() prüft GPU-Verfügbarkeit selbst nochmal und hat
-        # bereits einen eigenen internen CPU-Fallback - hier zählt nur "lieferte es
-        # überhaupt ein Ergebnis", nicht "war es wirklich die GPU".
-        if self._gpu_available() and offset_x == 0 and offset_y == 0:
+        # GPU-Pfad bewusst DEAKTIVIERT: shaders/terrain/noiseGeneration.comp (und
+        # ShaderManager.process_noise_generation()) ist eine seit jeher nie fertig
+        # implementierte Platzhalter-Formel ("Simplified noise - echte Simplex-
+        # Implementierung würde hier stehen", O-Ton der ursprünglichen Inline-Shader-
+        # Quelle) - kein echtes Gradient/Simplex-Noise, sondern nur sin(x)*cos(y).
+        # War all die Zeit toter Code (shader_manager war vor dem GPU-Fundament-Fix
+        # dieser Session IMMER None), erst dadurch aktiviert - und produzierte
+        # zusammen mit der LOD-angepassten Frequenz + normierten [0,1]-Koordinaten
+        # ein fast konstantes ("verdächtig homogenes") Höhenfeld, da sin/cos bei so
+        # kleinen Phasenwerten praktisch linear/konstant sind. Die CPU-Implementierung
+        # (OpenSimplex, unten) ist die echte, validierte Terrain-Noise - GPU-Pfad
+        # bleibt aus, bis eine echte Simplex-Noise-GLSL-Portierung existiert.
+        if False and self._gpu_available() and offset_x == 0 and offset_y == 0:
             try:
                 result = self.shader_manager.process_noise_generation(
                     size=size, octaves=octaves, frequency=frequency,

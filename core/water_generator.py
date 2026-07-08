@@ -224,7 +224,19 @@ class LakeDetectionSystem:
         return lake_map
 
     def _classify_lake_basins(self, heightmap, lake_map, lake_seeds):
-        """Klassifiziert See-Becken nach Volumen und validiert Threshold"""
+        """
+        Klassifiziert See-Becken nach Volumen und validiert Threshold.
+
+        Wasserspiegel-Fix: Vorher wurde die Höhe AM SEED (dem tiefsten Punkt des
+        Beckens) als Wasserspiegel verwendet - "terrain_height <= seed_height"
+        kann für einen echten lokalen Minimum-Seed (per Definition niedriger als
+        alle Nachbarn) praktisch nie zutreffen, wodurch total_volume so gut wie
+        immer 0 blieb und der Volume-Threshold nie erreicht wurde (siehe Session-
+        Analyse: reale Testkarten lieferten durchgehend 0 valid_lakes). Fix: der
+        Wasserspiegel ist die MAXIMALE Höhe innerhalb des vom Jump-Flooding
+        zugeordneten Beckens (Näherung an den Becken-Rand/Spillpunkt) - alles
+        darunter zählt als Wassertiefe.
+        """
         height, width = heightmap.shape
         filtered_lake_map = np.full((height, width), -1, dtype=np.int32)
         valid_lakes = []
@@ -235,14 +247,15 @@ class LakeDetectionSystem:
             if len(lake_pixels[0]) == 0:
                 continue
 
-            # Volumen-Berechnung
-            seed_height = heightmap[seed_y, seed_x]
+            # Volumen-Berechnung: Wasserspiegel = höchster Punkt im Becken (Rand-Näherung)
+            basin_heights = heightmap[lake_pixels]
+            water_level = basin_heights.max()
             total_volume = 0.0
 
             for py, px in zip(lake_pixels[0], lake_pixels[1]):
                 terrain_height = heightmap[py, px]
-                if terrain_height <= seed_height:
-                    water_depth = seed_height - terrain_height
+                if terrain_height <= water_level:
+                    water_depth = water_level - terrain_height
                     total_volume += water_depth
 
             # Volume-Threshold prüfen
@@ -1340,7 +1353,17 @@ class HydrologySystemGenerator:
         Erosion-Sedimentation benoetigte flow_directions-Array.
         """
         inputs = self._get_prepared_water_inputs(lod_level, needed=["heightmap"])
-        flow_directions = self.flow_network._calculate_steepest_descent(inputs["heightmap"])
+        flow_directions = None
+        if self.shader_manager:
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    "water", "steepestDescent", {"heightmap": inputs["heightmap"]}, self._current_parameters)
+                if result.get("success"):
+                    flow_directions = result["flow_directions"]
+            except Exception as e:
+                logging.warning(f"GPU steepest descent failed: {e}, falling back to CPU")
+        if flow_directions is None:
+            flow_directions = self.flow_network._calculate_steepest_descent(inputs["heightmap"])
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"flow_directions": flow_directions})
 
     def _calc_manning_flow(self, calculator_id: str, lod_level: int) -> None:

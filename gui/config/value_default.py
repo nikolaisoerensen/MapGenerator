@@ -24,7 +24,7 @@ class TERRAIN:
     # bei frequency=0.037 und lacunarity=2.3 übersteigt die Oktaven-Frequenz ab
     # Oktave 5 den Wert 1.0 (Wellenlänge unter einem Pixel) - diese Oktaven fügen
     # nur noch unkorreliertes "Static"-Rauschen statt Landschaftsdetail hinzu.
-    OCTAVES = {"min": 1, "max": 12, "default": 4, "step": 1}
+    OCTAVES = {"min": 1, "max": 8, "default": 4, "step": 1}
     FREQUENCY = {"min": 0.001, "max": 0.1, "default": 0.037, "step": 0.001}
     # Default 0.4 (statt vorher 0.68): bei 0.68 tragen selbst hochfrequente
     # Oktaven noch spürbar zur Gesamthöhe bei, was zusammen mit den vielen

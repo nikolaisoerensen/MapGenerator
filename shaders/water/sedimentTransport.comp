@@ -1,0 +1,74 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D erosionMap;
+layout(r32f, binding = 1) uniform readonly image2D flowSpeed;
+layout(r32f, binding = 2) uniform readonly image2D flowDirections;
+layout(r32f, binding = 3) uniform readonly image2D transportCapacity;
+// .r = sediment_load, .g = kumulierte sedimentation_map
+layout(rg32f, binding = 4) uniform readonly image2D stateIn;
+layout(rg32f, binding = 5) uniform writeonly image2D stateOut;
+
+uniform int u_size;
+uniform float u_settling_velocity;
+
+// WICHTIGER UNTERSCHIED zum CPU-Original (ErosionSedimentationSystem.
+// _transport_sediment_optimized(), core/water_generator.py): das CPU-Original ist ein
+// SCATTER-Gauss-Seidel-Update (jede Zelle schreibt ihr transportiertes Sediment direkt in
+// new_sediment_load[downstream_nachbar] INNERHALB derselben Zeilen-Schleife, wodurch spaeter
+// besuchte Zellen bereits aktualisierte Werte fruehr besuchter Zellen SEHEN - eine echte
+// sequenzielle Abhaengigkeit, nicht parallelisierbar ohne exakt dieselbe Abarbeitungsreihenfolge).
+// Diese Version ist stattdessen ein GATHER-Jacobi-Schritt (wie flowAccumulation.comp): jede
+// Zelle sammelt eingehendes Sediment von Nachbarn, deren flow_direction auf sie zeigt, basierend
+// auf dem Zustand der VORHERIGEN Iteration - Ergebnis ist physikalisch aequivalent (Sediment
+// wird transportiert/abgelagert nach denselben Regeln), aber NICHT bit-identisch zum CPU-Pfad.
+// Uebliche, etablierte Vereinfachung fuer GPU-Erosionssimulationen (Gauss-Seidel parallelisiert
+// grundsaetzlich nicht sauber) - bewusst nicht "repariert" auf CPU-Seite, nur hier als
+// Kompromiss fuer den GPU-Pfad gewaehlt.
+const ivec2 OFFSETS[8] = ivec2[8](
+    ivec2(1, 0), ivec2(1, 1), ivec2(0, 1), ivec2(-1, 1),
+    ivec2(-1, 0), ivec2(-1, -1), ivec2(0, -1), ivec2(1, -1)
+);
+
+float transportEfficiency(float velocity) {
+    return velocity > 0.1 ? min(1.0, velocity / 2.0) : 0.0;
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    vec2 selfState = imageLoad(stateIn, coord).rg;
+    float loadWithErosion = selfState.r + imageLoad(erosionMap, coord).r;
+    float selfEfficiency = transportEfficiency(imageLoad(flowSpeed, coord).r);
+    float transportedOut = loadWithErosion * selfEfficiency;
+    float remaining = loadWithErosion - transportedOut;
+
+    float incoming = 0.0;
+    for (int sourceDir = 0; sourceDir < 8; sourceDir++) {
+        ivec2 scoord = coord - OFFSETS[sourceDir];
+        if (scoord.x < 0 || scoord.x >= u_size || scoord.y < 0 || scoord.y >= u_size) continue;
+
+        float sourceDirection = imageLoad(flowDirections, scoord).r;
+        if (int(sourceDirection) != sourceDir) continue;
+
+        float sourceEfficiency = transportEfficiency(imageLoad(flowSpeed, scoord).r);
+        vec2 sourceState = imageLoad(stateIn, scoord).rg;
+        float sourceLoadWithErosion = sourceState.r + imageLoad(erosionMap, scoord).r;
+        incoming += sourceLoadWithErosion * sourceEfficiency;
+    }
+
+    float loadBeforeSettling = remaining + incoming;
+    float capacity = imageLoad(transportCapacity, coord).r;
+    float sedimentationAccum = selfState.g;
+    float newLoad = loadBeforeSettling;
+
+    if (loadBeforeSettling > capacity) {
+        float excess = loadBeforeSettling - capacity;
+        float settlingRate = excess * u_settling_velocity;
+        sedimentationAccum += settlingRate;
+        newLoad -= settlingRate;
+    }
+
+    imageStore(stateOut, coord, vec4(newLoad, sedimentationAccum, 0.0, 0.0));
+}

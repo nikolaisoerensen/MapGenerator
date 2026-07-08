@@ -1,0 +1,106 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D flowAccumulation;
+layout(rg32f, binding = 1) uniform readonly image2D slopemap;
+layout(r32f, binding = 2) uniform readonly image2D heightmap;
+layout(r32f, binding = 3) uniform writeonly image2D flowSpeedOut;
+layout(r32f, binding = 4) uniform writeonly image2D crossSectionOut;
+
+uniform int u_size;
+uniform float u_manning_n;
+uniform int u_depth_tests;
+
+const float PI = 3.14159265359;
+
+// Portierung von ManningFlowCalculator._analyze_valley_width() (core/water_generator.py).
+float analyzeValleyWidth(ivec2 center) {
+    float centerHeight = imageLoad(heightmap, center).r;
+    float heightThreshold = centerHeight + 20.0;
+    float maxDistance = 0.0;
+
+    for (int a = 0; a < 8; a++) {
+        // np.linspace(0, 2*pi, 8) - 8 Werte inkl. beider Endpunkte, Schrittweite 2*pi/7
+        float angle = float(a) * (2.0 * PI / 7.0);
+        float dx = cos(angle);
+        float dy = sin(angle);
+
+        float distance = 0.0;
+        for (int step = 1; step < 25; step++) {
+            ivec2 test = center + ivec2(int(dx * float(step)), int(dy * float(step)));
+            if (test.x < 0 || test.x >= u_size || test.y < 0 || test.y >= u_size) break;
+
+            float testHeight = imageLoad(heightmap, test).r;
+            if (testHeight > heightThreshold) {
+                distance = float(step);
+                break;
+            }
+        }
+        maxDistance = max(maxDistance, distance);
+    }
+
+    return maxDistance * 2.0;
+}
+
+// Portierung von ManningFlowCalculator._optimize_channel_geometry() - inkl. der
+// Eigenheit, dass der Vergleich "best_area * velocity" die Geschwindigkeit DIESER
+// Iteration nutzt (nicht die zu best_area gehörende) - bewusst 1:1 repliziert.
+void optimizeChannelGeometry(float flowRate, float slope, ivec2 coord, int depthTests,
+                              out float bestArea, out float bestHydraulicRadius) {
+    float valleyWidth = analyzeValleyWidth(coord);
+    float widthToDepthRatio;
+    if (valleyWidth < 5.0) widthToDepthRatio = 2.0;
+    else if (valleyWidth < 20.0) widthToDepthRatio = 5.0;
+    else widthToDepthRatio = 10.0;
+
+    bestArea = 0.0;
+    bestHydraulicRadius = 0.0;
+
+    int denom = max(depthTests - 1, 1);
+    for (int j = 0; j < depthTests; j++) {
+        float depth = 0.1 + float(j) * (4.9 / float(denom));
+        float width = depth * widthToDepthRatio;
+        float area = width * depth;
+        float wettedPerimeter = width + 2.0 * depth;
+        float hydraulicRadius = wettedPerimeter > 0.0 ? area / wettedPerimeter : 0.0;
+
+        float velocity = (1.0 / u_manning_n) * pow(hydraulicRadius, 2.0 / 3.0) * sqrt(slope);
+        float theoreticalFlow = area * velocity;
+
+        if (abs(theoreticalFlow - flowRate) < abs(bestArea * velocity - flowRate)) {
+            bestArea = area;
+            bestHydraulicRadius = hydraulicRadius;
+        }
+    }
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float flowRate = imageLoad(flowAccumulation, coord).r;
+    if (flowRate < 1.0) {
+        imageStore(flowSpeedOut, coord, vec4(0.0));
+        imageStore(crossSectionOut, coord, vec4(0.0));
+        return;
+    }
+
+    vec2 slopeVec = imageLoad(slopemap, coord).rg;
+    float slope = max(0.001, length(slopeVec));
+
+    float bestArea, bestHydraulicRadius;
+    optimizeChannelGeometry(flowRate, slope, coord, u_depth_tests, bestArea, bestHydraulicRadius);
+
+    float flowSpeed = 0.0;
+    float crossSection = 0.0;
+    if (bestHydraulicRadius > 0.0) {
+        float velocity = (1.0 / u_manning_n) * pow(bestHydraulicRadius, 2.0 / 3.0) * sqrt(slope);
+        if (velocity > 0.0) {
+            crossSection = flowRate / velocity;
+            flowSpeed = velocity;
+        }
+    }
+
+    imageStore(flowSpeedOut, coord, vec4(flowSpeed, 0.0, 0.0, 0.0));
+    imageStore(crossSectionOut, coord, vec4(crossSection, 0.0, 0.0, 0.0));
+}

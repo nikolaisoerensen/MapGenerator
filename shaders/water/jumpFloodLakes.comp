@@ -1,0 +1,53 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D heightmap;
+// .r = zugehoeriger seed_id, .g = Hoehe am Seed
+layout(rg32f, binding = 1) uniform readonly image2D stateIn;
+layout(rg32f, binding = 2) uniform writeonly image2D stateOut;
+
+uniform int u_size;
+uniform int u_jump_distance;
+
+// Portierung von WaterGenerator._apply_jump_flooding() (core/water_generator.py):
+// EIN Jump-Flooding-Schritt fuer eine gegebene Sprungdistanz. Der Host (Python)
+// ruft diesen Shader mehrfach mit halbierender u_jump_distance auf (Ping-Pong
+// zwischen zwei Texturen), bis jump_distance = 1 erreicht ist - exakt dieselbe
+// Sprungfolge wie im CPU-Original.
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float current_height = imageLoad(heightmap, coord).r;
+    vec2 self_state = imageLoad(stateIn, coord).rg;
+
+    float closest_seed = self_state.r;
+    float closest_seed_height = self_state.g;
+    float closest_distance = 1e30;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 ncoord = coord + ivec2(dx, dy) * u_jump_distance;
+            if (ncoord.x < 0 || ncoord.x >= u_size || ncoord.y < 0 || ncoord.y >= u_size) continue;
+
+            vec2 neighbor_state = imageLoad(stateIn, ncoord).rg;
+            float neighbor_seed = neighbor_state.r;
+            if (neighbor_seed < 0.0) continue;
+
+            float seed_height = neighbor_state.g;
+            // Wasser kann nicht bergauf zum Seed abfliessen
+            if (current_height < seed_height) continue;
+
+            int seed_id = int(neighbor_seed);
+            vec2 seed_pos = vec2(float(seed_id % u_size), float(seed_id / u_size));
+            float dist = distance(vec2(coord), seed_pos);
+            if (dist < closest_distance) {
+                closest_distance = dist;
+                closest_seed = neighbor_seed;
+                closest_seed_height = seed_height;
+            }
+        }
+    }
+
+    imageStore(stateOut, coord, vec4(closest_seed, closest_seed_height, 0.0, 0.0));
+}

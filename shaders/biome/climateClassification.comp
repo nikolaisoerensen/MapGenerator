@@ -1,0 +1,33 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D tempMap;
+layout(r32f, binding = 1) uniform readonly image2D precipMap;
+layout(r32f, binding = 2) uniform writeonly image2D climateMapOut;
+
+uniform int u_width;
+uniform int u_height;
+
+// Portierung von BiomeClassificationSystem._create_climate_classification_cpu()
+// (core/biome_generator.py) - rein lokal pro Pixel, 1:1 parallelisierbar.
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_width || coord.y >= u_height) return;
+
+    float temp = imageLoad(tempMap, coord).r;
+    float precip = imageLoad(precipMap, coord).r;
+
+    float climate;
+    if (temp < -10.0) {
+        climate = 0.0;  // Arctic
+    } else if (temp < 20.0) {
+        if (precip < 200.0) climate = 4.0;        // Arid
+        else if (precip < 1000.0) climate = 1.0;  // Boreal/Temperate
+        else climate = 2.0;                       // Temperate
+    } else {
+        if (precip < 600.0) climate = 4.0;  // Arid
+        else climate = 3.0;                 // Tropical
+    }
+
+    imageStore(climateMapOut, coord, vec4(climate, 0.0, 0.0, 0.0));
+}

@@ -1,0 +1,23 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D heightmap;
+layout(r32f, binding = 1) uniform writeonly image2D reachableOut;
+
+uniform int u_width;
+uniform int u_height;
+uniform float u_sea_level;
+
+// Seeding-Schritt fuer die Ocean-Connectivity-Flutung: Randpixel unter sea_level
+// sind die initialen "erreichbar"-Seeds (siehe SuperBiomeOverrideSystem.
+// _detect_ocean_connectivity(), core/biome_generator.py).
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_width || coord.y >= u_height) return;
+
+    bool isEdge = coord.x == 0 || coord.x == u_width - 1 || coord.y == 0 || coord.y == u_height - 1;
+    float height = imageLoad(heightmap, coord).r;
+    float result = (isEdge && height < u_sea_level) ? 1.0 : 0.0;
+
+    imageStore(reachableOut, coord, vec4(result, 0.0, 0.0, 0.0));
+}
