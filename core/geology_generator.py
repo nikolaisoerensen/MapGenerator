@@ -28,8 +28,6 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any
 
-from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
-
 
 @dataclass
 class GeologyData:
@@ -710,12 +708,17 @@ class GeologySystemGenerator:
     Hauptklasse für geologische Schichten und Gesteinstyp-Verteilung mit vollständiger LOD-Integration
     """
 
-    def __init__(self, map_seed: int = 42):
+    def __init__(self, map_seed: int = 42, data_lod_manager=None):
         """
         Initialisiert Geology-System-Generator mit allen Sub-Komponenten
 
         Args:
             map_seed: Globaler Seed für reproduzierbare Geologie
+            data_lod_manager: DataLODManager für feingranularen Calculator-Storage
+                (siehe set_calculator_output()/get_calculator_output()). Die echte
+                Pipeline injiziert immer eine Instanz über GenerationOrchestrator.
+                get_generator_instance(); bleibt sie None (Standalone/Tests), wird
+                beim ersten Bedarf lazy eine eigene erzeugt.
         """
         self.map_seed = map_seed
         self.logger = logging.getLogger(__name__)
@@ -731,6 +734,27 @@ class GeologySystemGenerator:
 
         # Progress-Callback für UI-Integration
         self.progress_callback = None
+
+        self.data_lod_manager = data_lod_manager
+        # Parameter der aktuell laufenden Generierungs-Anfrage (bereits mit
+        # default_parameters gemergt) - vom GenerationOrchestrator einmal pro
+        # frischer Anfrage über set_active_parameters() gesetzt, bleibt über alle
+        # LOD-Runden dieser Anfrage hinweg konstant.
+        self._current_parameters: Dict[str, Any] = dict(self.default_parameters)
+
+    def set_active_parameters(self, parameters: Dict[str, Any]):
+        """Setzt die (mit Defaults gemergten) Parameter, die alle _calc_*-Methoden
+        bis zur nächsten frischen Anfrage verwenden."""
+        self._current_parameters = {**self.default_parameters, **parameters}
+
+    def _ensure_data_lod_manager(self):
+        """Lazy-Fallback für Standalone-Nutzung (Tests, calculate_geology() ohne
+        injizierten Manager) - die echte Pipeline injiziert immer einen über
+        GenerationOrchestrator.get_generator_instance()."""
+        if self.data_lod_manager is None:
+            from gui.OldManagers.data_lod_manager import DataLODManager
+            self.data_lod_manager = DataLODManager()
+        return self.data_lod_manager
 
     def _load_default_parameters(self) -> Dict[str, Any]:
         """
@@ -812,50 +836,45 @@ class GeologySystemGenerator:
         try:
             self.logger.info(f"Starting geology generation - LOD {lod_level}, Size: {heightmap_combined.shape}")
 
-            # Parameter mit Defaults mergen
-            merged_params = {**self.default_parameters, **parameters}
+            self._ensure_data_lod_manager()
+            self.set_active_parameters(parameters)
+            merged_params = self._current_parameters
 
             # Input-Validation
             self._validate_inputs(heightmap_combined, slopemap, merged_params)
 
-            # Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
-            # Sequenz (siehe gui/OldManagers/calculator_graph.py - Geology-Calculator-
-            # Knoten #5-#10 + faceted_boundaries aus docs/generation_pipeline_
-            # dependencies.md). Phase des LOD-Lockstep-Umbaus (Tracker #16): nur
-            # Geology-intern zerlegt, externes Verhalten (calculate_geology()
-            # Signatur/Rückgabe inkl. previous_height_delta-Akkumulation) bleibt
-            # unverändert.
-            context = {
-                "heightmap_combined": heightmap_combined,
-                "slopemap": slopemap,
-                "parameters": merged_params,
-                "lod_level": lod_level,
-                "previous_height_delta": previous_height_delta,
-            }
+            # Standalone-Convenience-Pfad (Legacy-Kompatibilität + Tests): heightmap_
+            # combined/slopemap kommen hier als direkte Parameter, nicht aus dem
+            # DataLODManager - für die _calc_*-Methoden (die jetzt IMMER aus dem
+            # feingranularen Calculator-Storage lesen, siehe get_calculator_combined_
+            # heightmap()) werden sie deshalb dort gespiegelt: heightmap als
+            # terrain.redistribution-Output (get_calculator_combined_heightmap()
+            # liefert ihn dann unverändert zurück, da in einem frischen Manager keine
+            # Geology-/Water-Anteile existieren), slopemap als terrain.slope-Output.
+            self.data_lod_manager.set_calculator_output(
+                "terrain.redistribution", lod_level, {"heightmap": heightmap_combined})
+            self.data_lod_manager.set_calculator_output(
+                "terrain.slope", lod_level, {"slopemap": slopemap})
+            if previous_height_delta is not None:
+                self.data_lod_manager.set_calculator_output(
+                    "geology.tectonic_deformation", lod_level - 1, {"height_delta": previous_height_delta})
 
-            scheduler = CalculatorRoundScheduler(
-                calculator_ids=[
-                    "geology.classify_elevation", "geology.slope_hardening", "geology.blend_zones",
-                    "geology.tectonic_deformation", "geology.faceted_boundaries",
-                    "geology.mass_conservation", "geology.hardness",
-                ],
-                executors={
-                    "geology.classify_elevation": self._calc_classify_elevation,
-                    "geology.slope_hardening": self._calc_slope_hardening,
-                    "geology.blend_zones": self._calc_blend_zones,
-                    "geology.tectonic_deformation": self._calc_tectonic_deformation,
-                    "geology.faceted_boundaries": self._calc_faceted_boundaries,
-                    "geology.mass_conservation": self._calc_mass_conservation,
-                    "geology.hardness": self._calc_hardness,
-                },
-            )
-            scheduler.run_round(target_lod=lod_level, context=context)
+            # Läuft über die einzeln aufrufbaren _calc_*-Methoden (siehe
+            # gui/OldManagers/calculator_graph.py - Geology-Calculator-Knoten #5-#10
+            # + faceted_boundaries aus docs/generation_pipeline_dependencies.md).
+            # Die echte GUI-Pipeline (GenerationOrchestrator) ruft dieselben
+            # Methoden ab jetzt einzeln über den globalen CalculatorDispatcher auf
+            # (Tracker #16 LOD-Lockstep-Umbau) - der Effekt ist identisch, da beide
+            # Wege denselben Storage nutzen.
+            for calculator_id in (
+                "geology.classify_elevation", "geology.slope_hardening", "geology.blend_zones",
+                "geology.tectonic_deformation", "geology.faceted_boundaries",
+                "geology.mass_conservation", "geology.hardness",
+            ):
+                getattr(self, "_calc_" + calculator_id.split(".", 1)[1])(calculator_id, lod_level)
 
             # GeologyData-Objekt erstellen
-            geology_data = self._create_geology_data(
-                context["rock_map_uint8"], context["hardness_map"], lod_level, merged_params,
-                context["height_delta"]
-            )
+            geology_data = self.assemble_geology_data(lod_level, merged_params)
 
             self._update_progress("Generation Complete", 100, "Geology generation completed successfully")
             self.logger.info(f"Geology generation completed - LOD {lod_level}")
@@ -865,61 +884,128 @@ class GeologySystemGenerator:
         except Exception as e:
             self.logger.error(f"Geology generation failed: {e}")
             # Fallback zu Default-Rock-Distribution
-            return self._create_fallback_geology_data(heightmap_combined, merged_params, lod_level)
+            return self._create_fallback_geology_data(heightmap_combined, self._current_parameters, lod_level)
 
-    def _calc_classify_elevation(self, context: Dict[str, Any]) -> None:
+    def assemble_geology_data(self, lod_level: int, parameters: Dict[str, Any]) -> GeologyData:
+        """
+        Funktionsweise: Baut das finale GeologyData-Objekt aus den einzeln
+        gespeicherten Calculator-Outputs zusammen
+        Aufgabe: Wird vom GenerationOrchestrator aufgerufen, sobald alle 7 Geology-
+            Calculator-Knoten ein LOD abgeschlossen haben (siehe Task 18 im
+            LOD-Lockstep-Umbau)
+        """
+        rock_map = self.data_lod_manager.get_calculator_output("geology.mass_conservation", "rock_map", lod_level)
+        hardness_map = self.data_lod_manager.get_calculator_output("geology.hardness", "hardness_map", lod_level)
+        height_delta = self.data_lod_manager.get_calculator_output(
+            "geology.tectonic_deformation", "height_delta", lod_level)
+
+        if rock_map is None or hardness_map is None:
+            raise ValueError(f"assemble_geology_data: fehlende Calculator-Outputs für LOD {lod_level}")
+
+        return self._create_geology_data(rock_map, hardness_map, lod_level, parameters, height_delta)
+
+    def _calc_classify_elevation(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'geology.classify_elevation' (#5)"""
         self._update_progress("Rock Classification", 20, "Classifying rocks by elevation...")
-        context["rock_map"] = self.rock_classifier.classify_by_elevation(context["heightmap_combined"])
+        heightmap_combined = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
+        if heightmap_combined is None:
+            raise ValueError(f"geology.classify_elevation: heightmap_combined für LOD {lod_level} nicht verfügbar")
 
-    def _calc_slope_hardening(self, context: Dict[str, Any]) -> None:
+        rock_map = self.rock_classifier.classify_by_elevation(heightmap_combined)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"rock_map_raw": rock_map})
+
+    def _calc_slope_hardening(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'geology.slope_hardening' (#6)"""
         self._update_progress("Rock Classification", 35, "Applying slope hardening...")
-        context["rock_map"] = self.rock_classifier.apply_slope_hardening(
-            context["rock_map"], context["slopemap"])
+        rock_map = self.data_lod_manager.get_calculator_output(
+            "geology.classify_elevation", "rock_map_raw", lod_level)
+        slopemap = self.data_lod_manager.get_calculator_output("terrain.slope", "slopemap", lod_level)
+        if rock_map is None or slopemap is None:
+            raise ValueError(f"geology.slope_hardening: fehlende Inputs für LOD {lod_level}")
 
-    def _calc_blend_zones(self, context: Dict[str, Any]) -> None:
+        rock_map = self.rock_classifier.apply_slope_hardening(rock_map, slopemap)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"rock_map_hardened": rock_map})
+
+    def _calc_blend_zones(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'geology.blend_zones' (#7)"""
         self._update_progress("Geological Zones", 50, "Blending geological zones...")
-        context["rock_map"] = self.rock_classifier.blend_geological_zones(context["rock_map"])
+        rock_map = self.data_lod_manager.get_calculator_output(
+            "geology.slope_hardening", "rock_map_hardened", lod_level)
+        if rock_map is None:
+            raise ValueError(f"geology.blend_zones: rock_map_hardened für LOD {lod_level} nicht verfügbar")
 
-    def _calc_tectonic_deformation(self, context: Dict[str, Any]) -> None:
-        """Calculator-Node 'geology.tectonic_deformation' (#8)"""
+        rock_map = self.rock_classifier.blend_geological_zones(rock_map)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"rock_map_blended": rock_map})
+
+    def _calc_tectonic_deformation(self, calculator_id: str, lod_level: int) -> None:
+        """
+        Calculator-Node 'geology.tectonic_deformation' (#8) - inkl. Kumulation
+        über LOD-Durchläufe: liest sein EIGENES Ergebnis aus der vorherigen Runde
+        (lod_level - 1) als previous_height_delta, statt wie früher vom Aufrufer
+        übergeben zu bekommen.
+        """
         self._update_progress("Tectonic Deformation", 65, "Applying tectonic deformation...")
-        rock_map, height_delta = self._apply_tectonic_deformation(
-            context["rock_map"], context["heightmap_combined"], context["parameters"],
-            context["lod_level"], context["previous_height_delta"]
-        )
-        context["rock_map"] = rock_map
-        context["height_delta"] = height_delta
+        rock_map = self.data_lod_manager.get_calculator_output(
+            "geology.blend_zones", "rock_map_blended", lod_level)
+        heightmap_combined = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
+        if rock_map is None or heightmap_combined is None:
+            raise ValueError(f"geology.tectonic_deformation: fehlende Inputs für LOD {lod_level}")
 
-    def _calc_faceted_boundaries(self, context: Dict[str, Any]) -> None:
+        previous_height_delta = self.data_lod_manager.get_calculator_output(
+            calculator_id, "height_delta", lod_level - 1)
+
+        rock_map, height_delta = self._apply_tectonic_deformation(
+            rock_map, heightmap_combined, self._current_parameters, lod_level, previous_height_delta
+        )
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"rock_map_deformed": rock_map, "height_delta": height_delta})
+
+    def _calc_faceted_boundaries(self, calculator_id: str, lod_level: int) -> None:
         """
         Calculator-Node 'geology.faceted_boundaries' - scharfe, gezackte
         Gesteinsgrenzen statt glattem Verlauf (wie auf einer echten geologischen
         Karte); nicht in docs/generation_pipeline_dependencies.md erfasst.
         """
         self._update_progress("Faceting", 72, "Sharpening rock boundaries...")
-        context["rock_map"] = self.rock_classifier.apply_faceted_boundaries(context["rock_map"])
+        rock_map = self.data_lod_manager.get_calculator_output(
+            "geology.tectonic_deformation", "rock_map_deformed", lod_level)
+        if rock_map is None:
+            raise ValueError(f"geology.faceted_boundaries: rock_map_deformed für LOD {lod_level} nicht verfügbar")
 
-    def _calc_mass_conservation(self, context: Dict[str, Any]) -> None:
+        rock_map = self.rock_classifier.apply_faceted_boundaries(rock_map)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"rock_map_faceted": rock_map})
+
+    def _calc_mass_conservation(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'geology.mass_conservation' (#9)"""
         self._update_progress("Mass Conservation", 80, "Normalizing rock masses...")
-        context["rock_map_uint8"] = self._ensure_mass_conservation(context["rock_map"])
+        rock_map = self.data_lod_manager.get_calculator_output(
+            "geology.faceted_boundaries", "rock_map_faceted", lod_level)
+        if rock_map is None:
+            raise ValueError(f"geology.mass_conservation: rock_map_faceted für LOD {lod_level} nicht verfügbar")
 
-    def _calc_hardness(self, context: Dict[str, Any]) -> None:
+        rock_map_uint8 = self._ensure_mass_conservation(rock_map)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"rock_map": rock_map_uint8})
+
+    def _calc_hardness(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'geology.hardness' (#10)"""
         self._update_progress("Hardness Calculation", 95, "Calculating hardness map...")
-        hardness_tier_mask = self.rock_classifier.calculate_hardness_tier_mask(
-            context["heightmap_combined"].shape)
-        context["hardness_map"] = self.hardness_calculator.calculate_hardness_map(
-            context["rock_map_uint8"],
-            context["parameters"]['sedimentary_hardness'],
-            context["parameters"]['igneous_hardness'],
-            context["parameters"]['metamorphic_hardness'],
-            context["heightmap_combined"],
+        rock_map_uint8 = self.data_lod_manager.get_calculator_output(
+            "geology.mass_conservation", "rock_map", lod_level)
+        heightmap_combined = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
+        if rock_map_uint8 is None or heightmap_combined is None:
+            raise ValueError(f"geology.hardness: fehlende Inputs für LOD {lod_level}")
+
+        parameters = self._current_parameters
+        hardness_tier_mask = self.rock_classifier.calculate_hardness_tier_mask(heightmap_combined.shape)
+        hardness_map = self.hardness_calculator.calculate_hardness_map(
+            rock_map_uint8,
+            parameters['sedimentary_hardness'],
+            parameters['igneous_hardness'],
+            parameters['metamorphic_hardness'],
+            heightmap_combined,
             hardness_tier_mask
         )
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"hardness_map": hardness_map})
 
     def _validate_inputs(self, heightmap_combined: np.ndarray, slopemap: np.ndarray,
                         parameters: Dict[str, Any]):

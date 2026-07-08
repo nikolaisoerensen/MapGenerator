@@ -2663,6 +2663,17 @@ class DataLODManager(QObject):
         self._water_data = {}
         self._biome_data = {}
 
+        # === FEINGRANULARER CALCULATOR-STORAGE (LOD-Lockstep-Umbau, Tracker #16) ===
+        # Speichert Outputs einzelner Calculator-Knoten (siehe
+        # gui/OldManagers/calculator_graph.py CALCULATOR_GRAPH), nicht nur die finalen
+        # Domain-Objekte (TerrainData/GeologyData/...). Grundlage für den globalen
+        # CalculatorDispatcher: Calculator-Knoten werden künftig einzeln dispatcht statt
+        # nur als Teil eines ganzen Generator-Laufs und müssen ihren Zwischenzustand
+        # deshalb selbstständig persistieren, damit ein abhängiger Knoten, der erst in
+        # einer späteren Runde dispatcht wird, darauf zugreifen kann.
+        self._calculator_data = {}  # {f"lod_{level}_{calculator_id}_{output_key}": value}
+        self._current_calculator_lods = {}  # {calculator_id: höchstes abgeschlossenes LOD}
+
         # === CACHE-MANAGEMENT (LOD-ERWEITERT) ===
         self._cache_timestamps = {}  # {f"{generator}_{lod}_{key}": timestamp}
         self._parameter_hashes = {}  # {f"{generator}_{lod}": param_hash}
@@ -3014,6 +3025,67 @@ class DataLODManager(QObject):
         self._current_lods[generator] = max(self._current_lods.get(generator, 0), lod_level)
 
     # =============================================================================
+    # FEINGRANULARER CALCULATOR-STORAGE (LOD-Lockstep-Umbau, Tracker #16)
+    # =============================================================================
+
+    def set_calculator_output(self, calculator_id: str, lod_level: int, outputs: Dict[str, Any]):
+        """
+        Speichert die Output(s) eines einzelnen Calculator-Knotens (siehe
+        gui/OldManagers/calculator_graph.py CALCULATOR_GRAPH) für ein LOD-Level.
+        Parameter:
+            calculator_id - z.B. "geology.tectonic_deformation"
+            lod_level     - Ziel-LOD-Level
+            outputs       - dict output_key -> value (mehrere Output-Keys pro Knoten
+                            möglich, siehe CalculatorSpec.output_keys). None-Werte werden
+                            übersprungen statt gespeichert.
+        Keine np.ndarray-Validierung wie bei _validate_lod_input(): Calculator-Outputs
+        können auch Nicht-Array-Typen sein (z.B. Location-Listen bei Settlement).
+        """
+        if not isinstance(lod_level, int) or lod_level < 1:
+            self.logger.warning(
+                f"calculator '{calculator_id}': ungültiges LOD-Level {lod_level}, wird nicht gespeichert")
+            return
+
+        stored_any = False
+        for output_key, value in outputs.items():
+            if value is None:
+                continue
+            lod_key = f"lod_{lod_level}_{calculator_id}_{output_key}"
+            self._calculator_data[lod_key] = value
+            stored_any = True
+
+        if stored_any:
+            self._current_calculator_lods[calculator_id] = max(
+                self._current_calculator_lods.get(calculator_id, 0), lod_level)
+
+    def get_calculator_output(self, calculator_id: str, output_key: str, lod_level: int = None):
+        """
+        Holt einen einzelnen Output-Key eines Calculator-Knotens - bestes verfügbares
+        LOD <= lod_level als Fallback (None = insgesamt bestes verfügbares LOD für
+        diesen Knoten), analog zu get_terrain_data_lod()/_get_data_lod().
+        Return: Gespeicherter Wert oder None
+        """
+        if lod_level is None:
+            lod_level = self._current_calculator_lods.get(calculator_id, 0)
+
+        if lod_level < 1:
+            return None
+
+        for candidate in range(lod_level, 0, -1):
+            candidate_key = f"lod_{candidate}_{calculator_id}_{output_key}"
+            if candidate_key in self._calculator_data:
+                return self._calculator_data[candidate_key]
+
+        return None
+
+    def get_calculator_completed_lod(self, calculator_id: str) -> int:
+        """
+        Höchstes abgeschlossenes LOD für diesen Calculator-Knoten (0 = noch keins) -
+        Grundlage für die Runden-Bereitschaftsprüfung im CalculatorDispatcher.
+        """
+        return self._current_calculator_lods.get(calculator_id, 0)
+
+    # =============================================================================
     # TERRAIN DATA MANAGEMENT - LOD-ERWEITERT (BESTEHEND)
     # =============================================================================
 
@@ -3155,6 +3227,52 @@ class DataLODManager(QObject):
             combined = combined - erosion_map
 
         sedimentation_map = self.get_water_data_lod("sedimentation_map", lod_level)
+        if sedimentation_map is not None and sedimentation_map.shape == base.shape:
+            combined = combined + sedimentation_map
+
+        return combined
+
+    def get_calculator_combined_heightmap(self, lod_level: int):
+        """
+        Funktionsweise: Wie get_terrain_data_combined("heightmap", ...), liest die drei
+                 Anteile (Terrain-Basis, Geology-Tektonik, Water-Erosion/-Sedimentation)
+                 aber direkt aus dem feingranularen Calculator-Storage
+                 (terrain.redistribution/geology.tectonic_deformation/
+                 water.erosion_sedimentation) statt aus dem Domain-Level-Storage
+                 (_terrain_data/_geology_data/_water_data).
+        Aufgabe: Domain-Level-Storage wird erst befüllt, wenn ALLE Calculator-Knoten
+                 EINES Generators ein LOD abgeschlossen haben und der Orchestrator
+                 assemble_*_data() aufgerufen hat (_maybe_assemble_generator) - das
+                 passiert oft deutlich SPÄTER als der einzelne Calculator-Knoten
+                 terrain.redistribution, von dem z.B. geology.classify_elevation laut
+                 CALCULATOR_GRAPH bereits abhängen darf. _calc_*-Methoden anderer
+                 Generatoren, die "heightmap_combined" als Input brauchen, müssen
+                 deshalb diese Methode statt get_terrain_data_combined() verwenden,
+                 sonst schlagen sie fehl, obwohl ihre einzige echte Abhängigkeit
+                 (terrain.redistribution) längst fertig ist.
+        Parameter:
+            lod_level - gewünschtes LOD (best verfügbares darunter als Fallback,
+                        analog get_calculator_output())
+        Return: Kombinierte Heightmap oder None, wenn terrain.redistribution noch
+                 nichts für dieses/ein niedrigeres LOD geliefert hat
+        """
+        base = self.get_calculator_output("terrain.redistribution", "heightmap", lod_level)
+        if base is None:
+            return None
+
+        combined = base.copy()
+
+        geology_height_delta = self.get_calculator_output(
+            "geology.tectonic_deformation", "height_delta", lod_level)
+        if geology_height_delta is not None and geology_height_delta.shape == base.shape:
+            combined = combined + geology_height_delta
+
+        erosion_map = self.get_calculator_output("water.erosion_sedimentation", "erosion_map", lod_level)
+        if erosion_map is not None and erosion_map.shape == base.shape:
+            combined = combined - erosion_map
+
+        sedimentation_map = self.get_calculator_output(
+            "water.erosion_sedimentation", "sedimentation_map", lod_level)
         if sedimentation_map is not None and sedimentation_map.shape == base.shape:
             combined = combined + sedimentation_map
 

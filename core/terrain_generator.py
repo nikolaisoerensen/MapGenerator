@@ -36,8 +36,6 @@ import hashlib
 import logging
 from typing import Dict, List, Tuple, Optional, Any
 
-from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
-
 
 class TerrainData:
     """
@@ -983,11 +981,16 @@ class BaseTerrainGenerator:
     Error-Handling: Graceful Degradation bei Shader/Generator-Fehlern, vollständige Fallback-Kette
     """
 
-    def __init__(self, map_seed: int = 42, shader_manager=None):
+    def __init__(self, map_seed: int = 42, shader_manager=None, data_lod_manager=None):
         """
         Funktionsweise: Initialisiert Terrain-Generator mit allen Sub-Komponenten
         Parameter: map_seed - Globaler Seed für reproduzierbare Ergebnisse
         Parameter: shader_manager - ShaderManager für Performance-Optimierung
+        Parameter: data_lod_manager - DataLODManager für feingranularen Calculator-
+            Storage (siehe set_calculator_output()/get_calculator_output()). Die echte
+            Pipeline injiziert immer eine Instanz über GenerationOrchestrator.
+            get_generator_instance(); bleibt sie None (Standalone-Nutzung/Tests), wird
+            beim ersten Bedarf lazy eine eigene erzeugt (siehe _ensure_data_lod_manager()).
         """
         self.map_seed = map_seed
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -996,14 +999,44 @@ class BaseTerrainGenerator:
         self.shadow_calculator = ShadowCalculator(shader_manager=shader_manager)
         self.slope_calculator = SlopeCalculator(shader_manager=shader_manager)
         self.shader_manager = shader_manager
+        self.data_lod_manager = data_lod_manager
+
+        # Parameter der aktuell laufenden Generierungs-Anfrage - vom
+        # GenerationOrchestrator einmal pro frischer Anfrage über
+        # set_active_parameters() gesetzt, bleibt über alle LOD-Runden dieser
+        # Anfrage hinweg konstant (ersetzt das frühere context-dict-basierte
+        # Parameter-Handling, das nur innerhalb EINES calculate_heightmap()-Aufrufs
+        # existierte - die _calc_*-Methoden werden jetzt vom globalen
+        # CalculatorDispatcher einzeln aufgerufen, nicht mehr alle zusammen).
+        self._current_parameters: Dict[str, Any] = {}
 
         # Standard-Parameter aus value_default.py
         self.default_parameters = self._load_default_parameters()
 
+    def set_active_parameters(self, parameters: Dict[str, Any]):
+        """Setzt die Parameter, die alle _calc_*-Methoden bis zur nächsten frischen
+        Anfrage verwenden (vom GenerationOrchestrator aufgerufen)."""
+        self._current_parameters = parameters
+
+    def _ensure_data_lod_manager(self):
+        """Lazy-Fallback für Standalone-Nutzung (Tests, calculate_heightmap() ohne
+        injizierten Manager) - die echte Pipeline injiziert immer einen über
+        GenerationOrchestrator.get_generator_instance()."""
+        if self.data_lod_manager is None:
+            from gui.OldManagers.data_lod_manager import DataLODManager
+            self.data_lod_manager = DataLODManager()
+        return self.data_lod_manager
+
     def calculate_heightmap(self, parameters: Dict[str, Any], lod_level: int) -> TerrainData:
         """
-        Funktionsweise: EINZIGE öffentliche Methode - wird von GenerationOrchestrator aufgerufen
-        Aufgabe: Koordiniert komplette Terrain-Generierung für gegebenes LOD-Level
+        Funktionsweise: Standalone-Convenience-Entry-Point (Legacy-Kompatibilität + Tests)
+        Aufgabe: Führt alle 4 Terrain-Calculator-Knoten synchron für EIN LOD aus und
+            liefert das fertige TerrainData-Objekt. Die echte GUI-Pipeline
+            (GenerationOrchestrator) ruft dieselben _calc_*-Methoden ab jetzt einzeln
+            über den globalen CalculatorDispatcher auf (siehe
+            gui/OldManagers/calculator_graph.py, Tracker #16 LOD-Lockstep-Umbau) -
+            der Effekt ist identisch, da beide Wege dieselben Methoden und denselben
+            Storage nutzen.
         Parameter: parameters - Alle Terrain-Parameter (aus ParameterManager)
         Parameter: lod_level - Numerisches LOD-Level (1-7)
         Returns: TerrainData - Komplette Terrain-Daten mit Validity-System
@@ -1012,24 +1045,19 @@ class BaseTerrainGenerator:
         start_time = time.time()
 
         try:
-            # Parameter-Validation
             self._validate_parameters(parameters)
+            self._ensure_data_lod_manager()
+            self.set_active_parameters(parameters)
 
-            # Terrain-Generierung koordinieren
-            terrain_data = self._coordinate_generation(parameters, lod_level)
+            self.logger.debug(f"Starting terrain generation: LOD {lod_level}")
 
-            # Performance-Tracking
+            self._calc_noise("terrain.noise", lod_level)
+            self._calc_redistribution("terrain.redistribution", lod_level)
+            self._calc_slope("terrain.slope", lod_level)
+            self._calc_shadow("terrain.shadow", lod_level)
+
+            terrain_data = self.assemble_terrain_data(lod_level, parameters)
             terrain_data.generation_time = time.time() - start_time
-            terrain_data.fallback_used = self._determine_fallback_used()
-
-            # Parameter und Validity-State setzen
-            terrain_data.update_parameters(parameters)
-            terrain_data.validity_state = "valid"
-            terrain_data.validity_flags = {
-                "heightmap": True,
-                "slopemap": True,
-                "shadowmap": True
-            }
 
             self.logger.info(f"Terrain generation completed for LOD {lod_level} in {terrain_data.generation_time:.2f}s")
             return terrain_data
@@ -1053,54 +1081,45 @@ class BaseTerrainGenerator:
 
             return error_terrain
 
-    def _coordinate_generation(self, parameters: Dict[str, Any], lod_level: int) -> TerrainData:
+    def assemble_terrain_data(self, lod_level: int, parameters: Dict[str, Any]) -> TerrainData:
         """
-        Funktionsweise: Koordiniert alle Terrain-Generierungsschritte
-        Parameter: parameters, lod_level
-        Returns: TerrainData - Generierte Terrain-Daten
-
-        Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
-        Sequenz (siehe gui/OldManagers/calculator_graph.py - Terrain-Calculator-
-        Knoten #1-#4 aus docs/generation_pipeline_dependencies.md). Phase 1 des
-        LOD-Lockstep-Umbaus (Tracker #16): nur Terrain-intern zerlegt, externes
-        Verhalten (calculate_heightmap() Signatur/Rückgabe) bleibt unverändert -
-        die anderen 5 Generatoren laufen unverändert über den bisherigen
-        generation_orchestrator.py-Pfad.
+        Funktionsweise: Baut das finale TerrainData-Objekt aus den einzeln gespeicherten
+        Calculator-Outputs zusammen
+        Aufgabe: Wird vom GenerationOrchestrator aufgerufen, sobald alle 4 Terrain-
+            Calculator-Knoten ein LOD abgeschlossen haben (siehe Task 18 im
+            LOD-Lockstep-Umbau) - analog zu den entsprechenden assemble_*_data()-
+            Methoden der anderen 5 Generatoren (nimmt parameters entgegen, damit
+            der Orchestrator alle 6 assemble_*_data()-Methoden einheitlich
+            aufrufen kann).
+        Parameter: lod_level - Numerisches LOD-Level
+        Parameter: parameters - Alle Terrain-Parameter (für update_parameters())
+        Returns: TerrainData - Komplette, fertig validierte Terrain-Daten
         """
-        # LOD-Größe berechnen
-        lod_size = self._lod_level_to_size(lod_level, parameters.get('map_size', 512))
+        heightmap = self.data_lod_manager.get_calculator_output("terrain.redistribution", "heightmap", lod_level)
+        slopemap = self.data_lod_manager.get_calculator_output("terrain.slope", "slopemap", lod_level)
+        shadowmap = self.data_lod_manager.get_calculator_output("terrain.shadow", "shadowmap", lod_level)
 
-        # TerrainData initialisieren
+        if heightmap is None or slopemap is None or shadowmap is None:
+            raise ValueError(f"assemble_terrain_data: fehlende Calculator-Outputs für LOD {lod_level}")
+
         terrain_data = TerrainData()
         terrain_data.lod_level = lod_level
-        terrain_data.actual_size = lod_size
-
-        self.logger.debug(f"Starting terrain generation: LOD {lod_level}, Size {lod_size}")
-
-        context = {"parameters": parameters, "lod_size": lod_size, "lod_level": lod_level}
-
-        scheduler = CalculatorRoundScheduler(
-            calculator_ids=["terrain.noise", "terrain.redistribution", "terrain.slope", "terrain.shadow"],
-            executors={
-                "terrain.noise": self._calc_noise,
-                "terrain.redistribution": self._calc_redistribution,
-                "terrain.slope": self._calc_slope,
-                "terrain.shadow": self._calc_shadow,
-            },
-        )
-        scheduler.run_round(target_lod=lod_level, context=context)
-
-        terrain_data.heightmap = context["heightmap"]
-        terrain_data.slopemap = context["slopemap"]
-        terrain_data.shadowmap = context["shadowmap"]
-        terrain_data.calculated_sun_angles = context["calculated_sun_angles"]
+        terrain_data.actual_size = heightmap.shape[0]
+        terrain_data.heightmap = heightmap
+        terrain_data.slopemap = slopemap
+        terrain_data.shadowmap = shadowmap
+        terrain_data.calculated_sun_angles = self.shadow_calculator.get_sun_angles_for_lod(lod_level)[0]
+        terrain_data.fallback_used = self._determine_fallback_used()
+        terrain_data.update_parameters(parameters)
+        terrain_data.validity_state = "valid"
+        terrain_data.validity_flags = {"heightmap": True, "slopemap": True, "shadowmap": True}
 
         return terrain_data
 
-    def _calc_noise(self, context: Dict[str, Any]) -> None:
+    def _calc_noise(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'terrain.noise' (#1): rohes Noise-Grid [-1,1]"""
-        parameters = context["parameters"]
-        size = context["lod_size"]
+        parameters = self._current_parameters
+        size = self._lod_level_to_size(lod_level, parameters.get('map_size', 512))
 
         frequency = parameters.get('frequency', 0.01)
         octaves = parameters.get('octaves', 4)
@@ -1110,46 +1129,56 @@ class BaseTerrainGenerator:
         # Frequency für LOD-Größe anpassen
         adjusted_frequency = frequency * (64 / size)  # Referenz: LOD 64
 
-        context["noise_grid"] = self.noise_generator.generate_noise_grid(
+        noise_grid = self.noise_generator.generate_noise_grid(
             size=size,
             frequency=adjusted_frequency,
             octaves=octaves,
             persistence=persistence,
             lacunarity=lacunarity
         )
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"noise_grid": noise_grid})
         self.logger.debug("Noise generation completed")
 
-    def _calc_redistribution(self, context: Dict[str, Any]) -> None:
+    def _calc_redistribution(self, calculator_id: str, lod_level: int) -> None:
         """
         Calculator-Node 'terrain.redistribution' (#2): Noise -> amplitudenskalierte
         Heightmap -> Power-Redistribution, ergibt die finale heightmap.
         """
-        parameters = context["parameters"]
+        parameters = self._current_parameters
+        noise_grid = self.data_lod_manager.get_calculator_output("terrain.noise", "noise_grid", lod_level)
+        if noise_grid is None:
+            raise ValueError(f"terrain.redistribution: noise_grid für LOD {lod_level} nicht verfügbar")
+
         amplitude = parameters.get('amplitude', 100)
 
         # Auf [0, amplitude] skalieren
-        heightmap = (context["noise_grid"] + 1.0) * 0.5 * amplitude
+        heightmap = (noise_grid + 1.0) * 0.5 * amplitude
         heightmap = heightmap.astype(np.float32)
 
-        context["heightmap"] = self._apply_redistribution(
+        heightmap = self._apply_redistribution(
             heightmap, parameters.get('redistribute_power', 1.0), amplitude
         )
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"heightmap": heightmap})
         self.logger.debug("Heightmap generation + redistribution completed")
 
-    def _calc_slope(self, context: Dict[str, Any]) -> None:
+    def _calc_slope(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'terrain.slope' (#3)"""
-        context["slopemap"] = self.slope_calculator.calculate_slopes(
-            context["heightmap"], context["parameters"]
-        )
+        heightmap = self.data_lod_manager.get_calculator_output("terrain.redistribution", "heightmap", lod_level)
+        if heightmap is None:
+            raise ValueError(f"terrain.slope: heightmap für LOD {lod_level} nicht verfügbar")
+
+        slopemap = self.slope_calculator.calculate_slopes(heightmap, self._current_parameters)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"slopemap": slopemap})
         self.logger.debug("Slope calculation completed")
 
-    def _calc_shadow(self, context: Dict[str, Any]) -> None:
+    def _calc_shadow(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'terrain.shadow' (#4)"""
-        context["shadowmap"] = self.shadow_calculator.calculate_shadows(
-            context["heightmap"], context["lod_level"]
-        )
-        context["calculated_sun_angles"] = self.shadow_calculator.get_sun_angles_for_lod(
-            context["lod_level"])[0]
+        heightmap = self.data_lod_manager.get_calculator_output("terrain.redistribution", "heightmap", lod_level)
+        if heightmap is None:
+            raise ValueError(f"terrain.shadow: heightmap für LOD {lod_level} nicht verfügbar")
+
+        shadowmap = self.shadow_calculator.calculate_shadows(heightmap, lod_level)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"shadowmap": shadowmap})
         self.logger.debug("Shadow calculation completed")
 
     def _apply_redistribution(self, heightmap: np.ndarray, redistribute_power: float,
