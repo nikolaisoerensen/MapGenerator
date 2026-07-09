@@ -454,11 +454,14 @@ class MapDisplay2D(QWidget):
             self.ax.legend(loc='upper right', fontsize=8, framealpha=0.7)
         self.canvas.draw()
 
-    def overlay_roads(self, roads):
+    def overlay_roads(self, roads, color='darkorange', linewidth=1.2, alpha=0.85, zorder=4):
         """
         Funktionsweise: Zeichnet Road-Pfade als Linien über das aktuell
         angezeigte Bild
-        Aufgabe: Overlay für SettlementTab "Road Network"
+        Aufgabe: Overlay für SettlementTab "Road Network" - mehrfach mit
+        unterschiedlicher color aufrufbar, um Hauptstraßen/Landmark-
+        Anbindungen/Außenverbindungen optisch zu unterscheiden (siehe
+        SettlementTab.update_settlement_display())
         Parameter: roads (List[List[Tuple]]) - Liste von Pfaden, je Pfad eine
         Liste von (x,y[,...])-Punkten
         """
@@ -470,8 +473,47 @@ class MapDisplay2D(QWidget):
                 continue
             xs = [p[0] for p in path]
             ys = [p[1] for p in path]
-            self.ax.plot(xs, ys, color='darkorange', linewidth=1.2, alpha=0.85, zorder=4)
+            self.ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, zorder=zorder)
 
+        self.canvas.draw()
+
+    def overlay_city_boundary_contour(self, city_mask, color='gold', linewidth=2.2):
+        """
+        Funktionsweise: Zeichnet die Stadtgrenze (siehe CityBoundaryAnalyzer in
+        core/settlement_generator.py) als geschlossene Kontur statt als
+        gefuellte Flaeche
+        Aufgabe: Overlay fuer SettlementTab "City Boundary" - bewusst deutlich
+        und "stadtmauerartig" (Nutzer-Vorgabe), kombinierbar mit jedem anderen
+        Basis-Layer statt eines eigenen exklusiven Anzeigemodus
+        Parameter: city_mask (numpy.ndarray[int]) - Settlement-ID pro Pixel,
+        -1 = ausserhalb jeder Stadt (siehe city_mask-Konvention im Core)
+        """
+        if self.current_data is None or city_mask is None:
+            return
+
+        inside = (city_mask >= 0).astype(np.float32)
+        if not np.any(inside):
+            return
+
+        self.ax.contour(inside, levels=[0.5], colors=[color], linewidths=linewidth, zorder=6)
+        self.canvas.draw()
+
+    def overlay_street_mask(self, street_mask, color='dimgray'):
+        """
+        Funktionsweise: Überlagert eine bool-Maske (z.B. innerstädtisches
+        Straßenraster) als einfarbige Pixel über das aktuell angezeigte Bild
+        Aufgabe: Overlay für SettlementTab "City Blocks" (siehe CityBlockSystem
+        in core/settlement_generator.py) - analog zu overlay_river_network(),
+        aber für eine reine bool-Maske statt einem Schwellwert-Array
+        Parameter: street_mask (numpy.ndarray[bool]) - True wo eine Straße verläuft
+        """
+        if self.current_data is None or street_mask is None or not np.any(street_mask):
+            return
+
+        from matplotlib.colors import ListedColormap
+        overlay = np.ma.masked_where(~street_mask, street_mask.astype(np.uint8))
+        self.ax.imshow(overlay, cmap=ListedColormap([color]), origin='lower',
+                        interpolation='nearest', alpha=0.9, zorder=3)
         self.canvas.draw()
 
     def overlay_river_network(self, flow_map):

@@ -59,6 +59,19 @@ class SETTLEMENT:
     ROAD_SLOPE_TO_DISTANCE_RATIO = {"min": 0.1, "max": 3.0, "default": 1.5, "step": 0.1}
     LANDMARK_WILDERNESS = {"min": 0.1, "max": 0.8, "default": 0.3, "step": 0.05}
     PLOTSIZE = {"min": 0.5, "max": 5.0, "default": 2.0, "step": 0.1}
+    CITY_REACH_FACTOR = {"min": 1.0, "max": 10.0, "default": 4.0, "step": 0.5}
+    VORONOI_BASE_SPACING = {"min": 4.0, "max": 64.0, "default": 16.0, "step": 2.0}
+    VORONOI_RELAX_ITERATIONS = {"min": 1, "max": 10, "default": 4, "step": 1}
+    ROAD_VORONOI_EDGE_BIAS = {"min": 0.0, "max": 5.0, "default": 1.5, "step": 0.1}
+    HOUSE_SPACING = {"min": 1.0, "max": 16.0, "default": 4.0, "step": 0.5}
+    CIV_INFLUENCE_RANGE = {"min": 0.05, "max": 0.6, "default": 0.30, "step": 0.01, "suffix": "x diag"}
+    PLOT_BASE_SPACING = {"min": 2.0, "max": 40.0, "default": 10.0, "step": 1.0}
+    PLOT_CIV_SPACING_FACTOR = {"min": 0.0, "max": 10.0, "default": 3.0, "step": 0.1}
+    PLOT_HEIGHT_COST_FACTOR = {"min": 0.0, "max": 10.0, "default": 2.0, "step": 0.1}
+    PLOT_PATH_TRAFFIC_THRESHOLD = {"min": 1, "max": 500, "default": 25, "step": 1}
+    PLOT_ROAD_TRAFFIC_THRESHOLD = {"min": 1, "max": 500, "default": 75, "step": 1}
+    PLOT_INTERCITY_TRAFFIC = {"min": 0, "max": 200, "default": 30, "step": 1}
+    PLOT_TRAFFIC_ATTRACTION = {"min": 0.0, "max": 1.0, "default": 0.05, "step": 0.01}
 
 
 class WEATHER:

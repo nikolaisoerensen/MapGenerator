@@ -996,9 +996,9 @@ class GenerationOrchestrator(QObject):
                 # ohne diese Injektion bleibt self.data_lod_manager auf dem
                 # Generator None und jeder Calculator-Aufruf schlägt fehl.
                 # shader_manager injizieren, wo der jeweilige Generator-Konstruktor das
-                # unterstützt (Terrain/Weather/Water/Biome) - Geology/Settlement haben
+                # unterstützt (Terrain/Weather/Water/Biome/Settlement) - Geology hat
                 # bisher KEINE Shader-Anbindung implementiert (siehe Shader-Inventur),
-                # ihre Konstruktoren kennen den Parameter noch nicht.
+                # ihr Konstruktor kennt den Parameter noch nicht.
                 if generator_type == GeneratorType.TERRAIN:
                     from core.terrain_generator import BaseTerrainGenerator
                     self._generator_instances[generator_type.value] = BaseTerrainGenerator(
@@ -1022,7 +1022,7 @@ class GenerationOrchestrator(QObject):
                 elif generator_type == GeneratorType.SETTLEMENT:
                     from core.settlement_generator import SettlementGenerator
                     self._generator_instances[generator_type.value] = SettlementGenerator(
-                        data_lod_manager=self.data_lod_manager)
+                        data_lod_manager=self.data_lod_manager, shader_manager=self.shader_manager)
 
             except ImportError as e:
                 self.logger.error(f"Failed to import generator for {generator_type.value}: {e}")

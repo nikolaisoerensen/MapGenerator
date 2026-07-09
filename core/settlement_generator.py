@@ -83,8 +83,9 @@ PlotNodeSystem
 """
 
 import numpy as np
-from scipy.spatial import Delaunay
+from scipy.spatial import Delaunay, cKDTree
 from scipy.interpolate import splprep, splev
+from scipy.ndimage import distance_transform_edt
 import heapq
 import logging
 from dataclasses import dataclass
@@ -108,6 +109,13 @@ class SettlementData:
         self.plot_nodes = []  # List[PlotNode] - Alle PlotNodes
         self.plots = []  # List[Plot] - Alle Plots
         self.roads = []  # List[List[Tuple]] - Alle Road-Pfade
+        self.city_mask = None  # (height, width) - Settlement-ID pro Pixel, -1 = ausserhalb jeder Stadt
+        self.voronoi_cell_map = None  # (height, width) - Landschafts-Plot-Zell-ID pro Pixel, -1 = Stadt/Wilderness
+        self.street_mask = None  # (height, width) bool - innerstaedtisches Strassenraster
+        self.house_parcel_map = None  # (height, width) - kartenweit eindeutige Hausparzellen-ID, -1 = keine Parzelle
+        self.landmark_roads = []  # List[List[Tuple]] - Landmark-Anbindungen ans Strassennetz
+        self.outer_roads = []  # List[List[Tuple]] - Aussenverbindungen zur Kartengrenze
+        self.plot_edges = {}  # Dict[int, PlotEdge] - adressierbares Kanten-Registry mit Traffic/Klassifikation
 
         # Interne Daten
         self.combined_suitability_map = None  # Terrain-Suitability für Settlement-Platzierung
@@ -228,6 +236,32 @@ class PlotNode:
     connector_distance: List[float]
     connector_elevation: List[float]
     connector_movecost: List[float]
+    connector_edge_id: List[int]
+    settlement_id: int = -1  # >=0: dieser Node IST der Marktplatz von Settlement.location_id
+    # (Nutzer-Vorgabe: "eine Stadt hat je einen Marktplatz, der zugleich ein
+    # Node ist") - ein echter, in der Delaunay-Triangulation/im Traffic-Graph
+    # ganz normal teilnehmender PlotNode statt eines separaten virtuellen
+    # Anker-Knotens. -1 = normaler Plot-Node ohne Siedlungsbezug.
+
+
+@dataclass
+class PlotEdge:
+    """
+    Funktionsweise: Adressierbare Kante zwischen zwei PlotNodes (z.B. "Plotnode
+    234 und 260 teilen sich Kante 839", Nutzer-Vorgabe) - Grundlage für die
+    Familien-/Verkehrssimulation in PlotNodeSystem.simulate_plot_traffic().
+    Aufgabe: Traegt Laenge, kumulierte Hoehenueberbrueckung (Wegintegral statt
+    reiner Endpunkt-Differenz) und den daraus abgeleiteten Traffic-Wert, der
+    die Kante am Ende als "none"/"path"/"road" klassifiziert.
+    """
+    edge_id: int
+    node_a: int
+    node_b: int
+    length: float
+    height_cost: float  # kumulierte |Höhenänderung| entlang der Linie (Wegintegral)
+    movement_cost: float  # length * (1 + height_cost_factor * mittlere Steigung)
+    traffic: float = 0.0  # fraktional: eine PlotNode teilt ihre "Familien-Masse" per Rang-Distanz-Gewicht auf mehrere Ziele auf
+    classification: str = "none"  # "none" | "path" | "road"
 
 
 @dataclass
@@ -322,44 +356,37 @@ class TerrainSuitabilityAnalyzer:
             progress_callback("Terrain Analysis", 10, "Calculating water proximity...")
 
         height, width = water_map.shape
+
+        # Vektorisiert statt O(H*W*Wasserpixel) Python-Doppelschleife (jeder Pixel
+        # berechnete zuvor seine Distanz zu JEDEM Wasser-Pixel einzeln neu) -
+        # distance_transform_edt() liefert dieselbe "Distanz zum naechsten
+        # True-Pixel" exakt, nur in O(H*W). War die Hauptursache fuer sehr lange
+        # bzw. haengende Settlement-Generierung bei groesseren/wasserreichen
+        # Karten (siehe docs/backlog.md Ticket #4 Performance-Hinweis).
+        water_mask = water_map > 0
+        if not np.any(water_mask):
+            return np.zeros((height, width), dtype=np.float32)
+
+        min_distance = distance_transform_edt(~water_mask)
+
+        # LOD-abhängige Maximal-Distanz: alles darueber bleibt 0.0 (wie vorher)
+        min_distance = np.where(min_distance > self.max_distance_check, np.inf, min_distance)
+
+        # Optimal: 2-10 Pixel Entfernung
+        # Akzeptabel: bis 20 Pixel
+        # Ungeeignet: > 30 Pixel oder direkt auf Wasser
         water_suitability = np.zeros((height, width), dtype=np.float32)
-
-        # LOD-abhängige Maximal-Distanz
-        max_distance = self.max_distance_check
-
-        # Finde alle Wasser-Pixel
-        water_pixels = np.where(water_map > 0)
-
-        for y in range(height):
-            for x in range(width):
-                if len(water_pixels[0]) == 0:
-                    water_suitability[y, x] = 0.0
-                    continue
-
-                # Minimale Distanz zu Wasser berechnen (mit LOD-Limit)
-                distances = np.sqrt((water_pixels[1] - x) ** 2 + (water_pixels[0] - y) ** 2)
-                min_distance = np.min(distances)
-
-                # Bei niedrigen LODs: früher abbrechen
-                if min_distance > max_distance:
-                    water_suitability[y, x] = 0.0
-                    continue
-
-                # Optimal: 2-10 Pixel Entfernung
-                # Akzeptabel: bis 20 Pixel
-                # Ungeeignet: > 30 Pixel oder direkt auf Wasser
-                if min_distance == 0:
-                    water_suitability[y, x] = 0.0  # Direkt auf Wasser
-                elif min_distance < 2:
-                    water_suitability[y, x] = min_distance / 2.0  # Zu nah
-                elif min_distance <= 10:
-                    water_suitability[y, x] = 1.0  # Optimal
-                elif min_distance <= 20:
-                    water_suitability[y, x] = 1.0 - (min_distance - 10) / 10 * 0.5
-                elif min_distance <= 30:
-                    water_suitability[y, x] = 0.5 - (min_distance - 20) / 10 * 0.5
-                else:
-                    water_suitability[y, x] = 0.0
+        near_mask = min_distance < 2
+        water_suitability[near_mask] = (min_distance[near_mask] / 2.0).astype(np.float32)  # zu nah (inkl. direkt auf Wasser = 0)
+        optimal_mask = (min_distance >= 2) & (min_distance <= 10)
+        water_suitability[optimal_mask] = 1.0  # Optimal
+        good_mask = (min_distance > 10) & (min_distance <= 20)
+        if np.any(good_mask):
+            water_suitability[good_mask] = 1.0 - (min_distance[good_mask] - 10) / 10 * 0.5
+        ok_mask = (min_distance > 20) & (min_distance <= 30)
+        if np.any(ok_mask):
+            water_suitability[ok_mask] = 0.5 - (min_distance[ok_mask] - 20) / 10 * 0.5
+        # > 30 (oder > max_distance_check, oben auf inf gesetzt) bleibt 0.0
 
         return water_suitability
 
@@ -438,20 +465,54 @@ class TerrainSuitabilityAnalyzer:
         return combined_suitability
 
 
+def _voronoi_edge_distance_map(cell_map):
+    """
+    Distanz in Pixeln zur naechsten Voronoi-Zellgrenze (inkl. Stadtgrenze, da
+    Stadt-Pixel im cell_map bereits als -1 maskiert sind - ein Uebergang von Stadt
+    zu Landschafts-Zelle zaehlt hier bewusst ebenfalls als "Grenze", Strassen aus
+    der Stadt heraus sollen sich ja ebenso an ihr orientieren).
+    Grundlage fuer den Edge-Bias in PathfindingSystem (Nutzer-Vorgabe: Wege
+    zwischen Siedlungen sollen entlang der Plot-Grenzen verlaufen statt geradewegs
+    durch die Zellen).
+    """
+    edge_mask = np.zeros(cell_map.shape, dtype=bool)
+    edge_mask[:-1, :] |= cell_map[:-1, :] != cell_map[1:, :]
+    edge_mask[1:, :] |= cell_map[:-1, :] != cell_map[1:, :]
+    edge_mask[:, :-1] |= cell_map[:, :-1] != cell_map[:, 1:]
+    edge_mask[:, 1:] |= cell_map[:, :-1] != cell_map[:, 1:]
+
+    if not np.any(edge_mask):
+        return np.full(cell_map.shape, np.inf, dtype=np.float32)
+
+    return distance_transform_edt(~edge_mask).astype(np.float32)
+
+
 class PathfindingSystem:
     """
     Funktionsweise: Findet Wege geringsten Widerstands zwischen Settlements für Straßen
     Aufgabe: Erstellt realistische Straßenverbindungen mit Spline-Interpolation und LOD-Optimierung
     """
 
-    def __init__(self, road_slope_to_distance_ratio=1.0, map_size=64):
+    def __init__(self, road_slope_to_distance_ratio=1.0, map_size=64,
+                 edge_distance_map=None, edge_bias=0.0, edge_bias_scale=16.0):
         """
         Funktionsweise: Initialisiert Pathfinding-System mit Slope-Distance-Gewichtung und LOD
         Aufgabe: Setup der Pathfinding-Parameter mit LOD-Anpassung
         Parameter: road_slope_to_distance_ratio (float), map_size (int) - Gewichtung und tatsächliche Pixel-Größe
+        Parameter: edge_distance_map - optionale (H,W)-Distanz zur naechsten Voronoi-
+            Zellgrenze (siehe _voronoi_edge_distance_map()); None = kein Edge-Bias
+            (Legacy-Verhalten, reine Slope-Kosten).
+        Parameter: edge_bias - Staerke der Bevorzugung von Zellgrenzen (0 = aus)
+        Parameter: edge_bias_scale - charakteristische Distanz (Pixel), ueber die
+            der Edge-Bias von "billig direkt auf der Grenze" zu "voller Straf-
+            aufschlag weit von jeder Grenze" saettigt (typischerweise die
+            Voronoi-Seed-Spacing-Groessenordnung).
         """
         self.slope_distance_ratio = road_slope_to_distance_ratio
         self.map_size = map_size
+        self.edge_distance_map = edge_distance_map
+        self.edge_bias = edge_bias
+        self.edge_bias_scale = max(1e-3, edge_bias_scale)
 
         # Größenabhängige Pathfinding-Optimierungen
         if map_size <= 64:
@@ -483,8 +544,17 @@ class PathfindingSystem:
         # Basis-Kosten: 1.0 + Slope-Penalty
         base_cost = 1.0
         slope_penalty = slope_magnitude * self.slope_distance_ratio
+        cost = base_cost + slope_penalty
 
-        return base_cost + slope_penalty
+        # Edge-Bias: guenstiger nahe einer Voronoi-Zellgrenze, saettigt Richtung
+        # (1 + edge_bias) je weiter man sich von jeder Grenze entfernt.
+        if self.edge_distance_map is not None and self.edge_bias > 0:
+            distance_to_edge = self.edge_distance_map[y, x]
+            if np.isfinite(distance_to_edge):
+                cost *= 1.0 + self.edge_bias * (
+                    distance_to_edge / (distance_to_edge + self.edge_bias_scale))
+
+        return cost
 
     def find_least_resistance_path(self, slopemap, start_pos, end_pos, progress_callback=None):
         """
@@ -609,17 +679,486 @@ class PathfindingSystem:
             return path
 
 
+_VORONOI_NEIGHBOR_STEPS = (
+    (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+    (-1, -1, 1.4142135), (1, -1, 1.4142135), (-1, 1, 1.4142135), (1, 1, 1.4142135),
+)
+
+
+def _terrain_cost_voronoi(heightmap, slopemap, seed_positions, terrain_factor, max_cost=None, valid_mask=None):
+    """
+    Multi-Source-Dijkstra ueber das Pixelgrid: jeder Pixel wird dem Seed mit der
+    geringsten terrain-cost-gewichteten Distanz zugeordnet - CPU-Referenz fuer den
+    spaeteren GPU-JFA-Shader (siehe shaders/water/jumpFloodLakes.comp fuer exakt
+    dasselbe Muster bei der Lake-Detection, dort mit Hoehen- statt Slope-Kosten).
+
+    effective_distance = geometrische Distanz * (1 + terrain_factor * slope_magnitude),
+    dieselbe Formel-Familie wie im alten Settlement-Deskriptor
+    (slope_factor = 1 + terrain_factor * slope_angle; effective_distance = distance * slope_factor).
+
+    Parameter:
+        seed_positions: Liste/Array von (x, y)-Tupeln, ein Seed pro Eintrag (Index = seed_id)
+        max_cost: optionale Kappungsgrenze - Pixel jenseits davon bleiben unassigned (-1).
+            Laesst den Flood bei kleinen, lokal begrenzten Grenzen (z.B. Stadtgrenzen)
+            frueh terminieren statt die ganze Karte zu fluten.
+        valid_mask: optionale bool-Maske (H,W) - der Flood propagiert nur innerhalb
+            dieser Maske (genutzt vom Block-System, um Hausparzellen strikt auf
+            das Stadt-Footprint zu begrenzen statt in die Landschaft auszulaufen).
+    Returns: (nearest_seed_map int32 (H,W) mit -1 = unassigned, cost_map float32 (H,W))
+    """
+    height, width = heightmap.shape
+    slope_magnitude = np.sqrt(slopemap[..., 0] ** 2 + slopemap[..., 1] ** 2).astype(np.float32)
+
+    nearest_seed = np.full((height, width), -1, dtype=np.int32)
+    cost_map = np.full((height, width), np.inf, dtype=np.float32)
+
+    heap = []
+    for seed_id, (sx, sy) in enumerate(seed_positions):
+        ix, iy = int(round(sx)), int(round(sy))
+        if 0 <= ix < width and 0 <= iy < height and cost_map[iy, ix] > 0.0:
+            if valid_mask is not None and not valid_mask[iy, ix]:
+                continue
+            cost_map[iy, ix] = 0.0
+            nearest_seed[iy, ix] = seed_id
+            heapq.heappush(heap, (0.0, ix, iy, seed_id))
+
+    while heap:
+        cost, x, y, seed_id = heapq.heappop(heap)
+        if cost > cost_map[y, x]:
+            continue  # veralteter Heap-Eintrag, bereits durch billigeren Pfad ueberholt
+        for dx, dy, base_step in _VORONOI_NEIGHBOR_STEPS:
+            nx, ny = x + dx, y + dy
+            if nx < 0 or nx >= width or ny < 0 or ny >= height:
+                continue
+            if valid_mask is not None and not valid_mask[ny, nx]:
+                continue
+            step_cost = base_step * (1.0 + terrain_factor * slope_magnitude[ny, nx])
+            new_cost = cost + step_cost
+            if max_cost is not None and new_cost > max_cost:
+                continue
+            if new_cost < cost_map[ny, nx]:
+                cost_map[ny, nx] = new_cost
+                nearest_seed[ny, nx] = seed_id
+                heapq.heappush(heap, (new_cost, nx, ny, seed_id))
+
+    return nearest_seed, cost_map
+
+
+def _terrain_cost_voronoi_gpu_or_cpu(shader_manager, heightmap, slopemap, seed_positions, terrain_factor, max_cost=None):
+    """
+    Versucht den terrain-cost-gewichteten Multi-Source-Flood auf der GPU (JFA-
+    Approximation, siehe shaders/settlement/terrainCostFlood.comp), faellt bei
+    fehlendem shader_manager oder GPU-Fehlern auf die exakte CPU-Dijkstra-
+    Referenz zurueck (_terrain_cost_voronoi()) - dasselbe GPU->CPU-Fallback-
+    Muster wie in core/water_generator.py (hier ohne separaten Simple-Fallback,
+    da die CPU-Variante bereits die volle Referenzimplementierung ist).
+    Returns: (nearest_seed_map int32 (H,W), cost_map float32 (H,W)) - identische
+    Signatur zu _terrain_cost_voronoi(), damit beide Pfade austauschbar sind.
+    """
+    if shader_manager:
+        try:
+            result = shader_manager.request_shader_operation(
+                "settlement", "terrainCostFlood",
+                {"slopemap": slopemap, "seed_positions": seed_positions,
+                 "terrain_factor": terrain_factor, "max_cost": max_cost},
+                {}
+            )
+            if result.get("success"):
+                return result["nearest_seed_map"], result["cost_map"]
+        except Exception as e:
+            logging.warning(f"GPU terrain-cost-flood fehlgeschlagen: {e}, Fallback auf CPU")
+
+    return _terrain_cost_voronoi(heightmap, slopemap, seed_positions, terrain_factor, max_cost=max_cost)
+
+
+class CityBoundaryAnalyzer:
+    """
+    Funktionsweise: Bestimmt die Stadtgrenze je Settlement ueber eine terrain-cost-
+    gewichtete Distanz vom Stadtkern - auf flacher Distanz reicht die Stadt weiter,
+    Haenge bremsen die Ausdehnung ab (Nutzer-Vorgabe: Mischung aus Abstand zum
+    Stadtkern und Uberwindung von Hoehe).
+    Aufgabe: Liefert eine city_mask (Settlement-ID pro Pixel, -1 = ausserhalb jeder
+    Stadt) als harte Grenze zwischen Stadt-Innerem (feine Hausparzellen, siehe
+    spaeteres Block-System) und Landschaft (grobe Voronoi-Felder, siehe
+    LandscapeVoronoiSystem).
+    """
+
+    def __init__(self, terrain_factor=1.0, reach_factor=4.0, shader_manager=None):
+        self.terrain_factor = terrain_factor
+        self.reach_factor = reach_factor
+        self.shader_manager = shader_manager
+
+    def compute_city_boundaries(self, heightmap, slopemap, settlements, progress_callback=None):
+        """
+        Pro Settlement ein eigener kostenbegrenzter Flood (max_cost = radius *
+        reach_factor) statt ein einziger globaler Flood ueber alle Seeds - bei nur
+        wenigen Settlements (max 5, siehe SETTLEMENT.SETTLEMENTS) bleibt das
+        guenstig, weil jeder Flood frueh an seiner eigenen Grenze abbricht, und
+        erlaubt unterschiedlich grosse Staedte (je nach settlement.radius) mit
+        jeweils eigenem max_cost statt einem gemeinsamen Cutoff. Nutzt denselben
+        GPU/CPU-Flood wie LandscapeVoronoiSystem (siehe
+        _terrain_cost_voronoi_gpu_or_cpu()), pro Settlement einzeln aufgerufen
+        (Single-Seed), Ergebnisse werden ueber city_cost_map settlementuebergreifend
+        gemergt (bester/niedrigster Cost gewinnt bei ueberlappenden Reichweiten).
+        """
+        height, width = heightmap.shape
+        city_mask = np.full((height, width), -1, dtype=np.int32)
+        city_cost_map = np.full((height, width), np.inf, dtype=np.float32)
+
+        city_settlements = [s for s in settlements if s.location_type == 'settlement']
+        for i, settlement in enumerate(city_settlements):
+            if progress_callback:
+                progress_callback(
+                    "City Boundary", 30 + (i * 3) // max(1, len(city_settlements)),
+                    f"Computing city boundary {i + 1}/{len(city_settlements)}...")
+
+            max_cost = settlement.radius * self.reach_factor
+            seed_nearest, seed_cost = _terrain_cost_voronoi_gpu_or_cpu(
+                self.shader_manager, heightmap, slopemap, [(settlement.x, settlement.y)],
+                self.terrain_factor, max_cost=max_cost)
+
+            reached = seed_nearest >= 0
+            better = reached & (seed_cost < city_cost_map)
+            city_cost_map[better] = seed_cost[better]
+            city_mask[better] = settlement.location_id
+
+        return city_mask, city_cost_map
+
+
+class LandscapeVoronoiSystem:
+    """
+    Funktionsweise: Grobe Feld-Voronoi-Zellen fuer die Landschaft ausserhalb von
+    Staedten (siehe CityBoundaryAnalyzer) und Wilderness (siehe Wilderness-
+    Threshold in CivilizationInfluenceMapper). Seedpunkte stossen sich
+    physikalisch ab, Hoehe/Slope modulieren die Abstossung (steile Gegenden ->
+    dichtere Seeds -> kleinere Zellen - Nutzer-Vorgabe: "an steilen hügeligen
+    Gegenden sind die Plots in der Realität kleiner"). Zellzuordnung ueber
+    denselben terrain-cost-gewichteten Multi-Source-Flood wie CityBoundaryAnalyzer
+    (siehe _terrain_cost_voronoi()).
+
+    LOD-Kontinuitaet ("Gummiband", Nutzer-Vorgabe): SettlementGenerator uebergibt
+    die Seed-Positionen der letzten LOD-Stufe als Warm-Start (siehe
+    SettlementGenerator._calc_landscape_voronoi()) - die Relaxation baut jede
+    LOD-Stufe auf der vorigen auf statt komplett neu zu wuerfeln, damit Plot-
+    Grenzen zwischen LOD-Stufen nicht springen und sich Strassenwege ueber die
+    Iterationen hinweg straffen koennen.
+    """
+
+    def __init__(self, terrain_factor=1.0, base_spacing=16.0, relax_iterations=4, shader_manager=None):
+        self.terrain_factor = terrain_factor
+        self.base_spacing = base_spacing
+        self.relax_iterations = relax_iterations
+        self.shader_manager = shader_manager
+
+    def _local_min_spacing(self, slopemap, x, y):
+        """Steilere Stellen -> kleinerer Mindestabstand -> dichtere Seeds -> kleinere Zellen."""
+        dz_dx = slopemap[y, x, 0]
+        dz_dy = slopemap[y, x, 1]
+        slope_magnitude = np.sqrt(dz_dx ** 2 + dz_dy ** 2)
+        return self.base_spacing / (1.0 + self.terrain_factor * slope_magnitude)
+
+    def generate_seeds(self, heightmap, slopemap, city_mask, target_count,
+                        previous_seeds=None, rng=None):
+        """
+        Warm-Start aus previous_seeds (bereits auf die aktuelle Kartengroesse
+        skaliert - siehe SettlementGenerator._calc_landscape_voronoi()), aufgefuellt
+        per Rejection-Sampling bis target_count erreicht ist. Seeds werden nie
+        innerhalb einer Stadtgrenze plaziert (city_mask >= 0). Reicht der Platz bei
+        gegebenem Mindestabstand nicht fuer target_count Seeds, bricht das
+        Rejection-Sampling nach max_attempts einfach mit weniger Seeds ab, statt
+        zu haengen - fuer kleine LOD-Stufen mit wenigen freien Pixeln erwuenscht.
+        """
+        rng = rng or random
+        height, width = heightmap.shape
+
+        # Spatial-Hash-Grid statt linearem Scan ueber alle bisherigen Seeds:
+        # bei sehr steilem Terrain kann _local_min_spacing() auf einen winzigen
+        # Bruchteil von base_spacing schrumpfen, wodurch weit mehr Seeds passen
+        # als bei flachem Terrain angenommen - ein linearer "for (sx,sy) in seeds"-
+        # Scan pro Versuch wurde dann selbst bei nur ~1000 Zielwerten spuerbar
+        # langsam (siehe docs/backlog.md Ticket #4, "hängt bei LOD1"-Report).
+        # Zellgroesse = base_spacing (flaches Terrain als obere Schranke) haelt
+        # die pro Versuch zu pruefende Nachbarschaft klein und konstant.
+        cell_size = max(1e-3, self.base_spacing)
+        grid: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+
+        def cell_of(x, y):
+            return (int(x // cell_size), int(y // cell_size))
+
+        def is_too_close(x, y, min_spacing):
+            cx, cy = cell_of(x, y)
+            span = int(min_spacing // cell_size) + 1
+            for gx in range(cx - span, cx + span + 1):
+                for gy in range(cy - span, cy + span + 1):
+                    for (sx, sy) in grid.get((gx, gy), ()):
+                        if (sx - x) ** 2 + (sy - y) ** 2 < min_spacing ** 2:
+                            return True
+            return False
+
+        def insert(x, y):
+            grid.setdefault(cell_of(x, y), []).append((x, y))
+
+        seeds = []
+        if previous_seeds is not None:
+            for (x, y) in previous_seeds:
+                ix, iy = int(round(x)), int(round(y))
+                if 0 <= ix < width and 0 <= iy < height and city_mask[iy, ix] < 0:
+                    seeds.append((float(x), float(y)))
+                    insert(float(x), float(y))
+                if len(seeds) >= target_count:
+                    break
+
+        max_attempts = max(50, target_count * 30)
+        attempts = 0
+        while len(seeds) < target_count and attempts < max_attempts:
+            attempts += 1
+            x = rng.uniform(0, width - 1)
+            y = rng.uniform(0, height - 1)
+            ix, iy = int(x), int(y)
+            if city_mask[iy, ix] >= 0:
+                continue
+            min_spacing = self._local_min_spacing(slopemap, ix, iy)
+            if is_too_close(x, y, min_spacing):
+                continue
+            seeds.append((x, y))
+            insert(x, y)
+
+        return seeds
+
+    def relax(self, seeds, heightmap, slopemap, city_mask, progress_callback=None):
+        """
+        Iterative paarweise Abstossung ueber cKDTree-Nachbarschaftssuche. Ziel-
+        abstand pro Seed-Paar = Mittelwert der beiden lokalen Mindestabstaende
+        (terrain-moduliert). Seeds, die durch die Abstossung in eine Stadtgrenze
+        gedrueckt wuerden, bleiben auf ihrer alten Position stehen statt die
+        Stadtgrenze zu verletzen.
+        """
+        if len(seeds) < 2:
+            return seeds
+
+        height, width = heightmap.shape
+        positions = np.array(seeds, dtype=np.float64)
+        # Einmal vorab (statt pro Paar ueber _local_min_spacing()) - bei vielen
+        # Tausend Nachbar-Paaren pro Iteration dominierte vorher der reine
+        # Python/numpy-Scalar-Call-Overhead (np.clip()/np.hypot() pro Paar in
+        # einer Python-Schleife) die Laufzeit, nicht die Relaxation selbst -
+        # siehe Profiling in docs/backlog.md Ticket #4 ("hängt bei LOD1").
+        slope_magnitude = np.sqrt(slopemap[..., 0] ** 2 + slopemap[..., 1] ** 2)
+
+        for iteration in range(self.relax_iterations):
+            if progress_callback:
+                progress_callback(
+                    "Landscape Voronoi", 35 + (iteration * 5) // max(1, self.relax_iterations),
+                    f"Relaxing plot seeds (iteration {iteration + 1}/{self.relax_iterations})...")
+
+            tree = cKDTree(positions)
+            max_spacing = self.base_spacing * 2.0
+            pairs = tree.query_pairs(r=max_spacing, output_type='ndarray')
+            if len(pairs) == 0:
+                break
+
+            displacement = np.zeros_like(positions)
+
+            i_idx, j_idx = pairs[:, 0], pairs[:, 1]
+            pos_i, pos_j = positions[i_idx], positions[j_idx]
+
+            ix = np.clip(pos_i[:, 0], 0, width - 1).astype(np.intp)
+            iy = np.clip(pos_i[:, 1], 0, height - 1).astype(np.intp)
+            jx = np.clip(pos_j[:, 0], 0, width - 1).astype(np.intp)
+            jy = np.clip(pos_j[:, 1], 0, height - 1).astype(np.intp)
+
+            spacing_i = self.base_spacing / (1.0 + self.terrain_factor * slope_magnitude[iy, ix])
+            spacing_j = self.base_spacing / (1.0 + self.terrain_factor * slope_magnitude[jy, jx])
+            target_spacing = 0.5 * (spacing_i + spacing_j)
+
+            delta = pos_i - pos_j
+            dist = np.hypot(delta[:, 0], delta[:, 1])
+            valid = (dist >= 1e-6) & (dist < target_spacing)
+
+            push = np.zeros_like(dist)
+            push[valid] = (target_spacing[valid] - dist[valid]) / target_spacing[valid] * 0.5
+            direction = np.zeros_like(delta)
+            direction[valid] = delta[valid] / dist[valid, np.newaxis]
+
+            contribution = direction * push[:, np.newaxis]
+            np.add.at(displacement, i_idx, contribution)
+            np.add.at(displacement, j_idx, -contribution)
+
+            new_positions = positions + displacement
+            new_positions[:, 0] = np.clip(new_positions[:, 0], 0, width - 1)
+            new_positions[:, 1] = np.clip(new_positions[:, 1], 0, height - 1)
+
+            # Stadtgrenzen respektieren: Seeds, die hineingedrueckt wuerden, bleiben stehen
+            for idx in range(len(new_positions)):
+                nx, ny = int(new_positions[idx, 0]), int(new_positions[idx, 1])
+                if city_mask[ny, nx] >= 0:
+                    new_positions[idx] = positions[idx]
+
+            positions = new_positions
+
+        return [(float(x), float(y)) for x, y in positions]
+
+    def assign_cells(self, heightmap, slopemap, seeds, city_mask, progress_callback=None):
+        """
+        Zellzuordnung ueber denselben terrain-cost-Flood wie die Stadtgrenze
+        (siehe _terrain_cost_voronoi_gpu_or_cpu() - versucht GPU-JFA, faellt auf
+        CPU-Dijkstra zurueck). Der Flood selbst kennt die Stadtgrenze nicht
+        (propagiert ungehindert durch das gesamte Grid) - Stadt-Pixel werden
+        deshalb nachtraeglich aus dem Ergebnis maskiert, damit Landschafts-Zellen
+        nie mit Stadt-Innerem ueberlappen (das gehoert dem separaten Block-System,
+        siehe CityBlockSystem).
+        """
+        if progress_callback:
+            progress_callback("Landscape Voronoi", 42, "Assigning Voronoi cells...")
+        height, width = heightmap.shape
+        if not seeds:
+            return np.full((height, width), -1, dtype=np.int32)
+        cell_map, _ = _terrain_cost_voronoi_gpu_or_cpu(self.shader_manager, heightmap, slopemap, seeds, self.terrain_factor)
+        cell_map[city_mask >= 0] = -1
+        return cell_map
+
+
+class CityBlockSystem:
+    """
+    Funktionsweise: Feines innerstaedtisches Strassenraster + Hausparzellen
+    innerhalb einer Stadtgrenze (siehe CityBoundaryAnalyzer) - ein eigener,
+    dichterer Mechanismus als das grobe Landschafts-Voronoi (siehe
+    LandscapeVoronoiSystem), naeher am Referenzbild orientiert: zuerst ein
+    Strassen-Skelett (Minimum-Spanning-Tree zwischen Haus-Ankerpunkten), dann
+    richten sich die Hausparzellen an diesen Strassen aus statt an abstrakten
+    Zellgrenzen (Nutzer-Vorgabe: "Häuser richten sich nach Wegen aus, nicht
+    nach abstrakten Zellgrenzen").
+
+    Skaliert mit der verfuegbaren Pixel-Flaeche der Stadt (Nutzer-Vorgabe: bei
+    wenigen Pixeln pro Stadt nur wenige Haeuser, waechst mit dem LOD mit) -
+    target_houses ergibt sich aus footprint_area / house_spacing**2 statt einem
+    festen Parameter, damit winzige Staedte bei niedrigem LOD nicht ueberfuellt
+    werden.
+    """
+
+    def __init__(self, house_spacing=4.0):
+        self.house_spacing = house_spacing
+
+    def build_for_settlement(self, footprint_mask, rng):
+        """
+        Parameter: footprint_mask - bool (H,W), True wo city_mask == diese
+            Settlement-ID (siehe CityBoundaryAnalyzer). rng - random.Random-
+            Instanz fuer reproduzierbare Anker-Auswahl.
+        Returns: dict mit street_mask (bool H,W), house_parcel_map
+            (int32 H,W, lokale Parcel-ID, -1 = keine Parzelle/Strasse), anchors
+        """
+        height, width = footprint_mask.shape
+        ys, xs = np.nonzero(footprint_mask)
+        if len(xs) == 0:
+            return {
+                "street_mask": np.zeros((height, width), dtype=bool),
+                "house_parcel_map": np.full((height, width), -1, dtype=np.int32),
+                "anchors": [],
+            }
+
+        area = len(xs)
+        target_houses = max(1, int(area / max(1.0, self.house_spacing ** 2)))
+        anchors = self._sample_anchors(xs, ys, target_houses, rng)
+
+        street_mask = np.zeros((height, width), dtype=bool)
+        if len(anchors) >= 2:
+            street_mask = self._build_street_skeleton(anchors, footprint_mask)
+
+        # Hausparzellen: naechster Anker innerhalb des Footprints (rein geometrisch,
+        # kein Terrain-Cost noetig auf dieser kleinen Skala), Strassenpixel ausgenommen.
+        parcel_map = np.full((height, width), -1, dtype=np.int32)
+        if anchors:
+            flat_heightmap = np.zeros((height, width), dtype=np.float32)
+            flat_slopemap = np.zeros((height, width, 2), dtype=np.float32)
+            nearest, _ = _terrain_cost_voronoi(
+                flat_heightmap, flat_slopemap, anchors, terrain_factor=0.0, valid_mask=footprint_mask)
+            parcel_map[:] = nearest
+            parcel_map[street_mask] = -1
+
+        return {"street_mask": street_mask, "house_parcel_map": parcel_map, "anchors": anchors}
+
+    def _sample_anchors(self, xs, ys, target_count, rng):
+        """Rejection-Sampling mit Mindestabstand ueber die Footprint-Pixel selbst
+        (statt kontinuierlichem uniform-Sampling) - garantiert, dass jeder Anker
+        tatsaechlich innerhalb des (moeglicherweise sehr kleinen und unregel-
+        maessig geformten) Stadt-Footprints liegt. Spatial-Hash-Grid statt
+        linearem "all(...)"-Scan ueber alle bisherigen Anker (gleiches Muster
+        wie LandscapeVoronoiSystem.generate_seeds(), siehe dortigen Kommentar
+        zum Performance-Fix) - haelt die pro Kandidat zu pruefende Nachbarschaft
+        klein und konstant statt mit der Anker-Anzahl zu wachsen."""
+        candidates = list(zip(xs.tolist(), ys.tolist()))
+        rng.shuffle(candidates)
+
+        cell_size = max(1e-3, self.house_spacing)
+        grid: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+
+        def cell_of(x, y):
+            return (int(x // cell_size), int(y // cell_size))
+
+        def is_too_close(x, y):
+            cx, cy = cell_of(x, y)
+            for gx in (cx - 1, cx, cx + 1):
+                for gy in (cy - 1, cy, cy + 1):
+                    for (ax, ay) in grid.get((gx, gy), ()):
+                        if (x - ax) ** 2 + (y - ay) ** 2 < self.house_spacing ** 2:
+                            return True
+            return False
+
+        anchors = []
+        for (x, y) in candidates:
+            if len(anchors) >= target_count:
+                break
+            if not is_too_close(x, y):
+                anchors.append((float(x), float(y)))
+                grid.setdefault(cell_of(x, y), []).append((float(x), float(y)))
+        if not anchors and candidates:
+            anchors.append((float(candidates[0][0]), float(candidates[0][1])))
+        return anchors
+
+    def _build_street_skeleton(self, anchors, footprint_mask):
+        """Minimum-Spanning-Tree zwischen Haus-Ankerpunkten als Strassen-Skelett."""
+        from scipy.sparse.csgraph import minimum_spanning_tree
+        from scipy.sparse import csr_matrix
+
+        points = np.array(anchors)
+        dist_matrix = np.sqrt(((points[:, None, :] - points[None, :, :]) ** 2).sum(axis=-1))
+        mst = minimum_spanning_tree(csr_matrix(dist_matrix)).toarray()
+
+        street_mask = np.zeros(footprint_mask.shape, dtype=bool)
+        edges = np.transpose(np.nonzero(mst))
+        for i, j in edges:
+            self._rasterize_line(street_mask, points[i], points[j], footprint_mask)
+        return street_mask
+
+    @staticmethod
+    def _rasterize_line(street_mask, p0, p1, footprint_mask):
+        """Lineare Rasterung zwischen zwei Ankerpunkten, auf den Footprint begrenzt."""
+        height, width = street_mask.shape
+        x0, y0 = p0
+        x1, y1 = p1
+        steps = max(1, int(round(np.hypot(x1 - x0, y1 - y0))))
+        for t in np.linspace(0, 1, steps + 1):
+            x = int(round(x0 + (x1 - x0) * t))
+            y = int(round(y0 + (y1 - y0) * t))
+            if 0 <= x < width and 0 <= y < height and footprint_mask[y, x]:
+                street_mask[y, x] = True
+
+
 class SettlementGenerator:
     """
     Funktionsweise: Hauptklasse für intelligente Settlement-Platzierung mit BaseGenerator-API und LOD-System
     Aufgabe: Koordiniert alle Settlement-Aspekte und erstellt civ_map mit Progress-Updates
     """
 
-    def __init__(self, map_seed=42, data_lod_manager=None):
+    def __init__(self, map_seed=42, shader_manager=None, data_lod_manager=None):
         """
         Funktionsweise: Initialisiert Settlement-Generator mit BaseGenerator und Sub-Komponenten
         Aufgabe: Setup aller Settlement-Systeme und Rng-Seed
         Parameter: map_seed (int) - Globaler Seed für reproduzierbare Settlement-Platzierung
+        Parameter: shader_manager - optionaler ShaderManager für GPU-Compute (siehe
+            CityBoundaryAnalyzer/LandscapeVoronoiSystem, shaders/settlement/terrainCostFlood.comp).
+            None (Standalone/Tests) bedeutet reine CPU-Referenz, kein Verhaltensunterschied
+            außer Performance.
         Parameter: data_lod_manager - DataLODManager für feingranularen Calculator-Storage
             (siehe set_calculator_output()/get_calculator_output()). Die echte Pipeline
             injiziert immer eine Instanz über GenerationOrchestrator.get_generator_instance();
@@ -631,6 +1170,7 @@ class SettlementGenerator:
         np.random.seed(map_seed)
 
         self.next_location_id = 0
+        self.shader_manager = shader_manager
         self.data_lod_manager = data_lod_manager
 
         # Progress-Callback (step_name, progress_percent, detail_message) -> None.
@@ -651,6 +1191,19 @@ class SettlementGenerator:
         self.road_slope_to_distance_ratio = 1.5
         self.landmark_wilderness = 0.3
         self.plotsize = 2.0
+        self.city_reach_factor = 4.0
+        self.voronoi_base_spacing = 16.0
+        self.voronoi_relax_iterations = 4
+        self.road_voronoi_edge_bias = 1.5
+        self.house_spacing = 4.0
+        self.civ_influence_range = 0.30
+        self.plot_base_spacing = 10.0
+        self.plot_civ_spacing_factor = 3.0
+        self.plot_height_cost_factor = 2.0
+        self.plot_path_traffic_threshold = 25
+        self.plot_road_traffic_threshold = 75
+        self.plot_intercity_traffic = 30
+        self.plot_traffic_attraction = 0.05
 
     def set_active_parameters(self, parameters):
         """
@@ -669,6 +1222,19 @@ class SettlementGenerator:
         self.road_slope_to_distance_ratio = parameters['road_slope_to_distance_ratio']
         self.landmark_wilderness = parameters['landmark_wilderness']
         self.plotsize = parameters['plotsize']
+        self.city_reach_factor = parameters['city_reach_factor']
+        self.voronoi_base_spacing = parameters['voronoi_base_spacing']
+        self.voronoi_relax_iterations = parameters['voronoi_relax_iterations']
+        self.road_voronoi_edge_bias = parameters['road_voronoi_edge_bias']
+        self.house_spacing = parameters['house_spacing']
+        self.civ_influence_range = parameters['civ_influence_range']
+        self.plot_base_spacing = parameters['plot_base_spacing']
+        self.plot_civ_spacing_factor = parameters['plot_civ_spacing_factor']
+        self.plot_height_cost_factor = parameters['plot_height_cost_factor']
+        self.plot_path_traffic_threshold = parameters['plot_path_traffic_threshold']
+        self.plot_road_traffic_threshold = parameters['plot_road_traffic_threshold']
+        self.plot_intercity_traffic = parameters['plot_intercity_traffic']
+        self.plot_traffic_attraction = parameters['plot_traffic_attraction']
 
     def _ensure_data_lod_manager(self):
         """Lazy-Fallback für Standalone-Nutzung (Tests, _execute_generation() ohne
@@ -696,7 +1262,20 @@ class SettlementGenerator:
             'terrain_factor_villages': SETTLEMENT.TERRAIN_FACTOR_VILLAGES["default"],
             'road_slope_to_distance_ratio': SETTLEMENT.ROAD_SLOPE_TO_DISTANCE_RATIO["default"],
             'landmark_wilderness': SETTLEMENT.LANDMARK_WILDERNESS["default"],
-            'plotsize': SETTLEMENT.PLOTSIZE["default"]
+            'plotsize': SETTLEMENT.PLOTSIZE["default"],
+            'city_reach_factor': SETTLEMENT.CITY_REACH_FACTOR["default"],
+            'voronoi_base_spacing': SETTLEMENT.VORONOI_BASE_SPACING["default"],
+            'voronoi_relax_iterations': SETTLEMENT.VORONOI_RELAX_ITERATIONS["default"],
+            'road_voronoi_edge_bias': SETTLEMENT.ROAD_VORONOI_EDGE_BIAS["default"],
+            'house_spacing': SETTLEMENT.HOUSE_SPACING["default"],
+            'civ_influence_range': SETTLEMENT.CIV_INFLUENCE_RANGE["default"],
+            'plot_base_spacing': SETTLEMENT.PLOT_BASE_SPACING["default"],
+            'plot_civ_spacing_factor': SETTLEMENT.PLOT_CIV_SPACING_FACTOR["default"],
+            'plot_height_cost_factor': SETTLEMENT.PLOT_HEIGHT_COST_FACTOR["default"],
+            'plot_path_traffic_threshold': SETTLEMENT.PLOT_PATH_TRAFFIC_THRESHOLD["default"],
+            'plot_road_traffic_threshold': SETTLEMENT.PLOT_ROAD_TRAFFIC_THRESHOLD["default"],
+            'plot_intercity_traffic': SETTLEMENT.PLOT_INTERCITY_TRAFFIC["default"],
+            'plot_traffic_attraction': SETTLEMENT.PLOT_TRAFFIC_ATTRACTION["default"]
         }
 
     def _get_dependencies(self, data_manager, lod_level=None):
@@ -842,9 +1421,10 @@ class SettlementGenerator:
             # LOD-Lockstep-Umbau) - nur #34 (plot_nodes) braucht biome_map, die
             # anderen 6 Phasen können unabhängig von Biome starten.
             for calculator_id in (
-                "settlement.suitability", "settlement.settlements", "settlement.pathfinding",
-                "settlement.roadsites", "settlement.civ_influence", "settlement.landmarks",
-                "settlement.plot_nodes",
+                "settlement.suitability", "settlement.settlements", "settlement.city_boundary",
+                "settlement.city_blocks", "settlement.landscape_voronoi", "settlement.pathfinding",
+                "settlement.outer_roads", "settlement.roadsites", "settlement.civ_influence",
+                "settlement.landmarks", "settlement.landmark_roads", "settlement.plot_nodes",
             ):
                 getattr(self, "_calc_" + calculator_id.split(".", 1)[1])(calculator_id, lod)
 
@@ -873,7 +1453,17 @@ class SettlementGenerator:
             "settlement.suitability", "combined_suitability_map", lod_level)
         settlement_list = self.data_lod_manager.get_calculator_output(
             "settlement.settlements", "settlement_list", lod_level)
+        city_mask = self.data_lod_manager.get_calculator_output("settlement.city_boundary", "city_mask", lod_level)
+        voronoi_cell_map = self.data_lod_manager.get_calculator_output(
+            "settlement.landscape_voronoi", "voronoi_cell_map", lod_level)
+        street_mask = self.data_lod_manager.get_calculator_output("settlement.city_blocks", "street_mask", lod_level)
+        house_parcel_map = self.data_lod_manager.get_calculator_output(
+            "settlement.city_blocks", "house_parcel_map", lod_level)
         roads = self.data_lod_manager.get_calculator_output("settlement.pathfinding", "roads", lod_level)
+        landmark_roads = self.data_lod_manager.get_calculator_output(
+            "settlement.landmark_roads", "landmark_roads", lod_level)
+        outer_roads = self.data_lod_manager.get_calculator_output(
+            "settlement.outer_roads", "outer_roads", lod_level)
         roadsite_list = self.data_lod_manager.get_calculator_output(
             "settlement.roadsites", "roadsite_list", lod_level)
         civ_map = self.data_lod_manager.get_calculator_output("settlement.civ_influence", "civ_map", lod_level)
@@ -883,6 +1473,7 @@ class SettlementGenerator:
             "settlement.plot_nodes", "plot_nodes", lod_level)
         plots = self.data_lod_manager.get_calculator_output("settlement.plot_nodes", "plots", lod_level)
         plot_map = self.data_lod_manager.get_calculator_output("settlement.plot_nodes", "plot_map", lod_level)
+        plot_edges = self.data_lod_manager.get_calculator_output("settlement.plot_nodes", "plot_edges", lod_level)
 
         if combined_suitability_map is None or settlement_list is None or civ_map is None:
             raise ValueError(f"assemble_settlement_data: fehlende Calculator-Outputs für LOD {lod_level}")
@@ -893,13 +1484,20 @@ class SettlementGenerator:
         settlement_data.parameters = parameters.copy()
         settlement_data.combined_suitability_map = combined_suitability_map
         settlement_data.settlement_list = settlement_list
+        settlement_data.city_mask = city_mask
+        settlement_data.voronoi_cell_map = voronoi_cell_map
+        settlement_data.street_mask = street_mask
+        settlement_data.house_parcel_map = house_parcel_map
         settlement_data.roads = roads if roads is not None else []
+        settlement_data.landmark_roads = landmark_roads if landmark_roads is not None else []
+        settlement_data.outer_roads = outer_roads if outer_roads is not None else []
         settlement_data.roadsite_list = roadsite_list if roadsite_list is not None else []
         settlement_data.civ_map = civ_map
         settlement_data.landmark_list = landmark_list if landmark_list is not None else []
         settlement_data.plot_nodes = plot_nodes if plot_nodes is not None else []
         settlement_data.plots = plots if plots is not None else []
         settlement_data.plot_map = plot_map
+        settlement_data.plot_edges = plot_edges if plot_edges is not None else {}
 
         settlement_data.terrain_suitability_valid = True
         settlement_data.settlements_valid = True
@@ -956,16 +1554,114 @@ class SettlementGenerator:
         settlement_list = self.calculate_settlements(suitability_map, inputs["heightmap"], lod_level)
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"settlement_list": settlement_list})
 
+    def _calc_city_boundary(self, calculator_id: str, lod_level: int) -> None:
+        """Calculator-Node 'settlement.city_boundary' (NEU) - terrain-cost-gewichtete
+        Stadtgrenze je Settlement, Grundlage fuer die Trennung Stadt-Innen (spaeteres
+        Block-System) vs. Landschaft (LandscapeVoronoiSystem)."""
+        self._update_progress("City Boundary", 20, "Computing city boundaries...")
+        inputs = self._get_prepared_settlement_inputs(lod_level)
+        settlement_list = self.data_lod_manager.get_calculator_output(
+            "settlement.settlements", "settlement_list", lod_level)
+        if settlement_list is None:
+            raise ValueError(f"settlement.city_boundary: settlement_list für LOD {lod_level} nicht verfügbar")
+
+        analyzer = CityBoundaryAnalyzer(self.terrain_factor_villages, self.city_reach_factor, self.shader_manager)
+        city_mask, city_cost_map = analyzer.compute_city_boundaries(
+            inputs["heightmap"], inputs["slopemap"], settlement_list, self._update_progress)
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"city_mask": city_mask, "city_cost_map": city_cost_map})
+
+    def _calc_city_blocks(self, calculator_id: str, lod_level: int) -> None:
+        """Calculator-Node 'settlement.city_blocks' (NEU) - innerstädtisches
+        Straßenraster + Hausparzellen je Settlement (siehe CityBlockSystem),
+        strikt auf die jeweilige Stadtgrenze (#35, city_mask) begrenzt.
+        Parzellen-IDs werden über alle Settlements hinweg fortlaufend eindeutig
+        gemacht (globaler next_parcel_id-Zähler), damit house_parcel_map
+        kartenweit als eine einzige ID-Ebene genutzt werden kann."""
+        self._update_progress("City Blocks", 22, "Generating street grid and house parcels...")
+        city_mask = self.data_lod_manager.get_calculator_output("settlement.city_boundary", "city_mask", lod_level)
+        settlement_list = self.data_lod_manager.get_calculator_output(
+            "settlement.settlements", "settlement_list", lod_level)
+        if city_mask is None or settlement_list is None:
+            raise ValueError(f"settlement.city_blocks: fehlende Inputs für LOD {lod_level}")
+
+        height, width = city_mask.shape
+        street_mask = np.zeros((height, width), dtype=bool)
+        house_parcel_map = np.full((height, width), -1, dtype=np.int32)
+
+        block_system = CityBlockSystem(self.house_spacing)
+        next_parcel_id = 0
+        for settlement in settlement_list:
+            if settlement.location_type != 'settlement':
+                continue
+            footprint_mask = city_mask == settlement.location_id
+            if not np.any(footprint_mask):
+                continue
+
+            rng = random.Random(self.map_seed + lod_level + settlement.location_id)
+            result = block_system.build_for_settlement(footprint_mask, rng)
+
+            street_mask |= result["street_mask"]
+            local_parcels = result["house_parcel_map"]
+            has_parcel = local_parcels >= 0
+            if has_parcel.any():
+                house_parcel_map[has_parcel] = local_parcels[has_parcel] + next_parcel_id
+                next_parcel_id += int(local_parcels[has_parcel].max()) + 1
+
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {
+            "street_mask": street_mask, "house_parcel_map": house_parcel_map,
+        })
+
+    def _calc_landscape_voronoi(self, calculator_id: str, lod_level: int) -> None:
+        """Calculator-Node 'settlement.landscape_voronoi' (NEU) - grobe Feld-Voronoi-
+        Zellen ausserhalb der Stadtgrenzen, warm-gestartet aus der vorigen LOD-Stufe
+        (siehe LandscapeVoronoiSystem-Docstring fürs "Gummiband"-Verhalten)."""
+        self._update_progress("Landscape Voronoi", 30, "Generating landscape plot seeds...")
+        inputs = self._get_prepared_settlement_inputs(lod_level)
+        city_mask = self.data_lod_manager.get_calculator_output("settlement.city_boundary", "city_mask", lod_level)
+        if city_mask is None:
+            raise ValueError(f"settlement.landscape_voronoi: city_mask für LOD {lod_level} nicht verfügbar")
+
+        height, width = inputs["heightmap"].shape
+        previous_seeds_raw = self.data_lod_manager.get_calculator_output(
+            "settlement.landscape_voronoi", "voronoi_seed_positions", lod_level - 1)
+        previous_seeds = None
+        if previous_seeds_raw:
+            # Seeds werden relativ (0..1) gespeichert (siehe unten) - dadurch unabhängig
+            # von der absoluten Pixelgröße der vorigen LOD-Stufe auf die aktuelle Karte skalierbar.
+            previous_seeds = [(rx * (width - 1), ry * (height - 1)) for rx, ry in previous_seeds_raw]
+
+        voronoi = LandscapeVoronoiSystem(
+            self.terrain_factor_villages, self.voronoi_base_spacing, self.voronoi_relax_iterations,
+            self.shader_manager)
+        rng = random.Random(self.map_seed + lod_level)
+        seeds = voronoi.generate_seeds(
+            inputs["heightmap"], inputs["slopemap"], city_mask, self.plotnodes,
+            previous_seeds=previous_seeds, rng=rng)
+        seeds = voronoi.relax(seeds, inputs["heightmap"], inputs["slopemap"], city_mask, self._update_progress)
+        cell_map = voronoi.assign_cells(inputs["heightmap"], inputs["slopemap"], seeds, city_mask, self._update_progress)
+
+        # Relativ (0..1) speichern, damit der Warm-Start beim nächsten (größeren) LOD
+        # unabhängig von der absoluten Pixelgröße dieser Stufe skaliert werden kann.
+        relative_seeds = [(x / max(1, width - 1), y / max(1, height - 1)) for x, y in seeds]
+
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {
+            "voronoi_seed_positions": relative_seeds,
+            "voronoi_cell_map": cell_map,
+        })
+
     def _calc_pathfinding(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.pathfinding' (#30)"""
         self._update_progress("Road Building", 25, "Creating road networks between settlements...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
         settlement_list = self.data_lod_manager.get_calculator_output(
             "settlement.settlements", "settlement_list", lod_level)
+        voronoi_cell_map = self.data_lod_manager.get_calculator_output(
+            "settlement.landscape_voronoi", "voronoi_cell_map", lod_level)
         if settlement_list is None:
             raise ValueError(f"settlement.pathfinding: settlement_list für LOD {lod_level} nicht verfügbar")
 
-        roads = self.calculate_road_network(settlement_list, inputs["slopemap"], lod_level)
+        roads = self.calculate_road_network(settlement_list, inputs["slopemap"], lod_level, voronoi_cell_map)
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roads": roads})
 
     def _calc_roadsites(self, calculator_id: str, lod_level: int) -> None:
@@ -1005,6 +1701,39 @@ class SettlementGenerator:
         landmark_list = self.calculate_landmarks(civ_map, inputs["heightmap"], inputs["slopemap"], lod_level)
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"landmark_list": landmark_list})
 
+    def _calc_landmark_roads(self, calculator_id: str, lod_level: int) -> None:
+        """Calculator-Node 'settlement.landmark_roads' (NEU) - deterministische
+        Dijkstra-Anbindung jedes Landmarks an den nächstgelegenen Punkt des
+        Hauptstraßennetzes (Nutzer-Vorgabe: kein Zufallsmechanismus in Phase 1,
+        das dekorative Zusatz-Wegenetz kommt erst in Phase 2)."""
+        self._update_progress("Landmark Roads", 68, "Connecting landmarks to road network...")
+        inputs = self._get_prepared_settlement_inputs(lod_level)
+        landmark_list = self.data_lod_manager.get_calculator_output(
+            "settlement.landmarks", "landmark_list", lod_level)
+        roads = self.data_lod_manager.get_calculator_output("settlement.pathfinding", "roads", lod_level)
+        if landmark_list is None or roads is None:
+            raise ValueError(f"settlement.landmark_roads: fehlende Inputs für LOD {lod_level}")
+
+        landmark_roads = self.calculate_landmark_roads(landmark_list, roads, inputs["slopemap"], lod_level)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"landmark_roads": landmark_roads})
+
+    def _calc_outer_roads(self, calculator_id: str, lod_level: int) -> None:
+        """Calculator-Node 'settlement.outer_roads' (NEU) - 2-3 Außenverbindungen
+        von Siedlungen zur Kartengrenze an plausiblen Positionen (nicht
+        Bergspitze/Meer, siehe calculate_outer_connections())."""
+        self._update_progress("Outer Roads", 27, "Connecting settlements to map border...")
+        inputs = self._get_prepared_settlement_inputs(lod_level)
+        settlement_list = self.data_lod_manager.get_calculator_output(
+            "settlement.settlements", "settlement_list", lod_level)
+        suitability_map = self.data_lod_manager.get_calculator_output(
+            "settlement.suitability", "combined_suitability_map", lod_level)
+        if settlement_list is None or suitability_map is None:
+            raise ValueError(f"settlement.outer_roads: fehlende Inputs für LOD {lod_level}")
+
+        outer_roads = self.calculate_outer_connections(
+            settlement_list, suitability_map, inputs["water_map"], inputs["slopemap"], lod_level)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"outer_roads": outer_roads})
+
     def _calc_plot_nodes(self, calculator_id: str, lod_level: int) -> None:
         """
         Calculator-Node 'settlement.plot_nodes' (#34) - einzige Settlement-Phase,
@@ -1017,14 +1746,34 @@ class SettlementGenerator:
             "settlement.settlements", "settlement_list", lod_level)
         biome_map = self.data_lod_manager.get_calculator_output(
             "biome.integrate_layers", "biome_map", lod_level)
+        roads = self.data_lod_manager.get_calculator_output("settlement.pathfinding", "roads", lod_level)
         if civ_map is None or settlement_list is None or biome_map is None:
             raise ValueError(f"settlement.plot_nodes: fehlende Inputs für LOD {lod_level}")
 
-        plot_nodes, plots = self.calculate_plots(
-            civ_map, settlement_list, inputs["heightmap"], biome_map, lod_level)
+        height, width = inputs["heightmap"].shape
+        previous_positions_relative = self.data_lod_manager.get_calculator_output(
+            "settlement.plot_nodes", "plot_node_positions", lod_level - 1)
+        previous_node_positions = None
+        if previous_positions_relative:
+            # Relativ (0..1) gespeichert (siehe unten), damit der Warm-Start
+            # unabhängig von der absoluten Pixelgröße der vorigen LOD-Stufe auf
+            # die aktuelle Karte skaliert werden kann (analog zu
+            # LandscapeVoronoiSystem._calc_landscape_voronoi()).
+            previous_node_positions = [(rx * (width - 1), ry * (height - 1)) for rx, ry in previous_positions_relative]
+
+        plot_nodes, plots, plot_edges = self.calculate_plots(
+            civ_map, settlement_list, inputs["heightmap"], biome_map, lod_level, roads,
+            previous_node_positions=previous_node_positions)
         plot_map = self._create_plot_map(inputs["heightmap"].shape, plots)
+
+        relative_positions = [
+            (x / max(1, width - 1), y / max(1, height - 1)) for x, y in
+            (node.node_location for node in plot_nodes)
+        ]
         self.data_lod_manager.set_calculator_output(
-            calculator_id, lod_level, {"plot_nodes": plot_nodes, "plots": plots, "plot_map": plot_map})
+            calculator_id, lod_level,
+            {"plot_nodes": plot_nodes, "plots": plots, "plot_map": plot_map, "plot_edges": plot_edges,
+             "plot_node_positions": relative_positions})
 
     def calculate_terrain_suitability(self, heightmap, slopemap, water_map, lod):
         """
@@ -1098,17 +1847,28 @@ class SettlementGenerator:
 
         return settlements
 
-    def calculate_road_network(self, settlements, slopemap, lod):
+    def calculate_road_network(self, settlements, slopemap, lod, voronoi_cell_map=None):
         """
         Funktionsweise: Erstellt Straßennetzwerk zwischen Settlements mit LOD-optimiertem Pathfinding
         Aufgabe: Findet optimale Straßenverbindungen mit Spline-Interpolation
         Parameter: settlements, slopemap, lod - Settlement-Liste, Slope-Daten und LOD-Level
+        Parameter: voronoi_cell_map - optionale Landschafts-Voronoi-Zellzuordnung
+            (settlement.landscape_voronoi, #36) - wenn vorhanden, bevorzugen die
+            Straßen den Verlauf entlang der Zellgrenzen (Nutzer-Vorgabe); None
+            faellt auf reines Slope-Cost-Pathfinding zurueck (Legacy-Verhalten).
         Returns: List[List[Tuple]] - Alle Road-Pfade als Wegpunkt-Listen
         """
         if len(settlements) < 2:
             return []
 
-        pathfinder = PathfindingSystem(self.road_slope_to_distance_ratio, slopemap.shape[0])
+        edge_distance_map = None
+        if voronoi_cell_map is not None:
+            edge_distance_map = _voronoi_edge_distance_map(voronoi_cell_map)
+
+        pathfinder = PathfindingSystem(
+            self.road_slope_to_distance_ratio, slopemap.shape[0],
+            edge_distance_map=edge_distance_map, edge_bias=self.road_voronoi_edge_bias,
+            edge_bias_scale=self.voronoi_base_spacing)
         roads = []
 
         # Minimum Spanning Tree für Settlement-Verbindungen
@@ -1228,7 +1988,14 @@ class SettlementGenerator:
         height, width = heightmap.shape
         civ_map = np.zeros((height, width), dtype=np.float32)
 
-        influence_mapper = CivilizationInfluenceMapper(self.civ_influence_decay)
+        # effective_radius als Bruchteil der Kartendiagonale statt der winzigen
+        # settlement.radius (4-6px unabhaengig von map_size) als Decay-Laengenskala -
+        # Nutzer-Vorgabe: "ich will das wirklich ein großer Radius um die Stadt
+        # beeinflusst wird [...] alles andere ist ja Wilderness und die macht etwa
+        # die Hälfte der Karte aus". Skaliert automatisch mit jeder LOD-Stufe.
+        map_diagonal = np.sqrt(height ** 2 + width ** 2)
+        effective_radius = map_diagonal * self.civ_influence_range
+        influence_mapper = CivilizationInfluenceMapper(self.civ_influence_decay, effective_radius)
 
         # Settlement-Einfluss anwenden
         civ_map = influence_mapper.apply_settlement_influence(civ_map, settlements, slopemap, self._update_progress)
@@ -1265,22 +2032,28 @@ class SettlementGenerator:
             return landmarks
 
         height, width = civ_map.shape
-        valid_positions = []
 
-        for y in range(height):
-            for x in range(width):
-                civ_value = civ_map[y, x]
+        # Vektorisiert statt Pixel-fuer-Pixel-Python-Schleife: die alten Helper
+        # _check_elevation_suitability()/_check_slope_suitability() riefen pro
+        # Pixel (H*W-mal!) erneut np.min()/np.max() auf die komplette heightmap
+        # auf - zweitgroesster Performance-Fund neben calculate_water_proximity()
+        # (siehe docs/backlog.md Ticket #4 Performance-Hinweis).
+        min_height = np.min(heightmap)
+        max_height = np.max(heightmap)
+        height_range = max_height - min_height
+        if height_range == 0:
+            elevation_ok = np.ones((height, width), dtype=bool)
+        else:
+            norm_height = (heightmap - min_height) / height_range
+            elevation_ok = norm_height < 0.7  # Landmarks nur in unteren 70% der Höhen
 
-                # Wilderness-Schwellwert prüfen
-                if civ_value >= self.landmark_wilderness:
-                    continue
+        slope_magnitude = np.sqrt(slopemap[..., 0] ** 2 + slopemap[..., 1] ** 2)
+        slope_ok = slope_magnitude < 0.5  # Landmarks nur bei moderaten Slopes
 
-                # Niedrige Höhen und Slopes bevorzugen
-                elevation_ok = self._check_elevation_suitability(heightmap, x, y)
-                slope_ok = self._check_slope_suitability(slopemap, x, y)
-
-                if elevation_ok and slope_ok:
-                    valid_positions.append((x, y))
+        wilderness_ok = civ_map < self.landmark_wilderness
+        valid_mask = wilderness_ok & elevation_ok & slope_ok
+        valid_ys, valid_xs = np.nonzero(valid_mask)
+        valid_positions = list(zip(valid_xs.tolist(), valid_ys.tolist()))
 
         # Landmarks gleichmäßig verteilen
         if len(valid_positions) < adjusted_count:
@@ -1309,28 +2082,172 @@ class SettlementGenerator:
 
         return landmarks
 
-    def calculate_plots(self, civ_map, settlements, heightmap, biome_map, lod):
+    def calculate_landmark_roads(self, landmarks, roads, slopemap, lod):
         """
-        Funktionsweise: Generiert PlotNode-System mit Delaunay-Triangulation und Plot-Fusion
+        Funktionsweise: Verbindet jedes Landmark deterministisch per A*-Pathfinding
+        mit dem nächstgelegenen Wegpunkt des bestehenden Hauptstraßennetzes.
+        Aufgabe: Landmark-Anbindung ohne Zufallsmechanismus (Nutzer-Vorgabe -
+        das dekorative Zusatz-Wegenetz ist bewusst auf Phase 2 verschoben).
+        Parameter: landmarks, roads, slopemap, lod - Landmark-Liste, bestehende
+            Road-Pfade, Slope-Daten und LOD-Level
+        Returns: List[List[Tuple]] - Ein Pfad pro Landmark zum Straßennetz
+        """
+        if not landmarks or not roads:
+            return []
+
+        road_points = [pt for road in roads for pt in road]
+        if not road_points:
+            return []
+
+        pathfinder = PathfindingSystem(self.road_slope_to_distance_ratio, slopemap.shape[0])
+        landmark_roads = []
+
+        for landmark in landmarks:
+            distances = [(landmark.x - px) ** 2 + (landmark.y - py) ** 2 for px, py in road_points]
+            nearest_idx = int(np.argmin(distances))
+            target = road_points[nearest_idx]
+
+            path = pathfinder.find_least_resistance_path(
+                slopemap, (landmark.x, landmark.y), target, self._update_progress)
+            smoothed_path = pathfinder.apply_spline_smoothing(
+                path, smoothing_factor=3, progress_callback=self._update_progress)
+            landmark_roads.append(smoothed_path)
+
+        return landmark_roads
+
+    def calculate_outer_connections(self, settlements, suitability_map, water_map, slopemap, lod, count=None):
+        """
+        Funktionsweise: Verbindet Siedlungen mit 2-3 Punkten am Kartenrand an
+        plausiblen Positionen (nicht Bergspitze/Meer, siehe Nutzer-Vorgabe).
+        Aufgabe: Randpunkt-Auswahl über Suitability + Wasser-Ausschluss, über
+        den Kartenumfang verteilt (Mindestabstand), dann A*-Pathfinding von der
+        jeweils nächstgelegenen Siedlung.
+        Parameter: settlements, suitability_map, water_map, slopemap, lod, count
+            - Settlement-Liste, Terrain-Eignung, Wasser-Maske, Slope-Daten,
+              LOD-Level und optionale feste Anzahl Außenverbindungen (Default:
+              2-3, abhängig von der Settlement-Anzahl)
+        Returns: List[List[Tuple]] - Ein Pfad pro Außenverbindung
+        """
+        settlements_only = [s for s in settlements if s.location_type == 'settlement']
+        if not settlements_only:
+            return []
+
+        height, width = suitability_map.shape
+        connection_count = count if count is not None else min(3, max(2, len(settlements_only)))
+
+        border_candidates = []
+        for x in range(width):
+            border_candidates.append((x, 0))
+            border_candidates.append((x, height - 1))
+        for y in range(height):
+            border_candidates.append((0, y))
+            border_candidates.append((width - 1, y))
+
+        # Wasser-Punkte (Meer/See am Kartenrand) ausschließen, Rest nach Suitability sortieren
+        scored = [
+            (suitability_map[y, x], x, y) for (x, y) in border_candidates if water_map[y, x] <= 0
+        ]
+        if not scored:
+            return []
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+        # Ausgewählte Randpunkte über den Kartenumfang verteilen (Mindestabstand),
+        # damit nicht alle Verbindungen in derselben Ecke landen
+        chosen = []
+        map_perimeter = 2 * (width + height)
+        min_spacing = map_perimeter / (connection_count * 2)
+        for _, x, y in scored:
+            if len(chosen) >= connection_count:
+                break
+            if all((x - cx) ** 2 + (y - cy) ** 2 >= min_spacing ** 2 for cx, cy in chosen):
+                chosen.append((x, y))
+
+        pathfinder = PathfindingSystem(self.road_slope_to_distance_ratio, slopemap.shape[0])
+        outer_roads = []
+
+        for (bx, by) in chosen:
+            nearest_settlement = min(
+                settlements_only, key=lambda s: (s.x - bx) ** 2 + (s.y - by) ** 2)
+
+            path = pathfinder.find_least_resistance_path(
+                slopemap, (nearest_settlement.x, nearest_settlement.y), (bx, by), self._update_progress)
+            smoothed_path = pathfinder.apply_spline_smoothing(
+                path, smoothing_factor=3, progress_callback=self._update_progress)
+            outer_roads.append(smoothed_path)
+
+        return outer_roads
+
+    def calculate_plots(self, civ_map, settlements, heightmap, biome_map, lod, roads=None,
+                        previous_node_positions=None):
+        """
+        Funktionsweise: Generiert PlotNode-System mit Delaunay-Triangulation,
+        Plot-Fusion und Familien-/Verkehrssimulation über den Edge-Graph
         Aufgabe: Erstellt Grundstücks-System basierend auf akkumuliertem Civ-Wert mit LOD-optimierter Dichte
-        Parameter: civ_map, settlements, heightmap, biome_map, lod - Alle Plot-Daten und LOD-Level
-        Returns: Tuple[List[PlotNode], List[Plot]] - PlotNode-Liste und finale Plot-Liste
+
+        Zwei-Pass-Ablauf für die traffic-getriebene "Gummiband"-Anziehung
+        (Nutzer-Vorgabe): Pass 1 baut Graph+Traffic auf der (warmgestarteten)
+        Ausgangsgeometrie auf, nur um zu wissen, welche Kanten stark genutzt
+        sind. apply_traffic_attraction() verschiebt die Nodes daraufhin leicht
+        zueinander (Gegenkraft: derselbe civ-gewichtete Mindestabstand wie bei
+        der Generierung). Pass 2 baut Graph+Traffic auf der ANGEPASSTEN
+        Geometrie neu auf - das ist der tatsächlich zurückgegebene/angezeigte
+        Zustand. Traffic wird dabei nie über Aufrufe hinweg akkumuliert (siehe
+        simulate_plot_traffic()); nur die minimal verschobenen Positionen
+        wandern über previous_node_positions in die nächste LOD-Stufe weiter,
+        wo sich stark genutzte Wege dadurch schrittweise weiter begradigen/
+        verkürzen können - das Kräftegleichgewicht ist bewusst nur grob
+        kalibriert und soll später feinjustiert werden.
+        Parameter: civ_map, settlements, heightmap, biome_map, lod, roads -
+            Alle Plot-Daten, LOD-Level und bestehendes Straßennetz (für
+            Inter-City-Traffic, siehe simulate_plot_traffic())
+        Parameter: previous_node_positions - optionale (x,y)-Positionen der
+            vorigen LOD-Stufe, bereits auf die aktuelle Kartengröße skaliert
+            (siehe _calc_plot_nodes()) - Warm-Start für generate_plot_nodes()
+        Returns: Tuple[List[PlotNode], List[Plot], Dict[int, PlotEdge]] -
+            PlotNode-Liste, finale Plot-Liste und das Edge-Registry mit
+            simuliertem Traffic/Klassifikation (beides aus Pass 2)
         """
         plot_system = PlotNodeSystem(self.plotsize, heightmap.shape[0])
 
-        # PlotNodes generieren
-        nodes = plot_system.generate_plot_nodes(civ_map, self.plotnodes, settlements, self._update_progress)
+        # PlotNodes generieren (civ-wert-abhängige Abstoßung + Warm-Start, siehe generate_plot_nodes())
+        nodes = plot_system.generate_plot_nodes(
+            civ_map, self.plotnodes, settlements,
+            base_spacing=self.plot_base_spacing, civ_spacing_factor=self.plot_civ_spacing_factor,
+            previous_nodes=previous_node_positions,
+            rng=random.Random(self.map_seed + int(heightmap.shape[0])),
+            progress_callback=self._update_progress)
 
-        # Delaunay-Triangulation mit BiomeMap-Integration
-        nodes = plot_system.create_delaunay_triangulation(nodes, heightmap, biome_map, self._update_progress)
+        # Pass 1: Graph + Traffic nur zur Ermittlung stark genutzter Kanten
+        nodes, edge_registry = plot_system.create_delaunay_triangulation(
+            nodes, heightmap, biome_map, height_cost_factor=self.plot_height_cost_factor,
+            progress_callback=self._update_progress)
+        edge_registry = plot_system.simulate_plot_traffic(
+            nodes, edge_registry, settlements, roads or [],
+            path_traffic_threshold=self.plot_path_traffic_threshold,
+            road_traffic_threshold=self.plot_road_traffic_threshold,
+            intercity_traffic=self.plot_intercity_traffic,
+            progress_callback=self._update_progress)
 
-        # Node-Positionen optimieren
-        nodes = plot_system.optimize_node_positions(nodes, iterations=5, progress_callback=self._update_progress)
+        # Gummiband-Anziehung entlang stark genutzter Kanten anwenden
+        nodes = plot_system.apply_traffic_attraction(
+            nodes, edge_registry, civ_map, self.plot_base_spacing, self.plot_civ_spacing_factor,
+            self.plot_traffic_attraction, progress_callback=self._update_progress)
+
+        # Pass 2: Graph + Traffic auf der angepassten Geometrie neu aufbauen (finaler Zustand)
+        nodes, edge_registry = plot_system.create_delaunay_triangulation(
+            nodes, heightmap, biome_map, height_cost_factor=self.plot_height_cost_factor,
+            progress_callback=self._update_progress)
+        edge_registry = plot_system.simulate_plot_traffic(
+            nodes, edge_registry, settlements, roads or [],
+            path_traffic_threshold=self.plot_path_traffic_threshold,
+            road_traffic_threshold=self.plot_road_traffic_threshold,
+            intercity_traffic=self.plot_intercity_traffic,
+            progress_callback=self._update_progress)
 
         # Plots aus Nodes erstellen
         plots = plot_system.merge_to_plots(nodes, civ_map, self._update_progress)
 
-        return nodes, plots
+        return nodes, plots, edge_registry
 
     def _save_to_data_manager(self, data_manager, result, parameters):
         """
@@ -1475,40 +2392,6 @@ class SettlementGenerator:
                     reduction_factor = 1.0 - (distance / radius) * 0.8
                     suitability_map[y, x] *= reduction_factor
 
-    def _check_elevation_suitability(self, heightmap, x, y):
-        """
-        Funktionsweise: Prüft ob Elevation für Landmark geeignet ist
-        """
-        height, width = heightmap.shape
-
-        if x < 0 or x >= width or y < 0 or y >= height:
-            return False
-
-        min_height = np.min(heightmap)
-        max_height = np.max(heightmap)
-        height_range = max_height - min_height
-
-        if height_range == 0:
-            return True
-
-        norm_height = (heightmap[y, x] - min_height) / height_range
-        return norm_height < 0.7  # Landmarks nur in unteren 70% der Höhen
-
-    def _check_slope_suitability(self, slopemap, x, y):
-        """
-        Funktionsweise: Prüft ob Slope für Landmark geeignet ist
-        """
-        height, width = slopemap.shape[:2]
-
-        if x < 0 or x >= width or y < 0 or y >= height:
-            return False
-
-        dz_dx = slopemap[y, x, 0]
-        dz_dy = slopemap[y, x, 1]
-        slope_magnitude = np.sqrt(dz_dx ** 2 + dz_dy ** 2)
-
-        return slope_magnitude < 0.5  # Landmarks nur bei moderaten Slopes
-
     def _sample_landmark_positions(self, positions, count):
         """
         Funktionsweise: Sampelt Landmark-Positionen für gleichmäßige Verteilung
@@ -1620,7 +2503,13 @@ class SettlementGenerator:
             'water_map': water_map,
             'biome_map': self._create_fallback_biome_map(heightmap)
         }
-        parameters = {
+        # Auf Defaults aufsetzen statt eines fest kodierten Dicts, damit neu
+        # hinzugekommene Parameter (z.B. city_reach_factor, plot_base_spacing)
+        # diese Legacy-Methode nicht mit KeyError in set_active_parameters()
+        # brechen - nur die von der alten Signatur tatsächlich übergebenen
+        # Werte überschreiben die Defaults.
+        parameters = self._load_default_parameters()
+        parameters.update({
             'settlements': settlements,
             'landmarks': landmarks,
             'roadsites': roadsites,
@@ -1630,7 +2519,7 @@ class SettlementGenerator:
             'road_slope_to_distance_ratio': road_slope_to_distance_ratio,
             'landmark_wilderness': landmark_wilderness,
             'plotsize': plotsize
-        }
+        })
 
         # Seed aktualisieren falls nötig
         if map_seed != self.map_seed:
@@ -2002,13 +2891,19 @@ class CivilizationInfluenceMapper:
     Aufgabe: Erstellt realistische Zivilisations-Verteilung mit Decay-Kernels
     """
 
-    def __init__(self, civ_influence_decay=1.0):
+    def __init__(self, civ_influence_decay=1.0, effective_radius=50.0):
         """
         Funktionsweise: Initialisiert Civilization-Influence-Mapper mit Decay-Parameter
         Aufgabe: Setup der Zivilisations-Einfluss-Berechnung
         Parameter: civ_influence_decay (float) - Stärke des Einfluss-Abfalls mit Distanz
+        Parameter: effective_radius (float) - Decay-Längenskala in Pixeln für den
+            Einfluss-Abfall (siehe SettlementGenerator.calculate_civilization_mapping():
+            map_diagonal * civ_influence_range) - ersetzt die vorher genutzte
+            settlement.radius (4-6px, unabhängig von map_size) als Skala, damit die
+            Reichweite tatsächlich mit der Kartengröße mitwächst.
         """
         self.decay_factor = civ_influence_decay
+        self.effective_radius = max(1e-3, effective_radius)
 
     def apply_settlement_influence(self, civ_map, settlements, slopemap, progress_callback=None):
         """
@@ -2016,34 +2911,46 @@ class CivilizationInfluenceMapper:
         Aufgabe: Berechnet Zivilisations-Einfluss von Städten und Dörfern
         Parameter: civ_map, settlements, slopemap, progress_callback - Civ-Map, Settlement-Liste, Slope-Daten und Progress
         Returns: numpy.ndarray - Aktualisierte civ_map
+
+        Vektorisiert über die gesamte Karte pro Settlement (statt einer lokalen
+        Python-Doppelschleife über ein enges Fenster um settlement.radius) - mit
+        effective_radius jetzt oft ein nennenswerter Bruchteil der Kartengröße
+        (siehe __init__-Docstring) wäre das enge alte Fenster ohnehin zu klein
+        gewesen, und ein entsprechend vergrößertes Fenster mit Pixel-für-Pixel
+        Python-Aufrufen wäre für große effective_radius sehr langsam geworden.
         """
         if progress_callback:
             progress_callback("Civilization Mapping", 55, f"Applying influence for {len(settlements)} settlements...")
 
         height, width = civ_map.shape
+        slope_magnitude = np.sqrt(slopemap[..., 0] ** 2 + slopemap[..., 1] ** 2)
+
+        # Normalisiert auf die tatsächliche Terrain-Skala dieser Heightmap statt
+        # eines festen Faktors auf rohe Höhenmeter-pro-Pixel: slope_magnitude
+        # liegt bei üblicher Amplitude/Redistribution oft im Bereich 10-90+,
+        # wodurch der alte "min(3.0, 1+slope*2)"-Modifier auf >95% der Pixel
+        # sofort am Deckel saturierte - flache und gebirgige Gegenden wurden
+        # dadurch kaum unterschieden (Nutzer-Beobachtung: "Civ Influence
+        # verbreitet sich über flache Gebiete besser als Berge hoch und
+        # runter" - das griff bisher praktisch nirgends spürbar). Das
+        # 75.-Perzentil dieser konkreten Karte als Referenz macht den Modifier
+        # automatisch adaptiv zu jeder Amplitude/map_size statt eines
+        # hartcodierten "typischen" Werts.
+        typical_slope = np.percentile(slope_magnitude, 75)
+        normalized_slope = slope_magnitude / max(float(typical_slope), 1e-6)
+        slope_modifier = np.minimum(5.0, 1.0 + normalized_slope * 2.0)
+        yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
 
         for i, settlement in enumerate(settlements):
-            center_x = int(settlement.x)
-            center_y = int(settlement.y)
+            center_x, center_y = settlement.x, settlement.y
             radius = settlement.radius
             base_influence = settlement.civ_influence
 
-            # Einflussbereich berechnen
-            for y in range(max(0, center_y - int(radius) - 5), min(height, center_y + int(radius) + 6)):
-                for x in range(max(0, center_x - int(radius) - 5), min(width, center_x + int(radius) + 6)):
-                    distance = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
-
-                    if distance <= radius:
-                        # Innerhalb Stadt: maximaler Einfluss (1.0)
-                        civ_map[y, x] = max(civ_map[y, x], 1.0)
-                    else:
-                        # Außerhalb: radialer Decay mit Slope-Modifikation
-                        slope_modifier = self._calculate_slope_decay_modifier(slopemap, x, y)
-                        decay_distance = (distance - radius) * self.decay_factor * slope_modifier
-
-                        if decay_distance < radius * 2:
-                            influence = base_influence * np.exp(-decay_distance / radius)
-                            civ_map[y, x] = max(civ_map[y, x], influence)
+            distance = np.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
+            decay_distance = np.maximum(0.0, distance - radius) * self.decay_factor * slope_modifier
+            influence = base_influence * np.exp(-decay_distance / self.effective_radius)
+            influence = np.where(distance <= radius, 1.0, influence)  # Innerhalb Stadt: maximaler Einfluss
+            civ_map = np.maximum(civ_map, influence)
 
             # Progress-Update pro Settlement-Batch
             if progress_callback and (i + 1) % max(1, len(settlements) // 4) == 0:
@@ -2157,66 +3064,135 @@ class PlotNodeSystem:
         else:
             self.density_factor = 1.0  # 100% der gewünschten Nodes
 
-    def generate_plot_nodes(self, civ_map, plotnodes_count, settlements, progress_callback=None):
+    def generate_plot_nodes(self, civ_map, plotnodes_count, settlements, base_spacing=10.0,
+                             civ_spacing_factor=3.0, previous_nodes=None, rng=None, progress_callback=None):
         """
-        Funktionsweise: Generiert PlotNodes gleichmäßig verteilt außerhalb von Städten und Wilderness
-        Aufgabe: Erstellt initiale PlotNode-Verteilung für Grundstücks-System mit LOD-Optimierung
-        Parameter: civ_map, plotnodes_count, settlements, progress_callback - Civ-Map, Anzahl Nodes, Settlements und Progress
+        Funktionsweise: Generiert PlotNodes mit civ-wert-abhängiger Abstoßung
+        außerhalb von Städten und Wilderness
+        Aufgabe: Hoher Civ-Wert (näher an der Stadt) -> kleinerer Mindestabstand
+        -> dichtere Nodes -> kleinere Plots; niedriger Civ-Wert (Richtung
+        Wilderness) -> größerer Mindestabstand -> größere Plots (Nutzer-
+        Vorgabe). Ersetzt die vorherige civ-blinde Gleichverteilung
+        (_sample_uniform_distribution()) samt der wirkungslosen festen
+        3px-Abstoßung in optimize_node_positions() - Mindestabstand wird jetzt
+        direkt beim Sampling durchgesetzt statt nachträglich per Post-Hoc-
+        Optimierung. Spatial-Hash-Grid für die Nachbarschaftsprüfung (gleiches
+        Muster wie LandscapeVoronoiSystem.generate_seeds() - siehe dortigen
+        Performance-Kommentar zu O(n)-Scans bei vielen Nodes).
+        Parameter: civ_map, plotnodes_count, settlements - Civ-Map, Ziel-Anzahl, Settlement-Liste
+        Parameter: base_spacing, civ_spacing_factor - Mindestabstand bei civ=0
+            bzw. Stärke der civ-abhängigen Kompression (min_spacing =
+            base_spacing / (1 + civ_spacing_factor * civ_value))
+        Parameter: previous_nodes - optionale Liste von (x,y)-Positionen der
+            vorigen LOD-Stufe (bereits auf die aktuelle Kartengröße skaliert,
+            siehe SettlementGenerator._calc_plot_nodes()) - Warm-Start, damit
+            die traffic-getriebene Anziehung (apply_traffic_attraction()) über
+            LOD-Stufen hinweg wirken kann statt bei jeder Stufe komplett neu zu
+            würfeln (analog zu LandscapeVoronoiSystem.generate_seeds())
         Returns: List[PlotNode] - Generierte PlotNodes
         """
         if progress_callback:
             progress_callback("Plot Generation", 80, "Generating plot nodes...")
 
+        rng = rng or random
         height, width = civ_map.shape
+        adjusted_count = int(plotnodes_count * self.density_factor)
+
+        # Vektorisiert statt Pixel-für-Pixel-Python-Schleife: Wilderness (< 0.2)
+        # und Stadt-Kern (>= 1.0) ausschließen, dazu Mindestabstand zu allen Settlements.
+        valid_mask = (civ_map >= 0.2) & (civ_map < 1.0)
+        if settlements:
+            yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+            for settlement in settlements:
+                too_close = (xx - settlement.x) ** 2 + (yy - settlement.y) ** 2 < (settlement.radius * 1.2) ** 2
+                valid_mask &= ~too_close
+
+        cell_size = max(1e-3, base_spacing)
+        grid: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+
+        def cell_of(x, y):
+            return (int(x // cell_size), int(y // cell_size))
+
+        def is_too_close(x, y, min_spacing):
+            cx, cy = cell_of(x, y)
+            span = int(min_spacing // cell_size) + 1
+            for gx in range(cx - span, cx + span + 1):
+                for gy in range(cy - span, cy + span + 1):
+                    for (sx, sy) in grid.get((gx, gy), ()):
+                        if (sx - x) ** 2 + (sy - y) ** 2 < min_spacing ** 2:
+                            return True
+            return False
+
         nodes = []
 
-        # LOD-abhängige Node-Anzahl
-        density_factor = self.density_factor
-        adjusted_count = int(plotnodes_count * density_factor)
+        # Marktplatz-Node je Settlement (Nutzer-Vorgabe: "eine Stadt hat je
+        # einen Marktplatz, der zugleich ein Node ist") - unconditional
+        # eingefügt (ignoriert valid_mask, da Stadt-Kerne civ_map>=1.0 sonst
+        # ausgeschlossen wären), damit diese Nodes ganz normal an Delaunay-
+        # Triangulation und Traffic-Graph teilnehmen statt eines separaten
+        # virtuellen Anker-Knotens (siehe simulate_plot_traffic()). In den
+        # Abstands-Grid eingetragen, damit reguläre Nodes trotzdem Abstand
+        # dazu halten.
+        for settlement in settlements:
+            if settlement.location_type != 'settlement':
+                continue
+            node = PlotNode(
+                node_id=self.next_node_id, node_location=(float(settlement.x), float(settlement.y)),
+                connector_id=[], connector_distance=[], connector_elevation=[],
+                connector_movecost=[], connector_edge_id=[], settlement_id=settlement.location_id
+            )
+            nodes.append(node)
+            grid.setdefault(cell_of(settlement.x, settlement.y), []).append(
+                (float(settlement.x), float(settlement.y)))
+            self.next_node_id += 1
 
-        # Gültige Bereiche finden (nicht in Städten, nicht in Wilderness)
-        valid_positions = []
+        # Marktplätze zählen nicht gegen das reguläre Node-Budget (plotnodes_count
+        # ist "wie viele Feld-Nodes zusätzlich zu den Marktplätzen").
+        adjusted_count += len(nodes)
 
-        for y in range(height):
-            for x in range(width):
-                civ_value = civ_map[y, x]
-
-                # Wilderness ausschließen (< 0.2)
-                if civ_value < 0.2:
+        if previous_nodes:
+            for (x, y) in previous_nodes:
+                if len(nodes) >= adjusted_count:
+                    break
+                ix, iy = int(round(x)), int(round(y))
+                if not (0 <= ix < width and 0 <= iy < height) or not valid_mask[iy, ix]:
                     continue
-
-                # Stadt-Bereiche ausschließen (= 1.0)
-                if civ_value >= 1.0:
+                civ_value = float(civ_map[iy, ix])
+                min_spacing = base_spacing / (1.0 + civ_spacing_factor * civ_value)
+                if is_too_close(x, y, min_spacing):
                     continue
+                node = PlotNode(
+                    node_id=self.next_node_id, node_location=(float(x), float(y)),
+                    connector_id=[], connector_distance=[], connector_elevation=[],
+                    connector_movecost=[], connector_edge_id=[]
+                )
+                nodes.append(node)
+                grid.setdefault(cell_of(x, y), []).append((float(x), float(y)))
+                self.next_node_id += 1
 
-                # Mindestabstand zu Settlements prüfen
-                too_close = False
-                for settlement in settlements:
-                    distance = np.sqrt((x - settlement.x) ** 2 + (y - settlement.y) ** 2)
-                    if distance < settlement.radius * 1.2:
-                        too_close = True
-                        break
+        max_attempts = max(200, adjusted_count * 30)
+        attempts = 0
+        while len(nodes) < adjusted_count and attempts < max_attempts:
+            attempts += 1
+            x = rng.uniform(0, width - 1)
+            y = rng.uniform(0, height - 1)
+            ix, iy = int(x), int(y)
+            if not valid_mask[iy, ix]:
+                continue
 
-                if not too_close:
-                    valid_positions.append((x, y, civ_value))
+            civ_value = float(civ_map[iy, ix])
+            min_spacing = base_spacing / (1.0 + civ_spacing_factor * civ_value)
+            if is_too_close(x, y, min_spacing):
+                continue
 
-        # PlotNodes gleichmäßig verteilen
-        if len(valid_positions) < adjusted_count:
-            adjusted_count = len(valid_positions)
-
-        # Sampling für gleichmäßige Verteilung
-        sampled_positions = self._sample_uniform_distribution(valid_positions, adjusted_count)
-
-        for x, y, civ_value in sampled_positions:
             node = PlotNode(
                 node_id=self.next_node_id,
                 node_location=(float(x), float(y)),
-                connector_id=[],
-                connector_distance=[],
-                connector_elevation=[],
-                connector_movecost=[]
+                connector_id=[], connector_distance=[], connector_elevation=[],
+                connector_movecost=[], connector_edge_id=[]
             )
             nodes.append(node)
+            grid.setdefault(cell_of(x, y), []).append((x, y))
             self.next_node_id += 1
 
         if progress_callback:
@@ -2224,18 +3200,27 @@ class PlotNodeSystem:
 
         return nodes
 
-    def create_delaunay_triangulation(self, nodes, heightmap, biome_map=None, progress_callback=None):
+    def create_delaunay_triangulation(self, nodes, heightmap, biome_map=None,
+                                       height_cost_factor=2.0, progress_callback=None):
         """
         Funktionsweise: Erstellt Delaunay-Triangulation zwischen PlotNodes mit MoveCost-Berechnung
-        Aufgabe: Verbindet PlotNodes über Delaunay-Dreiecke für Grundstücks-Bildung
-        Parameter: nodes, heightmap, biome_map, progress_callback - PlotNode-Liste, Höhendaten, Biom-Map und Progress
-        Returns: List[PlotNode] - Nodes mit aktualisierten Verbindungen
+        Aufgabe: Verbindet PlotNodes über Delaunay-Dreiecke für Grundstücks-Bildung UND
+        baut parallel das adressierbare PlotEdge-Registry auf (Nutzer-Vorgabe:
+        "Plotnode 234 und 260 teilen sich eine Kante, diese ist dann Kante 839") -
+        Grundlage für build_edge_graph_and_simulate_traffic().
+        Parameter: nodes, heightmap, biome_map, height_cost_factor, progress_callback -
+            PlotNode-Liste, Höhendaten, Biom-Map, Gewichtung der mittleren
+            Pfad-Steigung in den Kantenkosten, und Progress
+        Returns: Tuple[List[PlotNode], Dict[int, PlotEdge]] - Nodes mit
+            aktualisierten Verbindungen und das Edge-Registry (edge_id -> PlotEdge)
         """
         if progress_callback:
             progress_callback("Plot Generation", 87, "Creating Delaunay triangulation...")
 
+        edge_registry: Dict[int, PlotEdge] = {}
+
         if len(nodes) < 3:
-            return nodes
+            return nodes, edge_registry
 
         # Koordinaten extrahieren
         points = np.array([node.node_location for node in nodes])
@@ -2250,54 +3235,61 @@ class PlotNodeSystem:
                 node.connector_distance = []
                 node.connector_elevation = []
                 node.connector_movecost = []
+                node.connector_edge_id = []
+
+            edge_lookup: Dict[Tuple[int, int], int] = {}  # (min_id,max_id) -> edge_id
+
+            def _connect(node_a, node_b):
+                distance = self._calculate_distance(node_a.node_location, node_b.node_location)
+                elevation_diff = self._calculate_elevation_difference(
+                    node_a.node_location, node_b.node_location, heightmap
+                )
+                movecost = self._calculate_biome_movecost(
+                    node_a.node_location, node_b.node_location, biome_map, distance, elevation_diff
+                )
+
+                key = (min(node_a.node_id, node_b.node_id), max(node_a.node_id, node_b.node_id))
+                if key not in edge_lookup:
+                    # Wegintegral statt Endpunkt-Differenz: eine gerade Linie über
+                    # Hügel-und-Tal hätte sonst netto ~0 Höhendifferenz, obwohl
+                    # tatsächlich Auf- und Abstieg zurückgelegt werden müsste.
+                    height_cost = self._cumulative_height_cost(
+                        node_a.node_location, node_b.node_location, heightmap)
+                    avg_slope = height_cost / max(distance, 1e-6)
+                    movement_cost = distance * (1.0 + height_cost_factor * avg_slope)
+
+                    edge_id = len(edge_registry)
+                    edge_registry[edge_id] = PlotEdge(
+                        edge_id=edge_id, node_a=key[0], node_b=key[1],
+                        length=distance, height_cost=height_cost, movement_cost=movement_cost)
+                    edge_lookup[key] = edge_id
+                edge_id = edge_lookup[key]
+
+                node_a.connector_id.append(node_b.node_id)
+                node_a.connector_distance.append(distance)
+                node_a.connector_elevation.append(elevation_diff)
+                node_a.connector_movecost.append(movecost)
+                node_a.connector_edge_id.append(edge_id)
 
             for simplex in tri.simplices:
                 # Jedes Dreieck verbindet 3 Nodes
                 for i in range(3):
                     for j in range(i + 1, 3):
-                        node_a_idx = simplex[i]
-                        node_b_idx = simplex[j]
+                        node_a = nodes[simplex[i]]
+                        node_b = nodes[simplex[j]]
 
-                        node_a = nodes[node_a_idx]
-                        node_b = nodes[node_b_idx]
-
-                        # Verbindung A->B
                         if node_b.node_id not in node_a.connector_id:
-                            distance = self._calculate_distance(node_a.node_location, node_b.node_location)
-                            elevation_diff = self._calculate_elevation_difference(
-                                node_a.node_location, node_b.node_location, heightmap
-                            )
-                            movecost = self._calculate_biome_movecost(
-                                node_a.node_location, node_b.node_location, biome_map, distance, elevation_diff
-                            )
-
-                            node_a.connector_id.append(node_b.node_id)
-                            node_a.connector_distance.append(distance)
-                            node_a.connector_elevation.append(elevation_diff)
-                            node_a.connector_movecost.append(movecost)
-
-                        # Verbindung B->A
+                            _connect(node_a, node_b)
                         if node_a.node_id not in node_b.connector_id:
-                            distance = self._calculate_distance(node_b.node_location, node_a.node_location)
-                            elevation_diff = self._calculate_elevation_difference(
-                                node_b.node_location, node_a.node_location, heightmap
-                            )
-                            movecost = self._calculate_biome_movecost(
-                                node_b.node_location, node_a.node_location, biome_map, distance, elevation_diff
-                            )
+                            _connect(node_b, node_a)
 
-                            node_b.connector_id.append(node_a.node_id)
-                            node_b.connector_distance.append(distance)
-                            node_b.connector_elevation.append(elevation_diff)
-                            node_b.connector_movecost.append(movecost)
-
-            return nodes
+            return nodes, edge_registry
 
         except Exception as e:
             # Fallback: keine Verbindungen
             if progress_callback:
                 progress_callback("Plot Generation", 87, f"Delaunay triangulation failed: {e}")
-            return nodes
+            return nodes, edge_registry
 
     def merge_to_plots(self, nodes, civ_map, progress_callback=None):
         """
@@ -2365,49 +3357,262 @@ class PlotNodeSystem:
 
         return plots
 
-    def optimize_node_positions(self, nodes, iterations=5, progress_callback=None):
+    @staticmethod
+    def _rank_distance_weights(n):
         """
-        Funktionsweise: Optimiert PlotNode-Positionen durch Abstoßungslogik und Winkel-Glättung
-        Aufgabe: Verbessert Node-Anordnung für natürlichere Grundstücks-Formen
-        Parameter: nodes, iterations, progress_callback - PlotNode-Liste, Iterationen und Progress
-        Returns: List[PlotNode] - Optimierte PlotNodes
+        Funktionsweise: Chancendegressions-Formel für die Stadtwahl nach
+        Rang-Distanz (Nutzer-Vorgabe): die i-nächste Siedlung bekommt
+        P(i) = 0.5^i (i=1 nächste, i=2 übernächste, ...), die entfernteste
+        Siedlung (Rang n) bekommt denselben Wert wie Rang n-1, damit die
+        Summe exakt 1.0 ergibt (2 Städte: 50/50, 3: 50/25/25, 4: 50/25/12.5/12.5, ...).
+        Parameter: n - Anzahl erreichbarer Siedlungen
+        Returns: List[float] - Gewichte, aufsteigend nach Rang (Index 0 = nächste)
+        """
+        if n <= 0:
+            return []
+        if n == 1:
+            return [1.0]
+        weights = [0.5 ** i for i in range(1, n)]
+        weights.append(0.5 ** (n - 1))
+        return weights
+
+    def simulate_plot_traffic(self, nodes, edge_registry, settlements, road_network,
+                               path_traffic_threshold=25, road_traffic_threshold=75,
+                               intercity_traffic=30, progress_callback=None):
+        """
+        Funktionsweise: Simuliert Wege-/Straßen-Entstehung über den PlotEdge-Graph
+        Aufgabe: Jede PlotNode (außer den Marktplätzen selbst) entspricht einer
+        Familie, die ihren Verkehr nach Rang-Distanz gewichtet auf ALLE
+        erreichbaren Marktplätze verteilt statt ausschließlich auf den
+        nächstgelegenen (Nutzer-Vorgabe, Chancendegressions-Formel - siehe
+        _rank_distance_weights()): die nächste Siedlung bekommt 50% der
+        "Familien-Masse" dieser PlotNode, die übernächste 25%, usw. Jede
+        durchquerte Kante auf dem jeweiligen Weg wird um das entsprechende
+        Gewicht erhöht (Kosten siehe PlotEdge.movement_cost). Zusätzlich
+        laufen intercity_traffic Personen pro Richtung zwischen den durch das
+        bestehende Straßennetz (road_network, settlement.pathfinding)
+        verbundenen Siedlungspaaren über denselben Graphen. Kanten werden ab
+        path_traffic_threshold zu "path", ab road_traffic_threshold zu "road".
+
+        Jede Siedlung hat einen eigenen Marktplatz-PlotNode (siehe
+        generate_plot_nodes()), der ganz normal im selben Graphen liegt - kein
+        separater virtueller Anker-Knoten mehr nötig.
+
+        Bleibt trotz Wegintegral-Kosten pro Kante günstig: der Graph hat nur
+        so viele Knoten wie es PlotNodes gibt (typischerweise <= wenige
+        Tausend, siehe SETTLEMENT.PLOTNODES) statt Pixel-Grid-Größe - Dijkstra
+        darauf ist Größenordnungen billiger als die Pixel-Floods anderswo im
+        Settlement-Rework (_terrain_cost_voronoi()).
+
+        Parameter: nodes, edge_registry - PlotNode-Liste und Dict[edge_id, PlotEdge]
+            (siehe create_delaunay_triangulation())
+        Parameter: settlements, road_network - Settlement-Liste und bestehende
+            Road-Pfade (settlement.pathfinding) zur Bestimmung "benachbarter"
+            Siedlungspaare für den Inter-City-Traffic
+        Returns: Dict[int, PlotEdge] - edge_registry mit aktualisiertem
+            traffic/classification (traffic ist jetzt fraktional/float, da
+            eine PlotNode ihre "Familien-Masse" auf mehrere Ziele aufteilt)
         """
         if progress_callback:
-            progress_callback("Plot Generation", 94, f"Optimizing node positions ({iterations} iterations)...")
+            progress_callback("Plot Generation", 93, "Simulating family/trade traffic...")
 
-        # LOD-abhängige Iterations-Anzahl
-        if self.map_size <= 64:
-            iterations = max(2, iterations // 2)
+        if not nodes or not edge_registry:
+            return edge_registry
 
-        for iteration in range(iterations):
-            # Abstoßungslogik zwischen zu nahen Nodes
-            for i, node_a in enumerate(nodes):
-                for j, node_b in enumerate(nodes[i + 1:], i + 1):
-                    distance = self._calculate_distance(node_a.node_location, node_b.node_location)
+        node_index = {node.node_id: i for i, node in enumerate(nodes)}
+        num_nodes = len(nodes)
 
-                    if distance < 3.0:  # Zu nah
-                        # Abstoßungsvektor berechnen
-                        dx = node_b.node_location[0] - node_a.node_location[0]
-                        dy = node_b.node_location[1] - node_a.node_location[1]
+        marketplace_index_by_settlement_id = {
+            n.settlement_id: node_index[n.node_id] for n in nodes if n.settlement_id >= 0
+        }
+        settlements_with_marketplace = [
+            s for s in settlements if s.location_type == 'settlement'
+            and s.location_id in marketplace_index_by_settlement_id
+        ]
+        if not settlements_with_marketplace:
+            return edge_registry
 
-                        if distance > 0:
-                            # Normalisieren und Abstoßung anwenden
-                            dx /= distance
-                            dy /= distance
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import dijkstra
 
-                            repulsion_strength = (3.0 - distance) * 0.1
+        rows, cols, costs = [], [], []
+        for edge in edge_registry.values():
+            i, j = node_index[edge.node_a], node_index[edge.node_b]
+            rows += [i, j]
+            cols += [j, i]
+            costs += [edge.movement_cost, edge.movement_cost]
+        graph = csr_matrix((costs, (rows, cols)), shape=(num_nodes, num_nodes))
 
-                            node_a.node_location = (
-                                node_a.node_location[0] - dx * repulsion_strength,
-                                node_a.node_location[1] - dy * repulsion_strength
-                            )
-                            node_b.node_location = (
-                                node_b.node_location[0] + dx * repulsion_strength,
-                                node_b.node_location[1] + dy * repulsion_strength
-                            )
+        edge_lookup = {(e.node_a, e.node_b): e.edge_id for e in edge_registry.values()}
+
+        def _add_traffic_along_path(predecessors, source_idx, target_idx, amount):
+            current = target_idx
+            while current != source_idx and current >= 0:
+                prev = predecessors[current]
+                if prev < 0:
+                    break
+                a, b = (current, prev) if current < prev else (prev, current)
+                key = (nodes[a].node_id, nodes[b].node_id)
+                edge_id = edge_lookup.get(key)
+                if edge_id is not None:
+                    edge_registry[edge_id].traffic += amount
+                current = prev
+
+        # 1) Rang-Distanz-gewichtete Verkehrsverteilung (siehe _rank_distance_weights()):
+        # Distanzen von JEDEM Marktplatz zu JEDER PlotNode auf einmal berechnen
+        # (kein "min_only" mehr - wir brauchen die volle Rangliste, nicht nur
+        # den naechsten), dann pro PlotNode nach Distanz sortieren und gewichtet
+        # verteilen.
+        marketplace_indices = [marketplace_index_by_settlement_id[s.location_id]
+                                for s in settlements_with_marketplace]
+        distances, predecessors = dijkstra(graph, indices=marketplace_indices, return_predecessors=True)
+
+        for i in range(num_nodes):
+            if nodes[i].settlement_id >= 0:
+                continue  # Marktplätze selbst erzeugen keinen Familienverkehr
+
+            node_distances = distances[:, i]
+            reachable = [k for k in range(len(marketplace_indices)) if np.isfinite(node_distances[k])]
+            if not reachable:
+                continue
+            reachable.sort(key=lambda k: node_distances[k])
+            weights = self._rank_distance_weights(len(reachable))
+            for rank, k in enumerate(reachable):
+                _add_traffic_along_path(predecessors[k], marketplace_indices[k], i, weights[rank])
+
+        # 2) Inter-City-Traffic: entlang des bestehenden Straßennetzes
+        # verbundene Siedlungspaare tauschen intercity_traffic Personen pro
+        # Richtung aus (ueber den Plot-Graphen geroutet, direkt zwischen den
+        # beiden Marktplatz-Nodes).
+        connected_pairs = self._infer_connected_settlement_pairs(settlements_with_marketplace, road_network)
+        for settlement_a, settlement_b in connected_pairs:
+            src = marketplace_index_by_settlement_id[settlement_a.location_id]
+            dst = marketplace_index_by_settlement_id[settlement_b.location_id]
+            dist_single, pred_single = dijkstra(graph, indices=[src], return_predecessors=True)
+            if np.isfinite(dist_single[0, dst]):
+                _add_traffic_along_path(pred_single[0], src, dst, intercity_traffic)
+
+        # 3) Klassifikation nach Traffic-Schwellwerten
+        for edge in edge_registry.values():
+            if edge.traffic >= road_traffic_threshold:
+                edge.classification = "road"
+            elif edge.traffic >= path_traffic_threshold:
+                edge.classification = "path"
+            else:
+                edge.classification = "none"
 
         if progress_callback:
-            progress_callback("Plot Generation", 95, f"Node optimization completed")
+            path_count = sum(1 for e in edge_registry.values() if e.classification != "none")
+            progress_callback("Plot Generation", 95, f"Traffic simulation done ({path_count} paths/roads)")
+
+        return edge_registry
+
+    def _infer_connected_settlement_pairs(self, settlements, road_network):
+        """
+        Funktionsweise: Bestimmt "benachbarte" Siedlungspaare für den Inter-
+        City-Traffic anhand des bereits bestehenden Straßennetzes
+        (settlement.pathfinding, MST-Verbindungen) statt einer eigenen
+        Nachbarschafts-Definition
+        Parameter: settlements, road_network - Settlement-Liste und Road-Pfade
+        Returns: List[Tuple[Location, Location]] - Verbundene Settlement-Paare
+        """
+        pairs = []
+        if not road_network:
+            return pairs
+
+        for road in road_network:
+            if len(road) < 2:
+                continue
+            start_point, end_point = road[0], road[-1]
+            start_settlement = min(
+                settlements, key=lambda s: (s.x - start_point[0]) ** 2 + (s.y - start_point[1]) ** 2)
+            end_settlement = min(
+                settlements, key=lambda s: (s.x - end_point[0]) ** 2 + (s.y - end_point[1]) ** 2)
+            if start_settlement is not end_settlement:
+                pairs.append((start_settlement, end_settlement))
+
+        return pairs
+
+    def apply_traffic_attraction(self, nodes, edge_registry, civ_map, base_spacing,
+                                  civ_spacing_factor, attraction_strength, progress_callback=None):
+        """
+        Funktionsweise: "Gummiband"-Anziehungskraft zwischen Nodes, deren
+        verbindende Kante Traffic trägt - stark genutzte Wege werden dadurch
+        über die LOD-Iterationen hinweg schrittweise kürzer/gerader
+        (Nutzer-Vorgabe: "verwendete Wege werden noch stärker verwendet").
+        Gegenkraft ist derselbe civ-gewichtete Mindestabstand wie bei
+        generate_plot_nodes() (Terrain/Civ-Dichte/Nähe zu anderen Plots) - eine
+        Kante zieht ihre beiden Nodes nie näher zusammen, als dieser
+        Mindestabstand erlaubt, das verhindert ein Kollabieren.
+
+        Traffic selbst wird NICHT über Aufrufe hinweg akkumuliert (jeder
+        Durchlauf berechnet frischen Traffic aus der aktuellen Geometrie, siehe
+        simulate_plot_traffic()) - nur die daraus resultierende, leicht
+        verschobene Node-Position wird über den Warm-Start
+        (generate_plot_nodes(previous_nodes=...)) an die nächste LOD-Stufe
+        weitergereicht. Das Gleichgewicht zwischen Anziehung und Mindestabstand
+        ist bewusst nur grob kalibriert (attraction_strength) - Feintuning ist
+        laut Nutzer-Vorgabe ein späterer Schritt.
+        Parameter: nodes, edge_registry - aktuelle PlotNode-/PlotEdge-Listen
+            (Traffic muss bereits über simulate_plot_traffic() gesetzt sein)
+        Parameter: civ_map, base_spacing, civ_spacing_factor - dieselbe
+            Mindestabstands-Formel wie generate_plot_nodes()
+        Parameter: attraction_strength - Bewegung in Pixel pro Traffic-Punkt
+        Returns: List[PlotNode] - Nodes mit angepassten Positionen (Marktplatz-
+            Nodes bleiben immer an ihrer Settlement-Position fixiert)
+        """
+        if progress_callback:
+            progress_callback("Plot Generation", 91, "Applying traffic attraction (rubber-band)...")
+
+        if not edge_registry:
+            return nodes
+
+        height, width = civ_map.shape
+        node_by_id = {n.node_id: n for n in nodes}
+        positions = {nid: np.array(n.node_location, dtype=np.float64) for nid, n in node_by_id.items()}
+        displacement = {nid: np.zeros(2) for nid in positions}
+
+        for edge in edge_registry.values():
+            if edge.traffic <= 0 or edge.node_a not in positions or edge.node_b not in positions:
+                continue
+
+            pos_a, pos_b = positions[edge.node_a], positions[edge.node_b]
+            delta = pos_b - pos_a
+            dist = float(np.hypot(delta[0], delta[1]))
+            if dist < 1e-6:
+                continue
+
+            civ_a = self._get_node_civ_value(node_by_id[edge.node_a], civ_map)
+            civ_b = self._get_node_civ_value(node_by_id[edge.node_b], civ_map)
+            min_spacing = base_spacing / (1.0 + civ_spacing_factor * 0.5 * (civ_a + civ_b))
+
+            # Nie ueber den Mindestabstand hinaus zusammenziehen (Gegenkraft)
+            pull = max(0.0, min(dist - min_spacing, attraction_strength * edge.traffic))
+            direction = delta / dist
+
+            # Marktplatz-Nodes bleiben fixiert (sie SIND die Settlement-Position,
+            # siehe generate_plot_nodes()) - trifft die Anziehung auf einen
+            # Marktplatz, bewegt sich stattdessen das andere Ende komplett
+            # (statt der sonst üblichen 50/50-Aufteilung).
+            a_pinned = node_by_id[edge.node_a].settlement_id >= 0
+            b_pinned = node_by_id[edge.node_b].settlement_id >= 0
+            if a_pinned and b_pinned:
+                continue
+            elif a_pinned:
+                displacement[edge.node_b] -= direction * pull
+            elif b_pinned:
+                displacement[edge.node_a] += direction * pull
+            else:
+                displacement[edge.node_a] += direction * pull * 0.5
+                displacement[edge.node_b] -= direction * pull * 0.5
+
+        for node in nodes:
+            if node.settlement_id >= 0:
+                continue  # Marktplatz bleibt an der Settlement-Position
+            new_pos = positions[node.node_id] + displacement[node.node_id]
+            new_pos[0] = np.clip(new_pos[0], 0, width - 1)
+            new_pos[1] = np.clip(new_pos[1], 0, height - 1)
+            node.node_location = (float(new_pos[0]), float(new_pos[1]))
 
         return nodes
 
@@ -2453,28 +3658,6 @@ class PlotNodeSystem:
 
         return distance * biome_cost_factor + abs(elevation_diff) * 0.5
 
-    def _sample_uniform_distribution(self, positions, count):
-        """
-        Funktionsweise: Sampelt Positionen für gleichmäßige räumliche Verteilung
-        Aufgabe: Verhindert Clustering von PlotNodes
-        Parameter: positions, count - Verfügbare Positionen und gewünschte Anzahl
-        Returns: List[Tuple] - Gleichmäßig verteilte Positionen
-        """
-        if len(positions) <= count:
-            return positions
-
-        # Einfaches Grid-basiertes Sampling
-        positions.sort(key=lambda p: (p[1], p[0]))  # Sort by y, then x
-
-        step = len(positions) // count
-        sampled = []
-
-        for i in range(0, len(positions), step):
-            if len(sampled) < count:
-                sampled.append(positions[i])
-
-        return sampled
-
     def _calculate_distance(self, pos1, pos2):
         """
         Funktionsweise: Berechnet Euklidische Distanz zwischen zwei Positionen
@@ -2497,6 +3680,29 @@ class PlotNodeSystem:
             return heightmap[y2, x2] - heightmap[y1, x1]
 
         return 0.0
+
+    def _cumulative_height_cost(self, pos1, pos2, heightmap):
+        """
+        Funktionsweise: Berechnet die kumulierte Höhenüberbrückung entlang der
+        geraden Linie zwischen zwei Positionen (Wegintegral)
+        Aufgabe: Liefert die tatsächlich zurückzulegende Auf-/Abstiegssumme für
+        PlotEdge.height_cost - eine Linie über Hügel-und-Tal hat ~0 Netto-
+        Höhendifferenz (siehe _calculate_elevation_difference()), muss aber
+        trotzdem als teuer gelten (Nutzer-Vorgabe: "kumulierte
+        Höhenüberbrückung, also über Wegintegral")
+        Parameter: pos1, pos2, heightmap - Start/Ziel und Höhendaten
+        Returns: float - Summe der absoluten Höhenänderungen entlang der Linie
+        """
+        height, width = heightmap.shape
+        x1, y1 = pos1
+        x2, y2 = pos2
+        steps = max(1, int(round(np.hypot(x2 - x1, y2 - y1))))
+
+        xs = np.clip(np.round(np.linspace(x1, x2, steps + 1)).astype(int), 0, width - 1)
+        ys = np.clip(np.round(np.linspace(y1, y2, steps + 1)).astype(int), 0, height - 1)
+        heights_along_path = heightmap[ys, xs]
+
+        return float(np.sum(np.abs(np.diff(heights_along_path))))
 
     def _get_node_civ_value(self, node, civ_map):
         """

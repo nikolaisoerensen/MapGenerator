@@ -104,17 +104,31 @@ _CALCULATOR_SPECS = [
                    ["combined_suitability_map"]),
     CalculatorSpec("settlement.settlements", "settlement",
                    ["settlement.suitability", "terrain.redistribution"], ["settlement_list"]),
+    CalculatorSpec("settlement.city_boundary", "settlement",
+                   ["settlement.settlements", "terrain.redistribution", "terrain.slope"],
+                   ["city_mask", "city_cost_map"]),
+    CalculatorSpec("settlement.city_blocks", "settlement",
+                   ["settlement.city_boundary", "settlement.settlements", "terrain.redistribution"],
+                   ["street_mask", "house_parcel_map"]),
+    CalculatorSpec("settlement.landscape_voronoi", "settlement",
+                   ["settlement.city_boundary", "terrain.redistribution", "terrain.slope"],
+                   ["voronoi_seed_positions", "voronoi_cell_map"]),
     CalculatorSpec("settlement.pathfinding", "settlement",
-                   ["settlement.settlements", "terrain.slope"], ["roads"]),
+                   ["settlement.settlements", "settlement.landscape_voronoi", "terrain.slope"], ["roads"]),
+    CalculatorSpec("settlement.outer_roads", "settlement",
+                   ["settlement.settlements", "settlement.suitability", "terrain.slope"], ["outer_roads"]),
     CalculatorSpec("settlement.roadsites", "settlement", ["settlement.pathfinding"], ["roadsite_list"]),
     CalculatorSpec("settlement.civ_influence", "settlement",
                    ["terrain.redistribution", "terrain.slope", "settlement.settlements",
                     "settlement.pathfinding", "settlement.roadsites"], ["civ_map"]),
     CalculatorSpec("settlement.landmarks", "settlement",
                    ["settlement.civ_influence", "terrain.redistribution", "terrain.slope"], ["landmark_list"]),
+    CalculatorSpec("settlement.landmark_roads", "settlement",
+                   ["settlement.landmarks", "settlement.pathfinding", "terrain.slope"], ["landmark_roads"]),
     CalculatorSpec("settlement.plot_nodes", "settlement",
-                   ["settlement.civ_influence", "settlement.settlements", "terrain.redistribution",
-                    "biome.integrate_layers"], ["plot_nodes", "plots", "plot_map"]),
+                   ["settlement.civ_influence", "settlement.settlements", "settlement.pathfinding",
+                    "terrain.redistribution", "biome.integrate_layers"],
+                   ["plot_nodes", "plots", "plot_map", "plot_edges", "plot_node_positions"]),
 ]
 
 CALCULATOR_GRAPH: Dict[str, CalculatorSpec] = {spec.calculator_id: spec for spec in _CALCULATOR_SPECS}
@@ -122,9 +136,11 @@ CALCULATOR_GRAPH: Dict[str, CalculatorSpec] = {spec.calculator_id: spec for spec
 # Tatsächliche Zählung: 34 durchnummerierte Schritte (#1-#34) aus
 # docs/generation_pipeline_dependencies.md, minus dem bekannt kaputten #22
 # (water.erosion_feedback, oben ausgeschlossen), plus geology.faceted_boundaries
-# (in den Docs nicht erfasst, aber real im Code vorhanden - siehe core/geology_generator.py)
-# = 34 aktive Knoten.
-assert len(CALCULATOR_GRAPH) == 34, f"Erwartet 34 aktive Calculators, gefunden {len(CALCULATOR_GRAPH)}"
+# (in den Docs nicht erfasst, aber real im Code vorhanden - siehe core/geology_generator.py),
+# plus 5 neue Settlement-Knoten (city_boundary, city_blocks, landscape_voronoi,
+# outer_roads, landmark_roads) aus dem Settlement-Rework (siehe docs/backlog.md
+# Ticket #4) = 39 aktive Knoten.
+assert len(CALCULATOR_GRAPH) == 39, f"Erwartet 39 aktive Calculators, gefunden {len(CALCULATOR_GRAPH)}"
 
 
 class CalculatorRoundScheduler:

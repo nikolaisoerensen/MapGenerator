@@ -144,12 +144,12 @@ class SettlementTab(BaseMapTab):
         Display-Mode/Filter/3D-Controls in der Viewport-Toolbar (siehe
         create_statistics_controls()/create_visualization_controls()) -
         beide nicht mehr im Parameter-Panel, wie bei TerrainTab.
+        Kein eigenes LOD/Generation-Steps-Status-Widget mehr zwischen der
+        Pipeline-Status-Spalte und den Parameter-Slidern (Ticket #6 in
+        docs/backlog.md) - Vorbild GeologyTab hat dafuer ebenfalls kein
+        eigenes Widget, nur die Parameter-Gruppen direkt gefolgt von
+        dependency_status.
         """
-        # System Status Widget (detaillierter Multi-Step-Fortschritt, nicht
-        # redundant zur einfachen Pipeline-Status-Spalte - bleibt hier)
-        self.system_status_widget = SettlementSystemStatusWidget()
-        self.control_panel.layout().addWidget(self.system_status_widget)
-
         # Parameter Panel
         self.parameter_panel = self.create_settlement_parameter_panel()
         self.control_panel.layout().addWidget(self.parameter_panel)
@@ -295,7 +295,14 @@ class SettlementTab(BaseMapTab):
         return controls_widget
 
     def _create_settlement_display_mode_controls(self) -> QHBoxLayout:
-        """Erstellt Switcher zwischen den 5 Settlement-Darstellungen"""
+        """
+        Erstellt Switcher zwischen den Settlement-Basis-Layern. Settlements/
+        Landmarks/Roadsites/Roads/City Boundary sind bewusst KEINE eigenen
+        Radio-Modi mehr, sondern Overlay-Checkboxen (siehe
+        _create_settlement_filter_controls()) - Nutzer-Vorgabe: "ich will ja
+        Plots und Straßen und alles gleichzeitig sehen können" statt zwischen
+        sich gegenseitig ausschließenden Ansichten wechseln zu müssen.
+        """
         layout = QHBoxLayout()
 
         self.display_mode = QButtonGroup()
@@ -306,30 +313,33 @@ class SettlementTab(BaseMapTab):
         self.display_mode.addButton(self.suitability_radio, 0)
         layout.addWidget(self.suitability_radio)
 
-        self.settlements_radio = QRadioButton("Settlements & Landmarks")
-        self.settlements_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.settlements_radio, 1)
-        layout.addWidget(self.settlements_radio)
-
-        self.road_network_radio = QRadioButton("Road Network")
-        self.road_network_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.road_network_radio, 2)
-        layout.addWidget(self.road_network_radio)
-
         self.civ_map_radio = QRadioButton("Civilization Map")
         self.civ_map_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.civ_map_radio, 3)
+        self.display_mode.addButton(self.civ_map_radio, 1)
         layout.addWidget(self.civ_map_radio)
 
         self.plot_map_radio = QRadioButton("Plot Boundaries")
         self.plot_map_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.plot_map_radio, 4)
+        self.display_mode.addButton(self.plot_map_radio, 2)
         layout.addWidget(self.plot_map_radio)
+
+        self.landscape_voronoi_radio = QRadioButton("Landscape Voronoi")
+        self.landscape_voronoi_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.landscape_voronoi_radio, 3)
+        layout.addWidget(self.landscape_voronoi_radio)
+
+        self.city_blocks_radio = QRadioButton("City Blocks")
+        self.city_blocks_radio.toggled.connect(self.update_display_mode)
+        self.display_mode.addButton(self.city_blocks_radio, 4)
+        layout.addWidget(self.city_blocks_radio)
 
         return layout
 
     def _create_settlement_filter_controls(self) -> QHBoxLayout:
-        """Erstellt Settlement-Type-Filter (nur relevant im 'Settlements & Landmarks'-Modus)"""
+        """
+        Erstellt Overlay-Checkboxen - kombinierbar mit JEDEM Basis-Layer-Radio
+        (siehe update_settlement_display()), nicht auf einen Modus beschränkt.
+        """
         layout = QHBoxLayout()
 
         self.show_settlements_cb = QCheckBox("Settlements")
@@ -346,6 +356,16 @@ class SettlementTab(BaseMapTab):
         self.show_roadsites_cb.setChecked(True)
         self.show_roadsites_cb.toggled.connect(self.update_display_mode)
         layout.addWidget(self.show_roadsites_cb)
+
+        self.show_roads_cb = QCheckBox("Roads")
+        self.show_roads_cb.setChecked(True)
+        self.show_roads_cb.toggled.connect(self.update_display_mode)
+        layout.addWidget(self.show_roads_cb)
+
+        self.show_city_boundary_cb = QCheckBox("City Boundary")
+        self.show_city_boundary_cb.setChecked(True)
+        self.show_city_boundary_cb.toggled.connect(self.update_display_mode)
+        layout.addWidget(self.show_city_boundary_cb)
 
         return layout
 
@@ -416,22 +436,14 @@ class SettlementTab(BaseMapTab):
 
     def update_system_status_display(self, status: str, message: str = ""):
         """
-        Funktionsweise: Aktualisiert System Status Display für alle Settlement-Schritte
-        Aufgabe: Zeigt Progress für alle 7 calculate-Phasen mit LOD-Info und Validity-State
-        Parameter: status (str), message (str) - Aktueller Status und Detail-Message
+        No-Op-Hook: das detaillierte Multi-Step-Status-Widget wurde entfernt
+        (Ticket #6 in docs/backlog.md, Vorbild GeologyTab - keine eigene
+        Status-Anzeige zwischen Pipeline-Status-Spalte und Parameter-Slidern).
+        Bleibt bestehen, da mehrere Call-Sites in dieser Datei ihn weiterhin
+        aufrufen; die allgemeine Pipeline-Status-Spalte deckt den Fortschritt
+        bereits ab.
         """
-        if hasattr(self, 'system_status_widget'):
-            self.system_status_widget.update_status(status, message)
-
-            # Settlement-spezifische Status-Updates
-            if status == "generating":
-                self.system_status_widget.update_step_progress(message)
-            elif status == "completed":
-                # Alle Schritte als completed markieren
-                steps = ["terrain_suitability", "settlements", "road_network", "roadsites",
-                        "civilization_mapping", "landmarks", "plots"]
-                for step in steps:
-                    self.system_status_widget.mark_step_completed(step)
+        pass
 
     def update_settlement_statistics(self):
         """
@@ -449,13 +461,8 @@ class SettlementTab(BaseMapTab):
             )
 
     def update_generation_progress(self, progress: int, message: str):
-        """
-        Funktionsweise: Aktualisiert Progress Bar für Settlement-Generation
-        Aufgabe: Zeigt detaillierten Progress für alle calculate-Schritte
-        Parameter: progress (int), message (str) - Progress-Prozent und Detail-Message
-        """
-        if hasattr(self, 'system_status_widget'):
-            self.system_status_widget.update_progress(progress, message)
+        """No-Op-Hook (siehe update_system_status_display() - Status-Widget entfernt)."""
+        pass
 
     @pyqtSlot(str, dict)
     def on_settlement_generation_completed(self, result_id: str, result_data: dict):
@@ -615,8 +622,12 @@ class SettlementTab(BaseMapTab):
 
     def update_settlement_display(self):
         """
-        Funktionsweise: Aktualisiert Display basierend auf aktuellem Visualization-Mode
-        Aufgabe: Zeigt verschiedene Settlement-Darstellungen mit Filtern
+        Funktionsweise: Aktualisiert Display basierend auf aktuellem Basis-Layer
+        (Radio) und den unabhängig davon zuschaltbaren Overlay-Checkboxen
+        (Settlements/Landmarks/Roadsites/Roads/City Boundary)
+        Aufgabe: Basis-Layer und Overlays sind entkoppelt, damit z.B. Plots und
+        Straßen und Settlements gleichzeitig sichtbar sein können statt
+        zwischen exklusiven Modi wechseln zu müssen (Nutzer-Vorgabe)
 
         Nutzt wie die anderen Tabs get_current_display()/_push_data_to_current_display()
         statt eines nie zugewiesenen self.map_display.
@@ -628,49 +639,78 @@ class SettlementTab(BaseMapTab):
             if suitability_map is not None:
                 self._push_data_to_current_display(suitability_map, "suitability_map")
 
-        elif current_mode == 1:  # Settlements & Landmarks
-            # Heightmap als Hintergrund (kombiniert), Settlements/Landmarks/Roadsites
-            # als Marker-Overlay
-            heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
-            if heightmap is not None:
-                self._push_data_to_current_display(heightmap, "heightmap")
-
-            current_display = self.get_current_display()
-            if current_display and self.current_view == "2d" and hasattr(current_display.display, 'overlay_settlements'):
-                settlements = self.data_lod_manager.get_settlement_data("settlement_list")
-                landmarks = self.data_lod_manager.get_settlement_data("landmark_list")
-                roadsites = self.data_lod_manager.get_settlement_data("roadsite_list")
-
-                display_settlements = settlements if self.show_settlements_cb.isChecked() else []
-                display_landmarks = landmarks if self.show_landmarks_cb.isChecked() else []
-                display_roadsites = roadsites if self.show_roadsites_cb.isChecked() else []
-
-                current_display.display.overlay_settlements(
-                    display_settlements, display_landmarks, display_roadsites
-                )
-
-        elif current_mode == 2:  # Road Network
-            heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
-            if heightmap is not None:
-                self._push_data_to_current_display(heightmap, "heightmap")
-
-            roads = self.data_lod_manager.get_settlement_data("roads")
-            current_display = self.get_current_display()
-            if roads and current_display and self.current_view == "2d" and hasattr(current_display.display, 'overlay_roads'):
-                current_display.display.overlay_roads(roads)
-
-        elif current_mode == 3:  # Civilization Map
+        elif current_mode == 1:  # Civilization Map
             civ_map = self.data_lod_manager.get_settlement_data("civ_map")
             if civ_map is not None:
                 self._push_data_to_current_display(civ_map, "civ_map")
 
-        elif current_mode == 4:  # Plot Boundaries
+        elif current_mode == 2:  # Plot Boundaries
             plot_map = self.data_lod_manager.get_settlement_data("plot_map")
             if plot_map is not None:
                 self._push_data_to_current_display(plot_map, "plot_map")
 
+        elif current_mode == 3:  # Landscape Voronoi (settlement.landscape_voronoi, #37)
+            voronoi_cell_map = self.data_lod_manager.get_settlement_data("voronoi_cell_map")
+            if voronoi_cell_map is not None:
+                self._push_data_to_current_display(voronoi_cell_map, "voronoi_cell_map")
+
+        elif current_mode == 4:  # City Blocks (settlement.city_blocks, #36)
+            house_parcel_map = self.data_lod_manager.get_settlement_data("house_parcel_map")
+            if house_parcel_map is not None:
+                self._push_data_to_current_display(house_parcel_map, "house_parcel_map")
+
+        self._apply_settlement_overlays()
+
         # 3D Overlays
         self.apply_3d_overlays()
+
+    def _apply_settlement_overlays(self):
+        """
+        Zeichnet die ueber Checkboxen zuschaltbaren Overlays (Settlements/
+        Landmarks/Roadsites/Roads/City Boundary) auf den aktuell angezeigten
+        Basis-Layer - unabhaengig davon, welcher Radio-Modus aktiv ist.
+        """
+        current_display = self.get_current_display()
+        if not current_display or self.current_view != "2d":
+            return
+        display = current_display.display
+
+        if hasattr(display, 'overlay_settlements') and (
+                self.show_settlements_cb.isChecked() or self.show_landmarks_cb.isChecked()
+                or self.show_roadsites_cb.isChecked()):
+            settlements = self.data_lod_manager.get_settlement_data("settlement_list")
+            landmarks = self.data_lod_manager.get_settlement_data("landmark_list")
+            roadsites = self.data_lod_manager.get_settlement_data("roadsite_list")
+
+            display_settlements = settlements if self.show_settlements_cb.isChecked() else []
+            display_landmarks = landmarks if self.show_landmarks_cb.isChecked() else []
+            display_roadsites = roadsites if self.show_roadsites_cb.isChecked() else []
+
+            display.overlay_settlements(display_settlements, display_landmarks, display_roadsites)
+
+        if hasattr(display, 'overlay_roads') and self.show_roads_cb.isChecked():
+            # Drei Farben für die drei Road-Kategorien (siehe
+            # calculate_road_network()/calculate_landmark_roads()/
+            # calculate_outer_connections() in core/settlement_generator.py)
+            roads = self.data_lod_manager.get_settlement_data("roads")
+            landmark_roads = self.data_lod_manager.get_settlement_data("landmark_roads")
+            outer_roads = self.data_lod_manager.get_settlement_data("outer_roads")
+            if roads:
+                display.overlay_roads(roads, color='darkorange')
+            if landmark_roads:
+                display.overlay_roads(landmark_roads, color='gold', linewidth=1.0)
+            if outer_roads:
+                display.overlay_roads(outer_roads, color='dimgray', linewidth=1.0)
+
+        if hasattr(display, 'overlay_street_mask') and self.city_blocks_radio.isChecked():
+            street_mask = self.data_lod_manager.get_settlement_data("street_mask")
+            if street_mask is not None:
+                display.overlay_street_mask(street_mask)
+
+        if hasattr(display, 'overlay_city_boundary_contour') and self.show_city_boundary_cb.isChecked():
+            city_mask = self.data_lod_manager.get_settlement_data("city_mask")
+            if city_mask is not None:
+                display.overlay_city_boundary_contour(city_mask)
 
     def apply_3d_overlays(self):
         """
@@ -706,118 +746,6 @@ class SettlementTab(BaseMapTab):
     def toggle_3d_markers(self, enabled: bool):
         """Toggle für 3D Settlement Markers"""
         self.update_settlement_display()
-
-
-class SettlementSystemStatusWidget(QGroupBox):
-    """
-    Funktionsweise: System Status Widget für alle Settlement-Berechnungsschritte
-    Aufgabe: Zeigt LOD-Level, Step-Status und Generation-Progress für alle 7 calculate-Phasen
-    """
-
-    def __init__(self):
-        super().__init__("Settlement System Status")
-        self.setup_ui()
-
-    def setup_ui(self):
-        """Erstellt UI für Settlement System Status"""
-        layout = QVBoxLayout()
-
-        # LOD Level Display
-        lod_group = QGroupBox("LOD Level & Validity")
-        lod_layout = QVBoxLayout()
-
-        self.lod_level_label = QLabel("Current LOD: LOD64")
-        self.validity_state_label = QLabel("Validity: Unknown")
-
-        lod_layout.addWidget(self.lod_level_label)
-        lod_layout.addWidget(self.validity_state_label)
-
-        lod_group.setLayout(lod_layout)
-        layout.addWidget(lod_group)
-
-        # Step Status für alle 7 calculate-Phasen
-        steps_group = QGroupBox("Generation Steps")
-        steps_layout = QVBoxLayout()
-
-        self.step_indicators = {}
-        steps = [
-            ("terrain_suitability", "Terrain Suitability"),
-            ("settlements", "Settlement Placement"),
-            ("road_network", "Road Network"),
-            ("roadsites", "Roadsite Placement"),
-            ("civilization_mapping", "Civilization Mapping"),
-            ("landmarks", "Landmark Placement"),
-            ("plots", "Plot Generation")
-        ]
-
-        for step_key, step_name in steps:
-            indicator = StatusIndicator(step_name)
-            indicator.set_unknown()
-            self.step_indicators[step_key] = indicator
-            steps_layout.addWidget(indicator)
-
-        steps_group.setLayout(steps_layout)
-        layout.addWidget(steps_group)
-
-        # Progress Bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-
-        # Status Message
-        self.status_message_label = QLabel("Ready for generation")
-        layout.addWidget(self.status_message_label)
-
-        self.setLayout(layout)
-
-    def update_status(self, status: str, message: str = ""):
-        """
-        Funktionsweise: Aktualisiert System Status
-        Parameter: status (str), message (str) - Status und Message
-        """
-        self.status_message_label.setText(message or f"Status: {status}")
-
-        if status == "generating":
-            self.progress_bar.setVisible(True)
-        elif status in ["completed", "failed"]:
-            self.progress_bar.setVisible(False)
-
-    def update_step_progress(self, step_message: str):
-        """
-        Funktionsweise: Aktualisiert Schritt-Progress basierend auf Message
-        Parameter: step_message (str) - Detail-Message mit Schritt-Info
-        """
-        # Parse step aus message und aktualisiere entsprechenden Indicator
-        if "terrain suitability" in step_message.lower():
-            self.step_indicators["terrain_suitability"].set_generating()
-        elif "settlement placement" in step_message.lower():
-            self.step_indicators["settlements"].set_generating()
-        elif "road network" in step_message.lower():
-            self.step_indicators["road_network"].set_generating()
-        elif "roadsite" in step_message.lower():
-            self.step_indicators["roadsites"].set_generating()
-        elif "civilization" in step_message.lower():
-            self.step_indicators["civilization_mapping"].set_generating()
-        elif "landmark" in step_message.lower():
-            self.step_indicators["landmarks"].set_generating()
-        elif "plot" in step_message.lower():
-            self.step_indicators["plots"].set_generating()
-
-    def mark_step_completed(self, step_key: str):
-        """
-        Funktionsweise: Markiert einzelnen Schritt als completed
-        Parameter: step_key (str) - Schritt-Schlüssel
-        """
-        if step_key in self.step_indicators:
-            self.step_indicators[step_key].set_success("Completed")
-
-    def update_progress(self, progress: int, message: str):
-        """
-        Funktionsweise: Aktualisiert Progress Bar
-        Parameter: progress (int), message (str) - Progress-Prozent und Message
-        """
-        self.progress_bar.setValue(progress)
-        self.status_message_label.setText(message)
 
 
 class SettlementStatisticsWidget(QGroupBox):

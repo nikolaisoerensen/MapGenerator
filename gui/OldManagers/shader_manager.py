@@ -22,6 +22,15 @@ Einsatzgebiete:
 - Terrain: Multi-Octave Noise (noiseGeneration), Shadow-Raycast (shadowRaycast)
 - Water: Lake-Detection via Jump-Flooding (jumpFloodLakes) - erster Water-Knoten
   auf GPU, weitere Knoten folgen nach demselben Muster (siehe DISPATCH_TABLE)
+- Settlement (Rework 2026-07-09): terrainCostFlood - JFA-Approximation des
+  terrain-cost-gewichteten Multi-Source-Floods (_terrain_cost_voronoi() in
+  core/settlement_generator.py), genutzt fuer sowohl Stadtgrenzen
+  (CityBoundaryAnalyzer) als auch Landschafts-Voronoi-Zellen
+  (LandscapeVoronoiSystem). civ_map-Decay und die Seed-Relaxation bleiben
+  bewusst CPU (Profiling zeigt: beide zusammen <1s bei map_size 256, der
+  eigentliche Bottleneck der Settlement-Pipeline liegt in der unvektorisierten
+  TerrainSuitabilityAnalyzer.calculate_water_proximity(), nicht im neuen Code -
+  siehe docs/backlog.md Ticket #4).
 """
 import logging
 import os
@@ -897,6 +906,72 @@ def _dispatch_ocean_connectivity(worker: "GPUWorker", inputs: dict, parameters: 
     return {"success": True, "ocean_mask": ocean_mask}
 
 
+def _dispatch_terrain_cost_flood(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
+    """
+    GPU-Gegenstueck zu _terrain_cost_voronoi() (core/settlement_generator.py) -
+    genutzt sowohl von CityBoundaryAnalyzer (ein Aufruf pro Settlement, mit
+    max_cost = radius * reach_factor) als auch von LandscapeVoronoiSystem
+    (ein globaler Aufruf mit allen Plot-Seeds, ohne max_cost-Limit). Die initiale
+    Seed-Zuordnung wird als (H,W,2)-Zustandstextur direkt aus Python hochgeladen
+    (Kanal 0 = seed_id oder -1, Kanal 1 = kumulierte Kosten) statt ueber einen
+    eigenen Seed-Init-Shader - anders als bei jumpFloodLakes.comp (lokale Minima
+    sind pro Pixel lokal entscheidbar) sind Settlement-Seeds beliebige, auf der
+    CPU berechnete Punktpositionen, die sich nicht aus der Heightmap ableiten
+    lassen.
+    """
+    slopemap = inputs["slopemap"]
+    seed_positions = inputs["seed_positions"]
+    terrain_factor = float(inputs["terrain_factor"])
+    max_cost = inputs.get("max_cost")
+    max_cost_value = float(max_cost) if max_cost is not None else 1e9
+    size = slopemap.shape[0]
+
+    if not seed_positions:
+        return {"success": True, "nearest_seed_map": np.full((size, size), -1, dtype=np.int32)}
+
+    slope_magnitude = np.sqrt(slopemap[..., 0] ** 2 + slopemap[..., 1] ** 2).astype(np.float32)
+
+    initial_state = np.full((size, size, 2), [-1.0, 1e9], dtype=np.float32)
+    for seed_id, (sx, sy) in enumerate(seed_positions):
+        ix, iy = int(round(sx)), int(round(sy))
+        if 0 <= ix < size and 0 <= iy < size:
+            initial_state[iy, ix] = [float(seed_id), 0.0]
+
+    program = worker.get_program("settlement", "terrainCostFlood")
+    slope_tex = _upload_texture_2d(slope_magnitude, gl.GL_R32F)
+    state_a = _upload_texture_2d_rg(initial_state, gl.GL_RG32F)
+    state_b = _create_texture_2d(size, size, gl.GL_RG32F)
+
+    work_groups = (size + 15) // 16
+
+    # Sprungfolge wie jumpFloodLakes.comp: kleinste Zweierpotenz >= size, dann halbierend bis 1
+    jump_distance = 1
+    while jump_distance < size:
+        jump_distance *= 2
+
+    read_tex, write_tex = state_a, state_b
+    while jump_distance >= 1:
+        gl.glBindImageTexture(0, slope_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(1, read_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RG32F)
+        gl.glBindImageTexture(2, write_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RG32F)
+        gl.glUseProgram(program)
+        _set_uniforms(program, {
+            "u_size": size, "u_jump_distance": jump_distance,
+            "u_terrain_factor": terrain_factor, "u_max_cost": max_cost_value,
+        })
+        gl.glDispatchCompute(work_groups, work_groups, 1)
+        gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
+        read_tex, write_tex = write_tex, read_tex
+        jump_distance //= 2
+
+    result_state = _read_texture_data_rg(read_tex, size, size)
+    gl.glDeleteTextures(3, [slope_tex, state_a, state_b])
+
+    nearest_seed_map = np.rint(result_state[..., 0]).astype(np.int32)
+    cost_map = result_state[..., 1].astype(np.float32)
+    return {"success": True, "nearest_seed_map": nearest_seed_map, "cost_map": cost_map}
+
+
 DISPATCH_TABLE = {
     ("terrain", "noiseGeneration"): _dispatch_noise_generation,
     ("terrain", "shadowRaycast"): _dispatch_shadow_raycast,
@@ -915,6 +990,7 @@ DISPATCH_TABLE = {
     ("biome", "climateClassification"): _dispatch_climate_classification,
     ("biome", "supersampling"): _dispatch_supersampling,
     ("biome", "oceanConnectivity"): _dispatch_ocean_connectivity,
+    ("settlement", "terrainCostFlood"): _dispatch_terrain_cost_flood,
 }
 
 
