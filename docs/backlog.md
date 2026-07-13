@@ -21,12 +21,52 @@ Kanban-Board zu verschieben.
      höchster Punkt im geflohnenen Becken). Das eigentliche
      "Fluss-gräbt-sich-keinen-Weg-raus"-Verhalten (Lakefill über LOD-Stufen)
      ist davon unberührt und weiterhin offen.
+   - Update 2026-07-09 (separate Session, `core/water_generator.py` CPU-Seite):
+     der "Wasserspiegel = Becken-Maximum"-Fix von 2026-07-08 hatte selbst noch
+     einen Bug — da jeder Punkt im Becken per Definition <= dem Becken-Maximum
+     liegt, zählte dadurch das GESAMTE Becken (inkl. Berggipfel) als
+     überflutet ("Lake überall", vom User gemeldet). Auf CPU UND GPU
+     (`_classify_lake_basins_vectorized` in `shader_manager.py`) jetzt auf
+     echten Spill-Point (niedrigster Beckenrand-Übergang) korrigiert, nur
+     Pixel darunter zählen als See. Zusätzlich: die Becken-ZUORDNUNG selbst
+     (`_apply_jump_flooding()` CPU-seitig, `jumpFloodLakes.comp` GPU-seitig)
+     prüft weiterhin nur "current_height >= seed_height" statt echter
+     Erreichbarkeit über einen monotonen Abwärtspfad - de facto ein reines
+     Luftlinien-Voronoi-Diagramm ohne Rücksicht auf Bergkämme. CPU-Seite auf
+     echten Priority-Flood-Watershed (Multi-Source-Dijkstra über Höhe als
+     Kosten) umgestellt und verifiziert (See-Abdeckung 100%→4.4% auf
+     realistischer Testkarte). GPU-Seite (`jumpFloodLakes.comp`) hat diesen
+     Watershed-Fix NICHT bekommen - ein echter paralleler Watershed-Transform
+     ist algorithmisch deutlich aufwändiger als simples Jump-Flooding (siehe
+     unten, neues Ticket). Der Spill-Point-Filter dämmt die GPU-seitige
+     Über-Zuordnung stark ein (die meisten falsch zugeordneten Hochpunkte
+     liegen über der Spill-Höhe und werden ausgeschlossen), ist aber keine
+     vollständige Lösung.
+   - Das eigentliche "Fluss-gräbt-sich-keinen-Weg-raus über LOD-Stufen"-
+     Verhalten (Lakefill-Algorithmus) ist weiterhin komplett offen, unabhängig
+     von den obigen Bugfixes.
 
 3. **Zu viele Fluss-Biom-Felder** — Es entstehen viel zu viele
    Fluss-Biom-Felder.
    a) Riverbank evtl. auf 2px begrenzen.
    b) Erkennung "was zählt als Fluss" grundsätzlich hinterfragen.
    c) Aktuell entstehen praktisch überall an Hängen Flüsse. *(Priority: high)*
+   - Update 2026-07-09: Hauptursache gefunden+gefixt - `RAIN_THRESHOLD`
+     (`gui/config/value_default.py`) war ~1000x zu klein für `precip_map`s
+     reale Größenordnung (0-2.8 bei Default-Parametern statt der
+     angenommenen ~0-500), wodurch praktisch jedes Pixel als Regenquelle
+     zählte und selbst einzelne Pixel sofort die "Grand River"-Schwelle
+     sprengten. Zusätzlich hatte `core/terrain_generator.py`s
+     `SlopeCalculator` (und Kopien davon in `weather_generator.py` und
+     `biome_generator.py`) nie die reale Meter-pro-Pixel-Umrechnung benutzt
+     (implizit 1 Pixel = 1m statt der realen ~50-300m je nach Kartengröße),
+     wodurch Steigungen um Faktor 10-15 überhöht waren (mean 85.6°→18.9°
+     nach Fix) - das trieb über die orographische Niederschlags-Komponente
+     zusätzlich Flüsse an praktisch jedem Hang. Beide behoben +
+     `RAIN_THRESHOLD` neu kalibriert (Default 0.2 statt 0.02/5.0,
+     empirisch gegen echte precip_map-Verteilung geprüft: absteigende
+     Creek>River>Grand-River-Verteilung statt Grand-River-Dominanz).
+     Riverbank-Breitenbegrenzung (a) nicht angefasst.
 
 4. **Settlements überarbeiten** — Es sollen echte Städte und Voronoi-Plots
    für die gesamte Karte entstehen, wie im Deskriptor/der Doku beschrieben.
@@ -409,21 +449,69 @@ Kanban-Board zu verschieben.
    ändert sich auch die Panel-Größe. Ursache unklar, muss untersucht werden.
    *(Priority: low)*
 
-39. **Echte GLSL-Simplex-Noise für Terrain-GPU-Pfad schreiben** — Der
-    GPU-Noise-Pfad für Terrain ist aktuell bewusst deaktiviert (siehe
-    Ticket #37 unten), weil die Platzhalter-Formel kein echtes Noise ist.
-    Läuft Stand jetzt als eigene Session im Hintergrund (vom User gestartet).
-    *(Priority: low-medium)*
-
-40. **GPU-Anbindung für Settlement** — Aktuell kein einziger
-    `shader_manager`-Aufruf im gesamten Settlement-Code, obwohl Settlement
-    (Pathfinding, Plot-Painting) der rechenintensivste Generator ist. Bewusst
-    zurückgestellt bis Ticket #4 (Settlements überarbeiten) besprochen ist.
-    *(Priority: high, aber blockiert)*
-
 41. **GPU-Anbindung für Geology** — Wie Settlement bisher komplett ohne
     GPU-Anbindung, außerhalb des Water/Weather/Biome-Fokus der GPU-Session
     vom 2026-07-08. *(Priority: medium)*
+
+42. **Echter paralleler Watershed-Transform für `jumpFloodLakes.comp`** —
+    GPU-seitige Becken-Zuordnung nutzt weiterhin nur "current_height >=
+    seed_height" + Luftlinien-Distanz statt echter Erreichbarkeit über einen
+    monotonen Abwärtspfad (siehe Ticket #2, Update 2026-07-09). Die CPU-Seite
+    (`_apply_jump_flooding` in `core/water_generator.py`) wurde auf einen
+    echten Priority-Flood/Multi-Source-Dijkstra umgestellt, was sich nicht
+    trivial auf GPU parallelisieren lässt (Dijkstra ist inhärent sequenziell
+    in Verarbeitungsreihenfolge; echte parallele Watershed-Transforms auf GPU
+    sind ein eigenes, nicht-triviales Forschungsthema). Spill-Point-Filter in
+    `_classify_lake_basins_vectorized` dämmt die Auswirkung stark ein, ersetzt
+    aber keine korrekte Zuordnung. *(Priority: medium, bewusst zurückgestellt
+    am 2026-07-09)*
+
+43. **Sedimentations-Menge zu gering trotz Floodplain-Verteilung** —
+    `_distribute_sediment_floodplain()` (neu 2026-07-09) verteilt Ablagerungen
+    jetzt korrekt über eine lokale Nachbarschaft statt auf einem Pixel zu
+    stapeln, aber die absolute Gesamtmenge bleibt gering: `settling_velocity`
+    (Default 0.01) lässt nur ~1% des überschüssigen Sediments pro Iteration
+    absetzen, bei nur ~7 Iterationen auf LOD3 setzen sich dadurch nur ~7% des
+    transportierten Sediments in einem LOD-Durchlauf tatsächlich ab. Braucht
+    eine eigene Kalibrierungsrunde (`settling_velocity`- und/oder
+    Iterationsbudget-Anpassung). *(Priority: medium)*
+
+44. **Feuchte-Skalierung in `weather_generator.py` fragil kalibriert** —
+    `_calculate_atmospheric_moisture_cpu()`s Skalierungsfaktor (140.0,
+    2026-07-09 empirisch gegen ein einzelnes Seed/Parameter-Sample gesetzt,
+    vorher 10.0 mit dem Effekt "Kondensations-Niederschlag praktisch immer
+    exakt 0") hat einen sehr schmalen Übergangsbereich zwischen "nirgends"
+    und "überall" übersättigt (~10% Skalierungs-Spannbreite) - eine Folge
+    davon, dass Transport+Diffusion das Feuchte-Feld stark glättet und wenig
+    räumliche Varianz übrig lässt. Kann bei anderen Wetter-Parameter-
+    Kombinationen wieder in einen der beiden Extremzustände kippen. Eine
+    robustere Lösung bräuchte entweder mehr räumliche Varianz im
+    Feuchte-Feld selbst oder eine adaptive statt einer festen Skalierung.
+    *(Priority: medium)*
+
+45. **GPU-Dispatch-Funktionen auf denselben Bug-Typ wie Lake-Detection
+    prüfen** — Am 2026-07-09 wurde in `_classify_lake_basins_vectorized`
+    (`shader_manager.py`) derselbe Bug wie im CPU-Pfad gefunden (Referenzhöhe
+    falsch gewählt, siehe Ticket #2). Nur Lake-Detection wurde geprüft+
+    gefixt (bewusst so vom User priorisiert) - Erosion/Sediment-Transport,
+    Weather- und Biome-GPU-Pfade in `shader_manager.py` wurden NICHT auf
+    dieselbe Fehlerklasse (falsche Referenzwerte, fehlende Grenzfall-Logik)
+    untersucht. *(Priority: medium)*
+
+46. **3D-View: `makeCurrent()`/`doneCurrent()`-Fix verifizieren** — User
+    meldete durchgängig "Stacking" in der 3D-Ansicht (mehrfach gezeichnete/
+    überlappende Geometrie) und persistentes Blau trotz mehrerer Fix-Runden.
+    Gefunden+gefixt: `map_display_3d.py` rief nirgends `makeCurrent()`/
+    `doneCurrent()` auf, obwohl `update_heightmap()` außerhalb von `paintGL()`
+    direkt OpenGL-Buffer erstellt/löscht - potenziell im falschen Kontext
+    (pro Tab existiert ein eigenes `MapDisplay3DWidget`). Zusätzlich einen
+    dauerhaft hängenden `useShadows`-Uniform gefixt (nie zurückgesetzt,
+    obwohl nie eine echte Shadow-Textur gebunden wird) und Blau aus der
+    3D-Terrain-Farbskala entfernt (eigene, von der 2D-Colormap unabhängige
+    Farbtabelle in `shaders/3d_display/terrain.frag`). **Nicht visuell
+    gegen die laufende App verifiziert** (kein Werkzeug-Zugriff auf native
+    Qt-Fenster von dieser Umgebung aus) - User-Bestätigung nach Neustart der
+    App noch ausständig. *(Priority: high, braucht User-Test)*
 
 ## Erledigt (2026-07-08 — siehe docs/tickets.xlsx für Details)
 
@@ -436,11 +524,57 @@ Kanban-Board zu verschieben.
    und in der echten Pipeline verifiziert (nicht nur isoliert getestet).
    Biome: 3 von 5 Knoten (die anderen 2 waren schon vektorisiert bzw. auf CPU
    nachweislich schneller). Terrain: Shadow-Raycast GPU-beschleunigt, Noise
-   bewusst weiter CPU (siehe Ticket #37/#39). Settlement/Geology bleiben
-   offen (siehe Ticket #40/#41).
+   war noch Platzhalter (siehe Ticket #39, seit 2026-07-09 erledigt).
+   Settlement seit 2026-07-09 ebenfalls erledigt (Ticket #40); Geology bleibt
+   offen (Ticket #41).
 
 Daneben mehrere kritische, unabhängig davon gefundene Bugs behoben (LOD-
 Ceiling-Desync beim Auto-Start, Endlosschleife bei Regenerierung nach
 Auto-Start, `impact_matrix`-Tippfehler "size"→"map_size", Pipeline-Status-
 Panel jetzt granular über alle 34 Calculator-Knoten) — vollständige Liste
 mit Root-Cause-Erklärungen in docs/tickets.xlsx, Nr. 27-38.
+
+## Erledigt (2026-07-09)
+
+39. ~~**Echte GLSL-Simplex-Noise für Terrain-GPU-Pfad schreiben**~~ — Kurt-
+    Spencer-OpenSimplex-2D-Algorithmus in `shaders/terrain/noiseGeneration.comp`
+    portiert (Hash-basierte Gradientenauswahl statt Permutationstabelle, da
+    das generische GPU-Dispatch-Protokoll keine Puffer-Uploads kennt). Ersetzt
+    die alte `sin(x)*cos(y)`-Platzhalter-Formel. In echtem Offscreen-GL-4.3-
+    Kontext kompiliert, dispatcht und verifiziert (reale Varianz über mehrere
+    Größen/Seeds, unabhängige Seeds unkorreliert). Das zuvor deaktivierende
+    `if False and`-Guard in `core/terrain_generator.py` entfernt.
+
+40. ~~**GPU-Anbindung für Settlement**~~ — War in diesem Backlog-Eintrag als
+    offen gelistet, aber laut Ticket #4 (Settlements überarbeiten) bereits am
+    2026-07-09 umgesetzt (`shaders/settlement/terrainCostFlood.comp` +
+    `_dispatch_terrain_cost_flood()`, 98.8% Pixel-Übereinstimmung mit der
+    CPU-Referenz) - Backlog-Status war veraltet, jetzt korrigiert.
+
+- ~~**"Lake überall" auf Terrain/Water/Biome-Tabs**~~ (User-Report) und
+  ~~**Terrain-Farbskala zeigt Blau (2D+3D)**~~ (User-Report) — siehe Ticket
+  #2 für die Lake-Fixes (Spill-Point CPU+GPU, echter Watershed CPU-seitig)
+  und Ticket #46 für die 3D-Fixes (Farbskala, `makeCurrent()`, `useShadows`).
+  Zusätzlich, unabhängig von Lake-Detection, gefunden+gefixt: Biome-
+  Klassifikation verglich `precip_map`/`soil_moist_map` (reale Skalen ~0-3
+  bzw. 0-100) gegen `biome_definitions`-Bereiche in klassischen Whittaker-
+  Jahres-Einheiten (0-4000 bzw. 0-1500) - jedes reale Werte fiel damit
+  strukturell in die "outside range"-Straf-Zone für praktisch jedes
+  feuchtere Biom. Bereiche in `core/biome_generator.py` `BaseBiomeClassifier`
+  neu skaliert (Faktor 50/4000 bzw. 100/1500), Base-Biome-Verteilung danach
+  spürbar vielfältiger (kein Einzel-Biom-Dominanz mehr in Testläufen).
+
+- ~~**Sedimentation nur an einem Pixel statt Flood-Plane**~~ (User-Report) —
+  `_distribute_sediment_floodplain()` neu in `core/water_generator.py`:
+  verteilt jede Ablagerung über eine lokale Nachbarschaft, gewichtet invers
+  zur lokalen Höhe (tiefere Punkte bekommen mehr). Absolute Sedimentations-
+  Menge bleibt gering, siehe neues Ticket #43.
+
+- ~~**Soil Moisture bimodal (nur ganz nass oder ganz trocken)**~~
+  (User-Report) — größtenteils Kaskadeneffekt der Rain-Threshold- und
+  Slope-Fixes (Ticket #3); zusätzlich einen eigenständigen Bug in der
+  Kondensations-Feuchte-Berechnung gefixt (`weather_generator.py`,
+  `_calculate_atmospheric_moisture_cpu()` skalierte `humid_map` so klein,
+  dass die Übersättigungs-Schwelle nie erreicht wurde - Kondensations-
+  Niederschlag war dadurch strukturell immer exakt 0). Kalibrierung fragil,
+  siehe neues Ticket #44.
