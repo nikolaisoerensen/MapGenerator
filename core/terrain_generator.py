@@ -198,7 +198,8 @@ class SimplexNoiseGenerator:
             try:
                 result = self.shader_manager.process_noise_generation(
                     size=size, octaves=octaves, frequency=frequency,
-                    persistence=persistence, lacunarity=lacunarity, seed=self.seed
+                    persistence=persistence, lacunarity=lacunarity, seed=self.seed,
+                    perm=self.generator._perm
                 )
                 if result is not None:
                     self.logger.debug("GPU noise generation successful")
@@ -913,8 +914,19 @@ class SlopeCalculator:
         Parameter: heightmap, parameters
         Returns: numpy.ndarray - CPU-berechnete Slopes
         """
-        # NumPy gradient für optimierte Performance
-        spacing = parameters.get('spacing', 1.0)
+        # NumPy gradient für optimierte Performance. spacing = reale Meter pro Pixel,
+        # NICHT 1.0 - die Karte deckt immer TERRAIN.WORLD_SIZE_KM x WORLD_SIZE_KM ab
+        # (siehe gui/widgets/map_display_3d.py), unabhängig von der Pixelauflösung.
+        # Ein fester spacing=1.0 hieß: 1m Höhenunterschied zwischen Nachbarpixeln wird
+        # wie 1m realer Horizontal-Abstand behandelt, obwohl ein Pixel bei typischen
+        # Kartengrößen tatsächlich ~50-300m Horizontal-Abstand abdeckt - das ergab
+        # Gradienten um ~10-15 (entspricht ~85-89°) auf praktisch der gesamten Karte.
+        if 'spacing' in parameters:
+            spacing = parameters['spacing']
+        else:
+            from gui.config.value_default import TERRAIN
+            world_size_m = TERRAIN.WORLD_SIZE_KM * 1000.0
+            spacing = world_size_m / heightmap.shape[0]
 
         # Berechne Gradienten in beide Richtungen
         grad_y, grad_x = np.gradient(heightmap, spacing, edge_order=2)

@@ -154,8 +154,14 @@ class MapDisplay2D(QWidget):
         self.ax.set_aspect('equal')
         self.ax.set_facecolor(CanvasSettings.CANVAS_2D["background_color"])
 
-        # Standard-Colormap für Heightmaps
-        self.heightmap_cmap = plt.cm.terrain
+        # Standard-Colormap für Heightmaps: plt.cm.terrain, aber ohne den
+        # Blau-Anteil (0-25% der Original-Colormap, sieht wie Wasser aus - bei
+        # elevation_vmax=4000 lag das Blau bei 0-1000m, Grün setzte erst ab 1000m
+        # ein). Nimmt nur den Grün-bis-Weiß-Teil (ab 25%) und streckt ihn auf den
+        # vollen 0-1 Bereich, damit Grün jetzt die niedrigste Farbe ist (0m) und
+        # Weiß weiterhin die höchste (elevation_vmax). Die Farbskala am Rand
+        # (colorbar in _render_heightmap) nutzt automatisch dieselbe Colormap.
+        self.heightmap_cmap = ListedColormap(plt.cm.terrain(np.linspace(0.25, 1.0, 256)))
 
         # Feste Biome-Colormap aus ColorSchemes.BIOME_COLOR_TABLE (dieselbe Quelle
         # wie BiomeLegendDialog) - vorher plt.cm.Set3, ein generischer 12-Farben-

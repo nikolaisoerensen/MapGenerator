@@ -611,8 +611,17 @@ class WeatherSystemGenerator:
         # Evaporation-Rate
         evaporation_rate = (soil_moisture / 100.0) * (saturation_vapor_pressure / 100.0) * (1.0 + wind_factor)
 
-        # Initiale Humidity aus Evaporation
-        humid_map = evaporation_rate * 10.0  # Skalierung auf realistische Werte
+        # Initiale Humidity aus Evaporation. Skalierungsfaktor kalibriert gegen
+        # rho_max = 5*exp(0.06*T) aus _calculate_precipitation_cpu (Magnus-Formel
+        # Sättigungsdampfdichte, Größenordnung ~5-17 bei -3..20°C): mit dem alten
+        # Faktor 10 lag humid_map bei ~0.3-1.5 - relative_humidity = humid_map/rho_max
+        # blieb dadurch IMMER unter ~0.09, "oversaturation" (>1.0, einziger Auslöser
+        # für Kondensations-Niederschlag) konnte nie auftreten, unabhängig von
+        # Temperatur/Wind/Terrain. precip_map bestand dadurch nur noch aus dem
+        # (kleinen) orographischen Anteil. Faktor empirisch so gewählt, dass bei
+        # Default-Parametern ein Mix aus über-/untersättigten Gebieten entsteht statt
+        # eines globalen Alles-oder-Nichts-Zustands (siehe [[project-precip-humidity-calibration]]).
+        humid_map = evaporation_rate * 140.0
 
         # Moisture-Transport (vereinfacht, 3 Iterationen)
         for _ in range(3):
@@ -876,20 +885,30 @@ class WeatherSystemGenerator:
 
     def _calculate_slopes_vectorized(self, heightmap: np.ndarray) -> np.ndarray:
         """
-        Vectorized Slope-Calculation (dz/dx, dz/dy) für Performance
+        Vectorized Slope-Calculation (dz/dx, dz/dy) für Performance.
+
+        Durch reale Meter/Pixel geteilt (siehe core/terrain_generator.py
+        SlopeCalculator._calculate_cpu_slopes für den identischen Bug an anderer
+        Stelle) - ohne das war ein 1m Höhenunterschied zwischen Nachbarpixeln wie
+        1m realer Horizontal-Abstand behandelt, obwohl ein Pixel bei typischen
+        Kartengrößen tatsächlich ~50-300m abdeckt. Das ließ wind_slope_alignment
+        (und darüber oro_precip) auf praktisch jedem Hang unrealistisch groß werden.
         """
         height, width = heightmap.shape
         slopemap = np.zeros((height, width, 2), dtype=np.float32)
 
+        from gui.config.value_default import TERRAIN
+        spacing = (TERRAIN.WORLD_SIZE_KM * 1000.0) / height
+
         # dz/dx (vectorized)
-        slopemap[:, 1:-1, 0] = (heightmap[:, 2:] - heightmap[:, :-2]) * 0.5
-        slopemap[:, 0, 0] = heightmap[:, 1] - heightmap[:, 0]
-        slopemap[:, -1, 0] = heightmap[:, -1] - heightmap[:, -2]
+        slopemap[:, 1:-1, 0] = (heightmap[:, 2:] - heightmap[:, :-2]) * 0.5 / spacing
+        slopemap[:, 0, 0] = (heightmap[:, 1] - heightmap[:, 0]) / spacing
+        slopemap[:, -1, 0] = (heightmap[:, -1] - heightmap[:, -2]) / spacing
 
         # dz/dy (vectorized)
-        slopemap[1:-1, :, 1] = (heightmap[2:, :] - heightmap[:-2, :]) * 0.5
-        slopemap[0, :, 1] = heightmap[1, :] - heightmap[0, :]
-        slopemap[-1, :, 1] = heightmap[-1, :] - heightmap[-2, :]
+        slopemap[1:-1, :, 1] = (heightmap[2:, :] - heightmap[:-2, :]) * 0.5 / spacing
+        slopemap[0, :, 1] = (heightmap[1, :] - heightmap[0, :]) / spacing
+        slopemap[-1, :, 1] = (heightmap[-1, :] - heightmap[-2, :]) / spacing
 
         return slopemap
 

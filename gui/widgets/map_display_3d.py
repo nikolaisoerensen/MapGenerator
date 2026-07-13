@@ -79,6 +79,7 @@ import OpenGL.arrays.vbo as glvbo
 from OpenGL.GL import shaders
 import math
 from gui.config.gui_default import CanvasSettings
+from gui.config.value_default import TERRAIN
 
 
 def _validate_heightmap(heightmap):
@@ -279,8 +280,10 @@ class MapDisplay3D(QOpenGLWidget):
     rendering_error = pyqtSignal(str)  # Error-Messages
 
     # Reale Weltgröße, die die Karte immer abdeckt (unabhängig von map_size/
-    # Pixelauflösung) - siehe _calculate_terrain_scaling().
-    WORLD_SIZE_KM = 10.0
+    # Pixelauflösung) - siehe _calculate_terrain_scaling(). Zentral in
+    # gui/config/value_default.py TERRAIN.WORLD_SIZE_KM, damit SlopeCalculator
+    # dieselbe Annahme verwendet.
+    WORLD_SIZE_KM = TERRAIN.WORLD_SIZE_KM
 
     def __init__(self, parent=None):
         """
@@ -474,7 +477,21 @@ class MapDisplay3D(QOpenGLWidget):
         self.heightmap = heightmap
         self.current_tab = tab_type
         self._calculate_terrain_scaling()
-        self._generate_terrain_mesh()
+
+        # _generate_terrain_mesh() erstellt/löscht OpenGL-Buffer direkt (glGenBuffers,
+        # glDeleteBuffers, VBO-Upload) - das läuft hier NICHT innerhalb von paintGL(),
+        # wo Qt automatisch den richtigen Kontext dieses Widgets aktiv setzt, sondern
+        # als normaler Methodenaufruf (z.B. aus einem Signal-Handler). Ohne
+        # makeCurrent() davor landen diese GL-Aufrufe im Kontext, der zufällig gerade
+        # aktiv ist - bei mehreren MapDisplay3DWidget-Instanzen (eine pro Tab, siehe
+        # base_tab.py) potenziell der FALSCHE Kontext oder gar keiner, was Buffer-
+        # Erstellung fehlschlagen lässt oder Zustand eines anderen Tabs verändert.
+        self.makeCurrent()
+        try:
+            self._generate_terrain_mesh()
+        finally:
+            self.doneCurrent()
+
         self.update()
 
     def update_shademap(self, shademap):
@@ -1030,6 +1047,17 @@ class MapDisplay3D(QOpenGLWidget):
             if overlay_strength_location >= 0:
                 gl.glUniform1f(overlay_strength_location, 0.5)  # Default-Stärke
 
+            # useShadows jeden Frame auf 0 zurücksetzen (wie useOverlay oben) - Shader-
+            # Uniforms behalten sonst ihren letzten Wert über Draw-Calls/Frames hinweg.
+            # _render_shadows() aktivierte diesen Uniform vorher dauerhaft (nie wieder
+            # zurückgesetzt), OHNE je eine echte Shadow-Textur zu erstellen/binden - der
+            # Shader sampelte dadurch eine nie initialisierte shadowMap-Textureinheit,
+            # was je nach Treiber zu Banding-/Stufen-Artefakten führen kann (sah aus wie
+            # gestapelte/mehrfach gezeichnete Geometrie).
+            use_shadows_location = gl.glGetUniformLocation(self.shader_program, "useShadows")
+            if use_shadows_location >= 0:
+                gl.glUniform1i(use_shadows_location, 0)
+
         elif self.shader_fallback_active:
             # Fallback-Shader Parameter
             wireframe_color_location = gl.glGetUniformLocation(self.shader_program, "wireframeColor")
@@ -1046,6 +1074,13 @@ class MapDisplay3D(QOpenGLWidget):
         """
         Funktionsweise: Rendert Shademap-Integration
         Aufgabe: Upscaling und Anwendung der 64x64 Shademap auf Terrain
+
+        NICHT implementiert: es wird nie eine Shadow-Textur erstellt/gebunden (siehe
+        TODO unten) - useShadows deshalb bewusst NICHT auf 1 setzen, sonst sampelt
+        der Shader eine nie initialisierte shadowMap-Textureinheit (undefinierte
+        Treiber-Ausgabe, sah wie Stufen-/Banding-Artefakte im Terrain aus).
+        _render_terrain_base() setzt useShadows jeden Frame auf 0 zurück; dieser Reset
+        bleibt also aktiv, bis hier eine echte Textur erstellt/gebunden wird.
         """
         if self.shademap is None or not self.shader_program:
             return
@@ -1056,11 +1091,9 @@ class MapDisplay3D(QOpenGLWidget):
         if upscaled_shadows is None:
             return
 
-        # Shadow-Textur erstellen und binden
-        # TODO: Implementierung der Textur-Upload und Shader-Integration
-        use_shadows_location = gl.glGetUniformLocation(self.shader_program, "useShadows")
-        if use_shadows_location >= 0:
-            gl.glUniform1i(use_shadows_location, 1)
+        # TODO: Shadow-Textur aus upscaled_shadows erstellen, an einen freien Texture-
+        # Slot binden, den shadowMap-Sampler-Uniform darauf zeigen lassen und ERST DANN
+        # useShadows=1 setzen.
 
     def _render_overlay(self, tab_type, layer_name):
         """

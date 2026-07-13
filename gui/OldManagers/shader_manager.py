@@ -22,6 +22,7 @@ import logging
 
 import numpy as np
 import OpenGL.GL as gl
+from opensimplex import OpenSimplex
 from PyQt5.QtCore import QObject, pyqtSignal
 
 def _protective_handler(*args, **kwargs):
@@ -139,9 +140,12 @@ class ShaderManager(QObject):
         Aufgabe: Erkennt OpenGL Compute Shader Support und setzt gpu_available Flag
         """
         try:
-            # Direkte OpenGL-Version-Prüfung statt QGLContext
+            # Direkte OpenGL-Version-Prüfung statt QGLContext. version_string.split()[0]
+            # kann "4.3" oder "4.3.0" (Patch-Level, z.B. Intel-Treiber) sein - nur die
+            # ersten beiden Komponenten nehmen, sonst wirft das Unpacking ValueError und
+            # gpu_available bleibt für IMMER False (dieser Check läuft nur einmal).
             version_string = gl.glGetString(gl.GL_VERSION).decode()
-            major, minor = map(int, version_string.split()[0].split('.'))
+            major, minor = map(int, version_string.split()[0].split('.')[:2])
 
             if major > 4 or (major == 4 and minor >= 3):
                 self.gpu_available = True
@@ -183,11 +187,13 @@ class ShaderManager(QObject):
         if self.gpu_available:
             self._load_core_shaders()
 
-    def process_noise_generation(self, size, octaves, frequency, persistence, lacunarity, seed):
+    def process_noise_generation(self, size, octaves, frequency, persistence, lacunarity, seed, perm):
         """
-        Funktionsweise: GPU-beschleunigte Multi-Octave Simplex-Noise Generierung
+        Funktionsweise: GPU-beschleunigte Multi-Octave OpenSimplex-Noise Generierung
         Aufgabe: Parallel Processing für Terrain-Noise mit allen Octaves
         Parameter: size, octaves, frequency, persistence, lacunarity, seed - Noise-Parameter
+        Parameter: perm - 256-Element Permutationstabelle (z.B. OpenSimplex(seed)._perm), muss mit dem
+                   CPU-Referenzpfad übereinstimmen, damit GPU- und CPU-Noise für denselben Seed identisch sind
         Returns: numpy array mit generiertem Noise oder None bei Fehler
         """
         self._ensure_gpu_checked()
@@ -196,28 +202,30 @@ class ShaderManager(QObject):
 
         self.processing_started.emit("noise_generation")
 
+        output_texture = None
+        perm_buffer = None
         try:
-            # GPU-Buffer für Output erstellen
-            output_texture = self._create_texture_2d(size, size, gl.GL_R32F)
-
-            # Shader-Parameter setzen
-            shader = self.shaders.get("noise_generation")
-            if not shader:
+            program = self._use_shader("noise_generation")
+            if not program:
                 raise Exception("Noise shader not available")
 
-            shader.bind()
-            shader.setUniformValue("u_size", size)
-            shader.setUniformValue("u_octaves", octaves)
-            shader.setUniformValue("u_frequency", frequency)
-            shader.setUniformValue("u_persistence", persistence)
-            shader.setUniformValue("u_lacunarity", lacunarity)
-            shader.setUniformValue("u_seed", seed)
+            output_texture = self._create_texture_2d(size, size, gl.GL_R32F)
+            perm_buffer = self._upload_ssbo(perm, dtype=np.int32)
+
+            gl.glBindImageTexture(0, output_texture, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+            gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 1, perm_buffer)
+
+            self._set_shader_uniform_int(program, "u_size", size)
+            self._set_shader_uniform_int(program, "u_octaves", octaves)
+            self._set_shader_uniform_float(program, "u_frequency", frequency)
+            self._set_shader_uniform_float(program, "u_persistence", persistence)
+            self._set_shader_uniform_float(program, "u_lacunarity", lacunarity)
 
             # Compute Shader ausführen
             work_groups_x = (size + 15) // 16  # 16x16 Work-Group Size
             work_groups_y = (size + 15) // 16
             gl.glDispatchCompute(work_groups_x, work_groups_y, 1)
-            gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
+            gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | gl.GL_SHADER_STORAGE_BARRIER_BIT)
 
             # Ergebnis von GPU lesen
             result = self._read_texture_data(output_texture, size, size)
@@ -226,8 +234,14 @@ class ShaderManager(QObject):
             return result
 
         except Exception as e:
+            self.logger.warning(f"GPU noise generation failed: {e}")
             self.processing_finished.emit("noise_generation", False)
             return self._cpu_fallback_noise(size, octaves, frequency, persistence, lacunarity, seed)
+        finally:
+            if output_texture is not None:
+                gl.glDeleteTextures(1, [output_texture])
+            if perm_buffer is not None:
+                gl.glDeleteBuffers(1, [perm_buffer])
 
     def process_erosion_simulation(self, heightmap, water_map, velocity_map, sediment_map, dt):
         """
@@ -380,38 +394,162 @@ class ShaderManager(QObject):
     def _create_noise_shader(self):
         """
         Funktionsweise: Erstellt GLSL Compute Shader Code für Noise-Generierung
-        Aufgabe: Definiert GPU-Code für Multi-Octave Simplex-Noise
+        Aufgabe: Definiert GPU-Code für Multi-Octave OpenSimplex-Noise (2D, Kurt-Spencer-Algorithmus),
+                 Port von opensimplex.internals._noise2/_extrapolate2 - siehe core/terrain_generator.py's
+                 SimplexNoiseGenerator (CPU-Referenz, gleicher Algorithmus über das opensimplex-Package).
+                 Die Permutationstabelle wird nicht im Shader neu berechnet, sondern von der CPU
+                 (OpenSimplex(seed)._perm) als SSBO hochgeladen, damit GPU- und CPU-Pfad für denselben
+                 Seed exakt dieselbe Permutation verwenden.
         Returns: String mit GLSL Compute Shader Code
         """
         return """
         #version 430
         layout(local_size_x = 16, local_size_y = 16) in;
-        layout(r32f, binding = 0) uniform image2D output_image;
+        layout(r32f, binding = 0) uniform writeonly image2D output_image;
+
+        layout(std430, binding = 1) readonly buffer PermBuffer {
+            int perm[256];
+        };
 
         uniform int u_size;
         uniform int u_octaves;
         uniform float u_frequency;
         uniform float u_persistence;
         uniform float u_lacunarity;
-        uniform int u_seed;
 
-        // Simplex-Noise Implementierung hier
+        const float STRETCH_CONSTANT2 = -0.211324865405187;
+        const float SQUISH_CONSTANT2 = 0.366025403784439;
+        const float NORM_CONSTANT2 = 47.0;
+
+        const vec2 GRAD2[8] = vec2[8](
+            vec2(5.0, 2.0), vec2(2.0, 5.0),
+            vec2(-5.0, 2.0), vec2(-2.0, 5.0),
+            vec2(5.0, -2.0), vec2(2.0, -5.0),
+            vec2(-5.0, -2.0), vec2(-2.0, -5.0)
+        );
+
+        float extrapolate2(int xsb, int ysb, float dx, float dy) {
+            int index = (perm[(perm[xsb & 0xFF] + ysb) & 0xFF] & 0x0E) >> 1;
+            vec2 g = GRAD2[index];
+            return g.x * dx + g.y * dy;
+        }
+
+        // Direkter Port von opensimplex.internals._noise2 (Kurt-Spencer OpenSimplex 2D)
+        float openSimplexNoise2(float x, float y) {
+            float stretchOffset = (x + y) * STRETCH_CONSTANT2;
+            float xs = x + stretchOffset;
+            float ys = y + stretchOffset;
+
+            int xsb = int(floor(xs));
+            int ysb = int(floor(ys));
+
+            float squishOffset = float(xsb + ysb) * SQUISH_CONSTANT2;
+            float xb = float(xsb) + squishOffset;
+            float yb = float(ysb) + squishOffset;
+
+            float xins = xs - float(xsb);
+            float yins = ys - float(ysb);
+            float inSum = xins + yins;
+
+            float dx0 = x - xb;
+            float dy0 = y - yb;
+
+            float value = 0.0;
+
+            float dx1 = dx0 - 1.0 - SQUISH_CONSTANT2;
+            float dy1 = dy0 - SQUISH_CONSTANT2;
+            float attn1 = 2.0 - dx1 * dx1 - dy1 * dy1;
+            if (attn1 > 0.0) {
+                attn1 *= attn1;
+                value += attn1 * attn1 * extrapolate2(xsb + 1, ysb, dx1, dy1);
+            }
+
+            float dx2 = dx0 - SQUISH_CONSTANT2;
+            float dy2 = dy0 - 1.0 - SQUISH_CONSTANT2;
+            float attn2 = 2.0 - dx2 * dx2 - dy2 * dy2;
+            if (attn2 > 0.0) {
+                attn2 *= attn2;
+                value += attn2 * attn2 * extrapolate2(xsb, ysb + 1, dx2, dy2);
+            }
+
+            int xsvExt;
+            int ysvExt;
+            float dxExt;
+            float dyExt;
+
+            if (inSum <= 1.0) {
+                float zins = 1.0 - inSum;
+                if (zins > xins || zins > yins) {
+                    if (xins > yins) {
+                        xsvExt = xsb + 1; ysvExt = ysb - 1;
+                        dxExt = dx0 - 1.0; dyExt = dy0 + 1.0;
+                    } else {
+                        xsvExt = xsb - 1; ysvExt = ysb + 1;
+                        dxExt = dx0 + 1.0; dyExt = dy0 - 1.0;
+                    }
+                } else {
+                    xsvExt = xsb + 1; ysvExt = ysb + 1;
+                    dxExt = dx0 - 1.0 - 2.0 * SQUISH_CONSTANT2;
+                    dyExt = dy0 - 1.0 - 2.0 * SQUISH_CONSTANT2;
+                }
+            } else {
+                float zins = 2.0 - inSum;
+                if (zins < xins || zins < yins) {
+                    if (xins > yins) {
+                        xsvExt = xsb + 2; ysvExt = ysb;
+                        dxExt = dx0 - 2.0 - 2.0 * SQUISH_CONSTANT2;
+                        dyExt = dy0 - 2.0 * SQUISH_CONSTANT2;
+                    } else {
+                        xsvExt = xsb; ysvExt = ysb + 2;
+                        dxExt = dx0 - 2.0 * SQUISH_CONSTANT2;
+                        dyExt = dy0 - 2.0 - 2.0 * SQUISH_CONSTANT2;
+                    }
+                } else {
+                    dxExt = dx0; dyExt = dy0;
+                    xsvExt = xsb; ysvExt = ysb;
+                }
+                xsb += 1;
+                ysb += 1;
+                dx0 = dx0 - 1.0 - 2.0 * SQUISH_CONSTANT2;
+                dy0 = dy0 - 1.0 - 2.0 * SQUISH_CONSTANT2;
+            }
+
+            float attn0 = 2.0 - dx0 * dx0 - dy0 * dy0;
+            if (attn0 > 0.0) {
+                attn0 *= attn0;
+                value += attn0 * attn0 * extrapolate2(xsb, ysb, dx0, dy0);
+            }
+
+            float attnExt = 2.0 - dxExt * dxExt - dyExt * dyExt;
+            if (attnExt > 0.0) {
+                attnExt *= attnExt;
+                value += attnExt * attnExt * extrapolate2(xsvExt, ysvExt, dxExt, dyExt);
+            }
+
+            return value / NORM_CONSTANT2;
+        }
+
         void main() {
             ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
             if (coord.x >= u_size || coord.y >= u_size) return;
 
-            float x = float(coord.x) / float(u_size);
-            float y = float(coord.y) / float(u_size);
+            float x = float(coord.x);
+            float y = float(coord.y);
 
             float noise_value = 0.0;
             float amplitude = 1.0;
             float frequency = u_frequency;
+            float max_amplitude = 0.0;
 
             for (int i = 0; i < u_octaves; i++) {
-                // Simplified noise - echte Simplex-Implementierung würde hier stehen
-                noise_value += amplitude * sin(x * frequency + u_seed) * cos(y * frequency + u_seed);
+                noise_value += amplitude * openSimplexNoise2(x * frequency, y * frequency);
+                max_amplitude += amplitude;
                 amplitude *= u_persistence;
                 frequency *= u_lacunarity;
+            }
+
+            if (max_amplitude > 0.0) {
+                noise_value /= max_amplitude;
             }
 
             imageStore(output_image, coord, vec4(noise_value, 0, 0, 0));
@@ -625,6 +763,20 @@ class ShaderManager(QObject):
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
         return texture_id
 
+    def _upload_ssbo(self, data, dtype=np.int32):
+        """
+        Funktionsweise: Lädt ein numpy-Array als Shader-Storage-Buffer-Object auf die GPU hoch
+        Aufgabe: Transfer von CPU-Daten (z.B. Permutationstabelle) zu GPU-Memory für Compute-Shader
+        Parameter: data (numpy.ndarray), dtype - Quelldaten und Ziel-GPU-Datentyp
+        Returns: GLuint - Buffer-ID
+        """
+        buffer_id = gl.glGenBuffers(1)
+        gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, buffer_id)
+        array = np.ascontiguousarray(data, dtype=dtype)
+        gl.glBufferData(gl.GL_SHADER_STORAGE_BUFFER, array.nbytes, array, gl.GL_STATIC_DRAW)
+        gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, 0)
+        return buffer_id
+
     def _read_texture_data(self, texture_id, width, height, channels=1, data_type=gl.GL_FLOAT):
         """
         Funktionsweise: Liest Texture-Daten von GPU zurück zu CPU
@@ -638,26 +790,32 @@ class ShaderManager(QObject):
 
     def _cpu_fallback_noise(self, size, octaves, frequency, persistence, lacunarity, seed):
         """
-        Funktionsweise: CPU-Fallback für Noise-Generierung wenn GPU nicht verfügbar
-        Aufgabe: Software-Implementation der Noise-Generierung
+        Funktionsweise: CPU-Fallback für Noise-Generierung wenn GPU nicht verfügbar oder
+                        die GPU-Dispatch fehlschlägt
+        Aufgabe: Software-Implementation mit demselben OpenSimplex-Algorithmus und derselben
+                 Normalisierung wie core/terrain_generator.py's SimplexNoiseGenerator._generate_cpu_optimized(),
+                 damit dieser interne Fallback nie stillschweigend die alte sin(x)*cos(y)-Platzhalter-Noise
+                 zurückgibt (das hatte zuvor near-flat Heightmaps verursacht, siehe _create_noise_shader())
         Parameter: size, octaves, frequency, persistence, lacunarity, seed - Noise-Parameter
         Returns: numpy array mit generiertem Noise
         """
-        np.random.seed(seed)
+        generator = OpenSimplex(seed=seed)
+        coords = np.arange(size, dtype=np.float64)
+
         result = np.zeros((size, size), dtype=np.float32)
+        amplitude = 1.0
+        current_frequency = frequency
+        max_amplitude = 0.0
 
-        for y in range(size):
-            for x in range(size):
-                noise_value = 0.0
-                amplitude = 1.0
-                freq = frequency
+        for _ in range(octaves):
+            octave_noise = generator.noise2array(coords * current_frequency, coords * current_frequency)
+            result += (amplitude * octave_noise).astype(np.float32)
+            max_amplitude += amplitude
+            amplitude *= persistence
+            current_frequency *= lacunarity
 
-                for _ in range(octaves):
-                    noise_value += amplitude * (np.sin(x * freq) * np.cos(y * freq))
-                    amplitude *= persistence
-                    freq *= lacunarity
-
-                result[y, x] = noise_value
+        if max_amplitude > 0:
+            result /= max_amplitude
 
         return result
 
