@@ -15,6 +15,13 @@ class TERRAIN:
     MAPSIZEMIN = 32
     MAPSIZEMAX = 1024
 
+    # Reale Weltgröße, die die Karte immer abdeckt, unabhängig von map_size/
+    # Pixelauflösung (siehe gui/widgets/map_display_3d.py _calculate_terrain_scaling()
+    # und core/terrain_generator.py SlopeCalculator._calculate_cpu_slopes() - beide
+    # brauchen dieselbe Meter-pro-Pixel-Annahme, sonst driften 3D-Darstellung und
+    # Slope-basierte Physik/Biome-Klassifikation auseinander)
+    WORLD_SIZE_KM = 10.0
+
     MAPSIZE = {"min": MAPSIZEMIN, "max": MAPSIZEMAX, "default": 128, "step": 32}
     # Default 4000m (statt vorher 2000m), damit die Farbskala (0-4000m, siehe
     # CanvasSettings.CANVAS_2D) beim Default-Seed auch tatsächlich ausgenutzt wird.
@@ -87,7 +94,13 @@ class WEATHER:
 class WATER:
     """Parameter für core/water_generator.py"""
     LAKE_VOLUME_THRESHOLD = {"min": 0.01, "max": 1.0, "default": 0.1, "step": 0.01, "suffix": "m"}
-    RAIN_THRESHOLD = {"min": 0.001, "max": 0.1, "default": 0.02, "step": 0.001, "suffix": "gH2O/m²"}
+    # Bereich empirisch gegen precip_map's TATSÄCHLICHE Default-Verteilung kalibriert
+    # (core/weather_generator.py klemmt zwar auf 0-500 gH2O/m², aber reale Werte bei
+    # Standard-Parametern liegen nur bei ~0-2.8, Mittel ~0.08 - der ursprüngliche
+    # 0.001-0.1-Bereich war nicht falsch skaliert, nur zu eng/niedrig für einen
+    # gesunden Creek/River/Grand-River-Mix; 0.2 ergibt empirisch eine absteigende
+    # Verteilung (mehr Creeks als Grand Rivers) statt eines dominanten Grand-River-Bands)
+    RAIN_THRESHOLD = {"min": 0.02, "max": 1.0, "default": 0.2, "step": 0.01, "suffix": "gH2O/m²"}
     MANNING_COEFFICIENT = {"min": 0.01, "max": 0.1, "default": 0.03, "step": 0.005}
     EROSION_STRENGTH = {"min": 0.1, "max": 5.0, "default": 1.0, "step": 0.1}
     SEDIMENT_CAPACITY_FACTOR = {"min": 0.01, "max": 1.0, "default": 0.1, "step": 0.01}

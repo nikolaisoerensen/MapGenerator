@@ -12,7 +12,7 @@ Funktionsweise: Dynamisches Hydrologiesystem mit Erosion, Sedimentation und bidi
 
 Parameter Input:
 - lake_volume_threshold (Mindestvolumen für Seebildung, default 0.1m)
-- rain_threshold (Niederschlagsschwelle für Quellbildung, default 0.02 gH2O/m²)
+- rain_threshold (Niederschlagsschwelle für Quellbildung, default 0.2 gH2O/m²)
 - manning_coefficient (Rauheitskoeffizient für Fließgeschwindigkeit, default 0.03)
 - erosion_strength (Erosionsintensitäts-Multiplikator, default 1.0)
 - sediment_capacity_factor (Transportkapazitäts-Faktor, default 0.1)
@@ -171,55 +171,51 @@ class LakeDetectionSystem:
         return local_minima
 
     def _apply_jump_flooding(self, heightmap, lake_seeds):
-        """Jump Flooding Algorithm für parallele Senken-Füllung in O(log n) Zeit"""
+        """
+        Wasserscheiden-Zuordnung per Priority-Flood/Immersionssimulation (Vincent-Soille-
+        Watershed-Transform): jede Zelle wird dem Becken zugeordnet, dessen Flutung sie
+        zuerst erreicht (Multi-Source-Dijkstra mit Höhe als Kosten über heapq, das aus
+        genau diesem Grund bereits am Modul-Anfang importiert wird).
+
+        Ersetzt die vormalige Jump-Flooding-Variante, die Zellen rein per "current_height
+        >= seed_height AND kürzeste Luftlinien-Distanz" zuwies - das ist keine echte
+        Erreichbarkeits-Prüfung (kein monotoner Abwärtspfad zum Seed nötig), sondern nur
+        eine grobe obere Schranke, die praktisch immer erfüllt ist (jeder Punkt der Karte
+        liegt höher als IRGENDEIN lokales Minimum irgendwo auf der Karte). Dadurch wurde
+        de facto ein reines Luftlinien-Voronoi-Diagramm über die gesamte Karte gelegt,
+        das auch Berggipfel dem nächstgelegenen Tal zuschlug, unabhängig von Bergkämmen
+        dazwischen - empirisch bestätigt: 99.98-100% der Karte wurden einem Becken
+        zugewiesen, ungeachtet der Topographie.
+
+        Die Priority-Flood-Wasserscheide stoppt dagegen an echten Wasserscheiden (Grate),
+        weil jede Zelle vom zuerst dort ankommenden (= niedrigsten) Flutungs-Frontpunkt
+        beansprucht wird - das ist die Standard-Definition eines Einzugsgebiets.
+        """
         height, width = heightmap.shape
         lake_map = np.full((height, width), -1, dtype=np.int32)
 
         if not lake_seeds:
             return lake_map
 
-        # Initialisierung: Jeder See-Seed markiert sich selbst
+        visited = np.zeros((height, width), dtype=bool)
+        heap = []
         for i, (seed_x, seed_y) in enumerate(lake_seeds):
             lake_map[seed_y, seed_x] = i
+            visited[seed_y, seed_x] = True
+            heapq.heappush(heap, (float(heightmap[seed_y, seed_x]), seed_x, seed_y, i))
 
-        # Jump Flooding mit exponentiell abnehmenden Sprungdistanzen
-        max_dim = max(height, width)
-        jump_distance = 1
-        while jump_distance < max_dim:
-            jump_distance *= 2
+        neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
 
-        while jump_distance >= 1:
-            new_lake_map = np.copy(lake_map)
+        while heap:
+            _, x, y, basin_id = heapq.heappop(heap)
 
-            for y in range(height):
-                for x in range(width):
-                    current_height = heightmap[y, x]
-                    closest_seed = lake_map[y, x]
-                    closest_distance = float('inf')
+            for dx, dy in neighbor_offsets:
+                nx, ny = x + dx, y + dy
 
-                    # Prüfe alle Jump-Nachbarn
-                    for dy in [-jump_distance, 0, jump_distance]:
-                        for dx in [-jump_distance, 0, jump_distance]:
-                            ny, nx = y + dy, x + dx
-
-                            if 0 <= ny < height and 0 <= nx < width:
-                                neighbor_seed = lake_map[ny, nx]
-
-                                if neighbor_seed >= 0:
-                                    seed_x, seed_y = lake_seeds[neighbor_seed]
-                                    seed_height = heightmap[seed_y, seed_x]
-
-                                    # Kann Wasser zu diesem Seed fließen?
-                                    if current_height >= seed_height:
-                                        distance = np.sqrt((x - seed_x) ** 2 + (y - seed_y) ** 2)
-                                        if distance < closest_distance:
-                                            closest_distance = distance
-                                            closest_seed = neighbor_seed
-
-                    new_lake_map[y, x] = closest_seed
-
-            lake_map = new_lake_map
-            jump_distance //= 2
+                if 0 <= nx < width and 0 <= ny < height and not visited[ny, nx]:
+                    visited[ny, nx] = True
+                    lake_map[ny, nx] = basin_id
+                    heapq.heappush(heap, (float(heightmap[ny, nx]), nx, ny, basin_id))
 
         return lake_map
 
@@ -227,46 +223,78 @@ class LakeDetectionSystem:
         """
         Klassifiziert See-Becken nach Volumen und validiert Threshold.
 
-        Wasserspiegel-Fix: Vorher wurde die Höhe AM SEED (dem tiefsten Punkt des
-        Beckens) als Wasserspiegel verwendet - "terrain_height <= seed_height"
-        kann für einen echten lokalen Minimum-Seed (per Definition niedriger als
-        alle Nachbarn) praktisch nie zutreffen, wodurch total_volume so gut wie
-        immer 0 blieb und der Volume-Threshold nie erreicht wurde (siehe Session-
-        Analyse: reale Testkarten lieferten durchgehend 0 valid_lakes). Fix: der
-        Wasserspiegel ist die MAXIMALE Höhe innerhalb des vom Jump-Flooding
-        zugeordneten Beckens (Näherung an den Becken-Rand/Spillpunkt) - alles
-        darunter zählt als Wassertiefe.
+        Ein Becken (Einzugsgebiet, aus _apply_jump_flooding) ist meist viel größer als
+        der eigentliche See darin - der Großteil ist trockenes Gelände, das nur ins
+        Becken entwässert. Der tatsächliche Wasserspiegel steigt bis zum niedrigsten
+        Punkt am Beckenrand (Spill-Point/Sattelpunkt, dort läuft er ins Nachbarbecken
+        oder über den Kartenrand über), NICHT bis zur Höhe irgendeines beliebigen
+        Randpixels. Nur Pixel unterhalb dieses Spill-Points sind tatsächlich unter
+        Wasser - vorher wurde stattdessen nur gegen die Höhe des Becken-Minimums selbst
+        geprüft (`terrain_height <= seed_height`), was praktisch nie erfüllt war (per
+        Definition liegt ein striktes lokales Minimum unter all seinen Nachbarn, sodass
+        nur das Minimum-Pixel selbst die Bedingung erfüllte) - dadurch war total_volume
+        für jedes Becken quasi immer 0 und es konnte nie ein See entstehen.
+
+        Ein zwischenzeitlicher Fix-Versuch (paralleler Branch) nahm stattdessen die
+        MAXIMALE Höhe innerhalb des Beckens als Wasserspiegel - das behebt zwar das
+        total_volume=0-Problem, öffnet aber das GEGENTEIL-Problem wieder: da jeder
+        Punkt im Becken per Definition <= dem Becken-Maximum liegt, zählt dann
+        wieder das GESAMTE Becken (inklusive Berggipfel) als überflutet. Der
+        Spill-Point (niedrigster RAND, nicht höchster Punkt) ist der einzige Wert,
+        der beide Probleme gleichzeitig vermeidet.
         """
         height, width = heightmap.shape
         filtered_lake_map = np.full((height, width), -1, dtype=np.int32)
         valid_lakes = []
 
-        for lake_id, (seed_x, seed_y) in enumerate(lake_seeds):
-            lake_pixels = np.where(lake_map == lake_id)
+        spill_elevation = np.full(len(lake_seeds), np.inf, dtype=np.float64)
+        neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
 
+        for y in range(height):
+            for x in range(width):
+                basin_id = lake_map[y, x]
+                if basin_id < 0:
+                    continue
+
+                on_edge = (x == 0 or x == width - 1 or y == 0 or y == height - 1)
+                if on_edge:
+                    # Becken berührt den Kartenrand - offener Abfluss, kein geschlossener See
+                    spill_elevation[basin_id] = min(spill_elevation[basin_id], heightmap[y, x])
+
+                for dx, dy in neighbor_offsets:
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < width and 0 <= ny < height:
+                        neighbor_basin = lake_map[ny, nx]
+                        if neighbor_basin != basin_id:
+                            crossing_height = max(heightmap[y, x], heightmap[ny, nx])
+                            if crossing_height < spill_elevation[basin_id]:
+                                spill_elevation[basin_id] = crossing_height
+
+        for lake_id, (seed_x, seed_y) in enumerate(lake_seeds):
+            spill = spill_elevation[lake_id]
+            if not np.isfinite(spill):
+                continue
+
+            lake_pixels = np.where(lake_map == lake_id)
             if len(lake_pixels[0]) == 0:
                 continue
 
-            # Volumen-Berechnung: Wasserspiegel = höchster Punkt im Becken (Rand-Näherung)
-            basin_heights = heightmap[lake_pixels]
-            water_level = basin_heights.max()
-            total_volume = 0.0
+            terrain_heights = heightmap[lake_pixels]
+            submerged = terrain_heights <= spill
+            if not np.any(submerged):
+                continue
 
-            for py, px in zip(lake_pixels[0], lake_pixels[1]):
-                terrain_height = heightmap[py, px]
-                if terrain_height <= water_level:
-                    water_depth = water_level - terrain_height
-                    total_volume += water_depth
+            total_volume = float((spill - terrain_heights[submerged]).sum())
 
-            # Volume-Threshold prüfen
             if total_volume >= self.lake_volume_threshold:
-                for py, px in zip(lake_pixels[0], lake_pixels[1]):
-                    filtered_lake_map[py, px] = len(valid_lakes)
+                py = lake_pixels[0][submerged]
+                px = lake_pixels[1][submerged]
+                filtered_lake_map[py, px] = len(valid_lakes)
 
                 valid_lakes.append({
                     'seed': (seed_x, seed_y),
                     'volume': total_volume,
-                    'pixels': len(lake_pixels[0])
+                    'pixels': int(submerged.sum())
                 })
 
         return filtered_lake_map, valid_lakes
@@ -278,7 +306,7 @@ class FlowNetworkBuilder:
     Aufgabe: Erstellt flow_map und water_biomes_map mit realistischen Flusssystemen
     """
 
-    def __init__(self, rain_threshold=5.0, shader_manager=None):
+    def __init__(self, rain_threshold=0.2, shader_manager=None):
         self.rain_threshold = rain_threshold
         self.shader_manager = shader_manager
 
@@ -431,13 +459,17 @@ class FlowNetworkBuilder:
 
                 flow_amount = flow_accumulation[y, x]
 
-                # Schwellen skaliert zur precip_map/rain_threshold-Größenordnung
-                # (siehe WATER.RAIN_THRESHOLD in gui/config/value_default.py)
-                if flow_amount >= 0.4:  # Grand River
+                # Schwellen tatsächlich relativ zu self.rain_threshold statt fixer
+                # Konstanten (0.02/0.08/0.4 lagen ~1000x unter precip_map's realem
+                # 0-500 gH2O/m²-Bereich - dadurch überschritt schon ein einzelnes
+                # Pixel mit eigenem Regen sofort die "Grand River"-Schwelle, ganz
+                # ohne echte Akkumulation, und quasi die gesamte Karte wurde als
+                # irgendeine Fließgewässer-Stufe klassifiziert)
+                if flow_amount >= self.rain_threshold * 20:  # Grand River
                     water_biomes_map[y, x] = 3
-                elif flow_amount >= 0.08:  # River
+                elif flow_amount >= self.rain_threshold * 4:  # River
                     water_biomes_map[y, x] = 2
-                elif flow_amount >= 0.02:  # Creek
+                elif flow_amount >= self.rain_threshold:  # Creek
                     water_biomes_map[y, x] = 1
 
         return water_biomes_map
@@ -603,7 +635,8 @@ class ErosionSedimentationSystem:
         self.settling_velocity = settling_velocity
         self.shader_manager = shader_manager
 
-    def simulate_erosion_sedimentation(self, flow_accumulation, flow_speed, flow_directions, hardness_map, parameters, lod_iterations):
+    def simulate_erosion_sedimentation(self, flow_accumulation, flow_speed, flow_directions, hardness_map,
+                                       parameters, lod_iterations, heightmap=None):
         """
         Funktionsweise: GPU-accelerated Erosion-Sedimentation mit iterativen Terrain-Modifikationen
         Aufgabe: 3-stufiges Fallback-System für realistische Landschafts-Evolution
@@ -647,24 +680,74 @@ class ErosionSedimentationSystem:
 
         # CPU-Fallback (Gut)
         try:
-            return self._cpu_erosion_sedimentation(flow_accumulation, flow_speed, flow_directions, hardness_map, lod_iterations)
+            return self._cpu_erosion_sedimentation(flow_accumulation, flow_speed, flow_directions, hardness_map,
+                                                    lod_iterations, heightmap)
         except Exception as e:
             logging.warning(f"CPU erosion simulation failed: {e}, using simple fallback")
 
         # Simple-Fallback (Minimal)
         return self._simple_erosion_sedimentation(flow_accumulation, hardness_map)
 
-    def _cpu_erosion_sedimentation(self, flow_accumulation, flow_speed, flow_directions, hardness_map, lod_iterations):
+    def _cpu_erosion_sedimentation(self, flow_accumulation, flow_speed, flow_directions, hardness_map,
+                                   lod_iterations, heightmap=None):
         """CPU-optimierte Erosion-Sedimentation mit Stream Power"""
         # Stream Power Erosion berechnen
         erosion_map = self._calculate_stream_power_erosion(flow_accumulation, flow_speed, hardness_map)
 
-        # Sediment-Transport mit LOD-optimierten Iterationen
-        sedimentation_map = self._transport_sediment_optimized(
+        # Sediment-Transport mit LOD-optimierten Iterationen. Liefert punktuelle
+        # Ablagerungen genau dort, wo die Transportkapazität lokal überschritten wird
+        # (meist am Ende eines Fließpfads, z.B. See-Zulauf oder Kartenrand) - ohne
+        # laterale Verteilung würde sich dort das gesamte Sediment eines Fließpfads
+        # auf einem einzigen Pixel stapeln.
+        raw_sedimentation_map = self._transport_sediment_optimized(
             erosion_map, flow_speed, flow_directions, flow_accumulation, lod_iterations["sediment"]
         )
 
+        if heightmap is not None:
+            sedimentation_map = self._distribute_sediment_floodplain(raw_sedimentation_map, heightmap)
+        else:
+            sedimentation_map = raw_sedimentation_map
+
         return erosion_map, sedimentation_map
+
+    def _distribute_sediment_floodplain(self, raw_sedimentation_map, heightmap, radius=3):
+        """
+        Verteilt punktuell abgelagertes Sediment auf die umliegende Flood-Plane, statt
+        es exakt am einzelnen Ablagerungs-Pixel zu belassen (siehe
+        _transport_sediment_optimized: dort settelt Sediment nur dort, wo die lokale
+        Transportkapazität überschritten wird - typischerweise ein einzelner Pixel am
+        Ende eines Fließpfads).
+
+        Gewichtung invers zur lokalen Höhe (relativ zum höchsten Punkt im Radius):
+        tiefere Nachbarpunkte, die bei Überflutung zuerst volllaufen würden, bekommen
+        proportional mehr ab als die etwas höheren - das glättet nebenbei die
+        Oberfläche, weil die Senken im Umkreis aufgefüllt werden statt eine einzelne
+        Sediment-Spitze entstehen zu lassen. Gesamtmenge pro Ablagerung bleibt erhalten
+        (nur die räumliche Verteilung ändert sich).
+        """
+        height, width = raw_sedimentation_map.shape
+        distributed = np.zeros_like(raw_sedimentation_map)
+
+        deposit_ys, deposit_xs = np.nonzero(raw_sedimentation_map)
+        for y, x in zip(deposit_ys, deposit_xs):
+            amount = raw_sedimentation_map[y, x]
+
+            y0, y1 = max(0, y - radius), min(height, y + radius + 1)
+            x0, x1 = max(0, x - radius), min(width, x + radius + 1)
+
+            local_heights = heightmap[y0:y1, x0:x1]
+            local_max = local_heights.max()
+            weights = np.maximum(0.0, local_max - local_heights)
+            weight_sum = weights.sum()
+
+            if weight_sum > 0:
+                distributed[y0:y1, x0:x1] += amount * (weights / weight_sum)
+            else:
+                # Flache Umgebung (alle Nachbarn auf gleicher Höhe) - keine sinnvolle
+                # Gewichtung möglich, Ablagerung bleibt am Ursprungspixel
+                distributed[y, x] += amount
+
+        return distributed
 
     def _simple_erosion_sedimentation(self, flow_accumulation, hardness_map):
         """Simple-Fallback: Basis Erosion ohne komplexe Transport-Berechnungen"""
@@ -1057,7 +1140,7 @@ class HydrologySystemGenerator:
             # Fallback defaults
             return {
                 'lake_volume_threshold': 0.1,
-                'rain_threshold': 0.02,
+                'rain_threshold': 0.2,
                 'manning_coefficient': 0.03,
                 'erosion_strength': 1.0,
                 'sediment_capacity_factor': 0.1,
@@ -1391,7 +1474,7 @@ class HydrologySystemGenerator:
         Geology._calc_tectonic_deformation()).
         """
         self._update_progress("Erosion-Sedimentation", 65, "Calculating stream power...")
-        inputs = self._get_prepared_water_inputs(lod_level, needed=["hardness_map"])
+        inputs = self._get_prepared_water_inputs(lod_level, needed=["hardness_map", "heightmap"])
         lod_iterations = self._get_lod_iterations(lod_level)
         flow_accumulation = self.data_lod_manager.get_calculator_output(
             "water.flow_network", "flow_accumulation", lod_level)
@@ -1401,9 +1484,12 @@ class HydrologySystemGenerator:
         if flow_accumulation is None or flow_speed is None or flow_directions is None:
             raise ValueError(f"water.erosion_sedimentation: fehlende Inputs für LOD {lod_level}")
 
+        # heightmap durchgereicht für _distribute_sediment_floodplain() - verteilt
+        # punktuelle Sediment-Ablagerungen auf die umliegende Flood-Plane statt sie
+        # auf einem einzigen Pixel zu belassen (siehe ErosionSedimentationSystem).
         erosion_map, sedimentation_map = self.erosion_system.simulate_erosion_sedimentation(
             flow_accumulation, flow_speed, flow_directions, inputs["hardness_map"],
-            self._current_parameters, lod_iterations
+            self._current_parameters, lod_iterations, heightmap=inputs["heightmap"]
         )
 
         target_size = inputs["target_size"]
@@ -1457,7 +1543,7 @@ class HydrologySystemGenerator:
     def _update_parameters(self, parameters):
         """Aktualisiert alle Sub-System Parameter"""
         self.lake_detection.lake_volume_threshold = parameters.get('lake_volume_threshold', 0.1)
-        self.flow_network.rain_threshold = parameters.get('rain_threshold', 5.0)
+        self.flow_network.rain_threshold = parameters.get('rain_threshold', 0.2)
         self.manning_calculator.manning_n = parameters.get('manning_coefficient', 0.03)
         self.erosion_system.erosion_strength = parameters.get('erosion_strength', 1.0)
         self.erosion_system.capacity_factor = parameters.get('sediment_capacity_factor', 0.1)

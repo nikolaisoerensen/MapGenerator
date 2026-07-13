@@ -186,19 +186,13 @@ class SimplexNoiseGenerator:
             'offset_y': offset_y
         }
 
-        # GPU-Pfad bewusst DEAKTIVIERT: shaders/terrain/noiseGeneration.comp (und
-        # ShaderManager.process_noise_generation()) ist eine seit jeher nie fertig
-        # implementierte Platzhalter-Formel ("Simplified noise - echte Simplex-
-        # Implementierung würde hier stehen", O-Ton der ursprünglichen Inline-Shader-
-        # Quelle) - kein echtes Gradient/Simplex-Noise, sondern nur sin(x)*cos(y).
-        # War all die Zeit toter Code (shader_manager war vor dem GPU-Fundament-Fix
-        # dieser Session IMMER None), erst dadurch aktiviert - und produzierte
-        # zusammen mit der LOD-angepassten Frequenz + normierten [0,1]-Koordinaten
-        # ein fast konstantes ("verdächtig homogenes") Höhenfeld, da sin/cos bei so
-        # kleinen Phasenwerten praktisch linear/konstant sind. Die CPU-Implementierung
-        # (OpenSimplex, unten) ist die echte, validierte Terrain-Noise - GPU-Pfad
-        # bleibt aus, bis eine echte Simplex-Noise-GLSL-Portierung existiert.
-        if False and self._gpu_available() and offset_x == 0 and offset_y == 0:
+        # GPU-Pfad: shaders/terrain/noiseGeneration.comp implementiert jetzt echtes
+        # Gradient-Noise (Hash-basierte OpenSimplex-Variante, siehe Shader-Kommentar)
+        # statt der ursprünglichen sin(x)*cos(y)-Platzhalter-Formel - re-aktiviert,
+        # nachdem die alte "if False and"-Deaktivierung (aus einer Zeit, in der
+        # shader_manager praktisch immer None war und der Shader selbst nur der
+        # Platzhalter war) beide Voraussetzungen nicht mehr zutreffen.
+        if self._gpu_available() and offset_x == 0 and offset_y == 0:
             try:
                 result = self.shader_manager.process_noise_generation(
                     size=size, octaves=octaves, frequency=frequency,
@@ -917,8 +911,19 @@ class SlopeCalculator:
         Parameter: heightmap, parameters
         Returns: numpy.ndarray - CPU-berechnete Slopes
         """
-        # NumPy gradient für optimierte Performance
-        spacing = parameters.get('spacing', 1.0)
+        # NumPy gradient für optimierte Performance. spacing = reale Meter pro Pixel,
+        # NICHT 1.0 - die Karte deckt immer TERRAIN.WORLD_SIZE_KM x WORLD_SIZE_KM ab
+        # (siehe gui/widgets/map_display_3d.py), unabhängig von der Pixelauflösung.
+        # Ein fester spacing=1.0 hieß: 1m Höhenunterschied zwischen Nachbarpixeln wird
+        # wie 1m realer Horizontal-Abstand behandelt, obwohl ein Pixel bei typischen
+        # Kartengrößen tatsächlich ~50-300m Horizontal-Abstand abdeckt - das ergab
+        # Gradienten um ~10-15 (entspricht ~85-89°) auf praktisch der gesamten Karte.
+        if 'spacing' in parameters:
+            spacing = parameters['spacing']
+        else:
+            from gui.config.value_default import TERRAIN
+            world_size_m = TERRAIN.WORLD_SIZE_KM * 1000.0
+            spacing = world_size_m / heightmap.shape[0]
 
         # Berechne Gradienten in beide Richtungen
         grad_y, grad_x = np.gradient(heightmap, spacing, edge_order=2)

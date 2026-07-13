@@ -40,6 +40,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import OpenGL.GL as gl
+from opensimplex import OpenSimplex
 from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtGui import QOffscreenSurface, QOpenGLContext, QSurfaceFormat
 
@@ -246,35 +247,86 @@ def _classify_lake_basins_vectorized(heightmap: np.ndarray, seed_id_map: np.ndar
     (anders als beim eigentlichen Jump-Flooding) schon aus der GPU-Berechnung
     vorliegt und sich mit numpy in einem Rutsch aggregieren lässt.
 
-    Wasserspiegel-Fix (siehe WaterGenerator._classify_lake_basins()-Docstring):
-    der Wasserspiegel ist die maximale Höhe innerhalb des zugeordneten Beckens,
-    nicht die Höhe am Seed selbst (der als lokales Minimum praktisch nie von
-    anderen Pixeln unterschritten wird - das hielt total_volume vorher immer
-    bei ~0).
+    Wasserspiegel = Spill-Point (niedrigster Rand-Übergang zu einem
+    Nachbarbecken oder zum Kartenrand), NICHT die maximale Höhe innerhalb des
+    Beckens. Ein Becken (aus jumpFloodLakes.comp) ist meist viel größer als der
+    eigentliche See - der Großteil ist trockenes Gelände, das nur einwärts
+    entwässert. "Wasserspiegel = Becken-Maximum" macht JEDEN Punkt im Becken per
+    Definition zu <= Wasserspiegel, wodurch das ganze Becken (inklusive
+    Berggipfel) als überflutet zählt; siehe WaterGenerator._classify_lake_basins()
+    für dieselbe Korrektur auf der CPU-Seite. Nur Pixel unterhalb des
+    Spill-Points sind tatsächlich unter Wasser.
+
+    Bekannte Einschränkung: die Becken-ZUORDNUNG selbst (aus jumpFloodLakes.comp)
+    prüft weiterhin nur "current_height >= seed_height" statt echter
+    Erreichbarkeit über einen monotonen Abwärtspfad - ein Becken kann dadurch
+    über einen Bergkamm hinweg zu groß geraten. Der Spill-Point-Filter hier
+    grenzt das Ergebnis trotzdem stark ein, weil die meisten fälschlich
+    zugeordneten Hochpunkte über der Spill-Höhe liegen und damit ausgeschlossen
+    werden. Ein echter paralleler Watershed-Transform für die Zuordnung selbst
+    ist nicht implementiert (eigenständiges, größeres Vorhaben).
     """
     height, width = heightmap.shape
+    heightmap = heightmap.astype(np.float64)
     valid = seed_id_map >= 0
     if not np.any(valid):
         return np.full((height, width), -1, dtype=np.int32), []
 
     unique_ids, inverse = np.unique(seed_id_map[valid].astype(np.int64), return_inverse=True)
+    n_basins = len(unique_ids)
+
+    basin_index_map = np.full((height, width), -1, dtype=np.int64)
+    basin_index_map[valid] = inverse
+
+    spill_elevation = np.full(n_basins, np.inf, dtype=np.float64)
+
+    # Becken, die den Kartenrand berühren, haben offenen Abfluss (kein
+    # geschlossener See) - Rand-Höhe zählt als (sehr niedriger) Spill-Point.
+    edge_mask = np.zeros((height, width), dtype=bool)
+    edge_mask[0, :] = edge_mask[-1, :] = edge_mask[:, 0] = edge_mask[:, -1] = True
+    edge_valid = valid & edge_mask
+    if np.any(edge_valid):
+        np.minimum.at(spill_elevation, basin_index_map[edge_valid], heightmap[edge_valid])
+
+    # 8-Nachbarschafts-Scan für Becken-Grenzübergänge (ohne np.roll, das an den
+    # Kartenrändern zyklisch umbrechen würde) - für jedes Pixel, dessen direkter
+    # Nachbar einem ANDEREN Becken angehört, ist max(eigene Höhe, Nachbar-Höhe)
+    # ein Kandidat für den Spill-Point des eigenen Beckens.
+    for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]:
+        y0, y1 = max(0, dy), height + min(0, dy)
+        x0, x1 = max(0, dx), width + min(0, dx)
+        ny0, ny1 = max(0, -dy), height + min(0, -dy)
+        nx0, nx1 = max(0, -dx), width + min(0, -dx)
+
+        cur_basin = basin_index_map[y0:y1, x0:x1]
+        nbr_basin = basin_index_map[ny0:ny1, nx0:nx1]
+        cur_valid = valid[y0:y1, x0:x1]
+        cur_height = heightmap[y0:y1, x0:x1]
+        nbr_height = heightmap[ny0:ny1, nx0:nx1]
+
+        cross_mask = cur_valid & (nbr_basin != cur_basin)
+        if np.any(cross_mask):
+            crossing_heights = np.maximum(cur_height[cross_mask], nbr_height[cross_mask])
+            np.minimum.at(spill_elevation, cur_basin[cross_mask], crossing_heights)
+
     valid_heights = heightmap[valid]
+    per_pixel_spill = spill_elevation[inverse]
+    submerged = valid_heights <= per_pixel_spill
+    depth = np.where(submerged, per_pixel_spill - valid_heights, 0.0)
 
-    water_level_per_group = np.full(len(unique_ids), -np.inf, dtype=np.float64)
-    np.maximum.at(water_level_per_group, inverse, valid_heights)
-    per_pixel_water_level = water_level_per_group[inverse]
-    depth = np.maximum(0.0, per_pixel_water_level - valid_heights)
-
-    total_volume = np.bincount(inverse, weights=depth, minlength=len(unique_ids))
+    total_volume = np.bincount(inverse, weights=depth, minlength=n_basins)
 
     filtered_lake_map = np.full((height, width), -1, dtype=np.int32)
     valid_lakes = []
     flat_valid_indices = np.flatnonzero(valid.ravel())
+    finite_spill = np.isfinite(spill_elevation)
 
     for local_idx, seed_flat_id in enumerate(unique_ids):
-        if total_volume[local_idx] < volume_threshold:
+        if not finite_spill[local_idx] or total_volume[local_idx] < volume_threshold:
             continue
-        pixel_mask = inverse == local_idx
+        pixel_mask = (inverse == local_idx) & submerged
+        if not np.any(pixel_mask):
+            continue
         pixel_flat_indices = flat_valid_indices[pixel_mask]
         compact_id = len(valid_lakes)
         filtered_lake_map.ravel()[pixel_flat_indices] = compact_id
@@ -1184,22 +1236,32 @@ class ShaderManager(QObject):
         return self._cpu_fallback_shadow_raycast(heightmap, sun_elevation, sun_azimuth, shadowmap_size)
 
     def _cpu_fallback_noise(self, size, octaves, frequency, persistence, lacunarity, seed):
-        """CPU-Fallback für Noise-Generierung wenn GPU nicht verfügbar."""
-        np.random.seed(seed)
+        """
+        CPU-Fallback für Noise-Generierung wenn GPU nicht verfügbar oder die
+        GPU-Dispatch fehlschlägt. Nutzt denselben OpenSimplex-Algorithmus und
+        dieselbe Normalisierung wie core/terrain_generator.py's
+        SimplexNoiseGenerator._generate_cpu_optimized() - vorher stand hier ein
+        sin(x)*cos(y)-Platzhalter ("echte Simplex-Implementierung würde hier
+        stehen"), der bei jedem GPU-Dispatch-Fehler silent ein fast-flaches
+        Höhenfeld zurückgab, statt eine Exception zu werfen.
+        """
+        generator = OpenSimplex(seed=seed)
+        coords = np.arange(size, dtype=np.float64)
+
         result = np.zeros((size, size), dtype=np.float32)
+        amplitude = 1.0
+        current_frequency = frequency
+        max_amplitude = 0.0
 
-        for y in range(size):
-            for x in range(size):
-                noise_value = 0.0
-                amplitude = 1.0
-                freq = frequency
+        for _ in range(octaves):
+            octave_noise = generator.noise2array(coords * current_frequency, coords * current_frequency)
+            result += (amplitude * octave_noise).astype(np.float32)
+            max_amplitude += amplitude
+            amplitude *= persistence
+            current_frequency *= lacunarity
 
-                for _ in range(octaves):
-                    noise_value += amplitude * (np.sin(x * freq) * np.cos(y * freq))
-                    amplitude *= persistence
-                    freq *= lacunarity
-
-                result[y, x] = noise_value
+        if max_amplitude > 0:
+            result /= max_amplitude
 
         return result
 

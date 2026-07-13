@@ -24,18 +24,25 @@ uniform bool useOverlay;
 uniform float overlayStrength;
 
 vec3 getTerrainColor() {
-    // Height-based terrain coloring
+    // Height-based terrain coloring. Kein Blau mehr (sah wie Wasser aus) -
+    // Grün ist jetzt die niedrigste Farbe (height=0), Weiß die höchste
+    // (height=1). Dieselben 5 Stützstellen wie die 2D-Colormap
+    // (gui/widgets/map_display_2d.py, plt.cm.terrain ab 25% zugeschnitten),
+    // damit 2D- und 3D-Ansicht farblich konsistent aussehen.
     float height = FragPos.y / maxHeight;
 
-    if (height < 0.3) {
-        // Water to Beach (blue to sandy brown)
-        return mix(vec3(0.2, 0.4, 0.8), vec3(0.8, 0.7, 0.4), height / 0.3);
-    } else if (height < 0.7) {
-        // Beach to Grass (sandy brown to green)
-        return mix(vec3(0.8, 0.7, 0.4), vec3(0.2, 0.6, 0.2), (height - 0.3) / 0.4);
+    if (height < 0.25) {
+        // Green to pale yellow-green
+        return mix(vec3(0.0, 0.8, 0.4), vec3(0.76, 0.95, 0.55), height / 0.25);
+    } else if (height < 0.5) {
+        // Pale yellow-green to tan
+        return mix(vec3(0.76, 0.95, 0.55), vec3(0.75, 0.67, 0.46), (height - 0.25) / 0.25);
+    } else if (height < 0.75) {
+        // Tan to grayish brown
+        return mix(vec3(0.75, 0.67, 0.46), vec3(0.63, 0.53, 0.51), (height - 0.5) / 0.25);
     } else {
-        // Grass to Snow (green to white)
-        return mix(vec3(0.2, 0.6, 0.2), vec3(0.9, 0.9, 0.9), (height - 0.7) / 0.3);
+        // Grayish brown to white
+        return mix(vec3(0.63, 0.53, 0.51), vec3(1.0, 1.0, 1.0), (height - 0.75) / 0.25);
     }
 }
 

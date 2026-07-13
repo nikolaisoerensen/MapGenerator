@@ -79,7 +79,10 @@ class CanvasSettings:
     CANVAS_2D = {
         "background_color": "#2c3e50",
         "grid_color": "#34495e",
-        "contour_colors": ["#3498db", "#e74c3c", "#f39c12"],
+        # Kein Blau mehr (sah wie Wasser aus, siehe elevation_vmin/vmax unten) -
+        # matplotlib zyklt durch diese Liste je Contour-Level, betraf also nicht
+        # nur niedrige Höhen sondern Linien über die ganze Karte verteilt.
+        "contour_colors": ["#7f8c8d", "#e74c3c", "#f39c12"],
         "dpi": 100,
         # Feste Höhen-Farbskala (Meter) statt Auto-Skalierung pro Heightmap,
         # damit z.B. ein 200m-Hügel und ein 3500m-Berg nicht dieselbe volle

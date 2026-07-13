@@ -266,8 +266,11 @@ class BiomeClassificationSystem:
             mean_temp_low = np.mean(temp_map[heightmap < np.percentile(heightmap, 25)])
             mean_temp_high = np.mean(temp_map[heightmap > np.percentile(heightmap, 75)])
 
-            # Höhere Lagen sollten tendenziell kälter sein
-            if mean_temp_low <= mean_temp_high:
+            # Höhere Lagen sollten tendenziell kälter sein - die Bedingung war
+            # umgekehrt: "low <= high" (Tiefland kälter/gleich Hochland) wurde als
+            # gültig durchgewunken, das eigentlich realistische "low > high"
+            # (Tiefland wärmer) loggte fälschlich eine "inverted"-Warnung.
+            if mean_temp_low >= mean_temp_high:
                 return True
             else:
                 self.logger.warning("Temperature-elevation relationship appears inverted")
@@ -847,7 +850,12 @@ class BaseBiomeClassifier:
         self.elevation_factor = elevation_factor
         self.soil_moisture_factor = soil_moisture_factor
 
-        # Base-Biome Definitionen (15 Biome nach Whittaker-Standards)
+        # Base-Biome Definitionen (15 Biome nach Whittaker-Standards). 'temp' und
+        # 'elevation' passen direkt zu temp_map (°C) und heightmap (m). 'precip' und
+        # 'moisture' sind hier bewusst die KLASSISCHEN Whittaker-Referenzwerte in
+        # Jahres-mm (0-4000) bzw. einer Jahres-Feuchte-Skala (0-1500) - siehe
+        # _rescale_precip_moisture_ranges() für die tatsächlich verwendeten,
+        # auf dieses Projekt skalierten Werte.
         self.biome_definitions = {
             0: {'name': 'ice_cap', 'temp': (-40, -5), 'precip': (0, 300), 'elevation': (0, 8000), 'moisture': (0, 200)},
             1: {'name': 'tundra', 'temp': (-15, 5), 'precip': (100, 600), 'elevation': (0, 2000), 'moisture': (100, 400)},
@@ -865,6 +873,38 @@ class BaseBiomeClassifier:
             13: {'name': 'coastal_dunes', 'temp': (5, 35), 'precip': (300, 1500), 'elevation': (0, 100), 'moisture': (200, 800)},
             14: {'name': 'badlands', 'temp': (-5, 45), 'precip': (0, 400), 'elevation': (200, 2500), 'moisture': (0, 200)}
         }
+        self._rescale_precip_moisture_ranges()
+
+    def _rescale_precip_moisture_ranges(self):
+        """
+        Skaliert 'precip'- und 'moisture'-Bereiche von klassischen Jahres-Whittaker-
+        Werten auf die tatsächliche Größenordnung von precip_map/soil_moist_map in
+        diesem Projekt herunter.
+
+        precip_map (core/weather_generator.py) ist eine einzelne Tages-Momentaufnahme
+        in gH2O/m² (kein Jahres-Niederschlag) und erreicht empirisch selbst bei
+        extremen Wetter-Parametern (hohe Temperatur/Wind/Terrain-Faktoren) nur
+        Werte bis ~50 (Default-Parameter: ~0-3) - nie annähernd die klassischen
+        0-4000mm/Jahr. soil_moist_map (core/water_generator.py) ist hart auf 0-100
+        (Prozent) begrenzt, nie die klassischen 0-1500. Ohne diese Reskalierung lag
+        JEDER real erreichbare precip_map/soil_moist_map-Wert weit unterhalb des
+        Minimums fast aller Biome-Bereiche (nur die trockensten Biome wie Desert/
+        Badlands/Ice-Cap haben ein Minimum nahe 0) - die Gauß-Fitness dieser Achsen
+        wurde dadurch für praktisch jedes feuchtere Biom systematisch mit dem
+        "outside_range"-Faktor 0.1 bestraft, unabhängig von der tatsächlichen
+        Feuchte vor Ort. Precipitation-Skala 4000->50 (Faktor 80), Moisture-Skala
+        1500->100 (Faktor 15) - beide behalten die relative Whittaker-Struktur
+        zwischen den 15 Biomen bei, nur die absolute Größenordnung ändert sich.
+        """
+        precip_scale = 50.0 / 4000.0
+        moisture_scale = 100.0 / 1500.0
+
+        for biome_def in self.biome_definitions.values():
+            p_min, p_max = biome_def['precip']
+            biome_def['precip'] = (p_min * precip_scale, p_max * precip_scale)
+
+            m_min, m_max = biome_def['moisture']
+            biome_def['moisture'] = (m_min * moisture_scale, m_max * moisture_scale)
 
     def classify_base_biomes(self, heightmap, temp_map, precip_map, soil_moist_map):
         """
@@ -1053,8 +1093,14 @@ class SuperBiomeOverrideSystem:
         """
         Berechnet Cliff-Probabilities mit Slope-Threshold und Edge-Softness
         """
-        # Gradient berechnen
-        grad_y, grad_x = np.gradient(heightmap)
+        # Gradient berechnen - ohne spacing rechnet np.gradient() mit 1 Pixel = 1m
+        # Horizontal-Abstand, obwohl ein Pixel real ~50-300m abdeckt (siehe
+        # TERRAIN.WORLD_SIZE_KM und core/terrain_generator.py SlopeCalculator für
+        # denselben Bug an anderer Stelle) - das ließ praktisch die gesamte Karte
+        # als Steilhang (>80°) erscheinen, unabhängig vom cliff_slope-Parameter.
+        from gui.config.value_default import TERRAIN
+        spacing = (TERRAIN.WORLD_SIZE_KM * 1000.0) / heightmap.shape[0]
+        grad_y, grad_x = np.gradient(heightmap, spacing)
         slope_magnitude = np.sqrt(grad_x**2 + grad_y**2)
         slope_degrees = np.degrees(np.arctan(slope_magnitude))
 
