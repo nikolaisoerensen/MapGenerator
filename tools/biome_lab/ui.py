@@ -10,7 +10,7 @@ die "Hintergrund"-Slider wirken erst nach einem Klick auf
 import numpy as np
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton,
-    QCheckBox, QGroupBox, QFormLayout, QSizePolicy
+    QCheckBox, QGroupBox, QFormLayout, QSizePolicy, QScrollArea, QPlainTextEdit
 )
 from PyQt5.QtCore import Qt
 
@@ -34,25 +34,67 @@ class UIMixin:
         layout.addWidget(self.canvas, stretch=3)
         self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
 
+        # QScrollArea statt Panel direkt ins Layout: die Anzahl der Regler/
+        # Checkboxen ist mittlerweile zu gross fuer eine feste Fensterhoehe --
+        # ohne Scroll-Wrapper quetscht Qt den Inhalt (ueberlappender Text)
+        # statt ihn abzuschneiden/scrollbar zu machen.
         panel = QWidget()
         panel.setFixedWidth(450)
         panel_layout = QVBoxLayout(panel)
-        layout.addWidget(panel, stretch=0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidget(panel)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setFixedWidth(470)
+        layout.addWidget(scroll_area, stretch=0)
 
         self.status_label = QLabel("Iteration: 0")
         panel_layout.addWidget(self.status_label)
 
-        self.play_button = QPushButton("Pause")
+        self.play_button = QPushButton("Play")
         self.play_button.clicked.connect(self._toggle_play)
         panel_layout.addWidget(self.play_button)
 
         regen_button = QPushButton("Regenerate Terrain + Settlements")
-        regen_button.clicked.connect(self._regenerate_scene)
+        # Bug-Fix: QPushButton.clicked emittiert IMMER ein bool "checked"-Arg.
+        # Direkt verbunden (`.connect(self._regenerate_scene)`) landet dieses
+        # bool in `seed` (scene._regenerate_scene(self, seed=None)), IMMER
+        # als False -- "if seed is None" greift dann nie, jeder Klick nutzt
+        # map_seed=False (==0), die Karte war deshalb nie wirklich random.
+        # Lambda kappt das Signal-Argument, damit seed=None (echtes Zufalls-
+        # Seed via random_mod.randint) tatsaechlich ankommt.
+        regen_button.clicked.connect(lambda: self._regenerate_scene())
         panel_layout.addWidget(regen_button)
 
         reset_button = QPushButton("Reset Plot Nodes (übernimmt Hintergrund-Slider)")
         reset_button.clicked.connect(self._reset_plot_nodes)
         panel_layout.addWidget(reset_button)
+
+        # Schritt-Log: zeigt die Diagnostik-Ausgaben der 8 Generierungs-
+        # Schritte (siehe topology._gen_step_1.._gen_step_8/_log_step) direkt
+        # in der App, damit sich der Schritt, der einen Fehler einfuehrt,
+        # ohne Logdatei-Wechsel eingrenzen laesst.
+        step_log_label = QLabel("Generierungs-Schritte (Play = naechster Schritt, solange Regenerate/Reset noch nicht durchgelaufen ist):")
+        step_log_label.setWordWrap(True)
+        panel_layout.addWidget(step_log_label)
+        self.step_log_widget = QPlainTextEdit()
+        self.step_log_widget.setReadOnly(True)
+        self.step_log_widget.setFixedHeight(160)
+        panel_layout.addWidget(self.step_log_widget)
+
+        forces_group = QGroupBox("Kräfte an/aus (zum Isolieren einzeln zuschaltbar, alle Default AUS)")
+        forces_form = QVBoxLayout()
+        self._add_force_checkbox(forces_form, "enable_core_plotnode_spring", "Feder (a): Core↔PlotNode")
+        self._add_force_checkbox(forces_form, "enable_plotnode_plotnode_spring", "Feder (b): PlotNode↔PlotNode")
+        self._add_force_checkbox(forces_form, "enable_pressure", "Druck (f): Flächenerhalt")
+        self._add_force_checkbox(forces_form, "enable_plot_node_repulsion", "Kollisionsabstoßung PlotNodes")
+        self._add_force_checkbox(forces_form, "enable_field_cores", "Potentialfeld auf Kerne (c)")
+        self._add_force_checkbox(forces_form, "enable_field_plotnodes", "Potentialfeld auf PlotNodes")
+        self._add_force_checkbox(forces_form, "enable_core_cell_containment", "Harte Zellgrenze (Kerne)")
+        self._add_force_checkbox(forces_form, "enable_wilderness_containment", "Wildnisgrenze (PlotNodes, weiche Feder)")
+        forces_group.setLayout(forces_form)
+        panel_layout.addWidget(forces_group)
 
         live_group = QGroupBox("Live-Physik (wirkt sofort, jeden Tick)")
         live_form = QFormLayout()
@@ -64,6 +106,16 @@ class UIMixin:
                               default=self.norm_spacing_spring_stiffness)
         self._add_log_slider(live_form, "norm_traffic_spring_stiffness", "Feder: Traffic-Zug (0.04x-25x)",
                               default=self.norm_traffic_spring_stiffness)
+        self._add_log_slider(live_form, "norm_pressure_strength", "Druck: Flächenerhalt (0.04x-25x)",
+                              default=self.norm_pressure_strength)
+        self._add_log_slider(live_form, "norm_core_mass", "Masse: Kern (0.04x-25x)",
+                              default=self.norm_core_mass)
+        self._add_log_slider(live_form, "norm_plot_node_mass", "Masse: PlotNode (0.04x-25x)",
+                              default=self.norm_plot_node_mass)
+        self._add_log_slider(live_form, "norm_plot_node_repulsion_strength", "PlotNode-Kollisionsabstand (0.04x-25x)",
+                              default=self.norm_plot_node_repulsion_strength)
+        self._add_slider(live_form, "damping", "Dämpfung (0=sofort still, 1=keine)", 0.0, 1.0, self.damping,
+                          scale=100)
         self._add_log_slider(live_form, "norm_gravity_strength", "Gravity Strength (0.04x-25x)",
                               default=self.norm_gravity_strength)
         self._add_log_slider(live_form, "norm_city_repulsion_strength", "Stadtmauer-Gegenkraft (0.04x-25x)",
@@ -102,8 +154,6 @@ class UIMixin:
         self._add_slider(bg_form, "city_size", "Stadtgröße", 0, 1.0, self.city_size, scale=100)
         self._add_slider(bg_form, "civ_influence_decay", "Civ Influence Decay", 0.1, 2, self.civ_influence_decay,
                           scale=100)
-        self._add_slider(bg_form, "wilderness_core_spacing", "Wildniskern-Abstand (px)", 20, 200,
-                          self.wilderness_core_spacing, scale=1)
         bg_group.setLayout(bg_form)
         panel_layout.addWidget(bg_group)
 
@@ -187,9 +237,44 @@ class UIMixin:
         row_layout.addWidget(value_label)
         form.addRow(label, row)
 
+    def _add_force_checkbox(self, layout, attr_name, label):
+        """Checkbox fuer einen einzelnen Kraft-/Mechanismus-Schalter (siehe
+        app.py enable_*-Attribute) -- direkt in ein QVBoxLayout, kein
+        Label/Value-Paar wie bei den Slidern noetig."""
+        checkbox = QCheckBox(label)
+        checkbox.setChecked(bool(getattr(self, attr_name)))
+
+        def on_toggle(checked):
+            setattr(self, attr_name, bool(checked))
+
+        checkbox.toggled.connect(on_toggle)
+        layout.addWidget(checkbox)
+
     def _toggle_play(self):
+        # Solange eine Schritt-fuer-Schritt-Generierung ansteht (siehe
+        # topology._start_step_through_generation), wird der Play-Button
+        # umgewidmet: ein Klick fuehrt genau den naechsten der 8 Schritte
+        # aus, statt die Physik-Ticks zu (de-)pausieren -- erst nach dem
+        # letzten Schritt wirkt der Button wieder normal als Play/Pause.
+        pending = getattr(self, "_pending_generation_steps", None) or []
+        step_idx = getattr(self, "_generation_step_index", 0)
+        if step_idx < len(pending):
+            self._advance_generation_step()
+            self._update_play_button_label()
+            return
+
         self.playing = not self.playing
-        self.play_button.setText("Pause" if self.playing else "Play")
+        self._update_play_button_label()
+
+    def _update_play_button_label(self):
+        """Zeigt entweder 'Naechster Schritt (N/8)' (waehrend eine
+        Schritt-fuer-Schritt-Generierung ansteht) oder normal Play/Pause."""
+        pending = getattr(self, "_pending_generation_steps", None) or []
+        step_idx = getattr(self, "_generation_step_index", 0)
+        if step_idx < len(pending):
+            self.play_button.setText(f"Nächster Schritt ({step_idx + 1}/{len(pending)})")
+        else:
+            self.play_button.setText("Pause" if self.playing else "Play")
 
     def _set_civ_overlay(self, checked):
         self.show_civ_overlay = checked
@@ -212,12 +297,34 @@ class UIMixin:
         return self._n("norm_civ_spacing_factor", self._BASE_CIV_SPACING_FACTOR)
 
     @property
-    def spacing_spring_stiffness(self):
+    def core_plotnode_spring_stiffness(self):
+        """Feder: Abstand -- Core<->PlotNode-Federn (a), civ-abhaengige Ruhelaenge."""
         return self._n("norm_spacing_spring_stiffness", self._BASE_SPACING_SPRING_STIFFNESS)
 
     @property
-    def traffic_spring_stiffness(self):
+    def plotnode_plotnode_spring_stiffness(self):
+        """Feder: Traffic-Zug -- PlotNode<->PlotNode-Federn (b), civ+traffic-
+        abhaengige Ruhelaenge."""
         return self._n("norm_traffic_spring_stiffness", self._BASE_TRAFFIC_SPRING_STIFFNESS)
+
+    @property
+    def pressure_strength(self):
+        """Druck: Flaechenerhalt -- Innendruck je Kern-Zelle (f), nur nach aussen."""
+        return self._n("norm_pressure_strength", self._BASE_PRESSURE_STRENGTH)
+
+    @property
+    def core_mass(self):
+        return self._n("norm_core_mass", self._BASE_CORE_MASS)
+
+    @property
+    def plot_node_mass(self):
+        return self._n("norm_plot_node_mass", self._BASE_PLOT_NODE_MASS)
+
+    @property
+    def plot_node_repulsion_strength(self):
+        """Kurzreichweitige Kollisionsabstossung zwischen NAHEN plot_nodes,
+        unabhaengig von direkter Netz-Adjazenz (Abschnitt D)."""
+        return self._n("norm_plot_node_repulsion_strength", self._BASE_PLOT_NODE_REPULSION_STRENGTH)
 
     @property
     def plot_gravity_strength(self):

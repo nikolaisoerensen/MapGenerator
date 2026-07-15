@@ -36,8 +36,37 @@ LOD-System (Numerisch):
 
 import numpy as np
 from opensimplex import OpenSimplex
+from scipy.ndimage import gaussian_filter, map_coordinates
 import logging
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Optional, Tuple
+
+
+class AtmosphereLayers:
+    """
+    Geometrie der 3 Höhenschichten für die gekoppelte Atmosphären-Simulation
+    (siehe _run_coupled_atmosphere_simulation). Terrain-folgend: die absolute
+    Höhe von Schicht L an Zelle (x,y) ist heightmap(x,y) + REF_ALTITUDE_AGL[L]
+    - ein Berg hebt den gesamten Schichtstapel mit an, wodurch Orographie
+    (Steigungsregen, Hangbeschleunigung) über alle 3 Schichten spürbar bleibt.
+
+    Bänder (0-150m / 150-1200m / >1200m AGL) sind eine grobe Anlehnung an
+    reale Grenzschicht/freie Troposphäre, keine exakt recherchierten Werte -
+    mit dem Nutzer abgestimmter Startwert, leicht anpassbar.
+    """
+    GROUND = 0
+    MID = 1
+    HIGH = 2
+    COUNT = 3
+    NAMES = ("ground", "mid", "high")
+    # Schicht-Mittelhöhen (AGL) für die Potentiell->Real-Temperatur-Umrechnung
+    # (siehe potential_to_real_temperature) und für die höhenabhängige
+    # Dämpfung der alten Einzelschicht-Terrainterme (siehe
+    # _run_coupled_atmosphere_simulation Schritt 2).
+    REF_ALTITUDE_AGL = (75.0, 675.0, 2200.0)
+    # Nominelle Schicht-Dicken (0-150m / 150-1200m / 1200-3200m), nur für die
+    # vertikale Fluss-Divergenz in _apply_continuity_correction genutzt (w/dicke) -
+    # HIGH hat keine echte Obergrenze, 3200m ist ein repräsentativer Abschluss.
+    THICKNESS_M = (150.0, 1050.0, 2000.0)
 
 
 class WeatherData:
@@ -61,6 +90,25 @@ class WeatherData:
         self.temp_map = None
         self.precip_map = None
         self.humid_map = None
+        # Saisonale Rohwerte (je Liste aus 6 np.ndarray, eine pro Zwei-Monats-
+        # Periode Jan/Feb..Nov/Dez) - für die animierte Weather-Tab-Anzeige.
+        # temp_map/wind_map/humid_map/precip_map bleiben der saisonale
+        # Mittelwert daraus, von Water/Biome/Default-GUI-Ansicht konsumiert.
+        self.wind_map_monthly = None
+        self.temp_map_monthly = None
+        self.precip_map_monthly = None
+        self.humid_map_monthly = None
+        # 3-Schicht-Atmosphäre (siehe AtmosphereLayers/_run_coupled_atmosphere_
+        # simulation) - rein ADDITIV zu den Feldern oben, die weiterhin die
+        # GROUND-Schicht widerspiegeln (Rückwärtskompatibilität für 2D/3D-
+        # Anzeige, water.evaporation, alle Biome-Knoten - siehe Docstring von
+        # _calc_temperature). Kein bestehender Konsument liest diese Felder.
+        self.wind_map_layers = None    # (3,H,W,2) float32 m/s
+        self.temp_map_layers = None    # (3,H,W) float32 °C (reale, keine potentielle Temp)
+        self.humid_map_layers = None   # (3,H,W) float32, gleiche Skala wie humid_map
+        self.wind_map_layers_monthly = None   # Liste von 6x (3,H,W,2)
+        self.temp_map_layers_monthly = None   # Liste von 6x (3,H,W)
+        self.humid_map_layers_monthly = None  # Liste von 6x (3,H,W)
         self.lod_level = 1
         self.actual_size = 32
         self.validity_state = {"valid": True, "dependencies_satisfied": False}
@@ -116,6 +164,14 @@ class WeatherSystemGenerator:
         self.precip_system = PrecipitationSystem()
         self.moisture_manager = AtmosphericMoistureManager()
 
+        # Eigene ShadowCalculator-Instanz (separat von Terrains) für die
+        # saisonalen Monats-Shadowmaps der 6-Monats-Simulation (siehe
+        # _calc_temperature) - nutzt denselben shader_manager für GPU-
+        # Beschleunigung, überschreibt aber nie den geteilten
+        # terrain.shadow-Knoten-Output.
+        from core.terrain_generator import ShadowCalculator
+        self.shadow_calculator = ShadowCalculator(shader_manager=shader_manager)
+
         # Performance-Tracking
         self.performance_stats = {}
 
@@ -132,6 +188,59 @@ class WeatherSystemGenerator:
         """Setzt die Parameter, die alle _calc_*-Methoden bis zur nächsten frischen
         Anfrage verwenden (vom GenerationOrchestrator aufgerufen)."""
         self._current_parameters = parameters
+
+    def _generate_seasonal_parameters(self, base_parameters: Dict[str, Any],
+                                       month_index: int) -> Dict[str, Any]:
+        """
+        Funktionsweise: month_index 0..5 = Jan/Feb .. Nov/Dez. Nutzt
+        WEATHER.CLIMATE_ZONE_SEASONAL_OFFSETS als saisonale FORM um den
+        User-Slider-Wert als Zentrum ("Jahres-Mittel" der Klimazone), statt
+        einer beliebigen Sinus-Kurve - Werte bleiben dadurch klimazonen-
+        typisch plausibel. Deterministisch aus map_seed (analog Fix #21:
+        aus parameters gelesen, nicht aus dem konstruktionszeit-fixen
+        self.map_seed, da GenerationOrchestrator.get_generator_instance()
+        WeatherSystemGenerator ohne map_seed konstruiert).
+        Aufgabe: Liefert ein vollständiges Parameter-Dict für einen einzelnen
+        Monats-Durchlauf der Monats-Schleife in den _calc_*-Methoden.
+        """
+        from gui.config.value_default import WEATHER
+
+        profile = WEATHER.CLIMATE_ZONE_SEASONAL_OFFSETS[WEATHER.CLIMATE_ZONE]
+        map_seed = base_parameters.get('map_seed', self.map_seed)
+        rng = np.random.default_rng((int(map_seed) * 1000 + month_index) % (2 ** 32))
+
+        # altitude_cooling/thermic_effect/terrain_factor bleiben unverändert
+        # (physikalische Konstanten, keine saisonalen Treiber)
+        params = dict(base_parameters)
+
+        def _apply_offset(key: str, config: Dict[str, Any], jitter_frac: float = 0.04) -> float:
+            base_value = base_parameters.get(key, config["default"])
+            offset = profile[key][month_index]
+            jitter = rng.normal(0.0, jitter_frac * (config["max"] - config["min"]))
+            return float(np.clip(base_value + offset + jitter, config["min"], config["max"]))
+
+        params["air_temp_entry"] = _apply_offset("air_temp_entry", WEATHER.AIR_TEMP_ENTRY)
+        params["solar_power"] = _apply_offset("solar_power", WEATHER.SOLAR_POWER)
+        params["wind_speed_factor"] = _apply_offset("wind_speed_factor", WEATHER.WIND_SPEED_FACTOR)
+        params["air_humidity_entry"] = _apply_offset("air_humidity_entry", WEATHER.AIR_HUMIDITY_ENTRY)
+
+        # Windrichtung ist zirkular - Rotation der Basisrichtung um eine
+        # saisonale Amplitude (moderat, "vorherrschende Richtung" soll nicht
+        # beliebig kippen) statt eines linearen Offsets (0/360°-Wrap-Bug).
+        base_direction = base_parameters.get(
+            "prevailing_wind_direction", WEATHER.PREVAILING_WIND_DIRECTION["default"])
+        wind_swing_deg = 35.0
+        seasonal_strength = profile["air_temp_entry"][month_index] / 9.0  # -1..1-artige Normierung
+        params["prevailing_wind_direction"] = (
+            base_direction + wind_swing_deg * seasonal_strength + rng.normal(0.0, 8.0)
+        ) % 360.0
+
+        # Für _generate_pressure_noise() (CPU) und den GPU-Gegenpart in
+        # shader_manager.py - macht das kleinräumige Windfeld-Rauschmuster
+        # pro Monat optisch unterscheidbar statt für alle 6 Perioden identisch.
+        params["month_index"] = month_index
+
+        return params
 
     def _ensure_data_lod_manager(self):
         """Lazy-Fallback für Standalone-Nutzung (Tests, calculate_weather_system()
@@ -216,9 +325,45 @@ class WeatherSystemGenerator:
         if temp_map is None or wind_map is None or humid_map is None or precip_map is None:
             raise ValueError(f"assemble_weather_data: fehlende Calculator-Outputs für LOD {lod_level}")
 
+        # Saisonale Monats-Listen (für die animierte Weather-Tab-Anzeige) -
+        # optional, da nur relevant, wenn die _calc_*-Methoden tatsächlich
+        # über die Monats-Schleife gelaufen sind (z.B. immer der Fall bei der
+        # echten Pipeline, aber None bei alten Cache-Einträgen).
+        temp_map_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.temperature", "temp_map_monthly", lod_level)
+        wind_map_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.wind", "wind_map_monthly", lod_level)
+        humid_map_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.humidity", "humid_map_monthly", lod_level)
+        precip_map_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.precipitation", "precip_map_monthly", lod_level)
+
+        # 3-Schicht-Atmosphäre (siehe AtmosphereLayers/_run_coupled_atmosphere_
+        # simulation, [[project-3layer-wind-cfd]]) - optional, None bei altem
+        # Cache oder falls der gekoppelte Loop diese Runde in den Einzelschicht-
+        # Fallback gefallen ist (siehe _calc_temperature-Docstring).
+        temp_map_layers = self.data_lod_manager.get_calculator_output(
+            "weather.temperature", "temp_map_layers", lod_level)
+        wind_map_layers = self.data_lod_manager.get_calculator_output(
+            "weather.wind", "wind_map_layers", lod_level)
+        humid_map_layers = self.data_lod_manager.get_calculator_output(
+            "weather.humidity", "humid_map_layers", lod_level)
+        temp_map_layers_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.temperature", "temp_map_layers_monthly", lod_level)
+        wind_map_layers_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.wind", "wind_map_layers_monthly", lod_level)
+        humid_map_layers_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.humidity", "humid_map_layers_monthly", lod_level)
+
         target_size = temp_map.shape[0]
         weather_data = self._create_weather_data(
-            wind_map, temp_map, precip_map, humid_map, lod_level, target_size, parameters)
+            wind_map, temp_map, precip_map, humid_map, lod_level, target_size, parameters,
+            wind_map_monthly=wind_map_monthly, temp_map_monthly=temp_map_monthly,
+            precip_map_monthly=precip_map_monthly, humid_map_monthly=humid_map_monthly,
+            temp_map_layers=temp_map_layers, wind_map_layers=wind_map_layers,
+            humid_map_layers=humid_map_layers, temp_map_layers_monthly=temp_map_layers_monthly,
+            wind_map_layers_monthly=wind_map_layers_monthly,
+            humid_map_layers_monthly=humid_map_layers_monthly)
 
         cfd_iterations = self._get_cfd_iterations(lod_level)
         self._update_performance_stats(weather_data, cfd_iterations)
@@ -244,51 +389,565 @@ class WeatherSystemGenerator:
         return heightmap, shadowmap, target_size
 
     def _calc_temperature(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'weather.temperature' (#11)"""
-        self._update_progress("Temperature", 20, "Calculating temperature field with orographic effects...")
+        """
+        Calculator-Node 'weather.temperature' (#11) - Wirtsknoten für die
+        gekoppelte 3-Schicht-Atmosphären-Simulation (siehe
+        _run_coupled_atmosphere_simulation, [[project-3layer-wind-cfd]]).
+
+        Läuft intern über 6 saisonale Zwei-Monats-Perioden (Jan/Feb..Nov/Dez,
+        siehe _generate_seasonal_parameters()). Jeder Monat bekommt seine
+        eigene, astronomisch berechnete Shadowmap (generate_seasonal_sun_angles()
+        + self.shadow_calculator, NICHT der geteilte terrain.shadow-Output -
+        Winter bekommt einen flacheren, Sommer einen steileren Sonnenstand).
+
+        WICHTIG (DAG-Design-Entscheidung): dieser Knoten hat im CALCULATOR_GRAPH
+        keine depends_on-Kante zu weather.wind/weather.humidity - ist also
+        topologisch GARANTIERT der erste der 3, der pro Runde fertig wird.
+        Deshalb läuft der GESAMTE gekoppelte Temp+Wind+Feuchte+Niederschlag-Loop
+        HIER statt in _calc_wind: würde der Loop stattdessen in _calc_wind
+        laufen, könnte biome.super_override (hängt NUR von weather.temperature
+        ab, nicht von weather.wind) einen nur-"geseedeten" temp_map-Wert lesen,
+        bevor der Loop fertig ist - ein Race-Window, das mit dem Loop hier
+        (wo kein Zwischenzustand existiert, der fälschlich als fertig gilt)
+        gar nicht erst entsteht. Ergebnisse werden explizit unter ALLEN 4
+        Calculator-IDs gespeichert (set_calculator_output nimmt calculator_id
+        als reinen String ohne Validierung gegen den ausführenden Knoten
+        entgegen) - _calc_wind/_calc_humidity/_calc_precipitation werden
+        dadurch zu dünnen Pass-Throughs (siehe deren Docstrings).
+
+        Die GROUND-Schicht füllt weiterhin temp_map/wind_map/humid_map/
+        precip_map (+ _monthly) - exakt wie vor dem 3-Schicht-Umbau, für
+        Rückwärtskompatibilität mit 2D/3D-Anzeige, water.evaporation und allen
+        Biome-Knoten. Die vollen 3 Schichten landen zusätzlich, rein additiv,
+        unter *_layers/*_layers_monthly (siehe WeatherData).
+
+        Fallback: schlägt der gekoppelte Loop fehl (Exception - z.B. bei
+        pathologischen Eingaben), fällt dieser Knoten auf die alte
+        Einzelschicht-Temperatur-Logik zurück und schreibt NUR
+        temp_map/temp_map_monthly/shadowmap_monthly - wind/humidity/
+        precipitation bleiben dann unter ihren jeweiligen calculator_ids leer,
+        wodurch die Pass-Through-Knoten IHREN eigenen alten Einzelschicht-
+        Fallback auslösen (etabliertes 3-stufiges Fallback-Muster dieser Datei).
+        """
+        self._update_progress("Temperature", 20, "Calculating coupled 3-layer atmosphere...")
         heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
-        temp_map = self._calculate_temperature_field(
-            heightmap, shadowmap, self._current_parameters, target_size)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"temp_map": temp_map})
+        atmosphere_steps = self._get_atmosphere_loop_steps(lod_level)
+
+        from gui.config.value_default import WEATHER
+        from core.terrain_generator import generate_seasonal_sun_angles
+        latitude = self._current_parameters.get('map_latitude', WEATHER.MAP_LATITUDE["default"])
+        longitude = self._current_parameters.get('map_longitude', WEATHER.MAP_LONGITUDE["default"])
+
+        monthly_shadowmaps = []
+        month_params_list = []
+        for month_index in range(6):
+            month_params = self._generate_seasonal_parameters(self._current_parameters, month_index)
+            sun_angles = generate_seasonal_sun_angles(month_index, latitude, longitude)
+            month_shadowmap = self.shadow_calculator.calculate_shadows(
+                heightmap, lod_level, sun_angles_override=sun_angles)
+            monthly_shadowmaps.append(month_shadowmap)
+            month_params_list.append(month_params)
+
+        try:
+            monthly_temp_maps, monthly_wind_maps = [], []
+            monthly_humid_maps, monthly_precip_maps = [], []
+            monthly_temp_layers, monthly_wind_layers, monthly_humid_layers = [], [], []
+
+            for month_index in range(6):
+                result = self._run_coupled_atmosphere_simulation(
+                    heightmap, monthly_shadowmaps[month_index], month_params_list[month_index],
+                    target_size, n_steps=atmosphere_steps)
+
+                monthly_temp_layers.append(result['temp_layers'])
+                monthly_wind_layers.append(result['wind_layers'])
+                monthly_humid_layers.append(result['humid_layers'])
+
+                monthly_temp_maps.append(result['temp_layers'][AtmosphereLayers.GROUND])
+                monthly_wind_maps.append(result['wind_layers'][AtmosphereLayers.GROUND])
+                monthly_humid_maps.append(result['humid_layers'][AtmosphereLayers.GROUND])
+                monthly_precip_maps.append(result['precip_map'])
+
+            # Mehrgenerationen-Puffer für Feuchte (siehe frühere _calc_humidity-
+            # Fassung, Verhalten hier 1:1 erhalten, nur an den neuen Aufrufort
+            # verschoben): gewichteter Mittelwert statt additiver Akkumulation,
+            # PRO Monatsindex, dämpft "kippt bei jedem Lauf komplett in trocken
+            # oder nass"-Verhalten.
+            previous_humid_monthly = self.data_lod_manager.get_calculator_output(
+                "weather.humidity", "humid_map_monthly", lod_level - 1)
+            if previous_humid_monthly is not None:
+                for m in range(6):
+                    prev_m = previous_humid_monthly[m]
+                    if prev_m.shape[0] != monthly_humid_maps[m].shape[0]:
+                        prev_m = self._interpolate_2d_bicubic(prev_m, monthly_humid_maps[m].shape[0])
+                    monthly_humid_maps[m] = 0.4 * prev_m + 0.6 * monthly_humid_maps[m]
+
+            temp_map = np.mean(np.stack(monthly_temp_maps, axis=0), axis=0).astype(np.float32)
+            wind_map = np.mean(np.stack(monthly_wind_maps, axis=0), axis=0).astype(np.float32)
+            humid_map = np.mean(np.stack(monthly_humid_maps, axis=0), axis=0).astype(np.float32)
+            precip_map = np.mean(np.stack(monthly_precip_maps, axis=0), axis=0).astype(np.float32)
+
+            temp_map_layers = np.mean(np.stack(monthly_temp_layers, axis=0), axis=0).astype(np.float32)
+            wind_map_layers = np.mean(np.stack(monthly_wind_layers, axis=0), axis=0).astype(np.float32)
+            humid_map_layers = np.mean(np.stack(monthly_humid_layers, axis=0), axis=0).astype(np.float32)
+
+            self.data_lod_manager.set_calculator_output(
+                "weather.temperature", lod_level,
+                {"temp_map": temp_map, "temp_map_monthly": monthly_temp_maps,
+                 "shadowmap_monthly": monthly_shadowmaps,
+                 "temp_map_layers": temp_map_layers, "temp_map_layers_monthly": monthly_temp_layers})
+            self.data_lod_manager.set_calculator_output(
+                "weather.wind", lod_level,
+                {"wind_map": wind_map, "wind_map_monthly": monthly_wind_maps,
+                 "wind_map_layers": wind_map_layers, "wind_map_layers_monthly": monthly_wind_layers})
+            self.data_lod_manager.set_calculator_output(
+                "weather.humidity", lod_level,
+                {"humid_map": humid_map, "humid_map_monthly": monthly_humid_maps,
+                 "humid_map_layers": humid_map_layers, "humid_map_layers_monthly": monthly_humid_layers})
+            self.data_lod_manager.set_calculator_output(
+                "weather.precipitation", lod_level,
+                {"precip_map": precip_map, "precip_map_monthly": monthly_precip_maps})
+
+        except Exception as e:
+            self.logger.warning(
+                f"weather.temperature: gekoppelte 3-Schicht-Simulation fehlgeschlagen ({e}) - "
+                f"Fallback auf Einzelschicht-Temperatur, Wind/Feuchte/Niederschlag "
+                f"nutzen ihren eigenen Einzelschicht-Fallback")
+            monthly_temp_maps = [
+                self._calculate_temperature_field(
+                    heightmap, monthly_shadowmaps[m], month_params_list[m], target_size)
+                for m in range(6)
+            ]
+            temp_map = np.mean(np.stack(monthly_temp_maps, axis=0), axis=0).astype(np.float32)
+            self.data_lod_manager.set_calculator_output(
+                "weather.temperature", lod_level,
+                {"temp_map": temp_map, "temp_map_monthly": monthly_temp_maps,
+                 "shadowmap_monthly": monthly_shadowmaps})
 
     def _calc_wind(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'weather.wind' (#12)"""
-        cfd_iterations = self._get_cfd_iterations(lod_level)
-        self._update_progress("Wind Field", 30, f"CFD simulation with {cfd_iterations} iterations...")
-        heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
-        temp_map = self.data_lod_manager.get_calculator_output("weather.temperature", "temp_map", lod_level)
-        if temp_map is None:
-            raise ValueError(f"weather.wind: temp_map für LOD {lod_level} nicht verfügbar")
+        """
+        Calculator-Node 'weather.wind' (#12) - dünner Pass-Through. Der
+        eigentliche Wind wird bereits vom gekoppelten 3-Schicht-Loop in
+        _calc_temperature berechnet und unter dieser calculator_id gespeichert
+        (siehe dortiger Docstring, [[project-3layer-wind-cfd]] für die DAG-
+        Begründung). Ist der Wert schon da (Normalfall - weather.temperature
+        hat keine Abhängigkeit zu diesem Knoten, läuft also garantiert
+        zuerst), ist dieser Aufruf ein No-Op, der nur zügig zurückkehrt (damit
+        der Orchestrator mark_completed('weather.wind') auslöst, worauf eigene
+        Downstream-Konsumenten warten).
 
-        wind_map = self._simulate_wind_field_cfd(
-            heightmap, temp_map, shadowmap, self._current_parameters, target_size, cfd_iterations)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"wind_map": wind_map})
+        Fallback: ist der Wert NICHT da (z.B. weil _calc_temperature's
+        gekoppelter Loop fehlschlug), auf die alte Einzelschicht-CFD
+        zurückfallen - etabliertes 3-stufiges Fallback-Muster dieser Datei.
+        """
+        existing = self.data_lod_manager.get_calculator_output(calculator_id, "wind_map", lod_level)
+        if existing is not None:
+            return
+
+        self.logger.warning("weather.wind: kein Ergebnis vom gekoppelten Loop gefunden - Einzelschicht-Fallback")
+        cfd_iterations = self._get_cfd_iterations(lod_level)
+        self._update_progress("Wind Field", 30, f"Fallback CFD simulation with {cfd_iterations} iterations...")
+        heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
+        temp_map_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.temperature", "temp_map_monthly", lod_level)
+        shadowmap_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.temperature", "shadowmap_monthly", lod_level)
+        if temp_map_monthly is None:
+            raise ValueError(f"weather.wind: temp_map_monthly für LOD {lod_level} nicht verfügbar")
+
+        monthly_wind_maps = []
+        for month_index in range(6):
+            month_params = self._generate_seasonal_parameters(self._current_parameters, month_index)
+            month_temp_map = temp_map_monthly[month_index]
+            month_shadowmap = shadowmap_monthly[month_index] if shadowmap_monthly else shadowmap
+            monthly_wind_maps.append(self._simulate_wind_field_cfd(
+                heightmap, month_temp_map, month_shadowmap, month_params, target_size, cfd_iterations))
+
+        wind_map = np.mean(np.stack(monthly_wind_maps, axis=0), axis=0).astype(np.float32)
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"wind_map": wind_map, "wind_map_monthly": monthly_wind_maps})
 
     def _calc_humidity(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'weather.humidity' (#13)"""
-        self._update_progress("Humidity", 60, "Calculating atmospheric moisture transport...")
+        """
+        Calculator-Node 'weather.humidity' (#13) - dünner Pass-Through, analog
+        zu _calc_wind. Die eigentliche Feuchte (inkl. Mehrgenerationen-Puffer-
+        Blending) wird bereits vom gekoppelten Loop in _calc_temperature
+        berechnet und gespeichert.
+
+        Fallback: alte Einzelschicht-Logik inkl. eigenem Mehrgenerationen-
+        Puffer-Blend, falls _calc_temperature's Loop fehlschlug.
+        """
+        existing = self.data_lod_manager.get_calculator_output(calculator_id, "humid_map", lod_level)
+        if existing is not None:
+            return
+
+        self.logger.warning("weather.humidity: kein Ergebnis vom gekoppelten Loop gefunden - Einzelschicht-Fallback")
+        self._update_progress("Humidity", 60, "Fallback atmospheric moisture transport...")
         heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
-        temp_map = self.data_lod_manager.get_calculator_output("weather.temperature", "temp_map", lod_level)
-        wind_map = self.data_lod_manager.get_calculator_output("weather.wind", "wind_map", lod_level)
-        if temp_map is None or wind_map is None:
+        temp_map_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.temperature", "temp_map_monthly", lod_level)
+        wind_map_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.wind", "wind_map_monthly", lod_level)
+        if temp_map_monthly is None or wind_map_monthly is None:
             raise ValueError(f"weather.humidity: fehlende Inputs für LOD {lod_level}")
 
-        humid_map = self._calculate_atmospheric_moisture(heightmap, temp_map, wind_map, self._current_parameters)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"humid_map": humid_map})
+        hardness_map = self.data_lod_manager.get_calculator_output(
+            "geology.hardness", "hardness_map", lod_level)
+        if hardness_map is not None and hardness_map.shape[0] != heightmap.shape[0]:
+            hardness_map = self._interpolate_2d_bicubic(hardness_map, heightmap.shape[0])
+
+        previous_monthly = self.data_lod_manager.get_calculator_output(
+            calculator_id, "humid_map_monthly", lod_level - 1)
+
+        monthly_humid_maps = []
+        for month_index in range(6):
+            month_params = self._generate_seasonal_parameters(self._current_parameters, month_index)
+            humid_map_m = self._calculate_atmospheric_moisture(
+                heightmap, temp_map_monthly[month_index], wind_map_monthly[month_index],
+                month_params, hardness_map=hardness_map)
+
+            if previous_monthly is not None:
+                prev_m = previous_monthly[month_index]
+                if prev_m.shape[0] != humid_map_m.shape[0]:
+                    prev_m = self._interpolate_2d_bicubic(prev_m, humid_map_m.shape[0])
+                humid_map_m = 0.4 * prev_m + 0.6 * humid_map_m
+
+            monthly_humid_maps.append(humid_map_m)
+
+        humid_map = np.mean(np.stack(monthly_humid_maps, axis=0), axis=0).astype(np.float32)
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"humid_map": humid_map, "humid_map_monthly": monthly_humid_maps})
 
     def _calc_precipitation(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'weather.precipitation' (#14)"""
-        self._update_progress("Precipitation", 80, "Calculating orographic precipitation...")
+        """
+        Calculator-Node 'weather.precipitation' (#14) - dünner Pass-Through,
+        analog zu _calc_wind/_calc_humidity. Der eigentliche Niederschlag
+        (akkumulierte Kondensation aus dem gekoppelten Loop + orographischer
+        Zusatzbeitrag) wird bereits von _calc_temperature berechnet und
+        gespeichert.
+
+        Fallback: alte Einzelschicht-Logik (Luv/Lee + Magnus-Kondensation auf
+        dem finalen Einzelschicht-Snapshot), falls _calc_temperature's Loop
+        fehlschlug.
+        """
+        existing = self.data_lod_manager.get_calculator_output(calculator_id, "precip_map", lod_level)
+        if existing is not None:
+            return
+
+        self.logger.warning(
+            "weather.precipitation: kein Ergebnis vom gekoppelten Loop gefunden - Einzelschicht-Fallback")
+        self._update_progress("Precipitation", 80, "Fallback orographic precipitation...")
         heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
-        temp_map = self.data_lod_manager.get_calculator_output("weather.temperature", "temp_map", lod_level)
-        wind_map = self.data_lod_manager.get_calculator_output("weather.wind", "wind_map", lod_level)
-        humid_map = self.data_lod_manager.get_calculator_output("weather.humidity", "humid_map", lod_level)
-        if temp_map is None or wind_map is None or humid_map is None:
+        temp_map_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.temperature", "temp_map_monthly", lod_level)
+        wind_map_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.wind", "wind_map_monthly", lod_level)
+        humid_map_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.humidity", "humid_map_monthly", lod_level)
+        if temp_map_monthly is None or wind_map_monthly is None or humid_map_monthly is None:
             raise ValueError(f"weather.precipitation: fehlende Inputs für LOD {lod_level}")
 
-        precip_map = self._calculate_precipitation_system(
-            humid_map, temp_map, wind_map, heightmap, self._current_parameters)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"precip_map": precip_map})
+        monthly_precip_maps = []
+        for month_index in range(6):
+            month_params = self._generate_seasonal_parameters(self._current_parameters, month_index)
+            monthly_precip_maps.append(self._calculate_precipitation_system(
+                humid_map_monthly[month_index], temp_map_monthly[month_index],
+                wind_map_monthly[month_index], heightmap, month_params))
+
+        precip_map = np.mean(np.stack(monthly_precip_maps, axis=0), axis=0).astype(np.float32)
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"precip_map": precip_map, "precip_map_monthly": monthly_precip_maps})
+
+    def _semi_lagrangian_advect(self, field: np.ndarray, u: np.ndarray, v: np.ndarray,
+                                y_idx: np.ndarray, x_idx: np.ndarray, dt_scale: float = 0.1) -> np.ndarray:
+        """
+        Allgemeine Semi-Lagrange-Rückwärts-Advektion (siehe [[project-3layer-wind-cfd]],
+        Referenz-Technik aus niels747/2D-Weather-Sandbox): jede Zelle sampelt ihren
+        neuen Wert an position - geschwindigkeit*dt_scale, statt Vorwärts-Differenzen -
+        numerisch stabil, kein CFL-Problem, gilt identisch für Geschwindigkeit,
+        potentielle Temperatur und Feuchte. y_idx/x_idx sind vom Aufrufer
+        vorberechnete np.mgrid-Koordinaten (wird pro Zeitschritt für alle 3
+        Schichten/4 Felder wiederverwendet statt pro Aufruf neu gebaut).
+        dt_scale folgt derselben Stabilitäts-Skalierung wie das bereits bestehende
+        _transport_moisture_simple (dt*0.1).
+        """
+        height, width = field.shape[:2]
+        source_x = np.clip(x_idx - u * dt_scale, 0, width - 1)
+        source_y = np.clip(y_idx - v * dt_scale, 0, height - 1)
+        return map_coordinates(field, [source_y, source_x], order=1, mode='nearest').astype(field.dtype)
+
+    def _run_coupled_atmosphere_simulation(self, heightmap: np.ndarray, shadowmap: np.ndarray,
+                                          month_params: Dict[str, Any], target_size: int,
+                                          n_steps: int) -> Dict[str, np.ndarray]:
+        """
+        Gekoppelte 3-Schicht-Atmosphären-Simulation (Boden/Mittel/Hoch, siehe
+        AtmosphereLayers) - ersetzt das bisherige "Temp einmal -> Wind einmal ->
+        Feuchte einmal"-Muster für EINEN Monat durch einen echten Pro-Zeitschritt-
+        Loop, in dem Wind/Temperatur/Feuchte sich gegenseitig beeinflussen. Wird
+        von _calc_temperature aufgerufen (siehe dortiger Docstring für die DAG-
+        Begründung, warum der Loop dort statt in _calc_wind gehostet wird) -
+        [[project-3layer-wind-cfd]].
+
+        Pro Zeitschritt, pro Schicht:
+          1. Semi-Lagrange-Advektion von u,v,theta (potentielle Temp),q
+          2. Druckgradient (gemeinsames synoptisches Druckfeld je Monat, Terrain-
+             Kopplung nur auf GROUND/gedämpft MID) + additive Terrain-Ablenkung
+             (nur GROUND/gedämpft MID) + thermische Konvektion (Schatten-Term nur
+             GROUND)
+          3. Latentwärme: Kondensation aus Übersättigung (Magnus-Formel, identische
+             Skala wie _calculate_precipitation_cpu/_calculate_atmospheric_moisture_cpu)
+             wärmt, Verdunstung (nur GROUND) kühlt
+        Danach, pro Zeitschritt EINMAL über alle Schichten:
+          4. Vertikaler Austausch (Thermik-getrieben, symmetrische Relaxation
+             zwischen Nachbarschichten - erhält die Schicht-Summe jeder Größe)
+          5. Diffusion + 6-Richtungs-Kontinuitäts-Korrektur (horizontale Divergenz
+             + vertikaler Fluss-Term aus Schritt 4)
+
+        Rückgabe: dict mit 'wind_layers' (3,H,W,2), 'temp_layers' (3,H,W, reale
+        Temperatur), 'humid_layers' (3,H,W), 'precip_map' (H,W).
+        """
+        from gui.config.value_default import WEATHER  # TURBULENCE_STRENGTH-Default weiter unten
+
+        height, width = heightmap.shape
+        L = AtmosphereLayers
+        altitude_cooling_rate = month_params['altitude_cooling'] / 1000.0  # °C/m (Parameter ist °C/km)
+
+        # Latentwärme-Kopplungsstärke: °C pro gH2O/m³ Kondensation/Verdunstung.
+        # Startwert (Bereich 0.05-0.15 laut Plan), empirisch, dokumentiert wie
+        # frühere Kalibrierungen dieser Session - noch nicht am echten Nutzer-
+        # Feedback nachjustiert.
+        LATENT_HEAT_COEFFICIENT = 0.1
+        # Vertikaler Austausch: Bruchteil pro Zeitschritt, der zwischen
+        # Nachbarschichten geblendet wird, proportional zur Thermik-Stärke -
+        # geklemmt, damit ein einzelner Zeitschritt nie mehr als 30% einer
+        # Schicht "leert" (Stabilität, analog zur Diffusions-Rate anderswo in
+        # dieser Datei).
+        MAX_VERTICAL_EXCHANGE_FRACTION = 0.3
+        VERTICAL_EXCHANGE_COEFF = 0.02
+        # Wie stark sich der druckgetriebene Wind-Term pro Zeitschritt Richtung
+        # Druck-Gleichgewicht bewegt, statt (wie im alten Einzelschicht-Code) ihn
+        # jede Iteration hart zu überschreiben - mit echter Advektion (Schritt 1)
+        # ist u/v jetzt eine prognostische, transportierte Größe, ein hartes
+        # Überschreiben würde die advehierte Struktur jedes Mal zerstören.
+        PRESSURE_RELAX_RATE = 0.3
+        # Wind-Geschwindigkeits-Multiplikatoren für die Initialbedingung je
+        # Schicht (Wind nimmt mit Höhe zu, geringere Bodenreibung) - nur
+        # Startwert, der Loop entwickelt die tatsächliche Struktur.
+        LAYER_WIND_SEED_MULT = (1.0, 1.3, 1.6)
+        LAYER_HUMID_SEED_MULT = (1.0, 0.5, 0.2)
+        # Terrain-Kopplung/-Ablenkung (die diese Session zuvor für die
+        # Einzelschicht-CFD hinzugefügten Terme) wirkt gedämpft mit der Höhe -
+        # voll auf GROUND, exponentiell gedämpft auf MID, gar nicht auf HIGH
+        # (siehe [[project-3layer-wind-cfd]]: der primäre Terrain-
+        # Beschleunigungseffekt entsteht jetzt aus der Kontinuitätskorrektur
+        # über die terrain-folgende Schichtgeometrie selbst).
+        TERRAIN_TERM_SCALE = (1.0, float(np.exp(-L.REF_ALTITUDE_AGL[L.MID] / 1000.0)), 0.0)
+        # Vorticity Confinement (Fedkiw/Stam, siehe _apply_vorticity_confinement)
+        # - Turbulenz entsteht überwiegend durch Bodenreibung/Oberflächen-Rauheit,
+        # deshalb stärker auf GROUND, schwächer auf MID/HIGH (aber nicht 0 wie bei
+        # den Terrain-Termen - auch die freie Atmosphäre zeigt etwas Verwirbelung).
+        VORTICITY_LAYER_SCALE = (1.0, 0.6, 0.3)
+
+        y_idx, x_idx = np.mgrid[0:height, 0:width].astype(np.float64)
+        slopemap = self._calculate_slopes_vectorized(heightmap)
+
+        # Rand-Verstärkung für Vorticity Confinement (Nutzer-Wunsch: "an der
+        # Kartengrenze mehr Varianz" - der Kartenrand ist, wo die synoptische
+        # Randbedingung einströmt, dort real am wenigsten "ausgeglichen"). Faktor
+        # 1.0 in der Kartenmitte, bis 2.5x direkt am Rand, exponentiell abklingend
+        # über ~8% der Kartengröße - Startwerte, empirisch nachjustierbar.
+        edge_dist = np.minimum.reduce([x_idx, width - 1 - x_idx, y_idx, height - 1 - y_idx])
+        vorticity_edge_boost = (1.0 + 1.5 * np.exp(
+            -edge_dist / max(0.08 * min(height, width), 1e-6))).astype(np.float32)
+
+        # Gemeinsames synoptisches Druckfeld (eine Größenordnung, alle Schichten
+        # spüren dieselbe großräumige Richtung + Monats-Rauschen - nur die
+        # Terrain-Kopplung unten unterscheidet sich pro Schicht).
+        wind_direction_deg = month_params.get('prevailing_wind_direction', 0.0)
+        pressure_field = self._build_directional_pressure_field(height, width, wind_direction_deg)
+        pressure_field = pressure_field + self._generate_pressure_noise(
+            (height, width), month_params.get('month_index', 0)) * 0.15
+
+        height_range = heightmap.max() - heightmap.min()
+        height_normalized = (heightmap - heightmap.min()) / height_range if height_range > 1e-6 \
+            else np.zeros_like(heightmap, dtype=np.float32)
+        terrain_pressure_layers = [
+            height_normalized * month_params['terrain_factor'] * 0.2 * TERRAIN_TERM_SCALE[i]
+            for i in range(L.COUNT)
+        ]
+
+        # --- Initialbedingung ---
+        surface_temp = self._calculate_temperature_field(heightmap, shadowmap, month_params, target_size)
+        # Konstante potentielle Temperatur über alle Schichten als Start (gut
+        # durchmischte Atmosphäre) - reale Temperatur pro Schicht ergibt sich
+        # daraus automatisch kälter mit Höhe (siehe Klassen-Docstring von
+        # AtmosphereLayers).
+        theta = [surface_temp.astype(np.float32).copy() for _ in range(L.COUNT)]
+
+        base_wind = self._simulate_wind_field_simple(heightmap, month_params)
+        u = [(base_wind[:, :, 0] * LAYER_WIND_SEED_MULT[i]).astype(np.float32) for i in range(L.COUNT)]
+        v = [(base_wind[:, :, 1] * LAYER_WIND_SEED_MULT[i]).astype(np.float32) for i in range(L.COUNT)]
+
+        ground_temp_c = np.clip(theta[L.GROUND] - altitude_cooling_rate * L.REF_ALTITUDE_AGL[L.GROUND], -50, 60)
+        sat_vp0 = 6.112 * np.exp(17.67 * ground_temp_c / (ground_temp_c + 243.5))
+        ground_wind_speed0 = np.sqrt(u[L.GROUND] ** 2 + v[L.GROUND] ** 2)
+        wind_factor0 = np.minimum(2.0, ground_wind_speed0 / 5.0)
+        evap_rate0 = 0.5 * (sat_vp0 / 100.0) * (1.0 + wind_factor0)  # soil_moisture=50/100=0.5
+        q = [(evap_rate0 * 140.0 * LAYER_HUMID_SEED_MULT[i]).astype(np.float32) for i in range(L.COUNT)]
+
+        precip_accum = np.zeros((height, width), dtype=np.float32)
+
+        for step in range(n_steps):
+            if step % max(1, n_steps // 5) == 0:
+                progress = 20 + (step / max(1, n_steps)) * 40
+                self._update_progress("Atmosphere", int(progress), f"Coupled step {step + 1}/{n_steps}")
+
+            t_real = [None] * L.COUNT
+            for i in range(L.COUNT):
+                # 1. Semi-Lagrange-Advektion (alle 4 Felder mit dem VOR der
+                # Advektion gültigen Geschwindigkeitsfeld rückwärts-gesampelt -
+                # Standard-Semi-Lagrange-Konsistenz).
+                u_old, v_old = u[i], v[i]
+                u[i] = self._semi_lagrangian_advect(u_old, u_old, v_old, y_idx, x_idx)
+                v[i] = self._semi_lagrangian_advect(v_old, u_old, v_old, y_idx, x_idx)
+                theta[i] = self._semi_lagrangian_advect(theta[i], u_old, v_old, y_idx, x_idx)
+                q[i] = self._semi_lagrangian_advect(q[i], u_old, v_old, y_idx, x_idx)
+
+                # 2a. Druckgradient - Relaxation statt hartem Reset (siehe
+                # PRESSURE_RELAX_RATE-Kommentar oben).
+                pressure_iter = pressure_field - terrain_pressure_layers[i]
+                grad_x = np.zeros((height, width), dtype=np.float32)
+                grad_y = np.zeros((height, width), dtype=np.float32)
+                grad_x[:, 1:-1] = (pressure_iter[:, 2:] - pressure_iter[:, :-2]) * 0.5
+                grad_y[1:-1, :] = (pressure_iter[2:, :] - pressure_iter[:-2, :]) * 0.5
+                u_target = -grad_x * month_params['wind_speed_factor'] * 10.0
+                v_target = -grad_y * month_params['wind_speed_factor'] * 10.0
+                u[i] += (u_target - u[i]) * PRESSURE_RELAX_RATE
+                v[i] += (v_target - v[i]) * PRESSURE_RELAX_RATE
+
+                # 2b. Terrain-Ablenkung (gedämpft mit Höhe, siehe TERRAIN_TERM_SCALE)
+                terrain_term = month_params['terrain_factor'] * 0.5 * TERRAIN_TERM_SCALE[i]
+                if terrain_term != 0.0:
+                    u[i] += slopemap[:, :, 1] * terrain_term
+                    v[i] -= slopemap[:, :, 0] * terrain_term
+
+                # 2c. Thermische Konvektion (Schatten-Term nur GROUND - nur die
+                # Bodenschicht "sieht" die Sonneneinstrahlung direkt, siehe
+                # Docstring Schritt 3 in der Klassen-Beschreibung oben).
+                t_real[i] = theta[i] - altitude_cooling_rate * L.REF_ALTITUDE_AGL[i]
+                temp_grad_x = np.zeros((height, width), dtype=np.float32)
+                temp_grad_y = np.zeros((height, width), dtype=np.float32)
+                temp_grad_x[:, 1:-1] = (t_real[i][:, 2:] - t_real[i][:, :-2]) * 0.5
+                temp_grad_y[1:-1, :] = (t_real[i][2:, :] - t_real[i][:-2, :]) * 0.5
+                convection_strength = (t_real[i] - np.mean(t_real[i])) * month_params['thermic_effect'] * 0.08
+                u[i] += temp_grad_x * 0.05 + convection_strength
+                if i == L.GROUND:
+                    if len(shadowmap.shape) == 3:
+                        shadow_avg = np.mean(shadowmap, axis=2)
+                    else:
+                        shadow_avg = shadowmap
+                    shadow_effect = (shadow_avg - 0.5) * month_params['thermic_effect'] * 0.15
+                    v[i] += temp_grad_y * 0.05 + shadow_effect
+                else:
+                    v[i] += temp_grad_y * 0.05
+
+                # 3. Latentwärme - identische Magnus-Skala wie
+                # _calculate_precipitation_cpu/_calculate_atmospheric_moisture_cpu
+                # (siehe [[project-precip-humidity-calibration]]), KEIN zweites
+                # Feuchte-Einheitensystem.
+                t_clamped = np.clip(t_real[i], -40, 50)
+                rho_max = 5.0 * np.exp(0.06 * t_clamped)
+                oversaturation = np.maximum(0.0, q[i] / np.maximum(rho_max, 1e-6) - 1.0)
+                condensation = np.minimum(oversaturation * rho_max * 0.6, q[i])
+                theta[i] += condensation * LATENT_HEAT_COEFFICIENT
+                q[i] = np.maximum(q[i] - condensation, 0.0)
+                if i in (L.GROUND, L.MID):
+                    precip_accum += condensation
+
+                if i == L.GROUND:
+                    ground_temp_c = np.clip(t_real[i], -50, 60)
+                    sat_vp = 6.112 * np.exp(17.67 * ground_temp_c / (ground_temp_c + 243.5))
+                    wind_speed = np.sqrt(u[i] ** 2 + v[i] ** 2)
+                    wind_factor = np.minimum(2.0, wind_speed / 5.0)
+                    evap_rate = 0.5 * (sat_vp / 100.0) * (1.0 + wind_factor)
+                    # Über n_steps verteilt, damit die kumulierte Zufuhr über den
+                    # ganzen Loop näherungsweise dieselbe Größenordnung erreicht
+                    # wie der bisherige Einzelschuss-Faktor 140.0.
+                    evap_source = evap_rate * 140.0 / max(n_steps, 1)
+                    q[L.GROUND] += evap_source
+                    theta[L.GROUND] -= evap_source * LATENT_HEAT_COEFFICIENT
+
+            # 4. Vertikaler Austausch (Thermik-getrieben, symmetrische Relaxation
+            # - erhält die Schicht-Summe von theta/q/u/v exakt, siehe
+            # Methoden-Docstring).
+            w_gm = np.maximum(0.0, t_real[L.GROUND] - t_real[L.MID]) * month_params['thermic_effect'] \
+                * VERTICAL_EXCHANGE_COEFF
+            w_mh = np.maximum(0.0, t_real[L.MID] - t_real[L.HIGH]) * month_params['thermic_effect'] \
+                * VERTICAL_EXCHANGE_COEFF
+            f_gm = np.clip(w_gm, 0.0, MAX_VERTICAL_EXCHANGE_FRACTION)
+            f_mh = np.clip(w_mh, 0.0, MAX_VERTICAL_EXCHANGE_FRACTION)
+
+            for field_list in (theta, q, u, v):
+                lower, mid_, upper = field_list[L.GROUND], field_list[L.MID], field_list[L.HIGH]
+                delta_gm = f_gm * (lower - mid_)
+                delta_mh = f_mh * (mid_ - upper)
+                field_list[L.GROUND] = lower - delta_gm
+                field_list[L.MID] = mid_ + delta_gm - delta_mh
+                field_list[L.HIGH] = upper + delta_mh
+
+            vertical_flux_terms = (
+                -w_gm / AtmosphereLayers.THICKNESS_M[L.GROUND],
+                (w_gm - w_mh) / AtmosphereLayers.THICKNESS_M[L.MID],
+                w_mh / AtmosphereLayers.THICKNESS_M[L.HIGH],
+            )
+
+            # 5. Diffusion + Vorticity Confinement + 6-Richtungs-Kontinuitätskorrektur
+            # pro Schicht. Vorticity Confinement läuft NACH der Diffusion (die
+            # Diffusion glättet zuerst, numerische Stabilität bleibt erhalten) und
+            # VOR der Kontinuitätskorrektur (die das Ergebnis danach wieder auf
+            # Massenerhaltung ausbalanciert) - würde die Reihenfolge vertauscht,
+            # würde die Diffusion die injizierte Verwirbelung im selben Schritt
+            # wieder wegbügeln.
+            turbulence_strength = month_params.get(
+                'turbulence_strength', WEATHER.TURBULENCE_STRENGTH["default"])
+            for i in range(L.COUNT):
+                wind_field_i = np.stack([u[i], v[i]], axis=-1).astype(np.float32)
+                wind_field_i = self._apply_wind_diffusion(wind_field_i, 0.1)
+                if turbulence_strength > 0.0:
+                    vorticity_strength_i = (
+                        turbulence_strength * VORTICITY_LAYER_SCALE[i] * vorticity_edge_boost)
+                    self._apply_vorticity_confinement(wind_field_i, vorticity_strength_i)
+                self._apply_continuity_correction(wind_field_i, vertical_flux_term=vertical_flux_terms[i])
+                u[i], v[i] = wind_field_i[:, :, 0], wind_field_i[:, :, 1]
+
+        # --- Ergebnis zusammensetzen ---
+        temp_layers = np.stack(
+            [theta[i] - altitude_cooling_rate * L.REF_ALTITUDE_AGL[i] for i in range(L.COUNT)], axis=0
+        ).astype(np.float32)
+        wind_layers = np.stack(
+            [np.stack([u[i], v[i]], axis=-1) for i in range(L.COUNT)], axis=0
+        ).astype(np.float32)
+        humid_layers = np.stack(q, axis=0).astype(np.float32)
+
+        # Orographischer Zusatzbeitrag (Luv-/Lee, identische Formel wie
+        # _calculate_precipitation_cpu) auf Basis der finalen GROUND-Schicht -
+        # separat von precip_accum gehalten, um Magnus-Kondensation nicht
+        # doppelt zu zählen (precip_accum hat die Kondensation bereits über
+        # den ganzen Loop akkumuliert).
+        wind_speed_ground = np.sqrt(wind_layers[L.GROUND, :, :, 0] ** 2 + wind_layers[L.GROUND, :, :, 1] ** 2)
+        wind_norm_x = np.where(wind_speed_ground > 0.1, wind_layers[L.GROUND, :, :, 0] / wind_speed_ground, 0)
+        wind_norm_y = np.where(wind_speed_ground > 0.1, wind_layers[L.GROUND, :, :, 1] / wind_speed_ground, 0)
+        wind_slope_alignment = wind_norm_x * slopemap[:, :, 0] + wind_norm_y * slopemap[:, :, 1]
+        orographic_factor = np.maximum(0, wind_slope_alignment) * wind_speed_ground * 0.3
+        oro_precip = humid_layers[L.GROUND] * orographic_factor * 0.05
+
+        precip_map = np.clip(precip_accum + oro_precip, 0.0, 500.0).astype(np.float32)
+
+        return {
+            'wind_layers': wind_layers,
+            'temp_layers': temp_layers,
+            'humid_layers': humid_layers,
+            'precip_map': precip_map,
+        }
 
     def _validate_inputs(self, heightmap_combined: np.ndarray, shadowmap: np.ndarray,
                         parameters: Dict[str, Any], lod_level: int):
@@ -364,6 +1023,36 @@ class WeatherSystemGenerator:
         }
 
         return iteration_mapping.get(lod_level, 25)  # 25+ Iterationen für höchste LODs
+
+    def _get_atmosphere_loop_steps(self, lod_level: int) -> int:
+        """
+        Bestimmt die Zeitschritt-Anzahl für den gekoppelten 3-Schicht-Atmosphäre-
+        Loop (_run_coupled_atmosphere_simulation, [[project-3layer-wind-cfd]]) -
+        EIGENSTÄNDIG von _get_cfd_iterations() oben, das weiterhin nur die
+        Einzelschicht-Fallback-Pfade treibt (_calc_wind/_calc_humidity/
+        _calc_precipitation, falls der gekoppelte Loop fehlschlägt) und für einen
+        anderen, bereits kalibrierten Algorithmus gilt - nicht automatisch mit
+        hochziehen.
+
+        Grob verdoppelt gegenüber der alten Tabelle: mit den alten, niedrigen
+        Werten blieb zu wenig "Simulationszeit", damit sich die tatsächlich
+        monats-variierenden Treiber (Windrichtungs-Drehung, Monats-Rauschen im
+        Druckfeld/in der Bodentemperatur, monatliche Sonnenstand-Shadowmap) gegen
+        das terrain-dominierte Gleichgewicht durchsetzen, bevor der Loop endet -
+        empirisch bestätigt über eine paarweise räumliche Korrelation von
+        humid_map_monthly von 0.72-0.96 (praktisch identisches Muster über alle
+        6 Monate, nur das Niveau verschob sich). Startwerte, nutzerseitig als
+        Performance-Kosten akzeptiert (vor dem geplanten GPU-Port).
+        """
+        step_mapping = {
+            1: 8,   # LOD 32x32
+            2: 12,  # LOD 64x64
+            3: 18,  # LOD 128x128
+            4: 25,  # LOD 256x256
+            5: 35,  # LOD 512x512
+            6: 50,  # LOD 1024x1024
+        }
+        return step_mapping.get(lod_level, 60)
 
     def _prepare_input_data(self, heightmap_combined: np.ndarray, shadowmap: np.ndarray,
                            target_size: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -470,7 +1159,8 @@ class WeatherSystemGenerator:
         temp_map += latitude_effect
 
         # Atmospheric Noise-Variation
-        noise_variation = self._generate_atmospheric_noise(heightmap.shape, target_size)
+        noise_variation = self._generate_atmospheric_noise(
+            heightmap.shape, target_size, parameters.get('month_index', 0))
         temp_map += noise_variation
 
         return temp_map
@@ -510,6 +1200,8 @@ class WeatherSystemGenerator:
                         'wind_speed_factor': parameters['wind_speed_factor'],
                         'terrain_factor': parameters['terrain_factor'],
                         'thermic_effect': parameters['thermic_effect'],
+                        'prevailing_wind_direction': parameters.get('prevailing_wind_direction', 0.0),
+                        'month_index': parameters.get('month_index', 0),
                         'cfd_iterations': cfd_iterations,
                         'map_seed': self.map_seed
                     },
@@ -537,6 +1229,28 @@ class WeatherSystemGenerator:
         # Simple-Fallback (Minimal)
         return self._simulate_wind_field_simple(heightmap, parameters)
 
+    def _build_directional_pressure_field(self, height: int, width: int,
+                                           wind_direction_deg: float) -> np.ndarray:
+        """
+        Funktionsweise: Lineares Druckgefälle entlang einer beliebigen
+        Windrichtung (Grad, math. Konvention: 0°=Wind Richtung +x/Ost,
+        90°=+y) - ersetzt das früher hartcodierte West-Ost-Gefälle. Bei
+        wind_direction_deg=0 identisch zur alten Formel (Projektion s
+        entspricht dann x_coords), da 'prevailing_wind_direction' den
+        Windursprung in Ost-Konvention beschreibt.
+        Aufgabe: Treibt die Richtung, aus der der vorherrschende Wind weht,
+        in die initiale Druckfeld-Konstruktion der CFD-Simulation ein - lokale
+        Abweichung entsteht weiterhin über die bestehende Terrain-Ablenkung.
+        """
+        theta = np.radians(wind_direction_deg)
+        dx, dy = np.cos(theta), np.sin(theta)
+        y_idx, x_idx = np.mgrid[0:height, 0:width]
+        s = x_idx * dx + y_idx * dy
+        s_min, s_max = s.min(), s.max()
+        s_range = s_max - s_min
+        s_norm = (s - s_min) / s_range if s_range > 1e-9 else np.zeros_like(s, dtype=np.float32)
+        return (1.0 - s_norm * 0.3).astype(np.float32)
+
     def _simulate_wind_field_cpu_cfd(self, heightmap: np.ndarray, temp_map: np.ndarray,
                                    shadowmap: np.ndarray, parameters: Dict[str, Any],
                                    cfd_iterations: int) -> np.ndarray:
@@ -549,19 +1263,36 @@ class WeatherSystemGenerator:
 
         # Initialisierung
         wind_field = np.zeros((height, width, 2), dtype=np.float32)
-        pressure_field = np.zeros((height, width), dtype=np.float32)
 
         # Slopemap aus Heightmap berechnen (vectorized)
         slopemap = self._calculate_slopes_vectorized(heightmap)
 
-        # Initiales Druckfeld (West-Ost-Gradient mit Noise)
-        x_coords = np.arange(width).reshape(1, -1)
-        pressure_gradient = 1.0 - (x_coords / (width - 1)) * 0.3
-        pressure_field = np.broadcast_to(pressure_gradient, (height, width)).copy()
+        # Initiales Druckfeld entlang der vorherrschenden Windrichtung (mit Noise)
+        wind_direction_deg = parameters.get('prevailing_wind_direction', 0.0)
+        pressure_field = self._build_directional_pressure_field(height, width, wind_direction_deg)
 
         # Noise-Modulation
-        pressure_noise = self._generate_pressure_noise((height, width))
+        pressure_noise = self._generate_pressure_noise((height, width), parameters.get('month_index', 0))
         pressure_field += pressure_noise * 0.15
+
+        # Druck-Terrain-Kopplung: hohe Punkte senken lokal den effektiven
+        # Druck (grobe Orographie-Näherung - Wind beschleunigt an/über
+        # Erhebungen, sammelt sich in Tälern). Anders als die bestehende
+        # additive Terrain-Ablenkung weiter unten (die nur EINMALIG pro
+        # Iteration auf wind_field draufaddiert wird, NACH der Gradienten-
+        # Berechnung) fließt dieser Term VOR der Gradientenberechnung ins
+        # Druckfeld selbst ein - dadurch bleibt die terrain-geprägte Struktur
+        # über die Diffusion/Kontinuitäts-Korrektur der gesamten
+        # Iterationskette hinweg erhalten, statt nur ein einmaliger Nudge auf
+        # ein sonst uniformes Feld zu sein. Koeffizient 0.2 ist ein erster
+        # Richtwert (kleiner als der bestehende additive Term mit 0.5, da
+        # dieser Effekt jetzt über ALLE Iterationen wirkt statt einmalig -
+        # sonst Gefahr von Überkompensation/Instabilität in
+        # _apply_continuity_correction).
+        height_range = heightmap.max() - heightmap.min()
+        height_normalized = (heightmap - heightmap.min()) / height_range if height_range > 1e-6 \
+            else np.zeros_like(heightmap, dtype=np.float32)
+        terrain_pressure_term = height_normalized * parameters['terrain_factor'] * 0.2
 
         # CFD-Iterationen
         for iteration in range(cfd_iterations):
@@ -571,12 +1302,14 @@ class WeatherSystemGenerator:
                 self._update_progress("Wind CFD", int(progress),
                                     f"CFD iteration {iteration + 1}/{cfd_iterations}")
 
-            # Druckgradienten berechnen (vectorized)
+            # Druckgradienten berechnen (vectorized) - Terrain-Kopplung fließt
+            # hier ein, VOR der Gradientenberechnung (siehe Kommentar oben).
+            pressure_field_iter = pressure_field - terrain_pressure_term
             pressure_grad_x = np.zeros_like(pressure_field)
             pressure_grad_y = np.zeros_like(pressure_field)
 
-            pressure_grad_x[:, 1:-1] = (pressure_field[:, 2:] - pressure_field[:, :-2]) * 0.5
-            pressure_grad_y[1:-1, :] = (pressure_field[2:, :] - pressure_field[:-2, :]) * 0.5
+            pressure_grad_x[:, 1:-1] = (pressure_field_iter[:, 2:] - pressure_field_iter[:, :-2]) * 0.5
+            pressure_grad_y[1:-1, :] = (pressure_field_iter[2:, :] - pressure_field_iter[:-2, :]) * 0.5
 
             # Wind aus Druckgradienten
             wind_field[:, :, 0] = -pressure_grad_x * parameters['wind_speed_factor'] * 10.0
@@ -605,9 +1338,12 @@ class WeatherSystemGenerator:
         height, width = heightmap.shape
         wind_field = np.zeros((height, width, 2), dtype=np.float32)
 
-        # Konstanter West-Ost-Wind
+        # Konstanter Wind entlang der vorherrschenden Windrichtung
+        wind_direction_deg = parameters.get('prevailing_wind_direction', 0.0)
+        theta = np.radians(wind_direction_deg)
         base_wind_speed = parameters['wind_speed_factor'] * 5.0
-        wind_field[:, :, 0] = base_wind_speed  # Ostwind
+        wind_field[:, :, 0] = base_wind_speed * np.cos(theta)
+        wind_field[:, :, 1] = base_wind_speed * np.sin(theta)
 
         # Basic Terrain-Ablenkung
         slopemap = self._calculate_slopes_vectorized(heightmap)
@@ -618,11 +1354,18 @@ class WeatherSystemGenerator:
         return wind_field
 
     def _calculate_atmospheric_moisture(self, heightmap: np.ndarray, temp_map: np.ndarray,
-                                      wind_map: np.ndarray, parameters: Dict[str, Any]) -> np.ndarray:
+                                      wind_map: np.ndarray, parameters: Dict[str, Any],
+                                      hardness_map: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Atmospheric-Moisture-Calculation mit Evaporation und Transport
 
         Implementiert Magnus-Formel für Sättigungsdampfdruck und Wind-enhanced Evaporation
+
+        hardness_map: optional, nur vom CPU-Fallback für die hardness-gewichtete
+        Diffusion genutzt (siehe _apply_humidity_diffusion) - der GPU-Pfad nutzt
+        weiterhin humidityDiffusion.comp's einfachen Box-Blur ohne Hardness-
+        Gewichtung (bekannte Lücke, analog zur bewusst zurückgestellten GPU-
+        Watershed-Parität für #42 - eigener Folge-Task, kein Blocker hier).
         """
         try:
             # GPU-Shader-Request (Optimal)
@@ -647,10 +1390,11 @@ class WeatherSystemGenerator:
             self.logger.warning(f"GPU moisture calculation failed: {e}")
 
         # CPU-Fallback (Gut)
-        return self._calculate_atmospheric_moisture_cpu(heightmap, temp_map, wind_map, parameters)
+        return self._calculate_atmospheric_moisture_cpu(heightmap, temp_map, wind_map, parameters, hardness_map)
 
     def _calculate_atmospheric_moisture_cpu(self, heightmap: np.ndarray, temp_map: np.ndarray,
-                                          wind_map: np.ndarray, parameters: Dict[str, Any]) -> np.ndarray:
+                                          wind_map: np.ndarray, parameters: Dict[str, Any],
+                                          hardness_map: Optional[np.ndarray] = None) -> np.ndarray:
         """
         CPU-optimierte Atmospheric-Moisture mit vectorized Operations
         """
@@ -688,7 +1432,7 @@ class WeatherSystemGenerator:
             humid_map = self._transport_moisture_simple(humid_map, wind_map, dt=0.5)
 
         # Diffusion für smooth Distribution
-        humid_map = self._apply_humidity_diffusion(humid_map, iterations=2)
+        humid_map = self._apply_humidity_diffusion(humid_map, iterations=2, hardness_map=hardness_map)
 
         return humid_map
 
@@ -776,7 +1520,12 @@ class WeatherSystemGenerator:
     def _create_weather_data(self, wind_map: np.ndarray, temp_map: np.ndarray,
                            precip_map: np.ndarray, humid_map: np.ndarray,
                            lod_level: int, target_size: int,
-                           parameters: Dict[str, Any]) -> WeatherData:
+                           parameters: Dict[str, Any],
+                           wind_map_monthly=None, temp_map_monthly=None,
+                           precip_map_monthly=None, humid_map_monthly=None,
+                           temp_map_layers=None, wind_map_layers=None, humid_map_layers=None,
+                           temp_map_layers_monthly=None, wind_map_layers_monthly=None,
+                           humid_map_layers_monthly=None) -> WeatherData:
         """
         Erstellt WeatherData-Objekt mit vollständiger LOD-Integration und Validation
         """
@@ -785,6 +1534,18 @@ class WeatherSystemGenerator:
         weather_data.temp_map = temp_map
         weather_data.precip_map = precip_map
         weather_data.humid_map = humid_map
+        weather_data.wind_map_monthly = wind_map_monthly
+        weather_data.temp_map_monthly = temp_map_monthly
+        weather_data.precip_map_monthly = precip_map_monthly
+        weather_data.humid_map_monthly = humid_map_monthly
+        # 3-Schicht-Atmosphäre, rein additiv (siehe [[project-3layer-wind-cfd]]) -
+        # None, falls der gekoppelte Loop diese Runde nicht lief.
+        weather_data.temp_map_layers = temp_map_layers
+        weather_data.wind_map_layers = wind_map_layers
+        weather_data.humid_map_layers = humid_map_layers
+        weather_data.temp_map_layers_monthly = temp_map_layers_monthly
+        weather_data.wind_map_layers_monthly = wind_map_layers_monthly
+        weather_data.humid_map_layers_monthly = humid_map_layers_monthly
         weather_data.lod_level = lod_level
         weather_data.actual_size = target_size
 
@@ -972,43 +1733,72 @@ class WeatherSystemGenerator:
 
         return slopemap
 
-    def _generate_atmospheric_noise(self, shape: Tuple[int, int], target_size: int) -> np.ndarray:
+    def _generate_atmospheric_noise(self, shape: Tuple[int, int], target_size: int,
+                                    month_index: int = 0) -> np.ndarray:
         """
-        Generiert atmospheric Noise-Variation mit Edge-Enhancement
-        """
-        height, width = shape
-        noise_field = np.zeros((height, width), dtype=np.float32)
+        Generiert atmospheric Noise-Variation mit Edge-Enhancement.
 
-        for y in range(height):
-            for x in range(width):
-                # Edge-Factor für stärkere Variation an Kartenrändern
-                edge_factor = self._calculate_edge_factor(x, y, width, height)
+        month_index verschiebt die Noise-Koordinaten um einen fixen Offset - exakt
+        dasselbe Muster wie _generate_pressure_noise() (letzte Runde). Vorher nutzte
+        dieser Aufruf IMMER dieselben Koordinaten (nur von der Pixelposition
+        abhängig) - da dieses Rauschen die Bodentemperatur speist, die wiederum die
+        initiale Feuchte-Quelle des gekoppelten 3-Schicht-Loops treibt, blieb das
+        räumliche MUSTER von humid_map über alle 6 Monate praktisch identisch (nur
+        das Niveau verschob sich über saisonale Parameter) - empirisch bestätigt:
+        paarweise räumliche Korrelation zwischen Monaten lag bei 0.72-0.96. Offset
+        (10 Einheiten pro Monat) liegt deutlich über der OpenSimplex-Kohärenzlänge
+        bei dieser Frequenz, siehe [[project-3layer-wind-cfd]].
 
-                # Noise mit verschiedenen Scales
-                noise_x, noise_y = x / width * 3, y / height * 3
-                noise_val = self.noise_generator.noise2(noise_x, noise_y)
-
-                # Zusätzlicher Noise für höhere LODs
-                if target_size > 128:
-                    noise_val += self.noise_generator.noise2(noise_x * 2, noise_y * 2) * 0.3
-
-                noise_field[y, x] = noise_val * edge_factor * 3.0
-
-        return noise_field
-
-    def _generate_pressure_noise(self, shape: Tuple[int, int]) -> np.ndarray:
-        """
-        Generiert Pressure-Noise für CFD-Simulation
+        Vektorisiert via noise2array() statt der früheren Python-Doppelschleife
+        (identische Formel, inkl. Edge-Enhancement) - selber Grund wie die
+        Vektorisierung der CFD-Hotpaths letzte Runde: wird jetzt pro Monat
+        aufgerufen, nicht mehr nur einmal insgesamt.
         """
         height, width = shape
-        pressure_noise = np.zeros((height, width), dtype=np.float32)
+        offset = month_index * 10.0
 
-        for y in range(height):
-            for x in range(width):
-                noise_x, noise_y = x / width * 2, y / height * 2
-                pressure_noise[y, x] = self.noise_generator.noise2(noise_x, noise_y)
+        x_coords = np.arange(width, dtype=np.float64) / width * 3.0 + offset
+        y_coords = np.arange(height, dtype=np.float64) / height * 3.0 + offset
+        noise_field = self.noise_generator.noise2array(x_coords, y_coords).astype(np.float32)
 
-        return pressure_noise
+        if target_size > 128:
+            noise_field += self.noise_generator.noise2array(
+                x_coords * 2, y_coords * 2).astype(np.float32) * 0.3
+
+        # Edge-Factor für stärkere Variation an Kartenrändern (identische Formel
+        # wie die frühere _calculate_edge_factor(), vektorisiert).
+        y_idx, x_idx = np.mgrid[0:height, 0:width]
+        dist_to_edge = np.minimum.reduce([x_idx, y_idx, width - 1 - x_idx, height - 1 - y_idx])
+        max_dist = max(min(width, height) // 6, 1)
+        edge_factor = np.where(
+            dist_to_edge < max_dist,
+            1.0 + (max_dist - dist_to_edge) / max_dist * 0.8,
+            1.0
+        ).astype(np.float32)
+
+        return noise_field * edge_factor * 3.0
+
+    def _generate_pressure_noise(self, shape: Tuple[int, int], month_index: int = 0) -> np.ndarray:
+        """
+        Generiert Pressure-Noise für CFD-Simulation.
+
+        month_index verschiebt die Noise-Koordinaten um einen fixen Offset -
+        vorher nutzte dieser Aufruf IMMER dieselben Koordinaten (nur von der
+        Pixelposition abhängig), wodurch das kleinräumige, optisch dominante
+        Rauschmuster des Windfelds für alle 6 saisonalen Perioden identisch
+        blieb, während nur die (schwächere) großräumige Grundrichtung
+        rotierte - der Wind wirkte dadurch trotz korrekt saisonal variierender
+        Richtung optisch "eingefroren". Offset (10 Einheiten pro Monat) liegt
+        deutlich über der OpenSimplex-Kohärenzlänge bei dieser Frequenz, das
+        Muster ist pro Monat dadurch optisch unabhängig. Nutzt noise2array()
+        (bereits an anderer Stelle dieser Session verifiziert) statt der
+        früheren Doppel-Schleife - vektorisiert, kein Verhaltensrisiko.
+        """
+        height, width = shape
+        offset = month_index * 10.0
+        x = np.arange(width, dtype=np.float64) / width * 2.0 + offset
+        y = np.arange(height, dtype=np.float64) / height * 2.0 + offset
+        return self.noise_generator.noise2array(x, y).astype(np.float32)
 
     def _apply_thermal_convection(self, wind_field: np.ndarray, temp_map: np.ndarray,
                                  shadowmap: np.ndarray, parameters: Dict[str, Any]):
@@ -1043,119 +1833,202 @@ class WeatherSystemGenerator:
 
     def _apply_wind_diffusion(self, wind_field: np.ndarray, diffusion_rate: float) -> np.ndarray:
         """
-        Wendet Diffusion auf Wind-Field für numerical Stability an
+        Wendet Diffusion auf Wind-Field für numerical Stability an.
+
+        Vektorisiert via np.roll statt der früheren Python-Doppelschleife (identische
+        4-Nachbar-Mittelwert-Formel) - notwendig, weil der neue 3-Schicht-CFD-
+        Zeitschritt-Loop (siehe [[project-3layer-wind-cfd]]) diese Funktion pro Schicht
+        UND pro Zeitschritt aufruft statt wie bisher nur einmal pro Monat; bei größeren
+        LODs wäre die reine Python-Schleife sonst spürbar limitierend. np.roll wraps am
+        Rand um, aber die dadurch "falschen" Werte landen nur in Zeile/Spalte 0 bzw.
+        -1 des Zwischenergebnisses, die am Ende explizit auf die unveränderten
+        Original-Randwerte zurückgesetzt werden (identisch zum alten Verhalten, das
+        Randpixel nie anfasste, da die Schleife bei range(1, height-1) begann).
         """
-        height, width = wind_field.shape[:2]
-        diffused_field = wind_field.copy()
+        neighbor_avg = (
+            np.roll(wind_field, 1, axis=0) + np.roll(wind_field, -1, axis=0) +
+            np.roll(wind_field, 1, axis=1) + np.roll(wind_field, -1, axis=1)
+        ) * 0.25
 
-        for component in [0, 1]:  # x und y Komponenten
-            for y in range(1, height - 1):
-                for x in range(1, width - 1):
-                    neighbors = [
-                        wind_field[y-1, x, component], wind_field[y+1, x, component],
-                        wind_field[y, x-1, component], wind_field[y, x+1, component]
-                    ]
-
-                    neighbor_avg = np.mean(neighbors)
-                    current_value = wind_field[y, x, component]
-
-                    diffused_field[y, x, component] = (current_value +
-                                                     (neighbor_avg - current_value) * diffusion_rate)
+        diffused_field = wind_field + (neighbor_avg - wind_field) * diffusion_rate
+        diffused_field[0, :] = wind_field[0, :]
+        diffused_field[-1, :] = wind_field[-1, :]
+        diffused_field[:, 0] = wind_field[:, 0]
+        diffused_field[:, -1] = wind_field[:, -1]
 
         return diffused_field
 
-    def _apply_continuity_correction(self, wind_field: np.ndarray):
+    def _apply_vorticity_confinement(self, wind_field: np.ndarray, vorticity_strength) -> None:
         """
-        Wendet Kontinuitäts-Correction für Massenerhaltung an (simplified)
+        Vorticity Confinement (Fedkiw/Stam-Standardtechnik, siehe
+        [[project-3layer-wind-cfd]]) - injiziert lokale Rotationsenergie zurück,
+        die _apply_wind_diffusion pro Zeitschritt entfernt. Formel 1:1 aus
+        niels747/2D-Weather-Sandbox's curlShader.frag + vorticityShader.frag
+        übernommen (nicht neu hergeleitet), an unser (H,W,2)-Layout angepasst:
+
+            curl = dv/dx - du/dy                              (skalare 2D-Rotation)
+            force = normalize(grad(|curl|)) * curl * staerke   (Kraft senkrecht zum
+                                                                 |curl|-Gradienten)
+
+        Ohne diesen Fix war der Wind über weite Flächen fast parallel (empirisch
+        ~7.8° mittlere Richtungsänderung zwischen Nachbarpixeln) - reine Diffusion
+        + Kontinuitätskorrektur glätten aktiv jede kleinräumige Verwirbelung weg,
+        die "Turbulenz" ausmacht.
+
+        Modifiziert wind_field IN-PLACE (wie _apply_continuity_correction).
+        vorticity_strength: Skalar ODER (H,W)-Array (z.B. für die Rand-
+        Verstärkung, siehe vorticity_edge_boost in _run_coupled_atmosphere_
+        simulation) - beides funktioniert per NumPy-Broadcasting unverändert.
+
+        STABILITÄTS-KAPPUNG: die Referenz-Formel selbst hat keine eingebaute
+        Grenze - bei uns wird sie über viele Zeitschritte (8-60+, siehe
+        _get_atmosphere_loop_steps) wiederholt angewendet, ohne einen echten
+        Zeitschritt-Skalierungsfaktor dt (anders als im Referenz-Shader, der pro
+        Frame mit einem sehr kleinen, festen dt läuft). Ohne Kappung entsteht eine
+        Rückkopplung (mehr Curl -> mehr Kraft -> mehr Curl im nächsten Schritt),
+        die bei höheren LODs (mehr Iterationen UND feineres Gitter) beobachtbar
+        eskalierte (empirisch: 12 m/s bei LOD1/8 Schritten, 247 m/s bei LOD3/18
+        Schritten - eindeutige Instabilität, kein Rundungsfehler). Kraft-Betrag
+        pro Aufruf auf denselben Größenordnungsbereich gekappt wie die übrigen
+        Pro-Iterations-Terme in dieser Datei (thermische Konvektion, Terrain-
+        Ablenkung: O(0.05-0.5)) - Turbulenz baut sich dadurch über mehrere
+        Schritte graduell auf statt in einem Schritt zu explodieren.
+        """
+        u, v = wind_field[:, :, 0], wind_field[:, :, 1]
+
+        dvdx = np.zeros_like(v)
+        dudy = np.zeros_like(u)
+        dvdx[:, 1:-1] = (v[:, 2:] - v[:, :-2]) * 0.5
+        dudy[1:-1, :] = (u[2:, :] - u[:-2, :]) * 0.5
+        curl = dvdx - dudy
+
+        abs_curl = np.abs(curl)
+        grad_x = np.zeros_like(curl)
+        grad_y = np.zeros_like(curl)
+        grad_x[:, 1:-1] = (abs_curl[:, 2:] - abs_curl[:, :-2]) * 0.5
+        grad_y[1:-1, :] = (abs_curl[2:, :] - abs_curl[:-2, :]) * 0.5
+        magnitude = np.sqrt(grad_x ** 2 + grad_y ** 2) + 1e-6
+
+        force_x = (grad_y / magnitude) * curl * vorticity_strength
+        force_y = (-grad_x / magnitude) * curl * vorticity_strength
+
+        FORCE_CAP = 1.0  # m/s pro Aufruf, siehe Docstring-Begründung oben
+        force_magnitude = np.sqrt(force_x ** 2 + force_y ** 2)
+        scale_down = np.minimum(1.0, FORCE_CAP / np.maximum(force_magnitude, 1e-6))
+        force_x *= scale_down
+        force_y *= scale_down
+
+        wind_field[:, :, 0] += force_x
+        wind_field[:, :, 1] += force_y
+
+    def _apply_continuity_correction(self, wind_field: np.ndarray, vertical_flux_term: Optional[np.ndarray] = None):
+        """
+        Wendet Kontinuitäts-Correction für Massenerhaltung an (simplified).
+
+        vertical_flux_term (optional, (H,W)): zusätzlicher Divergenz-Beitrag aus dem
+        vertikalen Massenaustausch zwischen Atmosphären-Schichten (siehe
+        _run_coupled_atmosphere_simulation Schritt 6, [[project-3layer-wind-cfd]]) -
+        (w_oben - w_unten)/dicke. Positiv = Netto-Massenzufluss von oben/unten in
+        diese Schicht (die Horizontal-Korrektur muss dann netto AUSWärts divergieren,
+        um den Zufluss auszugleichen), negativ = Netto-Abfluss (Konvergenz nötig).
+        None (Default) reproduziert exakt das alte Einzelschicht-2D-Verhalten.
+
+        Vektorisiert via Array-Slicing statt der früheren Python-Doppelschleife
+        (identische zentrale-Differenz-Divergenz-Formel) - selber Grund wie
+        _apply_wind_diffusion oben. dudx/dvdy werden hier für einen größeren Bereich
+        vorberechnet als nötig (dudx für alle Zeilen, dvdy für alle Spalten), aber nur
+        der [1:-1, 1:-1]-Kernbereich (wo im Original BEIDE Differenzen gültig waren)
+        wird tatsächlich auf wind_field angewendet.
+
+        Nicht bit-identisch zum Original, sondern ein Jacobi- statt des alten
+        Gauss-Seidel-artigen Updates: die Schleife modifizierte wind_field SEQUENTIELL
+        in-place, wodurch spätere (y,x)-Zellen in derselben Passage bereits von
+        früheren Zellen korrigierte Nachbarwerte lasen (Scan-Reihenfolge-abhängiger
+        Seiteneffekt, nicht erkennbar als bewusste Design-Entscheidung). Diese Version
+        liest alle Divergenzen aus einem unveränderten Snapshot und wendet die
+        Korrektur erst danach an - isotrop, ordnungsunabhängig, deshalb die
+        physikalisch sauberere Variante derselben Formel. Abweichung vom Original ist
+        klein (empirisch < 2% des typischen Wind-Betrags bei zufälligen Testfeldern),
+        aber real und beabsichtigt, keine Rundungsungenauigkeit.
         """
         height, width = wind_field.shape[:2]
 
-        # Divergence berechnen (simplified)
-        for y in range(1, height - 1):
-            for x in range(1, width - 1):
-                # Divergence: du/dx + dv/dy
-                dudx = (wind_field[y, x+1, 0] - wind_field[y, x-1, 0]) * 0.5
-                dvdy = (wind_field[y+1, x, 1] - wind_field[y-1, x, 1]) * 0.5
+        dudx = np.zeros((height, width), dtype=wind_field.dtype)
+        dvdy = np.zeros((height, width), dtype=wind_field.dtype)
+        dudx[:, 1:-1] = (wind_field[:, 2:, 0] - wind_field[:, :-2, 0]) * 0.5
+        dvdy[1:-1, :] = (wind_field[2:, :, 1] - wind_field[:-2, :, 1]) * 0.5
 
-                divergence = dudx + dvdy
+        divergence = dudx + dvdy
+        if vertical_flux_term is not None:
+            # Netto-Zufluss von oben/unten wirkt wie negative horizontale Divergenz
+            # (die Zelle "will" sich horizontal ausdehnen, um den Zufluss
+            # auszugleichen) - siehe Docstring oben.
+            divergence = divergence - vertical_flux_term
+        correction_factor = -divergence * 0.1
 
-                # Correction-Factor für Massenerhaltung
-                correction_factor = -divergence * 0.1
-
-                wind_field[y, x, 0] += correction_factor * 0.5
-                wind_field[y, x, 1] += correction_factor * 0.5
+        wind_field[1:-1, 1:-1, 0] += correction_factor[1:-1, 1:-1] * 0.5
+        wind_field[1:-1, 1:-1, 1] += correction_factor[1:-1, 1:-1] * 0.5
 
     def _transport_moisture_simple(self, humid_map: np.ndarray, wind_field: np.ndarray,
                                   dt: float = 0.5) -> np.ndarray:
         """
-        Simplified Moisture-Transport durch Advection
+        Simplified Moisture-Transport durch Advection.
+
+        Vektorisiert via scipy.ndimage.map_coordinates statt der früheren Python-
+        Doppelschleife mit manueller bilinearer Interpolation - identische Semi-
+        Lagrange-Rückwärts-Sample-Formel (source = position - wind*dt*skalierung,
+        bilinear an der Quellposition gesampelt), nur vektorisiert. Das ist zugleich
+        die allgemeine Advektions-Primitive, die der neue 3-Schicht-CFD-Zeitschritt-
+        Loop für Wind/Temperatur/Feuchte gleichermaßen braucht (siehe
+        [[project-3layer-wind-cfd]]) - keine Wegwerf-Arbeit. mode='nearest' entspricht
+        dem alten expliziten np.clip auf die Array-Grenzen. Randzeilen/-spalten bleiben
+        wie im Original unverändert (Schleife begann bei range(1, height-1)).
         """
         height, width = humid_map.shape
+        y_idx, x_idx = np.mgrid[0:height, 0:width].astype(np.float64)
+
+        wind_x = wind_field[:, :, 0] * dt * 0.1  # Scaled für Stabilität
+        wind_y = wind_field[:, :, 1] * dt * 0.1
+
+        source_x = np.clip(x_idx - wind_x, 0, width - 1)
+        source_y = np.clip(y_idx - wind_y, 0, height - 1)
+
+        sampled = map_coordinates(humid_map, [source_y, source_x], order=1, mode='nearest')
+
         transported_humid = humid_map.copy()
+        transported_humid[1:-1, 1:-1] = sampled[1:-1, 1:-1]
+        return transported_humid.astype(humid_map.dtype)
 
-        for y in range(1, height - 1):
-            for x in range(1, width - 1):
-                wind_x = wind_field[y, x, 0] * dt * 0.1  # Scaled für Stabilität
-                wind_y = wind_field[y, x, 1] * dt * 0.1
-
-                # Source-Position für Advektion
-                source_x = max(0, min(width - 1, x - wind_x))
-                source_y = max(0, min(height - 1, y - wind_y))
-
-                # Bilineare Interpolation
-                x0, y0 = int(source_x), int(source_y)
-                x1, y1 = min(x0 + 1, width - 1), min(y0 + 1, height - 1)
-
-                fx, fy = source_x - x0, source_y - y0
-
-                h00, h10 = humid_map[y0, x0], humid_map[y0, x1]
-                h01, h11 = humid_map[y1, x0], humid_map[y1, x1]
-
-                h0 = h00 * (1 - fx) + h10 * fx
-                h1 = h01 * (1 - fx) + h11 * fx
-
-                transported_humid[y, x] = h0 * (1 - fy) + h1 * fy
-
-        return transported_humid
-
-    def _apply_humidity_diffusion(self, humid_map: np.ndarray, iterations: int = 2) -> np.ndarray:
+    def _apply_humidity_diffusion(self, humid_map: np.ndarray, iterations: int = 2,
+                                   hardness_map: Optional[np.ndarray] = None) -> np.ndarray:
         """
-        Humidity-Diffusion für natural Distribution
+        Humidity-Diffusion für natural Distribution - echte scipy.ndimage.gaussian_filter-
+        Diffusion statt des früheren handgerollten 4-Nachbar-Box-Blurs (identisches
+        iterations-Argument beibehalten, nur als Sigma-Skalierung statt Loop-Zähler
+        genutzt - Iterations-Anzahl skalierte vorher grob die Diffusionsstärke,
+        das übernimmt jetzt Sigma direkt).
+
+        hardness_map (optional): normiert auf [0,1] und pixelweise als Blend-Gewicht
+        genutzt - result = hardness_norm*original + (1-hardness_norm)*diffused. Weiches
+        Gestein (niedrige hardness) lässt Feuchte stärker zu den Nachbarn diffundieren
+        (mehr diffundierter Anteil), hartes Gestein hält Feuchte lokal fester (mehr
+        Original-Anteil) - "sedimentation verteilt das besser als harter Stein"
+        (Nutzer-Feedback). Ohne hardness_map (z.B. allererster Weather-Lauf, bevor
+        Geology überhaupt etwas geliefert hat) wird gleichmäßig vollständig diffundiert.
         """
-        diffused_map = humid_map.copy()
-        diffusion_rate = 0.08
+        sigma = 1.5 * max(1, iterations)
+        diffused_map = gaussian_filter(humid_map, sigma=sigma)
 
-        for _ in range(iterations):
-            new_map = diffused_map.copy()
-            height, width = diffused_map.shape
+        if hardness_map is None:
+            return diffused_map
 
-            for y in range(1, height - 1):
-                for x in range(1, width - 1):
-                    neighbors = [
-                        diffused_map[y-1, x], diffused_map[y+1, x],
-                        diffused_map[y, x-1], diffused_map[y, x+1]
-                    ]
-
-                    neighbor_avg = np.mean(neighbors)
-                    current_value = diffused_map[y, x]
-
-                    new_map[y, x] = current_value + (neighbor_avg - current_value) * diffusion_rate
-
-            diffused_map = new_map
-
-        return diffused_map
-
-    def _calculate_edge_factor(self, x: int, y: int, width: int, height: int) -> float:
-        """
-        Berechnet Edge-Factor für stärkere Effekte an Map-Boundaries
-        """
-        dist_to_edge = min(x, y, width - 1 - x, height - 1 - y)
-        max_dist = min(width, height) // 6
-
-        if dist_to_edge < max_dist:
-            return 1.0 + (max_dist - dist_to_edge) / max_dist * 0.8
+        h_min, h_max = float(hardness_map.min()), float(hardness_map.max())
+        if h_max - h_min > 1e-6:
+            hardness_norm = (hardness_map - h_min) / (h_max - h_min)
         else:
-            return 1.0
+            hardness_norm = np.zeros_like(hardness_map)
+
+        return hardness_norm * humid_map + (1.0 - hardness_norm) * diffused_map
 
     def _calculate_parameter_hash(self, parameters: Dict[str, Any]) -> str:
         """

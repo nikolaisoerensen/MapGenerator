@@ -82,6 +82,9 @@ class BaseMapTab(QWidget):
     generate_requested = pyqtSignal(str, dict)  # generator_type, parameters
     parameter_ui_changed = pyqtSignal(str, str, object)  # generator_type, param_name, value
     display_mode_changed = pyqtSignal(str)  # display_mode
+    view_switched = pyqtSignal(str)  # "2d"/"3d" - siehe switch_view(), von map_editor.py
+    # genutzt, um den 2D/3D-Modus tabübergreifend als globale Präferenz zu behandeln
+    # (User-Report: "beim Wechsel des Tabs ist man vom 3D Modus wieder im 2D Modus").
 
     def __init__(self, data_lod_manager=None, parameter_manager=None,
                  navigation_manager=None, shader_manager=None, generation_orchestrator=None):
@@ -403,6 +406,7 @@ class BaseMapTab(QWidget):
 
         # Display aktualisieren
         self.update_display_mode()
+        self.view_switched.emit(view_type)
         self.logger.debug(f"Switched to {view_type} view")
 
     def _update_button_styles(self, active_view: str):
@@ -431,6 +435,41 @@ class BaseMapTab(QWidget):
             self.logger.debug(f"Get current display failed: {e}")
             return None
 
+    # 2D-`layer_type`-Strings -> 3D-interne overlay_data-Layer-Namen (siehe
+    # MapDisplay3DWidget.overlay_data in map_display_3d.py) - die beiden
+    # Namensräume sind historisch unterschiedlich gewachsen (2D nutzt die
+    # DataLODManager-Output-Keys wie "temp_map"/"soil_moist_map", 3D nutzt
+    # kürzere UI-Namen wie "temperature"/"soil_moisture"). Layer ohne Eintrag
+    # hier (z.B. "heightmap" selbst) werden nicht als Overlay behandelt.
+    _LAYER_NAME_MAP_3D = {
+        "temp_map": "temperature", "precip_map": "precipitation",
+        "humid_map": "humidity", "wind_map": "wind",
+        "water_map": "water_map", "soil_moist_map": "soil_moisture",
+        "erosion_map": "erosion", "sedimentation_map": "sedimentation",
+        "flow_map": "flow_map", "rock_map": "rock_map",
+        "hardness_map": "hardness_map", "biome_map": "biome_map",
+        "slopemap": "slope", "civ_map": "civ_map",
+    }
+
+    # Für welche Tabs die radio buttons ÜBER dem Canvas die EINZIGE Quelle
+    # der Wahrheit für die 3D-Layer-Sichtbarkeit sind (siehe
+    # _push_data_to_current_display() unten) - jeweils die Menge der "echten"
+    # Daten-Layer-Keys in MapDisplay3DWidget.layer_visibility[tab_type]
+    # (map_display_3d.py). Terrain behält "base"/"shadows" als eigene,
+    # unabhängige Sichtbarkeits-Checkboxen (keine Layer-AUSWAHL, sondern ob
+    # das Mesh/die Schatten überhaupt gezeichnet werden) - deshalb hier NICHT
+    # gelistet. Settlement fehlt bewusst: dessen Checkboxen (Plots/
+    # Settlements/Landmarks/Roads/Civ Map) sind ein Mehrfachauswahl-Overlay
+    # (mehrere gleichzeitig sichtbar), kein Radio-Button-artiges
+    # "genau ein Layer"-Muster wie bei den übrigen Tabs.
+    _LAYER_SELECTION_KEYS_3D = {
+        "terrain": {"slope"},
+        "geology": {"rock_map", "hardness_map"},
+        "weather": {"precipitation", "temperature", "wind", "humidity"},
+        "water": {"water_map", "soil_moisture", "erosion", "sedimentation", "flow_map"},
+        "biome": {"biome_map", "super_biome_mask"},
+    }
+
     def _push_data_to_current_display(self, data, layer_type: str):
         """
         Einheitlicher Versand von Anzeige-Daten ans aktuell aktive Display.
@@ -443,9 +482,12 @@ class BaseMapTab(QWidget):
           Layer-Namen ("heightmap"/"rock_map"/...). Ohne diese Unterscheidung
           landete z.B. "rock_map" im tab_type-Feld, paintGL() erkannte keinen
           bekannten Rendermodus und zeichnete nichts.
-          Overlay-Layer (alles außer "heightmap" selbst) werden im reduzierten
-          3D-Umfang noch nicht als Textur ans Terrain-Mesh geschickt - das
-          Mesh zeigt bei jedem Modus die Basis-Heightmap mit Shading.
+          Overlay-Layer (alles außer "heightmap" selbst) werden zusätzlich
+          IMMER an update_overlay_data() gepusht - unabhängig von
+          current_view, da self.map_display_3d pro Tab immer existiert
+          (siehe setup_ui()), auch wenn gerade 2D sichtbar ist. So zeigt die
+          3D-Ansicht sofort die richtigen Daten, sobald der Nutzer
+          umschaltet, ohne erneut generieren zu müssen.
         """
         current_display = self.get_current_display()
         if not current_display:
@@ -472,6 +514,50 @@ class BaseMapTab(QWidget):
                 if reference_heightmap is not None:
                     current_display.display.set_contour_reference_heightmap(reference_heightmap)
             current_display.update_display(data, layer_type)
+
+        mapped_layer = self._LAYER_NAME_MAP_3D.get(layer_type) if layer_type != "heightmap" else None
+
+        if (mapped_layer and self.map_display_3d
+                and hasattr(self.map_display_3d.display, "update_overlay_data")):
+            self.map_display_3d.display.update_overlay_data(self.generator_type, mapped_layer, data)
+
+        # Die radio buttons oben sind jetzt die EINZIGE Quelle der Wahrheit für
+        # "welcher Layer wird gezeigt" - in 2D UND 3D (User-Report: separate
+        # 3D-Checkboxen waren redundant zu den radio buttons, mehrere Layer
+        # konnten dort gleichzeitig aktiv sein). Läuft IMMER, auch wenn gerade
+        # "heightmap" (mapped_layer=None) gepusht wird - sonst blieb ein zuvor
+        # gewähltes Overlay (z.B. Terrain "Slope") in 3D hängen, weil dieser
+        # Block früher nur bei layer_type != "heightmap" lief und beim
+        # Zurückwechseln zu Height/Basis-Layer nie mehr abgeschaltet wurde
+        # (User-Report: "komme dort nicht mehr auf Height zurück"). Bei jedem
+        # Push exakt den gepushten Layer sichtbar und alle anderen "echten"
+        # Daten-Layer desselben Tabs unsichtbar setzen - dadurch ist der
+        # 3D-Zustand immer synchron zur aktuellen radio-button-Auswahl, auch
+        # beim Umschalten 2D->3D (switch_view() ruft bereits
+        # update_display_mode() auf, das den aktuell gewählten Layer erneut
+        # hier durchpusht).
+        if self.map_display_3d and hasattr(self.map_display_3d.display, "set_layer_visibility"):
+            selection_keys = self._LAYER_SELECTION_KEYS_3D.get(self.generator_type)
+            if selection_keys:
+                for key in selection_keys:
+                    self.map_display_3d.display.set_layer_visibility(
+                        self.generator_type, key, key == mapped_layer)
+
+        # Shademap fürs 3D-Schatten-Overlay mitschicken (siehe MapDisplay3D.
+        # update_shademap()/set_shadow_overlay(), [[project-3d-2d-ui-unification]]) -
+        # unabhängig von layer_type/current_view, da Schatten tab-übergreifend über
+        # die gemeinsame _render_terrain_base() gelten, nicht nur wenn gerade der
+        # Terrain-Tab aktiv ist. shadowmap liegt als (H,W,7) vor (ein Kanal pro
+        # Sonnenwinkel-Voreinstellung, siehe terrain_tab.py) - fester Standard-
+        # Winkelindex 3 (vorherige Default-Position des jetzt entfernten Shadow-
+        # Angle-Sliders, siehe gui/tabs/terrain_tab.py).
+        DEFAULT_SHADOW_ANGLE_INDEX = 3
+        if (self.map_display_3d and self.data_lod_manager
+                and hasattr(self.map_display_3d.display, "update_shademap")):
+            shadow_data = self.data_lod_manager.get_terrain_data("shadowmap")
+            if (shadow_data is not None and hasattr(shadow_data, "ndim")
+                    and shadow_data.ndim == 3 and shadow_data.shape[2] > DEFAULT_SHADOW_ANGLE_INDEX):
+                self.map_display_3d.display.update_shademap(shadow_data[:, :, DEFAULT_SHADOW_ANGLE_INDEX])
 
     @error_handler
     def update_display_mode(self):

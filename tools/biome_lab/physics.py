@@ -89,229 +89,377 @@ class PhysicsMixin:
         force_a = np.where((dist <= 1e-9)[:, None], 0.0, force_a)
         return force_a, -force_a
 
-    def _dynamic_rest_length(self, pos_a, pos_b, base_length, traffic_weight=0.0):
-        mid = 0.5 * (np.asarray(pos_a, dtype=float) + np.asarray(pos_b, dtype=float))
-        civ_here = self._civ_at_continuous(mid)
+    def _rest_length_core_plotnode_batch(self, positions):
+        """Ruhelaenge fuer die Core<->PlotNode-Federn (a): civ-abhaengig ueber
+        topology._spring_rest_length, civ am Kern selbst abgefragt (nicht am
+        Mittelpunkt -- der Kern definiert die 'Ortsklasse' der Zelle)."""
+        civ_here = self._civ_at_continuous_batch(positions)
+        civ_factor = np.maximum(1.0 - self.CIV_RESTLENGTH_STEEPNESS * civ_here, 0.25)
+        return np.maximum(self.plot_base_spacing * civ_factor, 2.0)
 
-        civ_factor = max(1.0 - self.plot_civ_spacing_factor * civ_here, 0.25)
-        shrink = 1.0 - min(float(traffic_weight) * self.spring_traffic_shrink, 1.0 - self.spring_min_shrink_fraction)
-        shrink = max(shrink, self.spring_min_shrink_fraction)
-
-        rest = float(base_length) * civ_factor * shrink
-        return max(rest, 2.0)
-
-    def _dynamic_rest_length_batch(self, pos_a_arr, pos_b_arr, base_lengths, traffic_weights):
-        """Vektorisierte Variante von _dynamic_rest_length fuer viele Paare gleichzeitig."""
+    def _rest_length_plotnode_plotnode_batch(self, pos_a_arr, pos_b_arr, traffic_values):
+        """Ruhelaenge fuer die PlotNode<->PlotNode-Federn (b): civ-abhaengig
+        am Kantenmittelpunkt (wie a), zusaetzlich um bis zu 30% verkuerzt bei
+        hohem Traffic -- stark befahrene Wege ziehen sich direkter/gerader,
+        analog zu einer echten Straße gegenueber einem Trampelpfad."""
         mids = 0.5 * (np.asarray(pos_a_arr, dtype=float) + np.asarray(pos_b_arr, dtype=float))
         civ_here = self._civ_at_continuous_batch(mids)
-        civ_factor = np.maximum(1.0 - self.plot_civ_spacing_factor * civ_here, 0.25)
-        shrink = 1.0 - np.minimum(np.asarray(traffic_weights, dtype=float) * self.spring_traffic_shrink,
+        civ_factor = np.maximum(1.0 - self.CIV_RESTLENGTH_STEEPNESS * civ_here, 0.25)
+        base = self.plot_base_spacing * civ_factor
+        shrink = 1.0 - np.minimum(np.asarray(traffic_values, dtype=float) * self.spring_traffic_shrink,
                                    1.0 - self.spring_min_shrink_fraction)
         shrink = np.maximum(shrink, self.spring_min_shrink_fraction)
-        rest = np.asarray(base_lengths, dtype=float) * civ_factor * shrink
-        return np.maximum(rest, 2.0)
+        return np.maximum(base * shrink, 2.0)
 
     def _apply_spring_forces(self):
-        """Sammelt alle Federkraefte (Kern<->Zentroid, Core<->Core) pro Tick
-        auf. Die einzelnen Beitraege sind ueber np.add.at vektorisiert pro
-        Kategorie, die Paar-Listen selbst werden aus den (kleinen, weil
-        sparse besetzten) Nachbarschaftslisten der Cores aufgebaut."""
-        node_ids = [node.node_id for node in self.nodes]
-        node_index = {nid: i for i, nid in enumerate(node_ids)}
-        core_ids = list(self.core_registry.keys())
-        core_index = {cid: i for i, cid in enumerate(core_ids)}
-        core_by_id = self.core_registry
+        """Sammelt alle Federkraefte + Innendruck pro Tick auf, fuer Kerne UND
+        plot_nodes (beide sind jetzt vollwertige Physik-Koerper mit eigener
+        Masse/Geschwindigkeit, siehe _physics_step). Drei Kategorien:
+          A) Core<->PlotNode (civ-abhaengige Ruhelaenge > 0)
+          B) PlotNode<->PlotNode (civ- UND traffic-abhaengige Ruhelaenge > 0)
+          C) Innendruck je Kern-Zelle (Flaechenerhalt, nur nach aussen)
+        Keine der Federn hat rest_length=0 mehr -- das war die eigentliche
+        Kollaps-Ursache (siehe Debugging-Notiz zu Cluster-Kollaps: zwei
+        Punktgruppen, die sich gegenseitig zum jeweils anderen Mittelwert
+        ziehen, kollabieren ohne verankerte, positive Ruhelaenge)."""
+        active_cores = [n for n in self.nodes if n.node_type == "standard_plot_node"]
+        core_ids = [n.node_id for n in active_cores]
+        core_index = {nid: i for i, nid in enumerate(core_ids)}
+        node_by_id_all = {n.node_id: n for n in self.nodes}
 
-        node_force_arr = np.zeros((len(node_ids), 2), dtype=float)
-        core_force_arr = np.zeros((len(core_ids), 2), dtype=float)
-
-        # 1) Kern <-> Zentroid seiner Voronoi-Nachbarknoten (plot_nodes):
-        #    zieht jeden Plotkern sanft in die Mitte seiner umgebenden
-        #    Voronoi-Zelle (Lloyd-Relaxation-artig). rest_length ist bewusst
-        #    0 -- der Kern SOLL im Zentroid liegen, jede Abweichung wird ueber
-        #    dieselbe Exponentialkennlinie wie alle anderen Federn sanktioniert.
+        plot_ids = [n.node_id for n in self.plot_nodes]
+        plot_index = {nid: i for i, nid in enumerate(plot_ids)}
         plot_node_by_id = {n.node_id: n for n in self.plot_nodes}
-        pairs_ni = []
-        pos_a_list, centroid_list = [], []
-        for node in self.nodes:
-            if node.node_type != "standard_plot_node":
-                continue  # Wildniskerne haben keine Feder-/Feldphysik
-            core = core_by_id.get(node.node_id)
-            if core is None or not core.neighbor_node_ids:
-                continue
-            neighbor_positions = [
-                plot_node_by_id[nid].node_location
-                for nid in core.neighbor_node_ids if nid in plot_node_by_id
-            ]
-            if not neighbor_positions:
-                continue
-            pairs_ni.append(node_index[node.node_id])
-            pos_a_list.append(node.node_location)
-            centroid_list.append(np.mean(np.array(neighbor_positions, dtype=float), axis=0))
 
-        if pairs_ni:
-            pos_a_arr = np.array(pos_a_list, dtype=float)
-            centroid_arr = np.array(centroid_list, dtype=float)
-            rest_lengths = np.zeros(len(pairs_ni), dtype=float)
-            force_a, _force_b = self._spring_force_batch(
-                pos_a_arr, centroid_arr, rest_lengths, self.spacing_spring_stiffness, growth_rate=0.15)
-            np.add.at(node_force_arr, pairs_ni, force_a)
+        core_force_arr = np.zeros((len(core_ids), 2), dtype=float)
+        plot_force_arr = np.zeros((len(plot_ids), 2), dtype=float)
 
-        # 2) Core <-> Core Federn (statisches Voronoi-Traffic-Netz)
-        if self._static_core_springs:
-            pairs_a, pairs_b, base_len_list = [], [], []
-            for core_id_a, core_id_b, _pair_key, base_length in self._static_core_springs:
-                core_a = core_by_id.get(core_id_a)
-                core_b = core_by_id.get(core_id_b)
-                if core_a is None or core_b is None:
+        # ---- A) Core <-> PlotNode ----
+        # core_registry.neighbor_node_ids ist fuer ALLE self.nodes-Eintraege
+        # befuellt (siehe topology._sync_core_registry), nicht nur aktive
+        # Kerne -- Wildniskerne nehmen als UNBEWEGLICHER Anker an der Feder
+        # teil (sie erhalten selbst keine Kraft, ziehen aber ihre plot_node-
+        # Nachbarn), regulaere Sonder-Nodes (Boundary-Typen) werden ausge-
+        # schlossen (die haben eigene Kontur-Kinematik, keine Federphysik).
+        if self.enable_core_plotnode_spring:
+            pairs_core_id, pairs_plot_idx = [], []
+            pos_core_list, pos_plot_list = [], []
+            for cid, core in self.core_registry.items():
+                core_node = node_by_id_all.get(cid)
+                if core_node is None or core_node.node_type not in ("standard_plot_node", "wilderness_core"):
                     continue
-                pairs_a.append(core_index[core_id_a])
-                pairs_b.append(core_index[core_id_b])
-                base_len_list.append(base_length)
+                for pid in core.neighbor_node_ids:
+                    plot_node = plot_node_by_id.get(pid)
+                    if plot_node is None:
+                        continue
+                    pairs_core_id.append(cid)
+                    pairs_plot_idx.append(plot_index[pid])
+                    pos_core_list.append(core_node.node_location)
+                    pos_plot_list.append(plot_node.node_location)
 
-            if pairs_a:
-                pos_a_arr = np.array([core_by_id[core_ids[i]].location for i in pairs_a], dtype=float)
-                pos_b_arr = np.array([core_by_id[core_ids[i]].location for i in pairs_b], dtype=float)
-                traffic_list = [0.0] * len(pairs_a)
-                rest_lengths = self._dynamic_rest_length_batch(pos_a_arr, pos_b_arr, base_len_list, traffic_list)
+            if pairs_core_id:
+                pos_core_arr = np.array(pos_core_list, dtype=float)
+                pos_plot_arr = np.array(pos_plot_list, dtype=float)
+                rest_arr = self._rest_length_core_plotnode_batch(pos_core_arr)
+                force_core, force_plot = self._spring_force_batch(
+                    pos_core_arr, pos_plot_arr, rest_arr, self.core_plotnode_spring_stiffness, growth_rate=0.15)
+
+                plot_idx_arr = np.array(pairs_plot_idx, dtype=int)
+                np.add.at(plot_force_arr, plot_idx_arr, force_plot)
+
+                active_mask = np.array([cid in core_index for cid in pairs_core_id], dtype=bool)
+                if np.any(active_mask):
+                    core_idx_arr = np.array(
+                        [core_index[cid] for cid in pairs_core_id if cid in core_index], dtype=int)
+                    np.add.at(core_force_arr, core_idx_arr, force_core[active_mask])
+
+        # ---- B) PlotNode <-> PlotNode ----
+        if self.enable_plotnode_plotnode_spring:
+            vertex_by_plot_node = getattr(self, "_plot_node_to_vertex", {})
+            seen_pairs = set()
+            pairs_i, pairs_j = [], []
+            pos_a_list, pos_b_list, traffic_list = [], [], []
+            for plot_node in self.plot_nodes:
+                for other_id in plot_node.neighbor_node_ids:
+                    if other_id == plot_node.node_id:
+                        continue
+                    pair = tuple(sorted((plot_node.node_id, other_id)))
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+                    other = plot_node_by_id.get(other_id)
+                    if other is None:
+                        continue
+                    pairs_i.append(plot_index[plot_node.node_id])
+                    pairs_j.append(plot_index[other_id])
+                    pos_a_list.append(plot_node.node_location)
+                    pos_b_list.append(other.node_location)
+
+                    vi = vertex_by_plot_node.get(plot_node.node_id)
+                    vj = vertex_by_plot_node.get(other_id)
+                    if vi is not None and vj is not None:
+                        # Bewusst die langsamer nachziehende Schrumpf-EMA
+                        # (nicht ridge_traffic_history, das bleibt fuer die
+                        # Traffic-Einfaerbung in draw.py schnell reagierend) --
+                        # verhindert den Sprung von 0 auf vollen EMA-Wert beim
+                        # ersten Auftreten von Traffic auf einer Kante.
+                        traffic_list.append(self.ridge_traffic_shrink_ema.get(self._edge_key(vi, vj), 0.0))
+                    else:
+                        traffic_list.append(0.0)
+
+            if pairs_i:
+                pos_a_arr = np.array(pos_a_list, dtype=float)
+                pos_b_arr = np.array(pos_b_list, dtype=float)
+                rest_arr = self._rest_length_plotnode_plotnode_batch(pos_a_arr, pos_b_arr, traffic_list)
                 force_a, force_b = self._spring_force_batch(
-                    pos_a_arr, pos_b_arr, rest_lengths, self.traffic_spring_stiffness, growth_rate=0.10)
-                np.add.at(core_force_arr, pairs_a, force_a)
-                np.add.at(core_force_arr, pairs_b, force_b)
+                    pos_a_arr, pos_b_arr, rest_arr, self.plotnode_plotnode_spring_stiffness, growth_rate=0.10)
+                np.add.at(plot_force_arr, pairs_i, force_a)
+                np.add.at(plot_force_arr, pairs_j, force_b)
 
-        node_norms = np.hypot(node_force_arr[:, 0], node_force_arr[:, 1])
-        scale = np.where(node_norms > self.MAX_SPRING_RESULTANT,
-                          self.MAX_SPRING_RESULTANT / np.maximum(node_norms, 1e-12), 1.0)
-        node_force_arr *= scale[:, None]
+        # ---- C) Innendruck + D) Kollisionsabstossung, beide je Kern-Zelle ----
+        # Federn A/B decken nur DIREKT ueber eine Voronoi-Kante benachbarte
+        # Paare ab. Zwei plot_nodes derselben Zelle, die NICHT direkt
+        # benachbart sind (z.B. gegenueberliegende Ecken eines Vierecks),
+        # haben sonst KEINE Ruhelaenge, die sie auseinanderhaelt -- empirisch
+        # beobachtet: sie koennen exakt aufeinanderfallen und darueber ihre
+        # angeschlossenen Kerne mit zusammenziehen. Deshalb hier zusaetzlich
+        # ALLE Paare innerhalb derselben Zelle (nicht nur Kanten-Nachbarn)
+        # mit einer Mindestabstands-Abstossung versehen, skaliert am
+        # lokalen ideal_radius (gleiche civ-abhaengige Groesse wie der
+        # Druckterm) statt an einem globalen Fixwert -- so passt sich der
+        # Mindestabstand automatisch an dichte Innenstadt- vs. weite
+        # Wildnis-Zellen an.
+        pressure_strength = self.pressure_strength if self.enable_pressure else 0.0
+        repulsion_strength = self.plot_node_repulsion_strength if self.enable_plot_node_repulsion else 0.0
+        if pressure_strength > 1e-9 or repulsion_strength > 1e-9:
+            for node in active_cores:
+                ids_for_cell = self._core_cell_plot_node_ids.get(node.node_id)
+                if not ids_for_cell:
+                    continue
+                ids_present = [pid for pid in ids_for_cell if pid in plot_node_by_id]
+                if len(ids_present) < 3:
+                    continue
+                positions = np.array(
+                    [plot_node_by_id[pid].node_location for pid in ids_present], dtype=float)
+                ideal_radius = self._spring_rest_length(
+                    self._civ_at_continuous(node.node_location), self.plot_base_spacing)
+
+                if pressure_strength > 1e-9:
+                    area = self._polygon_area(positions)
+                    ideal_area = np.pi * ideal_radius ** 2
+                    if area < 1e-6:
+                        pressure_mag = pressure_strength
+                    else:
+                        pressure_mag = pressure_strength * max(ideal_area / area - 1.0, 0.0)
+                    if pressure_mag > 1e-9:
+                        core_pos = np.array(node.node_location, dtype=float)
+                        deltas = positions - core_pos
+                        dists = np.hypot(deltas[:, 0], deltas[:, 1])
+                        safe_dists = np.where(dists > 1e-9, dists, 1.0)
+                        directions = deltas / safe_dists[:, None]
+                        forces = directions * pressure_mag
+                        idx_arr = np.array([plot_index[pid] for pid in ids_present], dtype=int)
+                        np.add.at(plot_force_arr, idx_arr, forces)
+
+                if repulsion_strength > 1e-9:
+                    min_sep = max(ideal_radius * 0.6, 3.0)
+                    n = len(ids_present)
+                    for a_idx in range(n):
+                        for b_idx in range(a_idx + 1, n):
+                            delta = positions[a_idx] - positions[b_idx]
+                            dist = float(np.hypot(delta[0], delta[1]))
+                            if dist >= min_sep:
+                                continue
+                            if dist > 1e-6:
+                                direction = delta / dist
+                            else:
+                                pid_a = ids_present[a_idx]
+                                angle = (pid_a * 2654435761) % 360 * np.pi / 180.0
+                                direction = np.array([np.cos(angle), np.sin(angle)])
+                            safe_dist = max(dist, 0.5)
+                            magnitude = repulsion_strength * (min_sep / safe_dist - 1.0)
+                            magnitude = min(magnitude, self.MAX_SPRING_RESULTANT)
+                            push = direction * magnitude
+                            ia, ib = plot_index[ids_present[a_idx]], plot_index[ids_present[b_idx]]
+                            plot_force_arr[ia] += push
+                            plot_force_arr[ib] -= push
+
+        # ---- E) Weiche Wildnisgrenze (ersetzt harten Snap in _physics_step) ----
+        # _contain_plot_node projiziert auf den naehesten Punkt einer festen
+        # Kontur -- eine Viele-zu-eins-Abbildung: mehrere plot_nodes vom
+        # selben Randabschnitt (z.B. einer konkaven Ecke) projizieren auf
+        # denselben Punkt und kollabierten dort sichtbar zu einer Linie/einem
+        # Haufen, wenn das Ergebnis wie frueher jeden Tick DIREKT als neue
+        # Position uebernommen wurde. Hier stattdessen nur als Zielpunkt
+        # fuer eine normale Federkraft genutzt (rest_length=0, nur nach
+        # innen ziehend) -- die laeuft durch dieselbe F=ma-Integration wie
+        # alle anderen Kraefte, so dass z.B. die PlotNode<->PlotNode-
+        # Kollisionsabstossung (Block D) gleichzeitig gegensteuern und ein
+        # Zusammenlaufen auf identische Punkte verhindern kann.
+        if self.enable_wilderness_containment:
+            prepared_wilderness = self._prepare_wilderness_polygons()
+            if prepared_wilderness:
+                for plot_node in self.plot_nodes:
+                    pos = np.asarray(plot_node.node_location, dtype=float)
+                    target = self._contain_plot_node(plot_node, pos, prepared_wilderness, cap=False)
+                    correction = target - pos
+                    dist = float(np.hypot(correction[0], correction[1]))
+                    if dist <= 1e-9:
+                        continue
+                    direction = correction / dist
+                    magnitude = self._safe_exp_spring_magnitude(
+                        deviation=dist, stiffness=self.wilderness_push_stiffness, growth_rate=0.15)
+                    magnitude = max(magnitude, 0.0)  # nur nach innen, nie nach aussen
+                    idx = plot_index[plot_node.node_id]
+                    plot_force_arr[idx] += direction * magnitude
 
         core_norms = np.hypot(core_force_arr[:, 0], core_force_arr[:, 1])
         scale = np.where(core_norms > self.MAX_SPRING_RESULTANT,
                           self.MAX_SPRING_RESULTANT / np.maximum(core_norms, 1e-12), 1.0)
         core_force_arr *= scale[:, None]
 
-        node_forces = {nid: node_force_arr[i] for i, nid in enumerate(node_ids)}
-        core_forces = {cid: core_force_arr[i] for i, cid in enumerate(core_ids)}
-        return node_forces, core_forces
+        plot_norms = np.hypot(plot_force_arr[:, 0], plot_force_arr[:, 1])
+        scale = np.where(plot_norms > self.MAX_SPRING_RESULTANT,
+                          self.MAX_SPRING_RESULTANT / np.maximum(plot_norms, 1e-12), 1.0)
+        plot_force_arr *= scale[:, None]
+
+        core_forces = {nid: core_force_arr[i] for i, nid in enumerate(core_ids)}
+        plot_forces = {nid: plot_force_arr[i] for i, nid in enumerate(plot_ids)}
+        return core_forces, plot_forces
 
     # --------------------------------------------------------- Bewegung --
+    def _reflect_velocity_on_correction(self, velocity, pos_before, pos_after):
+        """Nach einer harten Grenzkorrektur (Zell-/Wildnis-Containment) wird
+        NUR die Geschwindigkeitskomponente ENTGEGEN der Korrekturrichtung
+        entfernt (inelastischer Stoss, kein voller Stillstand) -- tangentiale
+        Geschwindigkeit (Entlanggleiten der Grenze) bleibt erhalten. Ohne das
+        wuerde ein Koerper an seiner Grenze im naechsten Tick sofort wieder
+        mit voller Geschwindigkeit dagegenlaufen."""
+        correction = np.asarray(pos_after, dtype=float) - np.asarray(pos_before, dtype=float)
+        dist = float(np.hypot(correction[0], correction[1]))
+        if dist <= 1e-9:
+            return velocity
+        direction = correction / dist
+        v_along = float(np.dot(velocity, direction))
+        if v_along < 0.0:
+            return velocity - v_along * direction
+        return velocity
+
     def _physics_step(self):
-        """Einzige gueltige physics_step()-Implementierung. Bewegt alle
-        Nodes/Cores in self.nodes (inkl. Randnode-Projektion auf Kontur).
-        core_registry ist nur ein Positions-Spiegel und wird separat ueber
-        _sync_core_positions() aktuell gehalten. Wird ausschliesslich von
-        _tick() aufgerufen."""
+        """Einzige gueltige physics_step()-Implementierung. Echte F=ma-
+        Integration (semi-implizites/symplektisches Euler: erst Geschwindig-
+        keit aus Kraft+Masse+Daempfung aktualisieren, dann Position aus
+        Geschwindigkeit) fuer aktive Kerne UND plot_nodes -- beide sind
+        vollwertige Massepunkte mit eigener velocity (siehe models.PlotNode).
+        city_border_node bleibt bewusst ausserhalb des Feder-Masse-Systems:
+        das ist eine gezielte Zwangsbedingung (Gleiten auf einer festen
+        Kontur), kein freier Koerper -- seine Bewegung kommt weiterhin rein
+        aus dem Potentialfeld, ohne Masse/Traegheit. map_border_node und
+        wilderness_node sind seit dem Umbau auf ein einziges geklipptes
+        Voronoi (siehe topology._build_voronoi_mesh/_gen_step_5_wilderness_snap)
+        PERMANENT unbeweglich -- keine Kinematik, keine Federphysik, gar
+        keine Bewegung mehr (Nutzer-Design: 'unbeweglich von jetzt an, keine
+        Physik'); ihre Position steht endgueltig fest, sobald sie klassifiziert
+        wurden. Wilderness-Kerne bekommen wie bisher nie Physik. Wird
+        ausschliesslich von _tick() aufgerufen."""
         if not getattr(self, "topology_ready", False):
             return
 
-        node_forces, core_forces = self._apply_spring_forces()
-
-        node_positions = np.array([n.node_location for n in self.nodes], dtype=float)
-        field_forces_all = self._sample_field_batch(node_positions)
+        core_forces, plot_forces = self._apply_spring_forces()
+        dt = self.PHYSICS_TIME_STEP
+        max_speed = self.MAX_DISPLACEMENT_PER_TICK / dt
         zero2 = np.zeros(2, dtype=float)
-        spring_forces_all = np.array(
-            [node_forces.get(n.node_id, zero2) + core_forces.get(n.node_id, zero2) for n in self.nodes],
-            dtype=float
-        )
-        total_forces_all = spring_forces_all + field_forces_all
-        norms = np.hypot(total_forces_all[:, 0], total_forces_all[:, 1])
-        scale = np.where(norms > self.MAX_SPRING_RESULTANT, self.MAX_SPRING_RESULTANT / np.maximum(norms, 1e-12), 1.0)
-        total_forces_all *= scale[:, None]
-        disp_all = total_forces_all * self.PHYSICS_TIME_STEP
-        disp_norms = np.hypot(disp_all[:, 0], disp_all[:, 1])
-        disp_scale = np.where(disp_norms > self.MAX_DISPLACEMENT_PER_TICK,
-                               self.MAX_DISPLACEMENT_PER_TICK / np.maximum(disp_norms, 1e-12), 1.0)
-        disp_all *= disp_scale[:, None]
-        free_positions_all = node_positions + disp_all
 
-        plot_node_by_id = {n.node_id: n for n in self.plot_nodes}
-        displacement_by_core_id = {}
+        # city_border_node: seit dem Umbau auf crossing-basierte Stadtgrenz-
+        # Nodes (siehe topology._gen_step_city_boundary_snap) lebt dieser Typ
+        # nicht mehr in self.nodes, sondern als klassifizierter plot_node in
+        # self.plot_nodes -- PERMANENT unbeweglich, genau wie map_border_node/
+        # wilderness_node (siehe movable_plot_nodes-Filter weiter unten). Die
+        # fruehere kinematische Potentialfeld-Zwangsbedingung entfaellt damit
+        # komplett, kein Ersatz-Codepfad noetig.
 
-        for idx, node in enumerate(self.nodes):
-            free_pos = free_positions_all[idx]
-            node_type = getattr(node, "node_type", "standard_plot_node")
+        # ---- Aktive Kerne: F=ma, Masse core_mass ----
+        active_cores = [n for n in self.nodes if n.node_type == "standard_plot_node"]
+        if active_cores:
+            plot_node_by_id = {n.node_id: n for n in self.plot_nodes}
+            core_positions = np.array([n.node_location for n in active_cores], dtype=float)
+            core_velocities = np.array([n.velocity for n in active_cores], dtype=float)
 
-            if node_type == "wilderness_core":
-                continue  # keine Tick-Physik, Position kommt aus _relax_wilderness_cores
+            core_field = self._sample_field_batch(core_positions) if self.enable_field_cores else np.zeros_like(core_positions)
+            core_total_force = (np.array([core_forces.get(n.node_id, zero2) for n in active_cores], dtype=float)
+                                 + core_field)
+            core_force_norms = np.hypot(core_total_force[:, 0], core_total_force[:, 1])
+            core_force_scale = np.where(core_force_norms > self.MAX_SPRING_RESULTANT,
+                                         self.MAX_SPRING_RESULTANT / np.maximum(core_force_norms, 1e-12), 1.0)
+            core_total_force *= core_force_scale[:, None]
 
-            if node_type == "wilderness_node":
-                cached_idx = self._wilderness_contour_cache.get(node.node_id)
-                polygons = getattr(self, "_wilderness_polygons", None) or []
-                if cached_idx is not None and cached_idx < len(polygons):
-                    best_contour = np.asarray(polygons[cached_idx].exterior.coords, dtype=float)
-                    best_idx = cached_idx
-                else:
-                    best_contour = None
-                    best_dist = np.inf
-                    best_idx = None
-                    for p_idx, poly in enumerate(polygons):
-                        contour = np.asarray(poly.exterior.coords, dtype=float)
-                        candidate = self._nearest_point_on_polyline(free_pos, contour, closed=True)
-                        dist = float(np.hypot(candidate[0] - free_pos[0], candidate[1] - free_pos[1]))
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_contour = contour
-                            best_idx = p_idx
-                    if best_idx is not None:
-                        self._wilderness_contour_cache[node.node_id] = best_idx
+            core_accel = core_total_force / self.core_mass
+            core_velocities = (core_velocities + core_accel * dt) * self.damping
+            core_speed = np.hypot(core_velocities[:, 0], core_velocities[:, 1])
+            core_speed_scale = np.where(core_speed > max_speed, max_speed / np.maximum(core_speed, 1e-12), 1.0)
+            core_velocities *= core_speed_scale[:, None]
 
-                if best_contour is not None:
-                    constrained = self._nearest_point_on_polyline(free_pos, best_contour, closed=True)
-                    node.node_location = (float(constrained[0]), float(constrained[1]))
-                else:
-                    clamped = np.array([
-                        np.clip(free_pos[0], 0.0, self.map_size - 1.0),
-                        np.clip(free_pos[1], 0.0, self.map_size - 1.0),
-                    ], dtype=float)
-                    node.node_location = (float(clamped[0]), float(clamped[1]))
+            core_free = core_positions + core_velocities * dt
+            core_free[:, 0] = np.clip(core_free[:, 0], 0.0, self.map_size - 1.0)
+            core_free[:, 1] = np.clip(core_free[:, 1], 0.0, self.map_size - 1.0)
 
-            elif node_type == "map_border_node":
-                inset = self.MAP_EDGE_INSET
-                s = float(self.map_size)
-                border_rect = np.array([
-                    [inset, inset],
-                    [s - inset, inset],
-                    [s - inset, s - inset],
-                    [inset, s - inset],
-                ], dtype=float)
-                constrained = self._nearest_point_on_polyline(free_pos, border_rect, closed=True)
-                node.node_location = (float(constrained[0]), float(constrained[1]))
-
-            elif node_type == "city_border_node":
-                settlement_id = self.boundary_owner.get(node.node_id)
-                contour = self._city_contours.get(settlement_id)
-                if contour is not None and len(contour) >= 2:
-                    constrained = self._nearest_point_on_polyline(free_pos, np.asarray(contour, dtype=float),
-                                                                   closed=True)
-                    node.node_location = (float(constrained[0]), float(constrained[1]))
-                else:
-                    clamped = np.array([
-                        np.clip(free_pos[0], 0.0, self.map_size - 1.0),
-                        np.clip(free_pos[1], 0.0, self.map_size - 1.0),
-                    ], dtype=float)
-                    node.node_location = (float(clamped[0]), float(clamped[1]))
-
-            else:
-                clamped = np.array([
-                    np.clip(free_pos[0], 0.0, self.map_size - 1.0),
-                    np.clip(free_pos[1], 0.0, self.map_size - 1.0),
-                ], dtype=float)
+            for idx, node in enumerate(active_cores):
                 # Harte Bewegungsgrenze: ein Plotkern darf seine eigene
                 # Voronoi-Zelle (Polygon aus den AKTUELLEN Positionen seiner
                 # Nachbar-plot_nodes) nie verlassen -- realistisch soll das
-                # nie moeglich sein. Die Feder zum Zentroid (siehe
-                # _apply_spring_forces) ist nur die weiche Vorstufe davon.
-                clamped = self._contain_core_in_cell(node, clamped, plot_node_by_id)
-                displacement_by_core_id[node.node_id] = clamped - node_positions[idx]
-                node.node_location = (float(clamped[0]), float(clamped[1]))
+                # nie moeglich sein. Die Federn (a) sind nur die weiche
+                # Vorstufe davon.
+                pos_before = core_free[idx]
+                if self.enable_core_cell_containment:
+                    pos_after = self._contain_core_in_cell(node, pos_before, plot_node_by_id)
+                else:
+                    pos_after = pos_before
+                velocity = self._reflect_velocity_on_correction(core_velocities[idx], pos_before, pos_after)
+                node.node_location = (float(pos_after[0]), float(pos_after[1]))
+                node.velocity = (float(velocity[0]), float(velocity[1]))
 
-        # core_registry-Positionen werden NICHT hier bewegt: core_forces ist
-        # bereits oben in spring_forces_all eingerechnet (core_id == node_id,
-        # core_registry ist nur ein Positions-Spiegel von self.nodes). Ein
-        # zusaetzliches Bewegen von core_registry waere sofort wirkungslos,
-        # da _tick() direkt danach _sync_core_positions() aufruft und
-        # core.location damit ohnehin wieder 1:1 aus self.nodes ueberschreibt.
+        # core_registry-Positionen werden NICHT hier bewegt: das ist nur ein
+        # Positions-Spiegel von self.nodes, siehe _sync_core_positions in
+        # _tick() -- ein zusaetzliches Bewegen waere sofort wirkungslos.
 
-        self._drift_plot_nodes(displacement_by_core_id, plot_node_by_id)
+        # ---- PlotNodes: F=ma, Masse plot_node_mass ----
+        # map_border_node/wilderness_node/city_border_node NICHT integrieren
+        # -- alle drei sind seit dem Umbau auf ein einziges geklipptes
+        # Voronoi + crossing-basierte Grenz-Erkennung permanent unbeweglich
+        # (siehe Docstring oben), duerfen aber weiterhin als Feder-Anker fuer
+        # ihre beweglichen Nachbarn wirken (siehe _apply_spring_forces, das
+        # unveraendert ALLE plot_nodes-Nachbarschaften durchgeht).
+        movable_plot_nodes = [n for n in self.plot_nodes
+                               if n.node_type not in ("map_border_node", "wilderness_node", "city_border_node")]
+        if movable_plot_nodes:
+            plot_positions = np.array([n.node_location for n in movable_plot_nodes], dtype=float)
+            plot_velocities = np.array([n.velocity for n in movable_plot_nodes], dtype=float)
+
+            plot_field = self._sample_field_batch(plot_positions) if self.enable_field_plotnodes else np.zeros_like(plot_positions)
+            plot_total_force = (np.array([plot_forces.get(n.node_id, zero2) for n in movable_plot_nodes], dtype=float)
+                                 + plot_field)
+            plot_force_norms = np.hypot(plot_total_force[:, 0], plot_total_force[:, 1])
+            plot_force_scale = np.where(plot_force_norms > self.MAX_SPRING_RESULTANT,
+                                         self.MAX_SPRING_RESULTANT / np.maximum(plot_force_norms, 1e-12), 1.0)
+            plot_total_force *= plot_force_scale[:, None]
+
+            plot_accel = plot_total_force / self.plot_node_mass
+            plot_velocities = (plot_velocities + plot_accel * dt) * self.damping
+            plot_speed = np.hypot(plot_velocities[:, 0], plot_velocities[:, 1])
+            plot_speed_scale = np.where(plot_speed > max_speed, max_speed / np.maximum(plot_speed, 1e-12), 1.0)
+            plot_velocities *= plot_speed_scale[:, None]
+
+            plot_free = plot_positions + plot_velocities * dt
+            plot_free[:, 0] = np.clip(plot_free[:, 0], 0.0, self.map_size - 1.0)
+            plot_free[:, 1] = np.clip(plot_free[:, 1], 0.0, self.map_size - 1.0)
+
+            # Kein harter Positions-Snap mehr hier: die Wildnisgrenze wirkt
+            # jetzt als weiche Kraft in _apply_spring_forces (Abschnitt E) --
+            # siehe dortiger Kommentar zur Viele-zu-eins-Kollaps-Ursache.
+            for idx, plot_node in enumerate(movable_plot_nodes):
+                pos_after = plot_free[idx]
+                plot_node.node_location = (float(pos_after[0]), float(pos_after[1]))
+                plot_node.velocity = (float(plot_velocities[idx][0]), float(plot_velocities[idx][1]))
 
     # -------------------------------------------------- Kern-/Node-Grenzen --
     def _point_in_polygon(self, point, polygon, shifted=None):
@@ -363,8 +511,7 @@ class PhysicsMixin:
         _build_core_cell_plot_node_ids kann ein Zell-Polygon (v.a. an der
         Civ-/Wildnis-Dichtegrenze) noch leicht verzerrt sein -- ohne Deckel
         wuerde eine einzelne entartete Kante den Kern in einem Tick quer
-        ueber die Karte teleportieren, und ueber _drift_plot_nodes auch alle
-        benachbarten plot_nodes gleich mit."""
+        ueber die Karte teleportieren."""
         plot_node_ids = getattr(self, "_core_cell_plot_node_ids", {}).get(node.node_id)
         if not plot_node_ids:
             return pos
@@ -383,7 +530,7 @@ class PhysicsMixin:
             projected = pos + correction * (max_step / dist)
         return projected
 
-    def _contain_plot_node(self, plot_node, pos, prepared_wilderness):
+    def _contain_plot_node(self, plot_node, pos, prepared_wilderness, cap=True):
         """Haelt zivilisationsnahe plot_nodes (mind. ein Nachbarkern ist ein
         regulaerer Plotkern) innerhalb der Wildnisgrenze -- 'Seifenblasen in
         einer Keksform'. Rein wildniseigene plot_nodes (alle Nachbarkerne sind
@@ -396,7 +543,17 @@ class PhysicsMixin:
         angekommen bleibt er (numerisch) dort, die teure Suche ueber alle
         Polygone lohnt sich nur beim ersten Mal bzw. wenn der Cache-Treffer
         nicht mehr passt. prepared_wilderness kommt aus
-        _prepare_wilderness_polygons() (einmal pro Tick, nicht pro Node)."""
+        _prepare_wilderness_polygons() (einmal pro Tick, nicht pro Node).
+
+        cap=False wird nur fuer die einmalige Sanierung direkt nach dem Reset
+        genutzt (topology._sanitize_plot_node_positions): manche plot_nodes
+        starten auf einem an die Kartengrenze geklemmten, eindeutig
+        ungueltigen Ausreisser-Vertex (siehe _build_plot_node_registry) --
+        die volle Korrektur in einem Schritt ist hier sicher und noetig. Im
+        laufenden Tick-Betrieb (cap=True) bleibt die Korrektur gedeckelt,
+        damit auch ein (nach Ausreisser-Filterung) noch leicht verzerrtes
+        Polygon niemals einen Tick-Sprung quer ueber die Karte ausloesen
+        kann."""
         if not prepared_wilderness:
             return pos
         type_by_id = getattr(self, "_core_type_by_id", {})
@@ -407,12 +564,33 @@ class PhysicsMixin:
             return pos
 
         cache = self._plot_node_wilderness_cache
+        # BEKANNTE EINSCHRAENKUNG (siehe Analyse-Notiz): Projektion auf die
+        # naeheste Stelle einer festen Kontur ist eine Viele-zu-eins-
+        # Abbildung -- mehrere plot_nodes, die vom selben Rand-Abschnitt
+        # (z.B. einer konkaven Ecke) angezogen werden, koennen auf denselben
+        # Punkt projizieren. Ein kleinerer Deckel verlangsamt das nur, loest
+        # es nicht (empirisch getestet: fuehrt zu MEHR betroffenen Paaren,
+        # da mehr Zeit in der Naehe der Grenze verbracht wird). Ein echter
+        # Fix braucht eine weiche, kraftbasierte Grenz-Rueckstellung statt
+        # eines harten Snaps -- vorerst bewusst grosszuegig gedeckelt, damit
+        # die Grenze wenigstens zuverlaessig eingehalten wird.
+        max_step = getattr(self, "plot_base_spacing", 60.0)
+
+        def _capped(candidate):
+            if not cap:
+                return candidate
+            correction = candidate - pos
+            dist = float(np.hypot(correction[0], correction[1]))
+            if dist > max_step and dist > 1e-9:
+                return pos + correction * (max_step / dist)
+            return candidate
+
         cached_idx = cache.get(plot_node.node_id)
         if cached_idx is not None and cached_idx < len(prepared_wilderness):
             coords, shifted, b = prepared_wilderness[cached_idx]
             if self._point_in_polygon(pos, coords, shifted):
                 return pos
-            return self._nearest_point_on_segments(pos, coords, b)
+            return _capped(self._nearest_point_on_segments(pos, coords, b))
 
         best_idx, best_dist, best_point = None, np.inf, pos
         for idx, (coords, shifted, b) in enumerate(prepared_wilderness):
@@ -425,32 +603,7 @@ class PhysicsMixin:
                 best_dist, best_idx, best_point = dist, idx, candidate
         if best_idx is not None:
             cache[plot_node.node_id] = best_idx
-        return best_point
-
-    def _drift_plot_nodes(self, displacement_by_core_id, plot_node_by_id):
-        """Plot_nodes bewegen sich mit, wenn die Plotkerne geschoben werden:
-        jeder plot_node driftet um den gedaempften Mittelwert der Verschiebung
-        seiner Nachbarkerne (PLOT_NODE_FOLLOW_FACTOR < 1, damit die Plots nur
-        'etwas aufrutschen', nicht 1:1 mitwandern). Wildnis-adjazente
-        plot_nodes bleiben unbewegt (ihre Nachbarkerne sind Wildniskerne,
-        Verschiebung == 0)."""
-        if not displacement_by_core_id:
-            return
-        follow_factor = getattr(self, "PLOT_NODE_FOLLOW_FACTOR", 0.35)
-        prepared_wilderness = self._prepare_wilderness_polygons()
-
-        for plot_node in self.plot_nodes:
-            deltas = [displacement_by_core_id[cid] for cid in plot_node.neighbor_core_ids
-                      if cid in displacement_by_core_id]
-            if not deltas:
-                continue
-            mean_delta = np.mean(deltas, axis=0) * follow_factor
-            if abs(mean_delta[0]) < 1e-9 and abs(mean_delta[1]) < 1e-9:
-                continue
-            x, y = plot_node.node_location
-            new_pos = np.array([x + mean_delta[0], y + mean_delta[1]], dtype=float)
-            new_pos = self._contain_plot_node(plot_node, new_pos, prepared_wilderness)
-            plot_node.node_location = (float(new_pos[0]), float(new_pos[1]))
+        return _capped(best_point)
 
     def _refresh_live_ridge_edges(self):
         """Baut current_ridge_edges/ridge_vertex_positions (nur fuer draw.py
@@ -497,8 +650,16 @@ class PhysicsMixin:
         self._start_timer("simulate_traffic")
         if self.iteration % self.TRAFFIC_RECOMPUTE_INTERVAL == 0:
             self._simulate_traffic()
-            self._refresh_live_ridge_edges()
         self._stop_timer("simulate_traffic")
+
+        # Vom Traffic-Intervall entkoppelt: das Rendering (draw.py) haengt
+        # ausschliesslich an ridge_vertex_positions/current_ridge_edges, die
+        # sonst bis zu TRAFFIC_RECOMPUTE_INTERVAL Ticks hinter den echten
+        # plot_node-Positionen zurueckbleiben wuerden (sichtbarer "Sprung").
+        # Die teure Dijkstra-Traffic-Simulation bleibt oben weiter gedrosselt.
+        self._start_timer("refresh_ridge_edges")
+        self._refresh_live_ridge_edges()
+        self._stop_timer("refresh_ridge_edges")
 
         self._start_timer("redraw")
         self._redraw()

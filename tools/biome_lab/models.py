@@ -56,6 +56,13 @@ class PlotNode:
     neighbor_core_ids: list[int] = field(default_factory=list)
     neighbor_node_ids: list[int] = field(default_factory=list)
     traffic_weight: float = 4.0
+    velocity: tuple[float, float] = (0.0, 0.0)
+    # Regionen-Partitionierung (siehe topology._generate_static_topology):
+    # welcher zusammenhaengenden civ-/Wildnis-Flaeche dieser Node angehoert.
+    # region_id_secondary ist nur fuer echte Nahtstellen-Nodes (node_type=
+    # "wilderness_node") gesetzt, die zwei Regionen gleichzeitig beruehren.
+    region_id: int = -1
+    region_id_secondary: int = -1
 
 
 @dataclass
@@ -68,3 +75,4 @@ class PlotCore:
     core_type: str = "standard_core"
     neighbor_core_ids: list[int] = field(default_factory=list)
     neighbor_node_ids: list[int] = field(default_factory=list)
+    region_id: int = -1

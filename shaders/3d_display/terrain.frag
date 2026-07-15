@@ -23,6 +23,17 @@ uniform sampler2D overlayTexture;
 uniform bool useOverlay;
 uniform float overlayStrength;
 
+// Contour Lines (globaler Shell-Toggle, siehe MapDisplay3D.set_contour_overlay()).
+// FragPos.y ist bereits Weltraum-Hoehe = rohe Heightmap-Meter * heightScale (siehe
+// _generate_terrain_mesh() pos_y = heightmap * terrain_height_scale) - daher genuegt
+// FragPos.y/heightScale, um dieselbe Roh-Hoehe wie _calculate_contour_levels() in
+// map_display_2d.py zu bekommen, ohne eine eigene Heightmap-Textur hochzuladen. Der
+// Mesh basiert immer auf der kombinierten Heightmap (heightmap_combined), unabhaengig
+// vom aktuell gezeigten renderMode/Overlay - Konturen bleiben also korrekt, egal
+// welcher Layer gerade angezeigt wird.
+uniform bool useContours;
+uniform float contourInterval;
+
 vec3 getTerrainColor() {
     // Height-based terrain coloring. Kein Blau mehr (sah wie Wasser aus) -
     // Grün ist jetzt die niedrigste Farbe (height=0), Weiß die höchste
@@ -44,6 +55,19 @@ vec3 getTerrainColor() {
         // Grayish brown to white
         return mix(vec3(0.63, 0.53, 0.51), vec3(1.0, 1.0, 1.0), (height - 0.75) / 0.25);
     }
+}
+
+vec3 getTerrainColorBlended() {
+    // Wie die anderen getXColor()-Funktionen (Geology/Weather/Water/Biome/
+    // Settlement), aber für renderMode 0 (Terrain-Tab) - z.B. für den
+    // Slope-Overlay. getTerrainColor() selbst bleibt unverändert (wird auch
+    // von den anderen getXColor()-Funktionen als Basis-Farbe wiederverwendet).
+    vec3 baseColor = getTerrainColor();
+    if (useOverlay) {
+        vec3 overlayColor = texture(overlayTexture, TexCoord).rgb;
+        return mix(baseColor, overlayColor, overlayStrength);
+    }
+    return baseColor;
 }
 
 vec3 getGeologyColor() {
@@ -99,13 +123,24 @@ void main() {
     // Select color based on render mode
     vec3 color;
     switch(renderMode) {
-        case 0: color = getTerrainColor(); break;
+        case 0: color = getTerrainColorBlended(); break;
         case 1: color = getGeologyColor(); break;
         case 2: color = getWeatherColor(); break;
         case 3: color = getWaterColor(); break;
         case 4: color = getBiomeColor(); break;
         case 5: color = getSettlementColor(); break;
         default: color = getTerrainColor(); break;
+    }
+
+    // Contour Lines - dunkler, anti-aliaster Streifen bei jedem Vielfachen von
+    // contourInterval (gleiche Grauton-Familie wie CanvasSettings.CANVAS_2D
+    // "contour_colors"[0] = #7f8c8d, fuer 2D/3D-Konsistenz).
+    if (useContours && contourInterval > 0.0) {
+        float rawHeight = FragPos.y / heightScale;
+        float m = mod(rawHeight, contourInterval) / contourInterval;
+        float d = max(fwidth(rawHeight) / contourInterval, 0.0001);
+        float line = 1.0 - smoothstep(0.0, d * 1.5, min(m, 1.0 - m));
+        color = mix(color, vec3(0.498, 0.549, 0.553), line * 0.85);
     }
 
     // Shadow mapping

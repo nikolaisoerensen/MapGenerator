@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QChe
 from PyQt5.QtCore import pyqtSignal
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import ListedColormap, LogNorm
 from matplotlib.figure import Figure
 from gui.config.gui_default import CanvasSettings, ColorSchemes
 
@@ -18,13 +18,13 @@ def _validate_input_data(data):
     if not isinstance(data, np.ndarray):
         return False
 
-    # Echte 2D-Daten (Skalarfelder) ODER RGB/RGBA-Bilddaten (z.B. Geology
-    # rock_map, (H,W,3) Gesteinsanteile) sind gültig für imshow(). Andere
-    # Kanalzahlen (z.B. (H,W,2) dx/dy-Gradienten wie slopemap/wind_map) sind
-    # NICHT direkt darstellbar - der Aufrufer muss sie vorher auf ein
-    # darstellbares Format reduzieren (siehe TerrainTab/WeatherTab
-    # update_display_mode()).
-    if data.ndim == 3 and data.shape[2] not in (3, 4):
+    # Echte 2D-Daten (Skalarfelder), RGB/RGBA-Bilddaten (z.B. Geology
+    # rock_map, (H,W,3) Gesteinsanteile) ODER (H,W,2) Vektorfelder (wind_map -
+    # eigener Pfeil-Renderer _render_wind_map()) sind gültig für die
+    # Darstellung. Andere Kanalzahlen (z.B. slopemap) sind NICHT direkt
+    # darstellbar - der Aufrufer muss sie vorher auf ein darstellbares Format
+    # reduzieren (siehe TerrainTab update_display_mode()).
+    if data.ndim == 3 and data.shape[2] not in (2, 3, 4):
         return False
     elif data.ndim not in (2, 3):
         return False
@@ -39,6 +39,27 @@ def _validate_input_data(data):
         return False
 
     return True
+
+def _get_layer_range(layer_key):
+    """
+    Funktionsweise: Liefert (colormap, vmin, vmax, scale) für einen Layer aus
+    CanvasSettings.CANVAS_2D["layer_ranges"], oder (None, None, None, "linear")
+    wenn kein Eintrag existiert (Aufrufer fällt dann auf Auto-Skalierung
+    zurück). Aufgabe: Zentraler Lookup, von allen _render_*-Methoden genutzt,
+    damit Farbskalen zwischen Frames (z.B. der saisonalen Monats-Animation im
+    Weather-Tab) stabil bleiben statt pro Frame neu zu skalieren. scale ist
+    "linear" (Default, bestehende 3-Tupel-Einträge) oder "log" (z.B.
+    erosion_map/sedimentation_map - stark rechtsschiefe Werteverteilung,
+    lineare Skala ließ den typischen Wertebereich kaum unterscheidbar
+    erscheinen) - siehe _render_generic_map()/map_display_3d.py's
+    _colorize_layer() für die tatsächliche Normalisierung.
+    """
+    entry = CanvasSettings.CANVAS_2D.get("layer_ranges", {}).get(layer_key)
+    if entry is None:
+        return None, None, None, "linear"
+    if len(entry) == 3:
+        return entry[0], entry[1], entry[2], "linear"
+    return entry
 
 def _calculate_contour_levels(heightmap):
     """
@@ -89,6 +110,7 @@ class MapDisplay2D(QWidget):
         self.current_layer = "heightmap"
         self.contour_lines_enabled = True
         self._contour_reference_heightmap = None  # für Contour-Overlay auf Nicht-Heightmap-Layern
+        self._water_biomes_reference = None  # für See/Fluss-Farbunterscheidung in _render_water_map
         self.shadow_overlay_enabled = False
         self.shadow_angle_index = None
         self.measure_mode = False
@@ -229,12 +251,14 @@ class MapDisplay2D(QWidget):
             self._render_biome_map(data)
         elif layer_type == "water_map":
             self._render_water_map(data)
-        elif layer_type == "temperature_map":
+        elif layer_type == "temp_map":
             self._render_temperature_map(data)
-        elif layer_type == "precipitation_map":
+        elif layer_type == "precip_map":
             self._render_precipitation_map(data)
+        elif layer_type == "wind_map":
+            self._render_wind_map(data)
         else:
-            self._render_generic_map(data)
+            self._render_generic_map(data, layer_type)
 
         # Contour-Lines-Overlay auf Nicht-Heightmap-Layern (Heightmap zeichnet
         # ihre eigenen Konturen bereits in _render_heightmap direkt aus den
@@ -255,6 +279,16 @@ class MapDisplay2D(QWidget):
         die Layer-Daten kommen im selben Zug über update_display().
         """
         self._contour_reference_heightmap = heightmap
+
+    def set_water_biomes_reference(self, water_biomes_map):
+        """
+        Öffentlicher Hook (analog zu set_contour_reference_heightmap): hinterlegt
+        water_biomes_map (0=kein Wasser, 1-3=Creek/River/Grand River, 4=Lake), damit
+        _render_water_map See-Pixel farblich von Fluss-Pixeln absetzen kann. Wird von
+        WaterTab.update_display_mode() vor jedem "water_map"-Display-Update mitgeschickt
+        - kein eigenes Redraw, die Layer-Daten kommen im selben Zug über update_display().
+        """
+        self._water_biomes_reference = water_biomes_map
 
     def _reset_measure_tools(self):
         """
@@ -329,7 +363,9 @@ class MapDisplay2D(QWidget):
         MapDisplay2D kann nur echte 2D-Bilder zeichnen).
         Parameter: slope_degrees (numpy.ndarray) - Steigung in Grad zum Rendern
         """
-        im = self.ax.imshow(slope_degrees, cmap=plt.cm.YlOrRd, origin='lower', interpolation='bilinear')
+        _, vmin, vmax, _ = _get_layer_range("slopemap")
+        im = self.ax.imshow(slope_degrees, cmap=plt.cm.YlOrRd, origin='lower', interpolation='bilinear',
+                             vmin=vmin, vmax=vmax)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Slope (°)')
@@ -379,11 +415,27 @@ class MapDisplay2D(QWidget):
         Funktionsweise: Rendert Water-Map mit Blau-Farbschema
         Aufgabe: Spezialisierte Darstellung für Wasser-Daten
         Parameter: water_map (numpy.ndarray) - Wasser-Daten zum Rendern
+
+        See-Pixel (water_biomes_map-Klasse 4, siehe core/water_generator.py
+        _classify_water_bodies) werden - falls set_water_biomes_reference() vorher
+        aufgerufen wurde - zusätzlich in einer klar abgesetzten Farbe overlayed, damit
+        Seen auf den ersten Blick von Flüssen unterscheidbar sind (beide teilten sich
+        vorher exakt dieselbe Blues-Tiefenskala, ein flacher See sah dadurch identisch
+        zu einem schmalen Bach aus). water_biomes_reference bleibt optional/None-
+        toleriert (Rückwärtskompatibilität, falls kein Aufrufer es setzt).
         """
-        im = self.ax.imshow(water_map, cmap=plt.cm.Blues, origin='lower', interpolation='bilinear')
+        _, vmin, vmax, _ = _get_layer_range("water_map")
+        im = self.ax.imshow(water_map, cmap=plt.cm.Blues, origin='lower', interpolation='bilinear',
+                             vmin=vmin, vmax=vmax)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Water Depth (m)')
+
+        water_biomes_map = self._water_biomes_reference
+        if water_biomes_map is not None and water_biomes_map.shape[:2] == water_map.shape[:2]:
+            lake_mask = np.ma.masked_where(water_biomes_map != 4, np.ones_like(water_map))
+            self.ax.imshow(lake_mask, cmap=ListedColormap(['#0b3d91']), origin='lower',
+                            interpolation='nearest', vmin=0, vmax=1, alpha=0.85)
 
     def _render_temperature_map(self, temp_map):
         """
@@ -391,7 +443,9 @@ class MapDisplay2D(QWidget):
         Aufgabe: Spezialisierte Darstellung für Temperatur-Daten
         Parameter: temp_map (numpy.ndarray) - Temperatur-Daten zum Rendern
         """
-        im = self.ax.imshow(temp_map, cmap=plt.cm.RdBu_r, origin='lower', interpolation='bilinear')
+        _, vmin, vmax, _ = _get_layer_range("temp_map")
+        im = self.ax.imshow(temp_map, cmap=plt.cm.RdBu_r, origin='lower', interpolation='bilinear',
+                             vmin=vmin, vmax=vmax)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Temperature (°C)')
@@ -402,18 +456,73 @@ class MapDisplay2D(QWidget):
         Aufgabe: Spezialisierte Darstellung für Niederschlags-Daten
         Parameter: precip_map (numpy.ndarray) - Niederschlags-Daten zum Rendern
         """
-        im = self.ax.imshow(precip_map, cmap=plt.cm.Greens, origin='lower', interpolation='bilinear')
+        _, vmin, vmax, _ = _get_layer_range("precip_map")
+        im = self.ax.imshow(precip_map, cmap=plt.cm.Greens, origin='lower', interpolation='bilinear',
+                             vmin=vmin, vmax=vmax)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Precipitation (mm)')
 
-    def _render_generic_map(self, data):
+    def _render_wind_map(self, wind_map):
+        """
+        Funktionsweise: Windstärke als Heatmap-Hintergrund + Richtungs-Pfeile
+        (matplotlib quiver), auf ein festes 32x32-Raster subgesampelt
+        unabhängig von map_size, damit die Pfeildichte bei jeder Kartengröße
+        gleich bleibt.
+        Aufgabe: Ersetzt die frühere reine Windstärke-Heatmap (wind_map kam
+        vorher bereits als Magnitude reduziert an) - zeigt jetzt zusätzlich
+        die tatsächliche Windrichtung. Pfeillänge UND -farbe skalieren mit
+        der lokalen Windstärke.
+        Parameter: wind_map (numpy.ndarray) - (H,W,2) u/v-Windkomponenten in m/s
+        """
+        height, width = wind_map.shape[0], wind_map.shape[1]
+        magnitude = np.sqrt(wind_map[:, :, 0] ** 2 + wind_map[:, :, 1] ** 2)
+
+        _, vmin, vmax, _ = _get_layer_range("wind_map")
+        im = self.ax.imshow(magnitude, cmap=plt.cm.Blues, origin='lower',
+                             interpolation='bilinear', alpha=0.6, vmin=vmin, vmax=vmax)
+        self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
+        self.current_colorbar.set_label('Wind Speed (m/s)')
+
+        grid = 32
+        y_idx = np.linspace(0, height - 1, min(grid, height)).astype(int)
+        x_idx = np.linspace(0, width - 1, min(grid, width)).astype(int)
+        yy, xx = np.meshgrid(y_idx, x_idx, indexing='ij')
+        u = wind_map[yy, xx, 0]
+        v = wind_map[yy, xx, 1]
+        mag_sampled = magnitude[yy, xx]
+
+        self.ax.quiver(xx, yy, u, v, mag_sampled, cmap=plt.cm.plasma,
+                        angles='xy', scale_units='xy', width=0.003)
+
+    def _render_generic_map(self, data, layer_type=None):
         """
         Funktionsweise: Rendert unbekannte Datentypen mit Standard-Colormap
-        Aufgabe: Fallback-Rendering für beliebige numerische Daten
-        Parameter: data (numpy.ndarray) - Beliebige Daten zum Rendern
+        Aufgabe: Fallback-Rendering für beliebige numerische Daten - nutzt
+        eine feste Farbskala aus CanvasSettings.CANVAS_2D["layer_ranges"],
+        falls layer_type dort einen Eintrag hat (z.B. humid_map,
+        hardness_map, erosion_map, sedimentation_map, flow_map,
+        soil_moist_map), sonst Auto-Skalierung wie bisher.
+        Parameter: data (numpy.ndarray) - Beliebige Daten zum Rendern,
+        layer_type (str) - Layer-Key für den Farbskalen-Lookup
         """
-        im = self.ax.imshow(data, cmap=plt.cm.viridis, origin='lower', interpolation='bilinear')
+        cmap_name, vmin, vmax, scale = _get_layer_range(layer_type) if layer_type else (None, None, None, "linear")
+        cmap = plt.cm.get_cmap(cmap_name) if cmap_name else plt.cm.viridis
+
+        if scale == "log" and vmin is not None and vmax is not None:
+            # Stark rechtsschiefe Werteverteilung (die meisten Pixel exakt 0,
+            # z.B. erosion_map/sedimentation_map) - LogNorm kann keine
+            # nicht-positiven Werte verarbeiten, daher vor dem Rendern auf ein
+            # kleines Epsilon (deutlich unter vmin) geklemmt, damit reine
+            # Nullen sauber unter die Skala fallen (unterste Farbe) statt als
+            # matplotlibs "bad"-Farbe für den Großteil der Karte zu erscheinen.
+            epsilon = vmin * 0.01
+            plot_data = np.maximum(data, epsilon)
+            norm = LogNorm(vmin=vmin, vmax=vmax, clip=True)
+            im = self.ax.imshow(plot_data, cmap=cmap, origin='lower', interpolation='bilinear', norm=norm)
+        else:
+            im = self.ax.imshow(data, cmap=cmap, origin='lower', interpolation='bilinear',
+                                 vmin=vmin, vmax=vmax)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Value')

@@ -149,6 +149,14 @@ class MapEditorWindow(QMainWindow):
         self.side_tab_widget = None
         self.tab_order = []  # lowercase tab names, Index == main_tab_bar/stack index
         self.tabs = {}
+        # Globale 2D/3D-Präferenz, tabübergreifend (User-Report: "beim Wechsel des
+        # Tabs ist man vom 3D Modus wieder im 2D Modus") - jeder Tab hat zwar sein
+        # eigenes current_view, aber ein frisch angezeigter Tab, der nie manuell
+        # umgeschaltet wurde, soll trotzdem den zuletzt GEWÄHLTEN Modus zeigen statt
+        # immer bei seinem eigenen 2D-Default zu bleiben. Aktualisiert via
+        # BaseMapTab.view_switched-Signal (siehe _register_tab_view_signal()),
+        # angewendet in _on_tab_changed().
+        self.global_view_mode = "2d"
         self.pipeline_status_panel = None
         self.footer_progress_bar = None
         self.generate_button = None
@@ -607,6 +615,9 @@ class MapEditorWindow(QMainWindow):
             self.tabs[tab_name.lower()] = tab_instance
             self.tab_generation_status[tab_name.lower()] = {}
 
+            if hasattr(tab_instance, 'view_switched'):
+                tab_instance.view_switched.connect(self._on_tab_view_switched)
+
             # DEBUG: Signal-Verbindung prüfen
             self.logger.info(f"DEBUG: Checking for generation_completed signal...")
             if hasattr(tab_instance, 'generation_completed'):
@@ -816,20 +827,37 @@ class MapEditorWindow(QMainWindow):
             if self.navigation_manager:
                 self.navigation_manager.current_tab = tab_name_lower
 
+            tab_instance = self.tabs.get(tab_name_lower)
+
             # Globale Contour/Shadow-Checkboxen gelten tab-übergreifend - beim
             # Wechsel auf den neu aktiven Tab anwenden, damit dessen Display
             # den aktuellen globalen Zustand übernimmt.
             self._apply_global_overlays_to_active_tab()
 
+            # Globale 2D/3D-Präferenz auf den neu aktiven Tab anwenden, falls er
+            # noch nicht im gewünschten Modus ist (siehe global_view_mode oben).
+            if tab_instance and hasattr(tab_instance, 'current_view') and hasattr(tab_instance, 'switch_view'):
+                if tab_instance.current_view != self.global_view_mode:
+                    tab_instance.switch_view(self.global_view_mode)
+
             # Erzwingt einen Display-Refresh mit dem aktuell gewählten Render-Modus.
             # Ohne das bleibt der Viewport leer, bis der Nutzer den Modus manuell
             # umschaltet - der Default-Radio (z.B. "Height") feuert beim Erstellen
             # kein toggled-Signal, weil setChecked(True) vor dem connect() passiert.
-            tab_instance = self.tabs.get(tab_name_lower)
             if tab_instance and hasattr(tab_instance, 'update_display_mode'):
                 tab_instance.update_display_mode()
 
             self.logger.debug(f"Tab changed to: {tab_text}")
+
+    @pyqtSlot(str)
+    def _on_tab_view_switched(self, view_type: str):
+        """
+        Hält die globale 2D/3D-Präferenz aktuell, sobald der Nutzer auf
+        IRGENDEINEM Tab manuell zwischen 2D/3D umschaltet (BaseMapTab.
+        view_switched-Signal, siehe _add_successful_tab()). _on_tab_changed()
+        wendet global_view_mode dann auf den jeweils neu aktivierten Tab an.
+        """
+        self.global_view_mode = view_type
 
     def _get_active_tab_instance(self):
         """Liefert die BaseMapTab-Instanz des aktuell im main_tab_bar aktiven Tabs."""

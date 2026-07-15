@@ -57,12 +57,23 @@ class PlotPhysicsLab(QMainWindow, SceneMixin, TopologyMixin, FieldMixin, Physics
     TRAFFIC_RECOMPUTE_INTERVAL = 3  # Traffic-Simulation laeuft nur jeden n-ten Tick
     WILDERNESS_CIV_THRESHOLD = 0.20
     WILDERNESS_MIN_AREA = 50
+    # Deutlich kleiner als WILDERNESS_MIN_AREA: Staedte koennen legitim nur
+    # 30-50px Flaeche haben (city_reach_factor bei niedrigem city_size), ein
+    # mit WILDERNESS_MIN_AREA geteiltes Filterkriterium warf solche echten,
+    # kleinen Stadtkonturen komplett weg -- die betroffene Siedlung bekam
+    # dadurch nie Stadttore (siehe scene._build_city_boundary_polygons).
+    CITY_MIN_AREA = 5.0
     SOFTENING = 5.0
     PHYSICS_TIME_STEP = 0.25
     MAX_SPRING_RESULTANT = 4.0
-    MAX_DISPLACEMENT_PER_TICK = 2.0
-    MAP_EDGE_INSET = 5.0
-    PLOT_NODE_FOLLOW_FACTOR = 0.35  # wie stark plot_nodes der Plotkern-Wanderung folgen ("aufrutschen")
+    MAX_DISPLACEMENT_PER_TICK = 2.0  # nur noch Geschwindigkeits-Deckel (siehe physics._physics_step: max_speed)
+    # Kartenrand-Inset fuer die Voronoi-Klip-Box (siehe topology._build_voronoi_mesh)
+    # UND fuer die Seed-Punkt-Ausschlusszone (siehe _gen_step_2_plot_cores) --
+    # EIN gemeinsamer Wert seit dem Umbau auf ein einziges geklipptes Voronoi:
+    # Kartenrand-Nodes entstehen jetzt direkt am Klip-Rand, es gibt keinen
+    # getrennt generierten Kartenrand-Ring mehr, der einen eigenen (frueher
+    # engeren) Abstand gebraucht haette.
+    PLOT_CORE_EDGE_MARGIN = 5.0
 
     # ------------------------------------------------------- Profiling --
     def _start_timer(self, name):
@@ -94,10 +105,17 @@ class PlotPhysicsLab(QMainWindow, SceneMixin, TopologyMixin, FieldMixin, Physics
 
         self.map_size = 256
         self.iteration = 0
-        self.playing = True
+        # Bewusst False: der Nutzer soll die Generierung Schritt fuer Schritt
+        # durchklicken koennen (siehe _gen_step_*/_advance_generation_step in
+        # topology.py), statt dass die Karte sofort komplett generiert UND
+        # die Physik sofort zu ticken beginnt.
+        self.playing = False
+        self._pending_generation_steps = []
+        self._generation_step_index = 0
         self.next_node_id = 0
         self.boundary_owner = {}
         self.ridge_traffic_history = {}
+        self.ridge_traffic_shrink_ema = {}
         self.current_ridge_edges = []
         self.ridge_vertex_positions = None
         self.potential_field = None
@@ -106,34 +124,80 @@ class PlotPhysicsLab(QMainWindow, SceneMixin, TopologyMixin, FieldMixin, Physics
 
         # -- Basiswerte mit physikalischer Einheit (px), bleiben unnormiert --
         self.plot_base_spacing = 60.0
-        self.wilderness_core_spacing = 80.0
 
         # -- Logarithmische Regler: 1.0 = neutral (kein Effekt auf Basiswert),
         #    5.0 = 5x staerker, 0.2 = 5x schwaecher, usw. (Basis 5 statt Basis 10) --
         self.norm_civ_spacing_factor = 1.0
-        # Default bewusst > 1: ohne staerkere Zentroid-Feder wandern Plotkerne
-        # sichtbar aus ihrem Grundstueck heraus, bevor die harte Zell-Grenze
-        # (physics._contain_core_in_cell) sie zurueckprojiziert -- mit hoeherer
-        # Steifigkeit bleiben sie meist von selbst nahe der Zellmitte.
-        self.norm_spacing_spring_stiffness = 3.0
-        self.norm_traffic_spring_stiffness = 1.0
+        # norm_spacing_spring_stiffness/norm_traffic_spring_stiffness: physikalischer
+        # Rebuild -- keine Feder hat mehr rest_length=0 (Core<->PlotNode/PlotNode<->
+        # PlotNode haben jetzt echte, civ-abhaengige Ruhelaengen > 0, siehe
+        # topology._spring_rest_length), daher braucht es keinen kuenstlich erhoehten
+        # Default mehr wie in der vorherigen (Zentroid-Feder-)Version. Start bewusst
+        # "steif" (siehe Nutzer-Vorgabe): hohe Basis-Steifigkeit + hohe Daempfung,
+        # zum Testen schrittweise weicher stellen.
+        self.norm_spacing_spring_stiffness = 1.0   # Feder: Abstand -> Core<->PlotNode (a)
+        self.norm_traffic_spring_stiffness = 1.0   # Feder: Traffic-Zug -> PlotNode<->PlotNode (b)
+        self.norm_pressure_strength = 1.0          # Druck: Flaechenerhalt (f)
+        self.norm_core_mass = 1.0                  # Masse: Kern (d)
+        self.norm_plot_node_mass = 1.0             # Masse: PlotNode (d)
+        self.norm_plot_node_repulsion_strength = 1.0  # PlotNode-Kollisionsabstossung (Abschnitt D)
         self.norm_gravity_strength = 1.0
         self.norm_city_repulsion_strength = 1.0
         self.norm_height_cost_factor = 1.0
         self.norm_tier_factor = 1.0
         self.norm_potential_strength = 1.0
 
+        # Daempfung (d): multiplikativer Geschwindigkeits-Verlust pro Tick
+        # (0=sofortiger Stillstand, 1=keine Daempfung/reine Energieerhaltung).
+        # Bewusst hoch/"steif" als Startwert -- global gilt: erst steif und
+        # stabil, dann schrittweise weicher testen.
+        self.damping = 0.80
+
+        # Ein/Aus-Schalter je Kraft/Mechanismus (Checkboxen, siehe ui.py):
+        # bewusst ALLE False als Default, damit man mit einer leeren Szene
+        # (keine Kraft aktiv, nichts bewegt sich) startet und Kraft fuer Kraft
+        # dazuschalten kann, um genau zu isolieren, welche einen Kollaps
+        # verursacht -- statt das per Kopfrechnen/Skript zu vermuten.
+        self.enable_core_plotnode_spring = False       # Feder (a)
+        self.enable_plotnode_plotnode_spring = False   # Feder (b)
+        self.enable_pressure = False                   # Druck (f)
+        self.enable_plot_node_repulsion = False        # Kollisionsabstossung (Abschnitt D)
+        self.enable_field_cores = False                # Potentialfeld auf Kerne (c)
+        self.enable_field_plotnodes = False             # Potentialfeld auf PlotNodes
+        self.enable_core_cell_containment = False      # harte Zellgrenze (Kerne)
+        self.enable_wilderness_containment = False     # harte Wildnisgrenze (PlotNodes)
+
         # -- Basiswerte, auf die die Normierung bei Multiplikator 1.0 abbildet --
         self._BASE_CIV_SPACING_FACTOR = 8.0
-        self._BASE_SPACING_SPRING_STIFFNESS = 0.04
-        self._BASE_TRAFFIC_SPRING_STIFFNESS = 0.02
+        self._BASE_SPACING_SPRING_STIFFNESS = 1.2
+        self._BASE_TRAFFIC_SPRING_STIFFNESS = 1.0
+        self._BASE_PRESSURE_STRENGTH = 0.8
+        self._BASE_CORE_MASS = 1.0
+        self._BASE_PLOT_NODE_MASS = 1.0
+        self._BASE_PLOT_NODE_REPULSION_STRENGTH = 4.0
         self._BASE_GRAVITY_STRENGTH = 0.01
         self._BASE_CITY_REPULSION_STRENGTH = 0.5
         self._BASE_HEIGHT_COST_FACTOR = 3.0
         self._BASE_TIER_FACTOR = 1.0
 
         self.spring_traffic_shrink = 0.002
-        self.spring_min_shrink_fraction = 0.4
+        # Ruhelaenge der PlotNode<->PlotNode-Feder (b) schrumpft mit Traffic
+        # bis zu 30% (Nutzer-Vorgabe) -- Bodenwert 0.70, nicht 1.0.
+        self.spring_min_shrink_fraction = 0.70
+        # Eigene, deutlich langsamer nachziehende EMA-Rate nur fuer den
+        # Feder-Schrumpf (siehe ridge_traffic_shrink_ema in traffic.py) --
+        # bewusst sanfter als traffic_decay=0.15 in traffic.py, damit die
+        # Ruhelaenge beim ersten Auftreten von Traffic auf einer Kante nicht
+        # in einem Schritt springt, sondern langsam eingleitet.
+        self.spring_shrink_ema_decay = 0.05
+
+        # Weiche Rueckstellkraft fuer die Wildnisgrenze (PlotNodes), ersetzt
+        # den frueheren harten Positions-Snap in _physics_step: der Snap war
+        # eine Viele-zu-eins-Abbildung (mehrere plot_nodes vom selben
+        # Randabschnitt projizieren auf denselben Punkt) und liess plot_nodes
+        # sichtbar zu Haufen/Linien entlang der Grenze kollabieren, siehe
+        # physics._apply_spring_forces Abschnitt E.
+        self.wilderness_push_stiffness = 1.5
 
         self.show_civ_overlay = False
         self.show_potential_overlay = False

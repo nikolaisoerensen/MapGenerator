@@ -167,6 +167,20 @@ class SimplexNoiseGenerator:
         self.shader_manager = shader_manager
         self.logger = logging.getLogger(self.__class__.__name__)
 
+    def set_seed(self, seed: int) -> None:
+        """
+        Setzt den Noise-Seed neu, falls er vom aktuellen abweicht. Nötig, weil
+        BaseTerrainGenerator (und damit dieser SimplexNoiseGenerator) über
+        GenerationOrchestrator.get_generator_instance() dauerhaft gecacht wird
+        - ohne explizites Reseed blieb der Seed für die gesamte App-Laufzeit
+        auf dem Wert eingefroren, mit dem der Generator beim allerersten
+        Generate-Klick konstruiert wurde (Änderungen am map_seed-Slider hatten
+        dadurch keine Wirkung auf die Heightmap).
+        """
+        if seed != self.seed:
+            self.generator = OpenSimplex(seed=seed)
+            self.seed = seed
+
     def generate_noise_grid(self, size: int, frequency: float, octaves: int,
                           persistence: float, lacunarity: float,
                           offset_x: float = 0, offset_y: float = 0) -> np.ndarray:
@@ -428,6 +442,67 @@ class SimplexNoiseGenerator:
         return interpolated
 
 
+_SOLAR_K = np.pi / 180.0
+# Referenztage für die 6 Zwei-Monats-Perioden (01.Jan/01.Mär/01.Mai/01.Jul/
+# 01.Sep/01.Nov), Tageszahl via "(monat-1)*30.3+datum" (geoastro.de-Formel).
+_SEASONAL_REFERENCE_DAYS_OF_YEAR = [1.0, 61.6, 122.2, 182.8, 243.4, 304.0]
+_SEASONAL_DAYTIME_HOURS = [6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]
+
+
+def calculate_solar_position(day_of_year: float, hour: float, latitude: float,
+                              longitude: float) -> Tuple[float, float]:
+    """
+    Funktionsweise: Echte astronomische Sonnenstandsberechnung (Deklination,
+    Zeitgleichung, Stundenwinkel -> Höhe/Azimut), Quelle: geoastro.de/SME/
+    tk/index.htm.
+    Parameter: day_of_year - Tageszahl im Jahr (1-365, kann fraktional sein),
+    hour - Stunde inkl. Bruchteil (z.B. 14.5 = 14:30), latitude/longitude -
+    Grad (longitude Ost positiv)
+    Returns: (elevation_deg, azimuth_deg) - Elevation auf >=0 geklemmt (Sonne
+    unter dem Horizont wird nicht negativ zurückgegeben)
+    """
+    declination = -23.45 * np.cos(_SOLAR_K * 360 * (day_of_year + 10) / 365)
+    equation_of_time = 60 * (
+        -0.171 * np.sin(0.0337 * day_of_year + 0.465)
+        - 0.1299 * np.sin(0.01787 * day_of_year - 0.168)
+    )
+    hour_angle = 15 * (hour - (15.0 - longitude) / 15.0 - 12 + equation_of_time / 60)
+
+    x = (np.sin(_SOLAR_K * latitude) * np.sin(_SOLAR_K * declination)
+         + np.cos(_SOLAR_K * latitude) * np.cos(_SOLAR_K * declination)
+         * np.cos(_SOLAR_K * hour_angle))
+    x = float(np.clip(x, -1.0, 1.0))
+    elevation = np.arcsin(x) / _SOLAR_K
+
+    denom = np.cos(_SOLAR_K * latitude) * np.sin(np.arccos(x))
+    if abs(denom) < 1e-9:
+        azimuth = 180.0
+    else:
+        y = float(np.clip(
+            -(np.sin(_SOLAR_K * latitude) * x - np.sin(_SOLAR_K * declination)) / denom,
+            -1.0, 1.0))
+        azimuth_raw = np.arccos(y) / _SOLAR_K
+        solar_noon_hour = 12 + (15.0 - longitude) / 15.0 - equation_of_time / 60
+        azimuth = azimuth_raw if hour <= solar_noon_hour else 360.0 - azimuth_raw
+
+    return max(0.0, float(elevation)), float(azimuth)
+
+
+def generate_seasonal_sun_angles(month_index: int, latitude: float,
+                                  longitude: float) -> List[Tuple[float, float]]:
+    """
+    Funktionsweise: 7 (elevation, azimuth)-Paare für eine der 6 saisonalen
+    Zwei-Monats-Perioden, über calculate_solar_position() für den jeweiligen
+    Referenztag und 7 Tageszeiten (6-18 Uhr) berechnet - ersetzt
+    ShadowCalculator.sun_angles 1:1 für diesen Monat (gleiche Länge 7,
+    dieselbe LOD-Index-Filterung in get_sun_angles_for_lod() bleibt gültig).
+    Parameter: month_index - 0..5 (Jan/Feb .. Nov/Dez), latitude/longitude - Grad
+    """
+    day_of_year = _SEASONAL_REFERENCE_DAYS_OF_YEAR[month_index]
+    return [calculate_solar_position(day_of_year, h, latitude, longitude)
+            for h in _SEASONAL_DAYTIME_HOURS]
+
+
 class ShadowCalculator:
     """
     Funktionsweise: Berechnet Verschattung mit Raycasts für LOD-spezifische Sonnenwinkel
@@ -466,7 +541,8 @@ class ShadowCalculator:
 
     def calculate_shadows(self, heightmap: np.ndarray, lod_level: int,
                          existing_shadows: Optional[np.ndarray] = None,
-                         existing_lod: int = 1) -> np.ndarray:
+                         existing_lod: int = 1,
+                         sun_angles_override: Optional[List[Tuple[float, float]]] = None) -> np.ndarray:
         """
         Funktionsweise: Berechnet Verschattung mit 3-stufigem Fallback und LOD-System
         Aufgabe: Erstellt shadowmap (konstant 64x64) für Weather-System
@@ -474,6 +550,12 @@ class ShadowCalculator:
         Parameter: lod_level - LOD-Level für Sonnenwinkel-Auswahl
         Parameter: existing_shadows - Bestehende Shadow-Daten (optional)
         Parameter: existing_lod - LOD-Level der bestehenden Shadows
+        Parameter: sun_angles_override - ersetzt self.sun_angles für diesen
+            Aufruf (z.B. saisonal berechnete Sonnenwinkel via
+            generate_seasonal_sun_angles() für Weathers Monats-Simulation) -
+            self.sun_weights bleibt unverändert, get_sun_angles_for_lod()s
+            Index-Filterung bleibt gültig (gleiche Länge 7). None = bisheriges
+            Verhalten (feste self.sun_angles-Tabelle, ein Tag für alle Monate).
         Returns: numpy.ndarray - Shadow-Map konstant 64x64
         """
         # GPU-Fallback (Optimal) - ShaderManager.process_shadow_raycast() rechnet nur
@@ -483,25 +565,34 @@ class ShadowCalculator:
         # sie in der aktuellen Pipeline nie mit gesetzten Werten aufruft.
         if self._gpu_available():
             try:
-                return self._calculate_gpu_shadows(heightmap, lod_level)
+                return self._calculate_gpu_shadows(heightmap, lod_level, sun_angles_override)
             except Exception as e:
                 self.logger.warning(f"GPU shadow calculation failed: {e}")
 
         # CPU-Fallback (Gut)
         try:
-            return self._calculate_cpu_shadows(heightmap, lod_level, existing_shadows, existing_lod)
+            return self._calculate_cpu_shadows(heightmap, lod_level, existing_shadows, existing_lod,
+                                                sun_angles_override)
         except Exception as e:
             self.logger.warning(f"CPU shadow calculation failed: {e}")
 
         # Simple-Fallback (Minimal)
         return self._calculate_simple_shadows(heightmap, lod_level)
 
-    def get_sun_angles_for_lod(self, lod_level: int) -> Tuple[List[Tuple[int, int]], List[float]]:
+    def get_sun_angles_for_lod(
+            self, lod_level: int,
+            sun_angles_override: Optional[List[Tuple[float, float]]] = None
+    ) -> Tuple[List[Tuple[float, float]], List[float]]:
         """
         Funktionsweise: Gibt passende Sonnenwinkel-Auswahl für LOD-Level zurück
         Parameter: lod_level (int) - 1,2,3,4,5,6,7
+        Parameter: sun_angles_override - falls gesetzt, wird diese 7er-Liste
+            statt self.sun_angles indiziert (siehe calculate_shadows()) -
+            self.sun_weights bleibt in jedem Fall die Quelle der Gewichtung.
         Returns: Tuple (sun_angles_list, sun_weights_list) - Gefilterte Winkel und Gewichtungen
         """
+        angles_source = sun_angles_override if sun_angles_override is not None else self.sun_angles
+
         if lod_level == 1:
             # Nur Mittag
             indices = [3]
@@ -515,7 +606,7 @@ class ShadowCalculator:
             # Alle 7 Winkel
             indices = list(range(7))
 
-        selected_angles = [self.sun_angles[i] for i in indices]
+        selected_angles = [angles_source[i] for i in indices]
         selected_weights = [self.sun_weights[i] for i in indices]
 
         return selected_angles, selected_weights
@@ -528,10 +619,11 @@ class ShadowCalculator:
 
     def _calculate_cpu_shadows(self, heightmap: np.ndarray, lod_level: int,
                               existing_shadows: Optional[np.ndarray] = None,
-                              existing_lod: int = 1) -> np.ndarray:
+                              existing_lod: int = 1,
+                              sun_angles_override: Optional[List[Tuple[float, float]]] = None) -> np.ndarray:
         """
         Funktionsweise: Optimierte CPU-Raycast-Implementierung
-        Parameter: heightmap, lod_level, existing_shadows, existing_lod
+        Parameter: heightmap, lod_level, existing_shadows, existing_lod, sun_angles_override
         Returns: numpy.ndarray - Shadow-Map in heightmap-Auflösung (intern bei 64x64 gerechnet)
         """
         shadow_resolution = 64
@@ -550,7 +642,7 @@ class ShadowCalculator:
                                                      existing_shadows, existing_lod)
 
         # Vollständige Shadow-Berechnung
-        sun_angles, sun_weights = self.get_sun_angles_for_lod(lod_level)
+        sun_angles, sun_weights = self.get_sun_angles_for_lod(lod_level, sun_angles_override)
         shadows = np.zeros((shadow_resolution, shadow_resolution), dtype=np.float32)
         total_weight = sum(sun_weights)
 
@@ -567,20 +659,21 @@ class ShadowCalculator:
 
         return shadows
 
-    def _calculate_gpu_shadows(self, heightmap: np.ndarray, lod_level: int) -> np.ndarray:
+    def _calculate_gpu_shadows(self, heightmap: np.ndarray, lod_level: int,
+                              sun_angles_override: Optional[List[Tuple[float, float]]] = None) -> np.ndarray:
         """
         Funktionsweise: GPU-Raycast-Implementierung über ShaderManager.process_shadow_raycast()
         Aufgabe: Rechnet - wie der CPU-Pfad - pro LOD-Sonnenwinkel einen Raycast-Pass und
                  kombiniert die Ergebnisse gewichtet; process_shadow_raycast() selbst rechnet
                  nur einen Winkel pro Aufruf (kein Batch-Modus vorhanden).
-        Parameter: heightmap, lod_level
+        Parameter: heightmap, lod_level, sun_angles_override
         Returns: numpy.ndarray - Shadow-Map in heightmap-Auflösung (intern bei 64x64 gerechnet)
         """
         shadow_resolution = 64
         original_size = heightmap.shape[0]
         shadow_heightmap = self._resize_2d(heightmap, shadow_resolution)
 
-        sun_angles, sun_weights = self.get_sun_angles_for_lod(lod_level)
+        sun_angles, sun_weights = self.get_sun_angles_for_lod(lod_level, sun_angles_override)
         shadows = np.zeros((shadow_resolution, shadow_resolution), dtype=np.float32)
         total_weight = sum(sun_weights)
 
@@ -1139,6 +1232,14 @@ class BaseTerrainGenerator:
 
         # Frequency für LOD-Größe anpassen
         adjusted_frequency = frequency * (64 / size)  # Referenz: LOD 64
+
+        # map_seed war hier vorher nie gelesen worden - der Noise-Generator
+        # behielt den Seed, mit dem er beim allerersten Generate-Klick
+        # konstruiert wurde, für die gesamte App-Laufzeit (siehe
+        # SimplexNoiseGenerator.set_seed()). Änderungen am map_seed-Slider
+        # hatten dadurch nie eine sichtbare Wirkung auf die Heightmap.
+        map_seed = parameters.get('map_seed', self.map_seed)
+        self.noise_generator.set_seed(map_seed)
 
         noise_grid = self.noise_generator.generate_noise_grid(
             size=size,

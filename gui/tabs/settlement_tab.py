@@ -190,7 +190,8 @@ class SettlementTab(BaseMapTab):
                 max_val=param_config["max"],
                 default_val=param_config["default"],
                 step=param_config.get("step", 1),
-                suffix=param_config.get("suffix", "")
+                suffix=param_config.get("suffix", ""),
+                description=param_config.get("description", "")
             )
 
             slider.valueChanged.connect(self.on_parameter_changed)
@@ -214,7 +215,8 @@ class SettlementTab(BaseMapTab):
                 max_val=param_config["max"],
                 default_val=param_config["default"],
                 step=param_config.get("step", 0.1),
-                suffix=param_config.get("suffix", "")
+                suffix=param_config.get("suffix", ""),
+                description=param_config.get("description", "")
             )
 
             slider.valueChanged.connect(self.on_parameter_changed)
@@ -238,7 +240,8 @@ class SettlementTab(BaseMapTab):
                 max_val=param_config["max"],
                 default_val=param_config["default"],
                 step=param_config.get("step", 0.1),
-                suffix=param_config.get("suffix", "")
+                suffix=param_config.get("suffix", ""),
+                description=param_config.get("description", "")
             )
 
             slider.valueChanged.connect(self.on_parameter_changed)
@@ -262,7 +265,8 @@ class SettlementTab(BaseMapTab):
                 max_val=param_config["max"],
                 default_val=param_config["default"],
                 step=param_config.get("step", 0.1),
-                suffix=param_config.get("suffix", "")
+                suffix=param_config.get("suffix", ""),
+                description=param_config.get("description", "")
             )
 
             slider.valueChanged.connect(self.on_parameter_changed)

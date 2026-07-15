@@ -559,23 +559,34 @@ def _dispatch_soil_moisture(worker: "GPUWorker", inputs: dict, parameters: dict)
     water_biomes_map = inputs["water_biomes_map"]
     flow_accumulation = inputs["flow_accumulation"]
     diffusion_radius = inputs["diffusion_radius"]
+    # Kapillare Ausbreitung: fester, kleiner Radius, identischer Fix wie im
+    # CPU-Pfad (SoilMoistureCalculator.__init__) - war hart auf 2.0 kodiert,
+    # siehe dortiger Docstring-Kommentar für die volle Begründung
+    # ([[project-water-flood-calibration]]).
+    capillary_sigma = inputs.get("capillary_sigma", 0.5)
+    # Zentrallinie statt der ggf. breiter gemalten water_biomes_map als 100%-
+    # Feuchte-Quellfläche - identischer Fix wie im CPU-Pfad
+    # (SoilMoistureCalculator._cpu_soil_moisture_calculation()), entkoppelt
+    # die Boden-Feuchte-Ausdehnung von der visuellen Flussbreite. Fällt auf
+    # water_biomes_map zurück, falls kein separater Key übergeben wurde.
+    water_mask_source = inputs.get("water_mask_source", water_biomes_map)
 
     # Portierung von SoilMoistureCalculator._cpu_soil_moisture_calculation() - die
     # Quell-Karten-Aufbereitung ist bereits mit numpy vektorisierbar (keine eigene
     # Shader-Passe nötig), nur die beiden Gaussian-Diffusionen laufen auf der GPU.
-    water_mask = water_biomes_map > 0
+    water_mask = water_mask_source > 0
     capillary_source = np.where(water_mask, 100.0, 0.0).astype(np.float32)
 
     groundwater_source = np.zeros_like(capillary_source)
-    groundwater_source[water_biomes_map == 4] = 80.0
-    mask3 = water_biomes_map == 3
+    groundwater_source[water_mask_source == 4] = 80.0
+    mask3 = water_mask_source == 3
     groundwater_source[mask3] = 60.0 + np.minimum(20.0, flow_accumulation[mask3] * 0.1)
-    mask2 = water_biomes_map == 2
+    mask2 = water_mask_source == 2
     groundwater_source[mask2] = 40.0 + np.minimum(20.0, flow_accumulation[mask2] * 0.2)
-    mask1 = water_biomes_map == 1
+    mask1 = water_mask_source == 1
     groundwater_source[mask1] = 20.0 + np.minimum(10.0, flow_accumulation[mask1] * 0.3)
 
-    capillary_moisture = _gaussian_blur(worker, capillary_source, 2.0)
+    capillary_moisture = _gaussian_blur(worker, capillary_source, capillary_sigma)
     groundwater_moisture = _gaussian_blur(worker, groundwater_source, diffusion_radius)
 
     combined_moisture = np.maximum(capillary_moisture, groundwater_moisture)
@@ -709,6 +720,7 @@ def _dispatch_wind_field_cfd(worker: "GPUWorker", inputs: dict, parameters: dict
     thermic_effect = float(inputs["thermic_effect"])
     cfd_iterations = max(1, int(inputs["cfd_iterations"]))
     map_seed = int(inputs["map_seed"])
+    month_index = int(inputs.get("month_index", 0))
     height, width = heightmap.shape
 
     # Slopemap + initiales Druckfeld sind im CPU-Original bereits vektorisiert (numpy) -
@@ -722,17 +734,46 @@ def _dispatch_wind_field_cfd(worker: "GPUWorker", inputs: dict, parameters: dict
     slopemap[0, :, 1] = heightmap[1, :] - heightmap[0, :]
     slopemap[-1, :, 1] = heightmap[-1, :] - heightmap[-2, :]
 
-    x_coords = np.arange(width).reshape(1, -1)
-    pressure_field = np.broadcast_to(
-        1.0 - (x_coords / (width - 1)) * 0.3, (height, width)).astype(np.float32).copy()
+    # Lineares Druckgefälle entlang der vorherrschenden Windrichtung (Grad,
+    # math. Konvention: 0°=Wind Richtung +x/Ost, 90°=+y) - 1:1 dieselbe
+    # Formel wie WeatherSystemGenerator._build_directional_pressure_field()
+    # (CPU-Pfad), hier separat gehalten statt geteilt, da GPU/CPU-Pfade in
+    # dieser Codebase durchgängig unabhängige Implementierungen sind. Bei
+    # wind_direction_deg=0 identisch zur alten hartcodierten West-Ost-Formel.
+    wind_direction_deg = float(inputs.get("prevailing_wind_direction", 0.0))
+    theta = np.radians(wind_direction_deg)
+    dx, dy = np.cos(theta), np.sin(theta)
+    y_idx, x_idx = np.mgrid[0:height, 0:width]
+    s = x_idx * dx + y_idx * dy
+    s_min, s_max = s.min(), s.max()
+    s_range = s_max - s_min
+    s_norm = (s - s_min) / s_range if s_range > 1e-9 else np.zeros_like(s, dtype=np.float32)
+    pressure_field = (1.0 - s_norm * 0.3).astype(np.float32)
 
-    seed_offset = (map_seed % 1000) * 0.1
+    # month_index * 10.0 - identischer Offset-Mechanismus wie
+    # WeatherSystemGenerator._generate_pressure_noise() (CPU-Pfad): macht das
+    # kleinräumige Rauschmuster pro saisonaler Periode optisch unterscheidbar
+    # statt für alle 6 Monate identisch (u_seed_offset in pressureNoise.comp
+    # ist bereits ein Koordinaten-Offset, kein Shader-Change nötig).
+    seed_offset = (map_seed % 1000) * 0.1 + month_index * 10.0
     pressure_field += _dispatch_pressure_noise(worker, width, height, seed_offset) * 0.15
+
+    # Druck-Terrain-Kopplung - identische Formel wie
+    # WeatherSystemGenerator._simulate_wind_field_cpu_cfd() (CPU-Pfad): hohe
+    # Punkte senken lokal den effektiven Druck (grobe Orographie-Näherung).
+    # Anders als der bestehende additive Terrain-Ablenkungs-Term weiter unten
+    # (der nur einmalig auf wind_field draufaddiert wird) fließt dieser Term
+    # VOR der Gradientenberechnung ins Druckfeld selbst ein.
+    height_range = heightmap.max() - heightmap.min()
+    height_normalized = (heightmap - heightmap.min()) / height_range if height_range > 1e-6 \
+        else np.zeros_like(heightmap, dtype=np.float32)
+    terrain_pressure_term = height_normalized * terrain_factor * 0.2
+    pressure_field_coupled = pressure_field - terrain_pressure_term
 
     pressure_grad_x = np.zeros_like(pressure_field)
     pressure_grad_y = np.zeros_like(pressure_field)
-    pressure_grad_x[:, 1:-1] = (pressure_field[:, 2:] - pressure_field[:, :-2]) * 0.5
-    pressure_grad_y[1:-1, :] = (pressure_field[2:, :] - pressure_field[:-2, :]) * 0.5
+    pressure_grad_x[:, 1:-1] = (pressure_field_coupled[:, 2:] - pressure_field_coupled[:, :-2]) * 0.5
+    pressure_grad_y[1:-1, :] = (pressure_field_coupled[2:, :] - pressure_field_coupled[:-2, :]) * 0.5
 
     wind_field = np.zeros((height, width, 2), dtype=np.float32)
     wind_field[:, :, 0] = -pressure_grad_x * wind_speed_factor * 10.0

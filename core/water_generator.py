@@ -15,10 +15,10 @@ Parameter Input:
 - rain_threshold (Niederschlagsschwelle für Quellbildung, default 0.2 gH2O/m²)
 - manning_coefficient (Rauheitskoeffizient für Fließgeschwindigkeit, default 0.03)
 - erosion_strength (Erosionsintensitäts-Multiplikator, default 1.0)
-- sediment_capacity_factor (Transportkapazitäts-Faktor, default 0.1)
+- sediment_capacity_factor (Transportkapazitäts-Faktor, default 0.001)
 - evaporation_base_rate (Basis-Verdunstungsrate, default 0.002 m/Tag)
-- diffusion_radius (Bodenfeuchtigkeit-Ausbreitungsradius, default 5.0 Pixel)
-- settling_velocity (Sediment-Sinkgeschwindigkeit, default 0.01 m/s)
+- diffusion_radius (Bodenfeuchtigkeit-Grundwasser-Ausbreitungsradius, default 2.0 Pixel)
+- settling_velocity (Sediment-Sinkgeschwindigkeit, default 0.08 m/s)
 - erosion_iterations_per_lod (Anzahl Erosions-Zyklen pro LOD-Level, default 10)
 - water_seed (Reproduzierbare Zufallsvariation)
 
@@ -41,7 +41,7 @@ Output:
 """
 
 import numpy as np
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, distance_transform_edt
 from scipy.spatial import distance_matrix
 from collections import deque
 from typing import Dict, Any, List, Optional
@@ -71,6 +71,173 @@ class WaterData:
         self.validity_state = "valid"      # Validity-State für Cache-Management
         self.parameter_hash = None         # Parameter-Hash für Cache-Invalidation
         self.parameters = {}               # Verwendete Parameter für Cache-Management
+
+def _detect_local_minima_full(heightmap):
+    """Identifiziert alle lokalen Minima einer Heightmap (siehe
+    LakeDetectionSystem._detect_local_minima, das dies als dünner Wrapper
+    aufruft) - modulweite Funktion, damit sie auch außerhalb von
+    LakeDetectionSystem wiederverwendbar ist (siehe compute_full_watershed())."""
+    height, width = heightmap.shape
+    local_minima = []
+
+    for y in range(1, height - 1):
+        for x in range(1, width - 1):
+            current_height = heightmap[y, x]
+            is_minimum = True
+
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    if dx == 0 and dy == 0:
+                        continue
+                    neighbor_height = heightmap[y + dy, x + dx]
+                    if neighbor_height <= current_height:
+                        is_minimum = False
+                        break
+                if not is_minimum:
+                    break
+
+            if is_minimum:
+                local_minima.append((x, y))
+
+    return local_minima
+
+
+def _apply_priority_flood_watershed(heightmap, seeds):
+    """
+    Wasserscheiden-Zuordnung per Priority-Flood/Immersionssimulation (Vincent-Soille-
+    Watershed-Transform): jede Zelle wird dem Becken zugeordnet, dessen Flutung sie
+    zuerst erreicht (Multi-Source-Dijkstra mit Höhe als Kosten über heapq). Modulweite
+    Funktion (siehe LakeDetectionSystem._apply_jump_flooding, das dies als dünner
+    Wrapper aufruft) - derselbe Algorithmus-Stammbaum wie RichDEM's Priority-Flood-
+    Depression-Filling (Barnes et al. 2014, https://github.com/r-barnes/richdem),
+    das ebenfalls Senken "to the level of their lowest outlet or spill-point" füllt.
+
+    Ersetzt die vormalige Jump-Flooding-Variante, die Zellen rein per "current_height
+    >= seed_height AND kürzeste Luftlinien-Distanz" zuwies - das ist keine echte
+    Erreichbarkeits-Prüfung (kein monotoner Abwärtspfad zum Seed nötig), sondern nur
+    eine grobe obere Schranke, die praktisch immer erfüllt ist (jeder Punkt der Karte
+    liegt höher als IRGENDEIN lokales Minimum irgendwo auf der Karte). Dadurch wurde
+    de facto ein reines Luftlinien-Voronoi-Diagramm über die gesamte Karte gelegt,
+    das auch Berggipfel dem nächstgelegenen Tal zuschlug, unabhängig von Bergkämmen
+    dazwischen - empirisch bestätigt: 99.98-100% der Karte wurden einem Becken
+    zugewiesen, ungeachtet der Topographie.
+
+    Die Priority-Flood-Wasserscheide stoppt dagegen an echten Wasserscheiden (Grate),
+    weil jede Zelle vom zuerst dort ankommenden (= niedrigsten) Flutungs-Frontpunkt
+    beansprucht wird - das ist die Standard-Definition eines Einzugsgebiets.
+    """
+    height, width = heightmap.shape
+    lake_map = np.full((height, width), -1, dtype=np.int32)
+
+    if not seeds:
+        return lake_map
+
+    visited = np.zeros((height, width), dtype=bool)
+    heap = []
+    for i, (seed_x, seed_y) in enumerate(seeds):
+        lake_map[seed_y, seed_x] = i
+        visited[seed_y, seed_x] = True
+        heapq.heappush(heap, (float(heightmap[seed_y, seed_x]), seed_x, seed_y, i))
+
+    neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+    while heap:
+        _, x, y, basin_id = heapq.heappop(heap)
+
+        for dx, dy in neighbor_offsets:
+            nx, ny = x + dx, y + dy
+
+            if 0 <= nx < width and 0 <= ny < height and not visited[ny, nx]:
+                visited[ny, nx] = True
+                lake_map[ny, nx] = basin_id
+                heapq.heappush(heap, (float(heightmap[ny, nx]), nx, ny, basin_id))
+
+    return lake_map
+
+
+def _compute_spill_elevations(heightmap, basin_id_map, num_basins):
+    """
+    Berechnet pro Becken-ID die Überlauf-/Spill-Point-Höhe (niedrigster Punkt, an dem
+    ein Becken in ein Nachbarbecken oder über den Kartenrand überläuft) - extrahiert
+    aus LakeDetectionSystem._classify_lake_basins()s erster Schleife, dort weiterhin
+    per Aufruf dieser Funktion genutzt (siehe dortigen Docstring für die volle
+    Herleitung, warum der Spill-Point statt Becken-Minimum/-Maximum der korrekte
+    Wasserspiegel-Bezugspunkt ist). Modulweite Funktion, damit sie auch außerhalb von
+    LakeDetectionSystem wiederverwendbar ist (siehe compute_full_watershed()).
+    Rückgabe: 1D-Array (Länge num_basins), np.inf für Becken ohne Nachbar-Kreuzung
+    (sollte bei einer vollständigen Karte nicht vorkommen, außer num_basins==0).
+    """
+    height, width = heightmap.shape
+    spill_elevation = np.full(num_basins, np.inf, dtype=np.float64)
+    neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+    for y in range(height):
+        for x in range(width):
+            basin_id = basin_id_map[y, x]
+            if basin_id < 0:
+                continue
+
+            on_edge = (x == 0 or x == width - 1 or y == 0 or y == height - 1)
+            if on_edge:
+                # Becken berührt den Kartenrand - offener Abfluss, kein geschlossener See
+                spill_elevation[basin_id] = min(spill_elevation[basin_id], heightmap[y, x])
+
+            for dx, dy in neighbor_offsets:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < width and 0 <= ny < height:
+                    neighbor_basin = basin_id_map[ny, nx]
+                    if neighbor_basin != basin_id:
+                        crossing_height = max(heightmap[y, x], heightmap[ny, nx])
+                        if crossing_height < spill_elevation[basin_id]:
+                            spill_elevation[basin_id] = crossing_height
+
+    return spill_elevation
+
+
+def compute_full_watershed(heightmap, smoothing_sigma=1.5):
+    """
+    Berechnet für die GESAMTE Karte (nicht nur Seen-Kandidaten) eine Wasserscheiden-/
+    Becken-Zuordnung per Priority-Flood (siehe _apply_priority_flood_watershed) - Basis
+    sowohl für die Seen-Erkennung (LakeDetectionSystem, über deren dünne Wrapper-
+    Methoden - die ABER die Roh-Heightmap direkt nutzen, nicht diese Funktion, siehe
+    unten) als auch für die becken-basierte Sediment-Verteilung
+    (ErosionSedimentationSystem._distribute_sediment_floodplain(), siehe [[project-erosion-sedimentation-basin-redistribution]]).
+    Beide Aufrufer teilen sich bewusst KEINEN gemeinsamen Objekt-Zustand - jeder ruft
+    diese Funktion unabhängig mit der jeweils aktuellen Heightmap auf (vermeidet
+    GPU/CPU-Inkonsistenz-Fallstricke: LakeDetectionSystem.detect_lakes() kann GPU
+    nutzen, dessen Jump-Flood-Shader eine bekannt andere - fehlerhafte - Zuordnung
+    liefert; die Sediment-Verteilung nutzt deshalb IMMER diese CPU-Variante,
+    unabhängig davon, ob Erosion/Transport selbst gerade auf GPU liefen).
+
+    smoothing_sigma: die Becken-TOPOLOGIE (welches Pixel gehört zu welchem Becken,
+    wo liegt der Spill-Point) wird auf einer leicht geglätteten Kopie der Heightmap
+    berechnet, NICHT auf den Roh-Höhen - kleinräumiges Terrain-Rauschen (jede noch so
+    kleine Delle gilt sonst als eigenes striktes lokales Minimum, siehe
+    _detect_local_minima_full()) würde sonst ein einzelnes großes Tal in viele
+    winzige Mikro-Becken zersplittern, deren jeweilige Spill-Elevation kaum über der
+    eigenen Senke liegt - das Gegenteil des gewünschten "über das ganze Tal
+    verteilen"-Effekts. LakeDetectionSystem bleibt davon unberührt (nutzt weiterhin
+    die Roh-Heightmap für _detect_local_minima/_apply_jump_flooding/
+    _classify_lake_basins, siehe deren Wrapper-Methoden oben) - Seen sollen exakt
+    in der echten, ungeglätteten Geländeform sitzen, nicht in einer geglätteten
+    Approximation. `smoothing_sigma=0` deaktiviert die Glättung (Roh-Heightmap direkt).
+
+    Rückgabe: (basin_id_map, spill_elevation) - basin_id_map: (H,W) int32, -1 wo keine
+    lokalen Minima existieren (z.B. eine komplett flache Karte); spill_elevation:
+    1D-Array (Länge = Anzahl gefundener Becken), pro Becken-ID die Überlauf-Höhe
+    (bezogen auf die geglättete Topologie, siehe smoothing_sigma oben).
+    """
+    height, width = heightmap.shape
+    topology_map = gaussian_filter(heightmap, sigma=smoothing_sigma) if smoothing_sigma > 0 else heightmap
+
+    local_minima = _detect_local_minima_full(topology_map)
+    if not local_minima:
+        return np.full((height, width), -1, dtype=np.int32), np.array([], dtype=np.float64)
+
+    basin_id_map = _apply_priority_flood_watershed(topology_map, local_minima)
+    spill_elevation = _compute_spill_elevations(topology_map, basin_id_map, len(local_minima))
+    return basin_id_map, spill_elevation
+
 
 class LakeDetectionSystem:
     """
@@ -145,79 +312,17 @@ class LakeDetectionSystem:
         return lake_map, [{"seed": (width//2, height//2), "volume": 1.0}]
 
     def _detect_local_minima(self, heightmap):
-        """Identifiziert alle lokalen Minima als potentielle See-Seeds"""
-        height, width = heightmap.shape
-        local_minima = []
-
-        for y in range(1, height - 1):
-            for x in range(1, width - 1):
-                current_height = heightmap[y, x]
-                is_minimum = True
-
-                for dy in [-1, 0, 1]:
-                    for dx in [-1, 0, 1]:
-                        if dx == 0 and dy == 0:
-                            continue
-                        neighbor_height = heightmap[y + dy, x + dx]
-                        if neighbor_height <= current_height:
-                            is_minimum = False
-                            break
-                    if not is_minimum:
-                        break
-
-                if is_minimum:
-                    local_minima.append((x, y))
-
-        return local_minima
+        """Identifiziert alle lokalen Minima als potentielle See-Seeds (dünner
+        Wrapper um die modulweite _detect_local_minima_full(), siehe dort -
+        Extraktion für Wiederverwendung durch compute_full_watershed())."""
+        return _detect_local_minima_full(heightmap)
 
     def _apply_jump_flooding(self, heightmap, lake_seeds):
-        """
-        Wasserscheiden-Zuordnung per Priority-Flood/Immersionssimulation (Vincent-Soille-
-        Watershed-Transform): jede Zelle wird dem Becken zugeordnet, dessen Flutung sie
-        zuerst erreicht (Multi-Source-Dijkstra mit Höhe als Kosten über heapq, das aus
-        genau diesem Grund bereits am Modul-Anfang importiert wird).
-
-        Ersetzt die vormalige Jump-Flooding-Variante, die Zellen rein per "current_height
-        >= seed_height AND kürzeste Luftlinien-Distanz" zuwies - das ist keine echte
-        Erreichbarkeits-Prüfung (kein monotoner Abwärtspfad zum Seed nötig), sondern nur
-        eine grobe obere Schranke, die praktisch immer erfüllt ist (jeder Punkt der Karte
-        liegt höher als IRGENDEIN lokales Minimum irgendwo auf der Karte). Dadurch wurde
-        de facto ein reines Luftlinien-Voronoi-Diagramm über die gesamte Karte gelegt,
-        das auch Berggipfel dem nächstgelegenen Tal zuschlug, unabhängig von Bergkämmen
-        dazwischen - empirisch bestätigt: 99.98-100% der Karte wurden einem Becken
-        zugewiesen, ungeachtet der Topographie.
-
-        Die Priority-Flood-Wasserscheide stoppt dagegen an echten Wasserscheiden (Grate),
-        weil jede Zelle vom zuerst dort ankommenden (= niedrigsten) Flutungs-Frontpunkt
-        beansprucht wird - das ist die Standard-Definition eines Einzugsgebiets.
-        """
-        height, width = heightmap.shape
-        lake_map = np.full((height, width), -1, dtype=np.int32)
-
-        if not lake_seeds:
-            return lake_map
-
-        visited = np.zeros((height, width), dtype=bool)
-        heap = []
-        for i, (seed_x, seed_y) in enumerate(lake_seeds):
-            lake_map[seed_y, seed_x] = i
-            visited[seed_y, seed_x] = True
-            heapq.heappush(heap, (float(heightmap[seed_y, seed_x]), seed_x, seed_y, i))
-
-        neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
-
-        while heap:
-            _, x, y, basin_id = heapq.heappop(heap)
-
-            for dx, dy in neighbor_offsets:
-                nx, ny = x + dx, y + dy
-
-                if 0 <= nx < width and 0 <= ny < height and not visited[ny, nx]:
-                    visited[ny, nx] = True
-                    lake_map[ny, nx] = basin_id
-                    heapq.heappush(heap, (float(heightmap[ny, nx]), nx, ny, basin_id))
-
-        return lake_map
+        """Wasserscheiden-Zuordnung (dünner Wrapper um die modulweite
+        _apply_priority_flood_watershed(), siehe dort für die volle
+        Algorithmus-Herleitung - Extraktion für Wiederverwendung durch
+        compute_full_watershed())."""
+        return _apply_priority_flood_watershed(heightmap, lake_seeds)
 
     def _classify_lake_basins(self, heightmap, lake_map, lake_seeds):
         """
@@ -242,33 +347,15 @@ class LakeDetectionSystem:
         wieder das GESAMTE Becken (inklusive Berggipfel) als überflutet. Der
         Spill-Point (niedrigster RAND, nicht höchster Punkt) ist der einzige Wert,
         der beide Probleme gleichzeitig vermeidet.
+
+        Spill-Elevation-Berechnung ist nach _compute_spill_elevations() extrahiert
+        (siehe dort - modulweit, auch von compute_full_watershed() genutzt).
         """
         height, width = heightmap.shape
         filtered_lake_map = np.full((height, width), -1, dtype=np.int32)
         valid_lakes = []
 
-        spill_elevation = np.full(len(lake_seeds), np.inf, dtype=np.float64)
-        neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
-
-        for y in range(height):
-            for x in range(width):
-                basin_id = lake_map[y, x]
-                if basin_id < 0:
-                    continue
-
-                on_edge = (x == 0 or x == width - 1 or y == 0 or y == height - 1)
-                if on_edge:
-                    # Becken berührt den Kartenrand - offener Abfluss, kein geschlossener See
-                    spill_elevation[basin_id] = min(spill_elevation[basin_id], heightmap[y, x])
-
-                for dx, dy in neighbor_offsets:
-                    nx, ny = x + dx, y + dy
-                    if 0 <= nx < width and 0 <= ny < height:
-                        neighbor_basin = lake_map[ny, nx]
-                        if neighbor_basin != basin_id:
-                            crossing_height = max(heightmap[y, x], heightmap[ny, nx])
-                            if crossing_height < spill_elevation[basin_id]:
-                                spill_elevation[basin_id] = crossing_height
+        spill_elevation = _compute_spill_elevations(heightmap, lake_map, len(lake_seeds))
 
         for lake_id, (seed_x, seed_y) in enumerate(lake_seeds):
             spill = spill_elevation[lake_id]
@@ -306,8 +393,9 @@ class FlowNetworkBuilder:
     Aufgabe: Erstellt flow_map und water_biomes_map mit realistischen Flusssystemen
     """
 
-    def __init__(self, rain_threshold=0.2, shader_manager=None):
+    def __init__(self, rain_threshold=0.2, stream_threshold=2.0, shader_manager=None):
         self.rain_threshold = rain_threshold
+        self.stream_threshold = stream_threshold
         self.shader_manager = shader_manager
 
     def build_flow_network(self, heightmap, precip_map, lake_map, parameters, lod_iterations):
@@ -349,6 +437,11 @@ class FlowNetworkBuilder:
         """CPU-optimierte Flow-Network-Generation"""
         # Steepest Descent berechnen
         flow_directions = self._calculate_steepest_descent(heightmap)
+
+        # Becken-interne Fließrichtung zum Spill-Punkt umleiten, damit Wasser
+        # nicht am Senken-Pixel (lokales Minimum) versiegt, siehe
+        # _redirect_basin_flow_to_spill().
+        flow_directions = self._redirect_basin_flow_to_spill(heightmap, lake_map, flow_directions)
 
         # Upstream-Akkumulation mit LOD-optimierten Iterationen
         flow_accumulation = self._accumulate_upstream_flow(
@@ -395,6 +488,138 @@ class FlowNetworkBuilder:
                             steepest_direction = direction
 
                 flow_directions[y, x] = steepest_direction
+
+        return flow_directions
+
+    def _redirect_basin_flow_to_spill(self, heightmap, lake_map, flow_directions):
+        """
+        Leitet die Fließrichtung innerhalb jedes geschlossenen Beckens (Spill zu
+        einem NACHBAR-Becken, nicht zum Kartenrand) so um, dass akkumuliertes
+        Wasser das Becken tatsächlich verlässt, statt am Senken-Pixel (dem
+        einzigen Pixel im Becken mit flow_direction == -1, per Definition
+        identisch mit einem lokalen Minimum) für immer zu versiegen.
+
+        Nur den Senken-Pixel selbst umzuleiten würde riskieren, mit einem
+        Nachbarn zu oszillieren, dessen eigene (unveränderte) Steepest-Descent-
+        Richtung weiterhin zurück zum Senken-Pixel zeigt. Stattdessen: BFS-
+        Richtungsbaum RÜCKWÄRTS vom Spill-Grenz-Pixel durch das GESAMTE Becken -
+        das ist per Konstruktion zyklenfrei und leitet jeden Becken-Pixel entlang
+        des kürzesten Wegs zum Spill-Punkt um.
+
+        Becken, deren niedrigster Rand-Übergang der Kartenrand selbst ist (offener
+        Abfluss, keine Nachbar-Becken-Zuordnung), werden NICHT umgeleitet - sie
+        erreichen den Kartenrand bereits korrekt, das ist das gewünschte
+        Verhalten, kein Bug.
+
+        Zyklus-Vermeidung: Union-Find über die Becken (Kruskal-Stil), Becken
+        werden in AUFSTEIGENDER Reihenfolge ihrer eigenen Spill-Höhe verarbeitet
+        (das flachste/zuerst überlaufende Becken zuerst). Eine Umleitung wird nur
+        angewendet, wenn Quell- und Ziel-Becken noch NICHT in derselben Union-
+        Gruppe sind (sonst würde sie einen Kreis schließen) - danach werden beide
+        Gruppen vereinigt. Kartenrand-Becken starten bereits in einer gemeinsamen
+        virtuellen "Außen"-Gruppe. Eine simplere Regel ("nur umleiten wenn Ziel
+        strikt höher als man selbst") wurde zuerst versucht, war aber in der
+        Praxis zu konservativ - bei vielen kleinen, dicht benachbarten Becken ist
+        das gegenseitig-niedrigster-Nachbar-Muster (A's bester Nachbar ist B UND
+        B's bester Nachbar ist A) so häufig, dass dabei fast nichts umgeleitet
+        wurde (empirisch: 0 von 46 Becken).
+
+        Bekannte Lücke: gilt nur für den CPU-Pfad. Der GPU-Dispatch
+        ("water", "steepestDescentFlow") berechnet Akkumulation direkt auf der
+        GPU ohne ein separates flow_directions-Zwischenergebnis offenzulegen -
+        eine echte GPU-Wasserscheiden-Umleitung ist eigenständige Folgearbeit
+        (siehe jumpFloodLakes.comp, dieselbe Einschränkung).
+        """
+        height, width = heightmap.shape
+        unique_basins = np.unique(lake_map[lake_map >= 0])
+        if len(unique_basins) == 0:
+            return flow_directions
+
+        neighbor_offsets = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
+
+        # Spill-Grenzübergang pro Becken finden (niedrigste max(eigene Höhe,
+        # Nachbar-Höhe) über alle Grenzpixel zu einem ANDEREN Becken - Kartenrand
+        # zählt hier bewusst NICHT mit, da dort keine Umleitung möglich/nötig ist).
+        spill_elevation = {}
+        spill_target = {}
+
+        for y in range(height):
+            for x in range(width):
+                basin_id = lake_map[y, x]
+                if basin_id < 0:
+                    continue
+                for dx, dy in neighbor_offsets:
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < width and 0 <= ny < height:
+                        neighbor_basin = lake_map[ny, nx]
+                        if neighbor_basin >= 0 and neighbor_basin != basin_id:
+                            crossing_height = max(heightmap[y, x], heightmap[ny, nx])
+                            if basin_id not in spill_elevation or crossing_height < spill_elevation[basin_id]:
+                                spill_elevation[basin_id] = crossing_height
+                                spill_target[basin_id] = (y, x, ny, nx)
+
+        # Union-Find (Kruskal-Stil) über Becken-IDs + eine virtuelle "Außen"-
+        # Gruppe (-1) für Kartenrand-Abfluss, damit auch Ketten wie A→Rand,
+        # B→A korrekt erkannt werden (B ist dann schon transitiv "draußen").
+        union_parent = {int(b): int(b) for b in unique_basins}
+        union_parent[-1] = -1
+
+        def find(basin):
+            root = basin
+            while union_parent[root] != root:
+                root = union_parent[root]
+            while union_parent[basin] != root:
+                union_parent[basin], basin = root, union_parent[basin]
+            return root
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                union_parent[ra] = rb
+
+        # Kartenrand-Becken (kein Eintrag in spill_target) direkt in die
+        # "Außen"-Gruppe aufnehmen.
+        for basin_id in unique_basins:
+            if basin_id not in spill_target:
+                union(int(basin_id), -1)
+
+        # Becken in aufsteigender Reihenfolge ihrer eigenen Spill-Höhe
+        # verarbeiten - das zuerst überlaufende Becken bekommt zuerst die
+        # Chance, sein Ziel zu vereinigen.
+        ordered_basins = sorted(
+            (b for b in unique_basins if b in spill_target),
+            key=lambda b: spill_elevation[b]
+        )
+
+        for basin_id in ordered_basins:
+            own_y, own_x, nbr_y, nbr_x = spill_target[basin_id]
+            target_basin_id = int(lake_map[nbr_y, nbr_x])
+
+            if find(int(basin_id)) == find(target_basin_id):
+                continue  # bereits verbunden - würde einen Kreis schließen
+
+            union(int(basin_id), target_basin_id)
+            basin_mask = (lake_map == basin_id)
+
+            visited = np.zeros((height, width), dtype=bool)
+            queue = deque([(own_y, own_x)])
+            visited[own_y, own_x] = True
+
+            while queue:
+                cy, cx = queue.popleft()
+                for direction_idx, (dx, dy) in enumerate(neighbor_offsets):
+                    py, px = cy - dy, cx - dx
+                    if (0 <= px < width and 0 <= py < height
+                            and basin_mask[py, px] and not visited[py, px]):
+                        visited[py, px] = True
+                        flow_directions[py, px] = direction_idx
+                        queue.append((py, px))
+
+            # Grenz-Pixel selbst zeigt über die Wasserscheide zum Nachbarbecken
+            for direction_idx, (dx, dy) in enumerate(neighbor_offsets):
+                if own_x + dx == nbr_x and own_y + dy == nbr_y:
+                    flow_directions[own_y, own_x] = direction_idx
+                    break
 
         return flow_directions
 
@@ -459,17 +684,25 @@ class FlowNetworkBuilder:
 
                 flow_amount = flow_accumulation[y, x]
 
-                # Schwellen tatsächlich relativ zu self.rain_threshold statt fixer
-                # Konstanten (0.02/0.08/0.4 lagen ~1000x unter precip_map's realem
-                # 0-500 gH2O/m²-Bereich - dadurch überschritt schon ein einzelnes
-                # Pixel mit eigenem Regen sofort die "Grand River"-Schwelle, ganz
-                # ohne echte Akkumulation, und quasi die gesamte Karte wurde als
-                # irgendeine Fließgewässer-Stufe klassifiziert)
-                if flow_amount >= self.rain_threshold * 20:  # Grand River
+                # Schwellen relativ zu self.stream_threshold, NICHT zu
+                # self.rain_threshold. rain_threshold gated vorher BEIDES: ob
+                # ein Pixel überhaupt Regen-Quelle ist UND ob es (bei 1x
+                # rain_threshold) schon als Creek gilt - dadurch wurde jedes
+                # einzelne Regen-Pixel sofort zum Fluss, ganz ohne echte
+                # Akkumulation von Nachbar-Zellen ("Fluss überall wo Regen
+                # fällt"). stream_threshold ist eine eigene, deutlich höhere
+                # Schwelle für akkumulierten Durchfluss - ein Pixel mit nur
+                # seinem eigenen Regen (max ~2.8 bei Default-Wetter-Parametern)
+                # reicht damit i.d.R. nicht mehr aus, es braucht echten Zufluss
+                # von mehreren Quell-Pixeln, um als Fluss zu gelten. Die
+                # Akkumulation selbst (_accumulate_upstream_flow) bleibt
+                # unverändert - jedes Regen-Pixel trägt weiterhin korrekt zur
+                # Summe bei, nur die VISUELLE Klassifikation ist strenger.
+                if flow_amount >= self.stream_threshold * 20:  # Grand River
                     water_biomes_map[y, x] = 3
-                elif flow_amount >= self.rain_threshold * 4:  # River
+                elif flow_amount >= self.stream_threshold * 4:  # River
                     water_biomes_map[y, x] = 2
-                elif flow_amount >= self.rain_threshold:  # Creek
+                elif flow_amount >= self.stream_threshold:  # Creek
                     water_biomes_map[y, x] = 1
 
         return water_biomes_map
@@ -490,6 +723,8 @@ class ManningFlowCalculator:
         Funktionsweise: GPU-accelerated Manning-Flow mit adaptiven Querschnitten
         Aufgabe: 3-stufiges Fallback-System für realistische Fließgeschwindigkeiten
         """
+        stream_threshold = parameters.get('stream_threshold', 2.0)
+
         # GPU-Shader (Optimal)
         if self.shader_manager:
             try:
@@ -511,14 +746,16 @@ class ManningFlowCalculator:
 
         # CPU-Fallback (Gut)
         try:
-            return self._cpu_manning_calculation(flow_accumulation, slopemap, heightmap, lod_iterations)
+            return self._cpu_manning_calculation(
+                flow_accumulation, slopemap, heightmap, lod_iterations, stream_threshold)
         except Exception as e:
             logging.warning(f"CPU Manning calculation failed: {e}, using simple fallback")
 
         # Simple-Fallback (Minimal)
         return self._simple_flow_calculation(flow_accumulation)
 
-    def _cpu_manning_calculation(self, flow_accumulation, slopemap, heightmap, lod_iterations):
+    def _cpu_manning_calculation(self, flow_accumulation, slopemap, heightmap, lod_iterations,
+                                  stream_threshold=1.0):
         """CPU-optimierte Manning-Gleichung mit adaptiven Querschnitten"""
         height, width = flow_accumulation.shape
         flow_speed = np.zeros((height, width), dtype=np.float32)
@@ -528,7 +765,12 @@ class ManningFlowCalculator:
             for x in range(width):
                 flow_rate = flow_accumulation[y, x]
 
-                if flow_rate < 1.0:
+                # Gate an stream_threshold statt fest 1.0 - deckt sich mit der
+                # Creek-Schwelle aus _classify_water_bodies() (Stufe 1 des
+                # River-Redesigns), damit die teure Tal-Breite-Suche
+                # (_analyze_valley_width, 8x24 Höhen-Lookups) nur für Pixel
+                # läuft, die überhaupt als Fluss klassifiziert werden.
+                if flow_rate < stream_threshold:
                     continue
 
                 # Slope-Magnitude berechnen
@@ -622,6 +864,98 @@ class ManningFlowCalculator:
 
         return max_distance * 2
 
+    def calculate_channel_width(self, cross_section, heightmap, stream_mask):
+        """
+        Funktionsweise: Leitet die Flussbreite aus dem bereits vorhandenen
+        Querschnitt (cross_section, aus der Manning-Kontinuitätsgleichung) her,
+        statt sie separat zu schätzen: area = width * depth und
+        width = ratio * depth (dieselbe Tal-Breite-zu-Tiefe-Ratio-Logik wie
+        _optimize_channel_geometry) ergibt width = sqrt(ratio * area). Läuft
+        einheitlich für GPU- wie CPU-cross_section, da die Ratio nur von der
+        Heightmap abhängt, nicht vom Fließweg.
+        Aufgabe: Nur für stream_mask-Pixel berechnet (teurer 8-Strahlen-Scan
+        über _analyze_valley_width pro Pixel) - alle anderen Pixel bleiben 0.
+        Return: (height, width) Array, Flussbreite in realen Metern
+        """
+        height, width_dim = heightmap.shape
+        channel_width = np.zeros((height, width_dim), dtype=np.float32)
+
+        ys, xs = np.nonzero(stream_mask)
+        for y, x in zip(ys, xs):
+            area = cross_section[y, x]
+            if area <= 0:
+                continue
+
+            valley_width = self._analyze_valley_width(heightmap, x, y)
+            if valley_width < 5:
+                ratio = 2.0
+            elif valley_width < 20:
+                ratio = 5.0
+            else:
+                ratio = 10.0
+
+            channel_width[y, x] = np.sqrt(ratio * area)
+
+        return channel_width
+
+    def paint_channel_width(self, water_biomes_map, channel_width, world_size_km, flow_speed=None):
+        """
+        Funktionsweise: Dilatiert jedes Fluss-Zentrallinien-Pixel (Creek/River/
+        Grand River, Werte 1-3 in water_biomes_map) um seine berechnete
+        Flussbreite/2 via distance_transform_edt (nearest-centerline-Lookup) -
+        übernimmt die Klassifikations-Stufe vom nächsten Zentrallinien-Pixel,
+        malt also nur die räumliche Ausdehnung, klassifiziert nicht neu.
+        Lake-Pixel (4) und bereits klassifizierte Fluss-Pixel bleiben
+        unverändert (kein Überschreiben mit einer schwächeren Stufe).
+        Aufgabe: channel_width ist in realen Metern (aus der Manning-
+        Kontinuitätsgleichung) - Umrechnung in Pixel-Radius über
+        TERRAIN.WORLD_SIZE_KM, analog zum spacing-Muster in
+        terrain_generator.py._calculate_cpu_slopes().
+
+        flow_speed (optional, (H,W) m/s aus calculate_flow_properties): schnell
+        fließende Reaches malen sich schmaler als ihr roher channel_width-Wert
+        nahelegt - reine Akkumulationsmenge (flow_accumulation, treibt
+        channel_width über cross_section) sagt nichts über die Fließ-
+        geschwindigkeit aus, aber bei gleicher Wassermenge kann sich schnell
+        fließendes Wasser nicht so breit "aufstauen" wie langsames (Nutzer-
+        Beobachtung: "dort wo die Wasserbewegung schneller ist, kann nicht so
+        viel Wasser sich ansammeln"). Skaliert NUR die gemalte Breite, NICHT
+        die Klassifikations-Schwellen selbst (die bleiben akkumulationsbasiert
+        - physikalisch richtig für "wie viel Wasser", siehe Docstring oben,
+        "malt nur die räumliche Ausdehnung, klassifiziert nicht neu").
+        None (Default) reproduziert exakt das alte Verhalten.
+        Return: neue water_biomes_map (Kopie, Original bleibt unverändert)
+        """
+        stream_mask = (water_biomes_map >= 1) & (water_biomes_map <= 3)
+        if not np.any(stream_mask):
+            return water_biomes_map
+
+        channel_width_visual = channel_width
+        if flow_speed is not None:
+            reference_speed = float(np.median(flow_speed[stream_mask]))
+            if reference_speed > 1e-6:
+                # Boden 0.3: schnelle Reaches wirken schmaler, verschwinden aber
+                # nie ganz. Median über alle Fluss-Pixel als Referenz, damit der
+                # Faktor relativ zur tatsächlichen Verteilung dieser Karte skaliert
+                # statt gegen eine feste, kartengrößen-unabhängige Konstante.
+                effective_width_factor = np.clip(
+                    reference_speed / np.maximum(flow_speed, 0.01), 0.3, 1.0)
+                channel_width_visual = channel_width * effective_width_factor
+
+        height = water_biomes_map.shape[0]
+        world_size_m = world_size_km * 1000.0
+        meters_per_pixel = world_size_m / height
+
+        distances, nearest_indices = distance_transform_edt(~stream_mask, return_indices=True)
+        nearest_y, nearest_x = nearest_indices
+        nearest_width_m = channel_width_visual[nearest_y, nearest_x]
+        nearest_radius_px = (nearest_width_m / 2.0) / meters_per_pixel
+
+        painted = water_biomes_map.copy()
+        paintable = (water_biomes_map == 0) & (distances <= nearest_radius_px)
+        painted[paintable] = water_biomes_map[nearest_y[paintable], nearest_x[paintable]]
+        return painted
+
 
 class ErosionSedimentationSystem:
     """
@@ -673,7 +1007,16 @@ class ErosionSedimentationSystem:
                     )
 
                     if transport_result.get("success"):
-                        return erosion_map, transport_result["sedimentation_map"]
+                        sedimentation_map = transport_result["sedimentation_map"]
+                        # Floodplain-Verteilung auch auf dem GPU-Pfad anwenden - vorher
+                        # lief das nur im CPU-Fallback (_cpu_erosion_sedimentation),
+                        # wodurch GPU- und CPU-Ergebnisse auseinanderliefen: der
+                        # GPU-Pfad hätte punktuelle Einzelpixel-Ablagerungen geliefert
+                        # statt der geglätteten Flood-Plane-Verteilung.
+                        if heightmap is not None:
+                            sedimentation_map = self._distribute_sediment_floodplain(
+                                sedimentation_map, heightmap)
+                        return erosion_map, sedimentation_map
 
             except Exception as e:
                 logging.warning(f"GPU erosion simulation failed: {e}, falling back to CPU")
@@ -710,44 +1053,75 @@ class ErosionSedimentationSystem:
 
         return erosion_map, sedimentation_map
 
-    def _distribute_sediment_floodplain(self, raw_sedimentation_map, heightmap, radius=3):
+    def _distribute_sediment_floodplain(self, raw_sedimentation_map, heightmap):
         """
-        Verteilt punktuell abgelagertes Sediment auf die umliegende Flood-Plane, statt
-        es exakt am einzelnen Ablagerungs-Pixel zu belassen (siehe
-        _transport_sediment_optimized: dort settelt Sediment nur dort, wo die lokale
-        Transportkapazität überschritten wird - typischerweise ein einzelner Pixel am
-        Ende eines Fließpfads).
+        Verteilt punktuell abgelagertes Sediment über die GESAMTE Becken-Fläche
+        unterhalb der Spill-Elevation, statt es exakt am einzelnen Ablagerungs-Pixel
+        zu belassen (siehe _transport_sediment_optimized: dort settelt Sediment nur
+        dort, wo die lokale Transportkapazität überschritten wird - typischerweise
+        ein einzelner Pixel am Ende eines Fließpfads).
 
-        Gewichtung invers zur lokalen Höhe (relativ zum höchsten Punkt im Radius):
-        tiefere Nachbarpunkte, die bei Überflutung zuerst volllaufen würden, bekommen
-        proportional mehr ab als die etwas höheren - das glättet nebenbei die
-        Oberfläche, weil die Senken im Umkreis aufgefüllt werden statt eine einzelne
-        Sediment-Spitze entstehen zu lassen. Gesamtmenge pro Ablagerung bleibt erhalten
-        (nur die räumliche Verteilung ändert sich).
+        Nutzt compute_full_watershed() (Priority-Flood, siehe dort - derselbe
+        Algorithmus-Stammbaum wie RichDEM's Depression-Filling, Barnes et al. 2014,
+        https://github.com/r-barnes/richdem) für eine becken-weite statt nur
+        lokal-fenster-weite Verteilung (frühere Fassung: festes 7x7-Fenster um jeden
+        Ablagerungs-Pixel, kannte keine Becken-Zugehörigkeit). Beispiel: Sediment, das
+        irgendwo in einem Tal auf 300m absetzt, verteilt sich jetzt auf alle Punkte
+        DIESES Tals unterhalb der Becken-Spill-Elevation, nicht nur auf die
+        unmittelbare 7x7-Nachbarschaft.
+
+        Gewichtung invers zur lokalen Höhe relativ zur Becken-Spill-Elevation
+        (`max(0, spill - height)`): tiefere Punkte im Becken, die bei Überflutung
+        zuerst volllaufen würden, bekommen proportional mehr ab - dieselbe
+        Gewichtungsphilosophie wie zuvor, nur über das ganze Becken statt ein
+        Fenster. Gesamtmenge pro Becken bleibt erhalten (nur die räumliche
+        Verteilung ändert sich). Läuft immer auf CPU (siehe compute_full_watershed()-
+        Docstring) - identisch für GPU- und CPU-Erosion/Transport-Pfad, da diese
+        Methode in beiden Fällen als Nachbearbeitung nach der eigentlichen
+        Sediment-Transport-Berechnung aufgerufen wird.
+
+        Vollständig vektorisiert (np.bincount-Gruppierung nach Becken-ID) statt
+        einer Python-Schleife über einzelne Ablagerungs-Pixel wie zuvor.
         """
-        height, width = raw_sedimentation_map.shape
-        distributed = np.zeros_like(raw_sedimentation_map)
+        basin_id, spill_elevation = compute_full_watershed(heightmap)
+        num_basins = len(spill_elevation)
 
-        deposit_ys, deposit_xs = np.nonzero(raw_sedimentation_map)
-        for y, x in zip(deposit_ys, deposit_xs):
-            amount = raw_sedimentation_map[y, x]
+        # Kein Becken gefunden (z.B. komplett flache Testkarte) oder gar kein Pixel
+        # einem Becken zugeordnet - kann nicht verteilt werden, Ablagerung bleibt
+        # unverändert an ihrem Ursprungspixel (identisches Fallback-Verhalten wie
+        # zuvor bei einer komplett flachen lokalen Umgebung).
+        valid_mask = basin_id >= 0
+        if num_basins == 0 or not np.any(valid_mask):
+            return raw_sedimentation_map.copy()
 
-            y0, y1 = max(0, y - radius), min(height, y + radius + 1)
-            x0, x1 = max(0, x - radius), min(width, x + radius + 1)
+        flat_basin_ids = basin_id[valid_mask]
+        flat_heights = heightmap[valid_mask].astype(np.float64)
+        flat_raw = raw_sedimentation_map[valid_mask].astype(np.float64)
+        flat_spill = spill_elevation[flat_basin_ids]
 
-            local_heights = heightmap[y0:y1, x0:x1]
-            local_max = local_heights.max()
-            weights = np.maximum(0.0, local_max - local_heights)
-            weight_sum = weights.sum()
+        # Nicht-endliche Spill-Elevation (sollte auf einer vollständigen Karte nicht
+        # vorkommen, siehe compute_full_watershed()-Docstring) defensiv abfangen -
+        # macht das Gewicht für betroffene Pixel 0 statt inf/nan zu erzeugen.
+        finite_spill = np.isfinite(flat_spill)
+        flat_spill_safe = np.where(finite_spill, flat_spill, flat_heights)
+        flat_weight = np.maximum(0.0, flat_spill_safe - flat_heights)
 
-            if weight_sum > 0:
-                distributed[y0:y1, x0:x1] += amount * (weights / weight_sum)
-            else:
-                # Flache Umgebung (alle Nachbarn auf gleicher Höhe) - keine sinnvolle
-                # Gewichtung möglich, Ablagerung bleibt am Ursprungspixel
-                distributed[y, x] += amount
+        basin_total = np.bincount(flat_basin_ids, weights=flat_raw, minlength=num_basins)
+        basin_weight_sum = np.bincount(flat_basin_ids, weights=flat_weight, minlength=num_basins)
 
-        return distributed
+        safe_weight_sum = np.where(basin_weight_sum > 0, basin_weight_sum, 1.0)
+        per_pixel_share = flat_weight / safe_weight_sum[flat_basin_ids]
+        redistributed_amount = basin_total[flat_basin_ids] * per_pixel_share
+
+        # Becken ohne jegliches Gefälle unterhalb der Spill-Elevation (entartete
+        # Randfälle, z.B. ein Becken, das komplett auf Spill-Höhe liegt) - keine
+        # sinnvolle Gewichtung möglich, Ablagerungen bleiben an ihrem Ursprungspixel.
+        has_valid_weight = basin_weight_sum[flat_basin_ids] > 0
+        distributed_valid = np.where(has_valid_weight, redistributed_amount, flat_raw)
+
+        distributed = raw_sedimentation_map.copy().astype(np.float64)
+        distributed[valid_mask] = distributed_valid
+        return distributed.astype(raw_sedimentation_map.dtype)
 
     def _simple_erosion_sedimentation(self, flow_accumulation, hardness_map):
         """Simple-Fallback: Basis Erosion ohne komplexe Transport-Berechnungen"""
@@ -874,15 +1248,38 @@ class SoilMoistureCalculator:
     Aufgabe: Erstellt soil_moist_map für Biome-System und Weather-Evaporation
     """
 
-    def __init__(self, diffusion_radius=5.0, shader_manager=None):
+    def __init__(self, diffusion_radius=2.0, shader_manager=None, capillary_sigma=0.5):
         self.diffusion_radius = diffusion_radius
         self.shader_manager = shader_manager
+        # Kapillare Ausbreitung: fester, KLEINER Radius (nicht die einstellbare
+        # diffusion_radius, die nur die "Grundwasser"-Komponente steuert) - war
+        # vorher hart auf 2.0 kodiert. Bei einem dichteren Fluss-Netzwerk
+        # (Creek/River-Klassifikation deckt nach der precip_map-Neukalibrierung
+        # empirisch ~40% der Karte ab statt vorher deutlich weniger) überlappte
+        # sigma=2.0 zwischen benachbarten Wasser-Quellen so stark, dass praktisch
+        # die GESAMTE Karte auf >90% Feuchte kam (empirisch: mean=63.8%,
+        # nur 1.7% der Pixel unter 10% - "Soil Moisture überall 100%"-Report,
+        # siehe [[project-water-flood-calibration]]). 0.5 verifiziert gegen
+        # denselben Test: mean sinkt auf ~52%, 4-7% der Pixel bleiben unter 10%.
+        self.capillary_sigma = capillary_sigma
 
-    def calculate_soil_moisture(self, water_biomes_map, flow_accumulation, parameters):
+    def calculate_soil_moisture(self, water_biomes_map, flow_accumulation, parameters, water_mask_source=None):
         """
         Funktionsweise: GPU-accelerated Soil-Moisture mit Multi-Radius-Filter
         Aufgabe: 3-stufiges Fallback-System für realistische Feuchtigkeits-Verteilung
+
+        water_mask_source (optional): separate Karte, die statt water_biomes_map
+        für die 100%-Feuchte-QUELLFLÄCHE genutzt wird (z.B. die ungemalte
+        Fluss-Zentrallinie vor Stage 3s Breiten-Malen, siehe _calc_soil_moisture
+        in HydrologySystemGenerator) - entkoppelt die räumliche Ausdehnung der
+        Boden-Feuchte von der visuellen Flussbreite. Default None = wie bisher
+        water_biomes_map selbst als Quelle nutzen (Rückwärtskompatibilität).
+        water_biomes_map bleibt für alles andere (Klassifikations-Stufe pro
+        Pixel) unverändert die volle/gemalte Karte.
         """
+        if water_mask_source is None:
+            water_mask_source = water_biomes_map
+
         # GPU-Shader (Optimal)
         if self.shader_manager:
             try:
@@ -890,8 +1287,10 @@ class SoilMoistureCalculator:
                     "water", "soilMoistureGaussian",
                     {
                         "water_biomes_map": water_biomes_map,
+                        "water_mask_source": water_mask_source,
                         "flow_accumulation": flow_accumulation,
-                        "diffusion_radius": self.diffusion_radius
+                        "diffusion_radius": self.diffusion_radius,
+                        "capillary_sigma": self.capillary_sigma
                     },
                     parameters
                 )
@@ -902,33 +1301,40 @@ class SoilMoistureCalculator:
 
         # CPU-Fallback (Gut)
         try:
-            return self._cpu_soil_moisture_calculation(water_biomes_map, flow_accumulation)
+            return self._cpu_soil_moisture_calculation(water_biomes_map, flow_accumulation, water_mask_source)
         except Exception as e:
             logging.warning(f"CPU soil moisture calculation failed: {e}, using simple fallback")
 
         # Simple-Fallback (Minimal)
-        return self._simple_soil_moisture_calculation(water_biomes_map)
+        return self._simple_soil_moisture_calculation(water_mask_source)
 
-    def _cpu_soil_moisture_calculation(self, water_biomes_map, flow_accumulation):
+    def _cpu_soil_moisture_calculation(self, water_biomes_map, flow_accumulation, water_mask_source=None):
         """CPU-optimierte Gaussian-Diffusion mit Multi-Radius-Filter"""
+        if water_mask_source is None:
+            water_mask_source = water_biomes_map
+
         height, width = water_biomes_map.shape
         soil_moisture = np.zeros((height, width), dtype=np.float32)
 
-        # Direkte Wasserpräsenz: maximale Feuchtigkeit
-        water_mask = water_biomes_map > 0
+        # Direkte Wasserpräsenz: maximale Feuchtigkeit - nutzt water_mask_source
+        # (Zentrallinie), nicht die ggf. breiter gemalte water_biomes_map.
+        water_mask = water_mask_source > 0
         soil_moisture[water_mask] = 100.0
 
         # Kapillare Ausbreitung (enger Filter)
         capillary_source = np.zeros_like(soil_moisture)
         capillary_source[water_mask] = 100.0
-        capillary_moisture = gaussian_filter(capillary_source, sigma=2.0)
+        capillary_moisture = gaussian_filter(capillary_source, sigma=self.capillary_sigma)
 
-        # Grundwasser-Effekte (weiter Filter)
+        # Grundwasser-Effekte (weiter Filter) - Klassifikations-Stufe (Creek/
+        # River/Grand River/Lake) an der Zentrallinie ist identisch zur
+        # gemalten Fläche (Breiten-Malen ändert nur die räumliche Ausdehnung,
+        # nicht die Stufe selbst), daher weiterhin water_mask_source nutzen.
         groundwater_source = np.zeros_like(soil_moisture)
 
         for y in range(height):
             for x in range(width):
-                water_type = water_biomes_map[y, x]
+                water_type = water_mask_source[y, x]
                 flow_amount = flow_accumulation[y, x]
 
                 if water_type == 4:  # Lake
@@ -949,7 +1355,10 @@ class SoilMoistureCalculator:
         return combined_moisture
 
     def _simple_soil_moisture_calculation(self, water_biomes_map):
-        """Simple-Fallback: Basis Bodenfeuchtigkeit ohne Gaussian-Diffusion"""
+        """Simple-Fallback: Basis Bodenfeuchtigkeit ohne Gaussian-Diffusion.
+        Parameter kann entweder die volle water_biomes_map oder bereits die
+        Zentrallinien-Quellfläche sein (Aufrufer entscheidet, siehe
+        calculate_soil_moisture())."""
         height, width = water_biomes_map.shape
         soil_moisture = np.zeros((height, width), dtype=np.float32)
 
@@ -1108,8 +1517,21 @@ class HydrologySystemGenerator:
 
     def set_active_parameters(self, parameters: Dict[str, Any]):
         """Setzt die Parameter, die alle _calc_*-Methoden bis zur nächsten frischen
-        Anfrage verwenden (vom GenerationOrchestrator aufgerufen)."""
+        Anfrage verwenden (vom GenerationOrchestrator aufgerufen). Water speichert
+        einen Teil der Parameter zusätzlich als Instanz-Attribute auf den Sub-
+        Kalkulator-Objekten (self.manning_calculator.manning_n,
+        self.erosion_system.capacity_factor, self.soil_moisture.diffusion_radius
+        etc.) - _update_parameters() überträgt das (identisches Muster wie
+        core/biome_generator.py set_active_parameters()/_update_parameters()).
+        Fehlte hier bisher: alle _calc_*-Calculator-Knoten rufen Methoden auf
+        diesen Sub-Objekten auf, die für die meisten Werte self.X liest statt aus
+        dem live durchgereichten parameters-Dict - ohne diesen Aufruf blieb jedes
+        Sub-Objekt für immer bei seinem Konstruktor-Default hängen, unabhängig
+        vom UI-Slider (Live-App-Report: "buchstäblich jeder Water-Parameter hat
+        keinen Effekt", siehe [[project-water-parameter-sync-bug]]).
+        """
         self._current_parameters = parameters
+        self._update_parameters(parameters)
 
     def _ensure_data_lod_manager(self):
         """Lazy-Fallback für Standalone-Nutzung (Tests, calculate_hydrology() ohne
@@ -1127,6 +1549,7 @@ class HydrologySystemGenerator:
             return {
                 'lake_volume_threshold': WATER.LAKE_VOLUME_THRESHOLD["default"],
                 'rain_threshold': WATER.RAIN_THRESHOLD["default"],
+                'stream_threshold': WATER.STREAM_THRESHOLD["default"],
                 'manning_coefficient': WATER.MANNING_COEFFICIENT["default"],
                 'erosion_strength': WATER.EROSION_STRENGTH["default"],
                 'sediment_capacity_factor': WATER.SEDIMENT_CAPACITY_FACTOR["default"],
@@ -1141,6 +1564,7 @@ class HydrologySystemGenerator:
             return {
                 'lake_volume_threshold': 0.1,
                 'rain_threshold': 0.2,
+                'stream_threshold': 2.0,
                 'manning_coefficient': 0.03,
                 'erosion_strength': 1.0,
                 'sediment_capacity_factor': 0.1,
@@ -1404,6 +1828,24 @@ class HydrologySystemGenerator:
         result["target_size"] = target_size
         return result
 
+    def _resize_nearest(self, array, target_size):
+        """
+        Nearest-Neighbor-Resize für Label-/Integer-Arrays wie lake_map (Basin-
+        IDs inkl. -1-Sentinel für "kein See") - die vorhandene bilineare
+        _interpolate_2d() würde zwischen benachbarten Basin-IDs (z.B. 2 und 5)
+        sinnlose Zwischenwerte (3.5) erzeugen. Gebraucht als Absicherung, wenn
+        lake_map (best-verfügbares LOD <= angefordertem Level, siehe
+        get_calculator_output()) von einer anderen tatsächlichen Auflösung
+        stammt als die aktuell verwendete heightmap für dasselbe LOD - z.B.
+        wenn map_size zwischen zwei Generierungs-Durchläufen geändert wurde
+        und noch ein andersgroßer lake_map-Eintrag im Calculator-Cache liegt.
+        """
+        old_size = array.shape[0]
+        if old_size == target_size:
+            return array
+        indices = np.clip((np.arange(target_size) * (old_size / target_size)).astype(np.int64), 0, old_size - 1)
+        return array[np.ix_(indices, indices)]
+
     def _calc_lake_detection(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'water.lake_detection' (#15)"""
         self._update_progress("Lake Detection", 5, "Detecting local minima...")
@@ -1419,6 +1861,8 @@ class HydrologySystemGenerator:
         lake_map = self.data_lod_manager.get_calculator_output("water.lake_detection", "lake_map", lod_level)
         if lake_map is None:
             raise ValueError(f"water.flow_network: lake_map für LOD {lod_level} nicht verfügbar")
+        if lake_map.shape[0] != inputs["heightmap"].shape[0]:
+            lake_map = self._resize_nearest(lake_map, inputs["heightmap"].shape[0])
 
         flow_accumulation, water_biomes_map = self.flow_network.build_flow_network(
             inputs["heightmap"], inputs["precip_map"], lake_map, self._current_parameters, lod_iterations
@@ -1447,6 +1891,19 @@ class HydrologySystemGenerator:
                 logging.warning(f"GPU steepest descent failed: {e}, falling back to CPU")
         if flow_directions is None:
             flow_directions = self.flow_network._calculate_steepest_descent(inputs["heightmap"])
+
+        # Wasserscheiden-Umleitung (siehe _redirect_basin_flow_to_spill) auch
+        # hier anwenden, unabhängig davon ob flow_directions von GPU oder CPU
+        # kam - sonst würden Erosion/Sedimentation (die diesen Knoten nutzen)
+        # mit an Senken versiegenden Richtungen rechnen, obwohl water.flow_network
+        # (#16) für seine eigene Akkumulation bereits korrekt umleitet.
+        lake_map = self.data_lod_manager.get_calculator_output("water.lake_detection", "lake_map", lod_level)
+        if lake_map is not None:
+            if lake_map.shape[0] != inputs["heightmap"].shape[0]:
+                lake_map = self._resize_nearest(lake_map, inputs["heightmap"].shape[0])
+            flow_directions = self.flow_network._redirect_basin_flow_to_spill(
+                inputs["heightmap"], lake_map, flow_directions)
+
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"flow_directions": flow_directions})
 
     def _calc_manning_flow(self, calculator_id: str, lod_level: int) -> None:
@@ -1464,6 +1921,40 @@ class HydrologySystemGenerator:
         )
         self.data_lod_manager.set_calculator_output(
             calculator_id, lod_level, {"flow_speed": flow_speed, "cross_section": cross_section})
+
+        # River Stage 3: Flussbreite aus dem Querschnitt malen. Überschreibt NUR
+        # den water_biomes_map-Key von water.flow_network - set_calculator_output()
+        # ist ein Key-Level-Upsert (siehe data_lod_manager.py set_calculator_output:
+        # jeder output_key bekommt seinen eigenen lod_{level}_{calculator_id}_{key}
+        # Cache-Eintrag), kein Dict-Replace, daher bleibt flow_accumulation
+        # unberührt. Kein eigener Calculator-Knoten nötig: alle bestehenden
+        # Konsumenten (biome_generator.py, settlement_generator.py,
+        # assemble_water_data, _calc_soil_moisture, _calc_evaporation) lesen
+        # water_biomes_map ohnehin über get_calculator_output("water.flow_network",
+        # "water_biomes_map", ...) und sehen die gemalte Version automatisch,
+        # sobald dieser Knoten (der bereits von water.flow_network abhängt) gelaufen ist.
+        water_biomes_map = self.data_lod_manager.get_calculator_output(
+            "water.flow_network", "water_biomes_map", lod_level)
+        if water_biomes_map is not None:
+            # Zentrallinie (VOR dem Breiten-Malen) separat sichern, bevor sie
+            # unten überschrieben wird - SoilMoistureCalculator nutzt diese
+            # statt der gemalten Breite als 100%-Feuchte-Quellfläche (siehe
+            # _calc_soil_moisture), sonst wächst die Boden-Feuchte-Ausdehnung
+            # automatisch mit, wenn Flüsse breiter gemalt werden (gemeldeter
+            # Effekt: "fast 100% fast überall" nach dem Breiten-Malen).
+            self.data_lod_manager.set_calculator_output(
+                "water.flow_network", lod_level,
+                {"water_biomes_map_centerline": water_biomes_map.copy()})
+
+            stream_mask = (water_biomes_map >= 1) & (water_biomes_map <= 3)
+            if np.any(stream_mask):
+                channel_width = self.manning_calculator.calculate_channel_width(
+                    cross_section, inputs["heightmap"], stream_mask)
+                from gui.config.value_default import TERRAIN
+                painted_water_biomes_map = self.manning_calculator.paint_channel_width(
+                    water_biomes_map, channel_width, TERRAIN.WORLD_SIZE_KM, flow_speed=flow_speed)
+                self.data_lod_manager.set_calculator_output(
+                    "water.flow_network", lod_level, {"water_biomes_map": painted_water_biomes_map})
 
     def _calc_erosion_sedimentation(self, calculator_id: str, lod_level: int) -> None:
         """
@@ -1522,8 +2013,32 @@ class HydrologySystemGenerator:
         if flow_accumulation is None or water_biomes_map is None:
             raise ValueError(f"water.soil_moisture: fehlende Inputs für LOD {lod_level}")
 
+        # Zentrallinie (VOR dem Breiten-Malen, siehe _calc_manning_flow) als
+        # 100%-Feuchte-Quellfläche statt der gemalten (breiteren) water_biomes_map -
+        # entkoppelt die Boden-Feuchte-Ausdehnung von der visuellen Flussbreite.
+        # Fallback auf water_biomes_map für alte Cache-Einträge ohne diesen Key
+        # oder wenn _calc_manning_flow für dieses LOD noch nicht gelaufen ist.
+        water_mask_source = self.data_lod_manager.get_calculator_output(
+            "water.flow_network", "water_biomes_map_centerline", lod_level)
+        if water_mask_source is None:
+            water_mask_source = water_biomes_map
+        elif water_mask_source.shape[0] != water_biomes_map.shape[0]:
+            # get_calculator_output()'s Best-verfügbares-LOD-Fallback kann eine
+            # Zentrallinie von einem FRÜHEREN (kleineren) LOD liefern, obwohl
+            # water_biomes_map/flow_accumulation bereits fürs aktuelle LOD
+            # vorliegen (_calc_manning_flow für dieses LOD lief noch nicht,
+            # z.B. beim allerersten Auto-Start-Tick) - ohne Reconciliation
+            # führte das zu "operands could not be broadcast together with
+            # shapes (64,64) (32,32)" weiter unten in _cpu_soil_moisture_
+            # calculation(). Nearest-Neighbor (nicht bilinear!), da
+            # water_mask_source Label-Werte (Basin-/Fluss-Typ-IDs) enthält -
+            # dasselbe Muster wie _resize_nearest() für lake_map an anderer
+            # Stelle in dieser Klasse.
+            water_mask_source = self._resize_nearest(water_mask_source, water_biomes_map.shape[0])
+
         soil_moist_map = self.soil_moisture.calculate_soil_moisture(
-            water_biomes_map, flow_accumulation, self._current_parameters)
+            water_biomes_map, flow_accumulation, self._current_parameters,
+            water_mask_source=water_mask_source)
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"soil_moist_map": soil_moist_map})
 
     def _calc_evaporation(self, calculator_id: str, lod_level: int) -> None:
@@ -1541,14 +2056,19 @@ class HydrologySystemGenerator:
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"evaporation_map": evaporation_map})
 
     def _update_parameters(self, parameters):
-        """Aktualisiert alle Sub-System Parameter"""
-        self.lake_detection.lake_volume_threshold = parameters.get('lake_volume_threshold', 0.1)
-        self.flow_network.rain_threshold = parameters.get('rain_threshold', 0.2)
+        """Aktualisiert alle Sub-System Parameter. Fallback-Literale sind nur ein
+        Sicherheitsnetz für fehlende Dict-Keys (sollte in der echten Pipeline nie
+        auftreten, da WaterTab.get_current_parameters() immer alle Slider-Werte
+        liefert) - gegen gui/config/value_default.py's aktuelle Defaults
+        abgeglichen, um Drift bei künftigen Kalibrierungsrunden zu vermeiden."""
+        self.lake_detection.lake_volume_threshold = parameters.get('lake_volume_threshold', 0.02)
+        self.flow_network.rain_threshold = parameters.get('rain_threshold', 3.0)
+        self.flow_network.stream_threshold = parameters.get('stream_threshold', 35.0)
         self.manning_calculator.manning_n = parameters.get('manning_coefficient', 0.03)
-        self.erosion_system.erosion_strength = parameters.get('erosion_strength', 1.0)
-        self.erosion_system.capacity_factor = parameters.get('sediment_capacity_factor', 0.1)
-        self.erosion_system.settling_velocity = parameters.get('settling_velocity', 0.01)
-        self.soil_moisture.diffusion_radius = parameters.get('diffusion_radius', 5.0)
+        self.erosion_system.erosion_strength = parameters.get('erosion_strength', 2.5)
+        self.erosion_system.capacity_factor = parameters.get('sediment_capacity_factor', 0.0001)
+        self.erosion_system.settling_velocity = parameters.get('settling_velocity', 0.1)
+        self.soil_moisture.diffusion_radius = parameters.get('diffusion_radius', 2.0)
         self.evaporation.base_rate = parameters.get('evaporation_base_rate', 0.002)
 
     def _save_to_data_manager(self, data_manager, result, parameters):

@@ -93,6 +93,24 @@ class SceneMixin:
 
         self._remove_civ_islands()  # verhindert stadtlose civ-Inseln in der Wildnis
 
+        # Regionen-Map: rein diagnostisch/informativ seit dem Umbau auf ein
+        # einziges globales, geklipptes Voronoi (siehe
+        # topology._build_voronoi_mesh) -- die eigentliche Netz-Konstruktion
+        # partitioniert nicht mehr nach Regionen, region_map wird nur noch
+        # fuer den Schritt-1-Log und die region_id-Markierung an
+        # Stadtgrenz-Nodes verwendet (siehe topology._region_id_at).
+        # region_map: 0 = ungueltig/nie belegt (jedes Pixel ist entweder civ
+        # oder Wildnis), 1..num_civ_regions = civ-Bloecke,
+        # num_civ_regions+1.. = Wildnis-Bloecke.
+        civ_mask = self.civ_map >= self.WILDERNESS_CIV_THRESHOLD
+        civ_labeled, num_civ_regions = label(civ_mask)
+        wild_labeled, num_wild_regions = label(~civ_mask)
+        self.region_map = np.where(
+            civ_mask, civ_labeled, wild_labeled + num_civ_regions
+        ).astype(np.int32)
+        self.num_civ_regions = int(num_civ_regions)
+        self.num_wild_regions = int(num_wild_regions)
+
         boundary_analyzer = CityBoundaryAnalyzer(
             self.gen.terrain_factor_villages, self.city_reach_factor, shader_manager=None)
         self.city_mask, _ = boundary_analyzer.compute_city_boundaries(
@@ -100,6 +118,7 @@ class SceneMixin:
 
         # ---- Dynamische Wildnis-Grenzpunkte statt fester Knoten ----
         self._wilderness_boundary_polygon = self._build_wilderness_boundary_points()
+        self._city_polygons = self._build_city_boundary_polygons()
 
         self._compute_potential_field()
         self._mark_static_layer_dirty()
@@ -143,12 +162,25 @@ class SceneMixin:
         einfach (self-intersecting) -- Shapely markiert sie dann als invalid.
         Statt solche Konturen komplett zu verwerfen (was dazu fuehrt, dass nur
         ein Teil der Wildnisgrenzen ueberhaupt Nodes bekommt), reparieren wir
-        sie per buffer(0) (Standard-Shapely-Trick fuer Self-Intersections)."""
+        sie per buffer(0) (Standard-Shapely-Trick fuer Self-Intersections).
+
+        Bug-Fix: find_contours schliesst eine Kontur NICHT automatisch, wenn
+        die civ-Flaeche bis an den Rand des Arrays reicht -- die zurueck-
+        gegebene Punktfolge ist dann OFFEN (erster != letzter Punkt). Polygon(pts)
+        schliesst jeden Ring aber IMMER mit einer geraden Linie vom letzten
+        zurueck zum ersten Punkt -- bei einer offenen, randberuehrenden Kontur
+        wird das zu einer willkuerlichen geraden Sehne quer durchs Gelaende
+        statt dem echten (am Kartenrand entlanglaufenden) Rand. Fix: mask mit
+        1px Hintergrund umranden, bevor find_contours laeuft -- dann beruehrt
+        JEDE Flaeche garantiert nie den Array-Rand, jede Kontur ist zwingend
+        geschlossen, und die Koordinaten werden danach um den Padding-Offset
+        zurueckverschoben."""
         mask = (self.civ_map >= self.WILDERNESS_CIV_THRESHOLD).astype(np.float32)
-        contours = measure.find_contours(mask, level=0.5)
+        padded_mask = np.pad(mask, 1, mode="constant", constant_values=0.0)
+        contours = measure.find_contours(padded_mask, level=0.5)
         polygons = []
         for c in contours:
-            pts = np.column_stack([c[:, 1], c[:, 0]])  # (row,col) -> (x,y)
+            pts = np.column_stack([c[:, 1] - 1.0, c[:, 0] - 1.0])  # (row,col) -> (x,y), Padding-Offset entfernt
             if len(pts) < 4:
                 continue
             poly = Polygon(pts)
@@ -161,6 +193,64 @@ class SceneMixin:
                 if cand.is_valid and not cand.is_empty and cand.area > self.WILDERNESS_MIN_AREA:
                     polygons.append(cand)
         self._wilderness_polygons = polygons
+        # Jedes Polygon einmalig seiner civ-Region zuordnen (representative_point
+        # liegt garantiert INNERHALB des Polygons, also auf der civ-Seite) --
+        # nur noch fuer den Schritt-1-Diagnostik-Log genutzt (siehe
+        # topology._gen_step_1_background), seit die eigentliche Netz-
+        # Konstruktion nicht mehr nach Regionen partitioniert.
+        region_map = getattr(self, "region_map", None)
+        self._wilderness_polygon_region_ids = []
+        for poly in polygons:
+            region_id = -1
+            if region_map is not None:
+                rp = poly.representative_point()
+                px = int(np.clip(round(rp.x), 0, self.map_size - 1))
+                py = int(np.clip(round(rp.y), 0, self.map_size - 1))
+                region_id = int(region_map[py, px])
+            self._wilderness_polygon_region_ids.append(region_id)
+
         if polygons:
             return np.vstack([np.array(p.exterior.coords) for p in polygons])
         return np.empty((0, 2), dtype=np.float64)
+
+    def _build_city_boundary_polygons(self):
+        """Baut fuer JEDE Siedlung ein eigenes, geschlossenes Polygon ihres
+        Stadtgebiets -- exakt dasselbe Marching-Squares-Verfahren wie
+        _build_wilderness_boundary_points (1px Hintergrund-Padding gegen
+        offene Konturen am Array-Rand, buffer(0)-Reparatur fuer Self-
+        Intersections), nur pro Siedlung auf `city_mask == settlement.
+        location_id` statt auf `civ_map >= Schwelle`. Ersetzt das fruehere
+        Pre-Sampling einzelner Punkte um den Rasterrand (siehe ehemals
+        _generate_city_boundary_nodes) -- Stadtgrenz-Nodes entstehen jetzt
+        wie wilderness_node aus echten Voronoi-Kanten-Kreuzungen mit diesem
+        Polygon (siehe topology._gen_step_city_boundary_snap).
+
+        Liefert dict[settlement_id] -> Liste von Polygonen (i.d.R. genau 1,
+        aber ein Stadtgebiet kann theoretisch in getrennte Blobs zerfallen,
+        analog zu den mehreren moeglichen Wildnis-Polygonen)."""
+        city_polygons = {}
+        for settlement in self.settlements:
+            sid = settlement.location_id
+            mask = (self.city_mask == sid).astype(np.float32)
+            if not np.any(mask):
+                city_polygons[sid] = []
+                continue
+
+            padded_mask = np.pad(mask, 1, mode="constant", constant_values=0.0)
+            contours = measure.find_contours(padded_mask, level=0.5)
+            polygons = []
+            for c in contours:
+                pts = np.column_stack([c[:, 1] - 1.0, c[:, 0] - 1.0])
+                if len(pts) < 4:
+                    continue
+                poly = Polygon(pts)
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if poly.is_empty:
+                    continue
+                candidates = list(poly.geoms) if isinstance(poly, MultiPolygon) else [poly]
+                for cand in candidates:
+                    if cand.is_valid and not cand.is_empty and cand.area > self.CITY_MIN_AREA:
+                        polygons.append(cand)
+            city_polygons[sid] = polygons
+        return city_polygons

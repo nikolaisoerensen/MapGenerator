@@ -113,7 +113,7 @@ class DrawMixin:
             return
         pick_radius_px = 8.0
 
-        excluded_ids = set(self.boundary_owner.keys()) | self.wilderness_node_ids | self.map_border_node_ids
+        excluded_ids = set(self.boundary_owner.keys())
         regular_nodes = [n for n in self.nodes if n.node_id not in excluded_ids]
 
         core_hit = None
@@ -176,11 +176,29 @@ class DrawMixin:
             ax.contour(inside, levels=[0.5], colors="gold", linewidths=2.0,
                        extent=(0, self.map_size, 0, self.map_size))
 
-        wilderness = (self.civ_map < self.WILDERNESS_CIV_THRESHOLD).astype(float)
-        if np.any(wilderness):
-            ax.contour(wilderness, levels=[0.5], colors="cyan", linewidths=0.8, alpha=0.4,
-                       extent=(0, self.map_size, 0, self.map_size))
+        # Einzige Wildnisgrenzen-Darstellung: die TATSAECHLICHEN Shapely-
+        # Polygone, die auch fuer die Berechnung genutzt werden
+        # (self._wilderness_polygons, scene._build_wilderness_boundary_points
+        # -- inkl. deren buffer(0)-Reparatur bei self-intersecting Konturen,
+        # siehe topology._gen_step_5_wilderness_snap). Bewusst NICHT mehr
+        # zusaetzlich die rohe Pixel-Schwellwert-Kontur aus civ_map direkt
+        # (frueher redundant uebereinanderliegend, siehe Nutzer-Anmerkung).
+        wilderness_polygons = getattr(self, "_wilderness_polygons", None) or []
+        polygon_outline_segments = []
+        for poly in wilderness_polygons:
+            coords = np.asarray(poly.exterior.coords, dtype=float)
+            polygon_outline_segments.extend(
+                (tuple(coords[i]), tuple(coords[i + 1])) for i in range(len(coords) - 1))
+        if polygon_outline_segments:
+            artists["wilderness_polygon_outline"] = LineCollection(
+                polygon_outline_segments, colors="magenta", linewidths=1.5, alpha=0.9, zorder=3)
+            ax.add_collection(artists["wilderness_polygon_outline"])
 
+        # EIN einziges globales, geklipptes Voronoi (siehe
+        # topology._build_voronoi_mesh) deckt jetzt civ- UND Wildnisgebiet
+        # gemeinsam ab -- kein separates Wildnis-Dreiecksnetz und kein
+        # Naht-Stitching mehr noetig, current_ridge_edges ist bereits die
+        # vollstaendige, ueberall zusammenhaengende Kanten-Liste.
         polygon_segments = [(p1, p2) for (i, j, p1, p2, cost) in self.current_ridge_edges]
         grey_edges = LineCollection(polygon_segments, colors="dimgray", linewidths=0.5, alpha=0.5, zorder=2)
         ax.add_collection(grey_edges)
@@ -198,6 +216,13 @@ class DrawMixin:
 
         artists["standard_cores"] = ax.scatter([], [], s=14, c="red", zorder=6)
         artists["wilderness_cores"] = ax.scatter([], [], s=14, c="limegreen", zorder=6)
+        # city_core (Schritt 4/11, siehe topology._gen_step_2c_place_city_cores)
+        # sitzt exakt auf der Siedlungsposition, also deckungsgleich mit dem
+        # bereits vorhandenen Siedlungsstern (unten) -- als Ring HINTER dem
+        # Stern gerendert (kleinerer zorder), damit man trotzdem sieht, dass
+        # dort tatsaechlich ein city_core-PlotNode erzeugt wurde.
+        artists["city_cores"] = ax.scatter(
+            [], [], s=340, facecolors="none", edgecolors="orange", linewidths=2.0, zorder=6)
         artists["boundary_nodes"] = ax.scatter(
             [], [], s=25, c="gold", marker="^", zorder=6, edgecolors="black", linewidths=0.4)
         artists["wilderness_border_nodes"] = ax.scatter(
@@ -295,10 +320,11 @@ class DrawMixin:
         MIN_TRAFFIC = 20.0 * self.plot_tier_factor
         TRAFFIC_MAX = 300.0 * self.plot_tier_factor
 
-        # Grundstuecksgrenzen/Voronoi-Punkte folgen den (langsam driftenden,
-        # siehe physics._drift_plot_nodes/_refresh_live_ridge_edges)
-        # plot_node-Positionen -- deshalb hier per set_segments/set_offsets
-        # aktualisiert statt nur einmalig in _rebuild_static_layer gezeichnet.
+        # Grundstuecksgrenzen/Voronoi-Punkte folgen den sich per Federphysik
+        # bewegenden plot_node-Positionen (siehe physics._apply_spring_forces/
+        # _refresh_live_ridge_edges) -- deshalb hier per set_segments/
+        # set_offsets aktualisiert statt nur einmalig in _rebuild_static_layer
+        # gezeichnet.
         grey_segments = [(p1, p2) for (i, j, p1, p2, cost) in self.current_ridge_edges]
         artists["grey_edges"].set_segments(grey_segments)
         if self.ridge_vertex_positions is not None and len(self.ridge_vertex_positions) > 0:
@@ -335,26 +361,35 @@ class DrawMixin:
             artists["traffic_active"].set_linewidths(active_widths)
         artists["traffic_unused"].set_segments(unused_segs)
 
-        excluded_ids = set(self.boundary_owner.keys()) | self.wilderness_node_ids | self.map_border_node_ids
+        excluded_ids = set(self.boundary_owner.keys())
         regular_nodes = [n for n in self.nodes if n.node_id not in excluded_ids]
-        standard_cores = [n for n in regular_nodes if n.node_type != "wilderness_core"]
+        standard_cores = [n for n in regular_nodes if n.node_type not in ("wilderness_core", "city_core")]
         wilderness_cores = [n for n in regular_nodes if n.node_type == "wilderness_core"]
+        city_cores = [n for n in regular_nodes if n.node_type == "city_core"]
         self._set_scatter_offsets(artists["standard_cores"], standard_cores)
         self._set_scatter_offsets(artists["wilderness_cores"], wilderness_cores)
+        self._set_scatter_offsets(artists["city_cores"], city_cores)
 
-        boundary_nodes = [n for n in self.nodes if n.node_id in self.boundary_owner]
+        # city_border_node lebt seit dem Umbau auf einen dedizierten
+        # Stadtkern-Seed (siehe topology._gen_step_city_boundary_distribute)
+        # ebenfalls in self.plot_nodes, nicht mehr in self.nodes.
+        boundary_nodes = [n for n in self.plot_nodes if n.node_id in self.boundary_owner]
         self._set_scatter_offsets(artists["boundary_nodes"], boundary_nodes)
 
-        wilderness_border_nodes = [n for n in self.nodes if n.node_id in self.wilderness_node_ids]
+        # map_border_node/wilderness_node leben seit dem Umbau auf ein
+        # einziges geklipptes Voronoi als klassifizierte Vertices in
+        # self.plot_nodes, nicht mehr in self.nodes (siehe
+        # topology._build_voronoi_mesh/_gen_step_5_wilderness_snap).
+        wilderness_border_nodes = [n for n in self.plot_nodes if n.node_id in self.wilderness_node_ids]
         self._set_scatter_offsets(artists["wilderness_border_nodes"], wilderness_border_nodes)
 
-        map_border_nodes = [n for n in self.nodes if n.node_id in self.map_border_node_ids]
+        map_border_nodes = [n for n in self.plot_nodes if n.node_id in self.map_border_node_ids]
         self._set_scatter_offsets(artists["map_border_nodes"], map_border_nodes)
 
         self._update_selection_highlight()
 
         artists["title"].set_text(
-            f"Iteration {self.iteration} | Plotkerne: {len(regular_nodes)} | "
+            f"Iteration {self.iteration} | Plotkerne: {len(standard_cores) + len(wilderness_cores)} | "
             f"Straße: {strasse_count} Weg: {weg_count} Pfad: {pfad_count} Total Traffic: {total_traffic:.1f}")
 
     @staticmethod

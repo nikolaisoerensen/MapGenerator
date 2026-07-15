@@ -158,13 +158,15 @@ class ParameterSlider(QWidget):
     valueChanged = pyqtSignal(float)
 
     def __init__(self, label: str, min_val: float, max_val: float,
-                 default_val: float, step: float = 1.0, suffix: str = "", parent=None):
+                 default_val: float, step: float = 1.0, suffix: str = "",
+                 description: str = "", parent=None):
         super().__init__(parent)
 
         self.min_val = min_val
         self.max_val = max_val
         self.step = step
         self.suffix = suffix
+        self.description = description
         self.current_value = default_val
         self.default_value = default_val
 
@@ -218,9 +220,25 @@ class ParameterSlider(QWidget):
         self.reset_button.setToolTip("Reset to default")
         self.reset_button.clicked.connect(self.reset_to_default)
 
+        # Info-Button (hinter dem Reset-Button, siehe Nutzer-Anfrage): reine
+        # Hover-Tooltip-Anzeige über Qt's eingebauten Tooltip-Mechanismus (kein
+        # eigenes Popup nötig) - erklärt, was der Parameter fachlich bewirkt
+        # (z.B. "Manning Coefficient" ist ohne Erklärung nicht selbsterklärend).
+        # description kommt aus dem "description"-Key des jeweiligen
+        # value_default.py-Parameter-Dicts (siehe get_parameter_config()) - bei
+        # fehlendem Text ein generischer Platzhalter statt eines leeren Tooltips.
+        self.info_button = QPushButton("ⓘ")
+        self.info_button.setMaximumWidth(20)
+        self.info_button.setMaximumHeight(20)
+        self.info_button.setStyleSheet("font-size: 10px; color: #3498db;")
+        self.info_button.setToolTip(self.description or "Keine Beschreibung verfügbar")
+        self.info_button.setCursor(Qt.WhatsThisCursor)
+        self.info_button.setFocusPolicy(Qt.NoFocus)
+
         slider_layout.addWidget(self.slider)
         slider_layout.addWidget(self.input_field)
         slider_layout.addWidget(self.reset_button)
+        slider_layout.addWidget(self.info_button)
         layout.addLayout(slider_layout)
 
         self.setLayout(layout)
@@ -309,6 +327,14 @@ class StatusIndicator(QWidget):
         self.current_status = "unknown"
         self.setup_ui()
 
+    # Feste Breite für den Status-Text - ohne das bestimmte die aktuelle
+    # Textlänge (z.B. "Generating LOD 1/6 (25%)" vs. "Generation completed
+    # (LOD 6)") den sizeHint() des QLabels, was den umgebenden Layouts
+    # (Parameter-Slider im selben Panel) bei jedem Status-Wechsel eine neue
+    # Breite aufzwang. Text wird bei Bedarf mit "…" gekürzt, volle Nachricht
+    # bleibt über den Tooltip erreichbar.
+    _STATUS_TEXT_WIDTH = 200
+
     def setup_ui(self):
         """Erstellt UI für Status-Indicator"""
         layout = QHBoxLayout()
@@ -321,6 +347,8 @@ class StatusIndicator(QWidget):
 
         # Status Text
         self.status_text = QLabel(self.label_text)
+        self.status_text.setFixedWidth(self._STATUS_TEXT_WIDTH)
+        self.status_text.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         layout.addWidget(self.status_icon)
         layout.addWidget(self.status_text)
@@ -331,6 +359,12 @@ class StatusIndicator(QWidget):
         # Initial Status
         self.set_unknown()
 
+    def _set_status_text(self, full_text: str):
+        """Setzt den Status-Text elidiert auf die feste Breite, volle Nachricht per Tooltip."""
+        metrics = QFontMetrics(self.status_text.font())
+        elided = metrics.elidedText(full_text, Qt.ElideRight, self._STATUS_TEXT_WIDTH)
+        self.status_text.setText(elided)
+
     def set_success(self, message: str = ""):
         """Setzt Success-Status"""
         self.current_status = "success"
@@ -338,17 +372,17 @@ class StatusIndicator(QWidget):
         self.status_icon.setStyleSheet("color: #27ae60; font-weight: bold;")
 
         if message:
-            self.status_text.setText(f"{self.label_text}: {message}")
+            self._set_status_text(f"{self.label_text}: {message}")
             self.setToolTip(message)
         else:
-            self.status_text.setText(f"{self.label_text}: OK")
+            self._set_status_text(f"{self.label_text}: OK")
 
     def set_warning(self, message: str):
         """Setzt Warning-Status"""
         self.current_status = "warning"
         self.status_icon.setText("⚠")
         self.status_icon.setStyleSheet("color: #f39c12; font-weight: bold;")
-        self.status_text.setText(f"{self.label_text}: {message}")
+        self._set_status_text(f"{self.label_text}: {message}")
         self.setToolTip(message)
 
     def set_error(self, message: str):
@@ -356,7 +390,7 @@ class StatusIndicator(QWidget):
         self.current_status = "error"
         self.status_icon.setText("✗")
         self.status_icon.setStyleSheet("color: #e74c3c; font-weight: bold;")
-        self.status_text.setText(f"{self.label_text}: {message}")
+        self._set_status_text(f"{self.label_text}: {message}")
         self.setToolTip(message)
 
     def set_unknown(self):
@@ -364,7 +398,7 @@ class StatusIndicator(QWidget):
         self.current_status = "unknown"
         self.status_icon.setText("◯")
         self.status_icon.setStyleSheet("color: #7f8c8d;")
-        self.status_text.setText(f"{self.label_text}: Unknown")
+        self._set_status_text(f"{self.label_text}: Unknown")
         self.setToolTip("Status unknown")
 
     def set_pending(self, message: str = ""):
@@ -374,10 +408,10 @@ class StatusIndicator(QWidget):
         self.status_icon.setStyleSheet("color: #3498db; font-weight: bold;")
 
         if message:
-            self.status_text.setText(f"{self.label_text}: {message}")
+            self._set_status_text(f"{self.label_text}: {message}")
             self.setToolTip(message)
         else:
-            self.status_text.setText(f"{self.label_text}: Pending")
+            self._set_status_text(f"{self.label_text}: Pending")
 
 
 class ProgressBar(QWidget):

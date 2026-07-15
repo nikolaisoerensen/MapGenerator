@@ -73,6 +73,7 @@ class TrafficMixin:
 
         if not self.topology_ready or vertex_positions is None or not ridge_edges:
             self.ridge_traffic_history = {}
+            self.ridge_traffic_shrink_ema = {}
             return
 
         def trace_and_add_predecessors(row_index, source_entry, target_entry, amount, contrib):
@@ -185,3 +186,20 @@ class TrafficMixin:
                 new_history[key] = new_value
 
         self.ridge_traffic_history = new_history
+
+        # Eigene, deutlich langsamer nachziehende EMA nur fuer den Feder-
+        # Schrumpf (physics._rest_length_plotnode_plotnode_batch) -- sanfterer
+        # decay als oben, damit der Schrumpf beim ersten Auftreten von Traffic
+        # auf einer Kante nicht in einem Schritt von 0 auf den vollen Wert
+        # springt. ridge_traffic_history bleibt unveraendert schnell reagierend
+        # fuer die Traffic-Einfaerbung (draw.py).
+        shrink_keep_factor = 1.0 - self.spring_shrink_ema_decay
+        new_shrink_ema = {}
+        for key in all_keys:
+            old_shrink = self.ridge_traffic_shrink_ema.get(key, 0.0)
+            new_shrink = (old_shrink * shrink_keep_factor
+                          + fresh_contrib.get(key, 0.0) * self.spring_shrink_ema_decay)
+            if new_shrink > 1e-6:
+                new_shrink_ema[key] = new_shrink
+
+        self.ridge_traffic_shrink_ema = new_shrink_ema
