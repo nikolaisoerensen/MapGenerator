@@ -37,6 +37,7 @@ LOD-System (Numerisch):
 import numpy as np
 from opensimplex import OpenSimplex
 from scipy.ndimage import gaussian_filter, map_coordinates
+from scipy.fft import dctn, idctn
 import logging
 from typing import Dict, Any, Optional, Tuple
 
@@ -67,6 +68,26 @@ class AtmosphereLayers:
     # vertikale Fluss-Divergenz in _apply_continuity_correction genutzt (w/dicke) -
     # HIGH hat keine echte Obergrenze, 3200m ist ein repräsentativer Abschluss.
     THICKNESS_M = (150.0, 1050.0, 2000.0)
+
+
+# Rauigkeits-Lookup-Tabelle je Biome-Kategorie (core/biome_generator.py:859-875
+# Basis-Biome 0-14, :981-999 Wasser-Super-Biome 15-19) -> ungefährer
+# Dämpfungs-Anteil [0,1] für bodennahen Wind, grob an WindNinjas
+# Rauigkeitslängen-Konzept angelehnt (dichter Bewuchs bremst Wind nahe am
+# Boden stärker als offenes Gelände/Wasser). Stilisierte, nicht
+# meteorologisch kalibrierte Werte - siehe [[project-wind-roughness]] und
+# WeatherSystemGenerator._get_roughness_damping().
+_BIOME_ROUGHNESS_DAMPING = np.array([
+    0.03, 0.08, 0.30, 0.12, 0.32, 0.18, 0.04, 0.08, 0.35, 0.28,
+    0.14, 0.30, 0.22, 0.10, 0.05,   # 0-14: ice_cap..badlands
+    0.00, 0.00, 0.02, 0.02, 0.02,   # 15-19: ocean/lake/grand_river/river/creek
+], dtype=np.float32)
+
+# Stärke des Grat-/Canyon-Speedup-Terms (WindNinja-Terrain-Shape-Effekt,
+# siehe [[project-wind-ridge-speedup]]) - maximale multiplikative
+# Geschwindigkeitsänderung (+/-) bei extremer (3-Sigma-)Krümmung, empirischer
+# Startwert wie die übrigen internen Skalierungskonstanten dieser Datei.
+_RIDGE_SPEEDUP_STRENGTH = 0.35
 
 
 class WeatherData:
@@ -174,6 +195,13 @@ class WeatherSystemGenerator:
 
         # Performance-Tracking
         self.performance_stats = {}
+
+        # Cache für die separierbaren Poisson-Eigenwerte (1/lambda) der
+        # DCT-basierten Kontinuitätskorrektur (_apply_continuity_correction),
+        # pro (height, width) - siehe [[project-wind-poisson-projection]].
+        # Spart die wiederholte cos()-Berechnung des Nenners, nicht die
+        # eigentliche FFT-Kosten.
+        self._poisson_eig_cache: Dict[Tuple[int, int], np.ndarray] = {}
 
         # Progress-Callback für UI-Updates
         self.progress_callback = None
@@ -432,6 +460,10 @@ class WeatherSystemGenerator:
         self._update_progress("Temperature", 20, "Calculating coupled 3-layer atmosphere...")
         heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
         atmosphere_steps = self._get_atmosphere_loop_steps(lod_level)
+        # Statisch über alle 6 Monate dieser Runde - einmal holen statt in
+        # _run_coupled_atmosphere_simulation sechsmal neu abzufragen (siehe
+        # [[project-wind-roughness]]).
+        roughness_damping = self._get_roughness_damping(heightmap.shape, lod_level)
 
         from gui.config.value_default import WEATHER
         from core.terrain_generator import generate_seasonal_sun_angles
@@ -456,7 +488,7 @@ class WeatherSystemGenerator:
             for month_index in range(6):
                 result = self._run_coupled_atmosphere_simulation(
                     heightmap, monthly_shadowmaps[month_index], month_params_list[month_index],
-                    target_size, n_steps=atmosphere_steps)
+                    target_size, n_steps=atmosphere_steps, roughness_damping=roughness_damping)
 
                 monthly_temp_layers.append(result['temp_layers'])
                 monthly_wind_layers.append(result['wind_layers'])
@@ -677,7 +709,8 @@ class WeatherSystemGenerator:
 
     def _run_coupled_atmosphere_simulation(self, heightmap: np.ndarray, shadowmap: np.ndarray,
                                           month_params: Dict[str, Any], target_size: int,
-                                          n_steps: int) -> Dict[str, np.ndarray]:
+                                          n_steps: int,
+                                          roughness_damping: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
         """
         Gekoppelte 3-Schicht-Atmosphären-Simulation (Boden/Mittel/Hoch, siehe
         AtmosphereLayers) - ersetzt das bisherige "Temp einmal -> Wind einmal ->
@@ -691,8 +724,10 @@ class WeatherSystemGenerator:
           1. Semi-Lagrange-Advektion von u,v,theta (potentielle Temp),q
           2. Druckgradient (gemeinsames synoptisches Druckfeld je Monat, Terrain-
              Kopplung nur auf GROUND/gedämpft MID) + additive Terrain-Ablenkung
-             (nur GROUND/gedämpft MID) + thermische Konvektion (Schatten-Term nur
-             GROUND)
+             UND multiplikativer Grat-/Canyon-Speedup (beide nur GROUND/gedämpft
+             MID, siehe [[project-wind-ridge-speedup]]) + Rauigkeits-Dämpfung aus
+             Biome (best-effort, siehe [[project-wind-roughness]]) + thermische
+             Konvektion (Schatten-Term nur GROUND)
           3. Latentwärme: Kondensation aus Übersättigung (Magnus-Formel, identische
              Skala wie _calculate_precipitation_cpu/_calculate_atmospheric_moisture_cpu)
              wärmt, Verdunstung (nur GROUND) kühlt
@@ -701,6 +736,14 @@ class WeatherSystemGenerator:
              zwischen Nachbarschichten - erhält die Schicht-Summe jeder Größe)
           5. Diffusion + 6-Richtungs-Kontinuitäts-Korrektur (horizontale Divergenz
              + vertikaler Fluss-Term aus Schritt 4)
+
+        roughness_damping (optional, (H,W), Wertebereich [0,1]): best-effort
+        Bodenrauigkeits-Dämpfung aus der Biome-Klassifikation, von
+        _calc_temperature einmal pro LOD-Runde vorab per
+        _get_roughness_damping() geholt (statisch über alle 6 Monate, daher
+        hier als Parameter statt hier selbst erneut abgefragt). None (Default,
+        z.B. wenn Biome in dieser Session nie angefragt wurde) reproduziert
+        exakt das alte Verhalten ohne Rauigkeits-Term.
 
         Rückgabe: dict mit 'wind_layers' (3,H,W,2), 'temp_layers' (3,H,W, reale
         Temperatur), 'humid_layers' (3,H,W), 'precip_map' (H,W).
@@ -746,9 +789,14 @@ class WeatherSystemGenerator:
         # deshalb stärker auf GROUND, schwächer auf MID/HIGH (aber nicht 0 wie bei
         # den Terrain-Termen - auch die freie Atmosphäre zeigt etwas Verwirbelung).
         VORTICITY_LAYER_SCALE = (1.0, 0.6, 0.3)
+        # Rauigkeits-Dämpfung: wie die Terrain-Terme voll auf GROUND, gedämpft
+        # auf MID, keine auf HIGH (Bodenreibung wirkt per Definition nur nahe
+        # der Oberfläche) - siehe [[project-wind-roughness]].
+        ROUGHNESS_LAYER_SCALE = (1.0, 0.3, 0.0)
 
         y_idx, x_idx = np.mgrid[0:height, 0:width].astype(np.float64)
         slopemap = self._calculate_slopes_vectorized(heightmap)
+        curvature_norm = self._calculate_curvature_normalized(heightmap)
 
         # Rand-Verstärkung für Vorticity Confinement (Nutzer-Wunsch: "an der
         # Kartengrenze mehr Varianz" - der Kartenrand ist, wo die synoptische
@@ -825,10 +873,19 @@ class WeatherSystemGenerator:
                 v[i] += (v_target - v[i]) * PRESSURE_RELAX_RATE
 
                 # 2b. Terrain-Ablenkung (gedämpft mit Höhe, siehe TERRAIN_TERM_SCALE)
+                # + Grat-/Canyon-Speedup (WindNinja-Terrain-Shape-Effekt,
+                # siehe [[project-wind-ridge-speedup]]): zusätzlich zur reinen
+                # Hang-Ablenkung beschleunigt Wind multiplikativ über
+                # konvexen Graten und bremst in konkaven Tälern, gleiche
+                # Höhendämpfung wie die Ablenkung selbst.
                 terrain_term = month_params['terrain_factor'] * 0.5 * TERRAIN_TERM_SCALE[i]
                 if terrain_term != 0.0:
                     u[i] += slopemap[:, :, 1] * terrain_term
                     v[i] -= slopemap[:, :, 0] * terrain_term
+                    ridge_factor = 1.0 + _RIDGE_SPEEDUP_STRENGTH * (-curvature_norm) * \
+                        month_params['terrain_factor'] * TERRAIN_TERM_SCALE[i]
+                    u[i] *= ridge_factor
+                    v[i] *= ridge_factor
 
                 # 2c. Thermische Konvektion (Schatten-Term nur GROUND - nur die
                 # Bodenschicht "sieht" die Sonneneinstrahlung direkt, siehe
@@ -849,6 +906,16 @@ class WeatherSystemGenerator:
                     v[i] += temp_grad_y * 0.05 + shadow_effect
                 else:
                     v[i] += temp_grad_y * 0.05
+
+                # 2d. Rauigkeits-Dämpfung aus Biome (best-effort, siehe
+                # [[project-wind-roughness]]) - läuft VOR der Verdunstungs-
+                # Windgeschwindigkeit in Schritt 3, damit rauigkeitsbedingt
+                # gebremster Bodenwind auch die Verdunstungs-Verstärkung
+                # konsistent mitreduziert.
+                if roughness_damping is not None and ROUGHNESS_LAYER_SCALE[i] > 0.0:
+                    damping = roughness_damping * ROUGHNESS_LAYER_SCALE[i]
+                    u[i] *= (1.0 - damping)
+                    v[i] *= (1.0 - damping)
 
                 # 3. Latentwärme - identische Magnus-Skala wie
                 # _calculate_precipitation_cpu/_calculate_atmospheric_moisture_cpu
@@ -1266,6 +1333,14 @@ class WeatherSystemGenerator:
 
         # Slopemap aus Heightmap berechnen (vectorized)
         slopemap = self._calculate_slopes_vectorized(heightmap)
+        # Grat-/Canyon-Speedup-Term (siehe [[project-wind-ridge-speedup]]) -
+        # nur der Speedup, keine Rauigkeits-Dämpfung hier: dieser Pfad ist
+        # der seltene Einzelschicht-Fallback (nur bei Exception im primären
+        # 3-Schicht-Loop), der schon bisher bewusst schlanker gehalten wird
+        # (keine Advektion/Vorticity/Schichten) - Rauigkeit bräuchte
+        # zusätzlich lod_level/data_lod_manager-Zugriff, den diese Methode
+        # aktuell nicht entgegennimmt.
+        curvature_norm = self._calculate_curvature_normalized(heightmap)
 
         # Initiales Druckfeld entlang der vorherrschenden Windrichtung (mit Noise)
         wind_direction_deg = parameters.get('prevailing_wind_direction', 0.0)
@@ -1319,6 +1394,11 @@ class WeatherSystemGenerator:
             terrain_factor = parameters['terrain_factor'] * 0.5
             wind_field[:, :, 0] += slopemap[:, :, 1] * terrain_factor  # Slope Y -> Wind X
             wind_field[:, :, 1] -= slopemap[:, :, 0] * terrain_factor  # Slope X -> Wind Y
+
+            # Grat-/Canyon-Speedup (siehe [[project-wind-ridge-speedup]])
+            ridge_factor = 1.0 + _RIDGE_SPEEDUP_STRENGTH * (-curvature_norm) * parameters['terrain_factor']
+            wind_field[:, :, 0] *= ridge_factor
+            wind_field[:, :, 1] *= ridge_factor
 
             # Thermal-Convection
             self._apply_thermal_convection(wind_field, temp_map, shadowmap, parameters)
@@ -1733,6 +1813,84 @@ class WeatherSystemGenerator:
 
         return slopemap
 
+    def _calculate_curvature_normalized(self, heightmap: np.ndarray) -> np.ndarray:
+        """
+        Normalisierte Gelände-Krümmung (diskreter Laplace der Heightmap,
+        reales Meter/Pixel-Spacing wie _calculate_slopes_vectorized) für den
+        Grat-/Canyon-Speedup-Term (siehe [[project-wind-ridge-speedup]],
+        WindNinjas Terrain-Shape-Effekt): negativ auf konvexen Graten/Kuppen
+        (Wind soll dort beschleunigen), positiv in konkaven Tälern (Wind soll
+        dort bremsen).
+
+        Auf [-1,1] per geclipptem Z-Score (3 Standardabweichungen) normiert
+        statt fixer physikalischer Einheiten - die rohe Krümmung
+        (Höhe/Meter²) hängt stark von TERRAIN.AMPLITUDE/WORLD_SIZE_KM ab, ein
+        Z-Score-Clip macht den Speedup-Effekt unabhängig von der absoluten
+        Terrain-Skalierung nutzbar (ähnliches Muster wie height_normalized an
+        anderer Stelle dieser Datei, aber robust gegen Ausreißer statt Min/Max).
+        Ränder bleiben bei 0 (kein Krümmungssignal) - dieselbe Vereinfachung
+        wie das ungenutzte äußerste Pixel bei vielen zentralen Differenzen
+        dieser Datei.
+        """
+        height, width = heightmap.shape
+        from gui.config.value_default import TERRAIN
+        spacing = (TERRAIN.WORLD_SIZE_KM * 1000.0) / height
+
+        d2x = np.zeros((height, width), dtype=np.float32)
+        d2y = np.zeros((height, width), dtype=np.float32)
+        d2x[:, 1:-1] = (heightmap[:, 2:] - 2.0 * heightmap[:, 1:-1] + heightmap[:, :-2]) / (spacing ** 2)
+        d2y[1:-1, :] = (heightmap[2:, :] - 2.0 * heightmap[1:-1, :] + heightmap[:-2, :]) / (spacing ** 2)
+        laplacian = d2x + d2y
+
+        scale = float(np.std(laplacian)) + 1e-9
+        return np.clip(laplacian / (3.0 * scale), -1.0, 1.0).astype(np.float32)
+
+    def _resize_nearest_labels(self, label_map: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
+        """
+        Nearest-Neighbor-Resize für kategoriale/Label-Daten (z.B. biome_map) -
+        bilineare/bikubische Interpolation wie _interpolate_2d_bicubic würde
+        an Kategoriegrenzen unsinnige Zwischenwerte erzeugen. Siehe
+        _get_roughness_damping() für den Aufrufkontext (analog zum
+        bestehenden Muster in water_generator.py::_resize_nearest).
+        """
+        src_h, src_w = label_map.shape[:2]
+        tgt_h, tgt_w = target_shape
+        if (src_h, src_w) == (tgt_h, tgt_w):
+            return label_map
+        y_idx = np.clip((np.arange(tgt_h) * src_h / tgt_h).astype(int), 0, src_h - 1)
+        x_idx = np.clip((np.arange(tgt_w) * src_w / tgt_w).astype(int), 0, src_w - 1)
+        return label_map[np.ix_(y_idx, x_idx)]
+
+    def _get_roughness_damping(self, target_shape: Tuple[int, int], lod_level: int) -> Optional[np.ndarray]:
+        """
+        Best-effort Bodenrauigkeits-Dämpfung aus der Biome-Klassifikation
+        (siehe [[project-wind-roughness]], _BIOME_ROUGHNESS_DAMPING oben).
+
+        Biome läuft NACH Weather im Calculator-Graph (weather.wind ist keine
+        Abhängigkeit von biome.*) - ein aktueller Wert ist nur verfügbar,
+        wenn Biome in DIESER Session bereits (mindestens für ein niedrigeres
+        LOD) angefragt wurde, z.B. beim Auto-Start der vollen Pipeline. Bei
+        isolierter Weather-Tab-Generierung bleibt Biome unangefragt - dann
+        liefert dieser Aufruf None, und der Aufrufer wendet keine Dämpfung an
+        (identisches Verhalten zu vor dieser Änderung).
+
+        Bei einer Shape-Abweichung (z.B. weil Biome zuletzt bei einer anderen
+        map_size lief - der DataLODManager-Cache für Calculator-Outputs wird
+        von clear_all_data()/invalidate_cache_lod() nie geleert) wird per
+        Nearest-Neighbor resampled statt zu verwerfen, analog zum
+        bestehenden Muster in water_generator.py::_resize_nearest - eine
+        stilisierte, leicht veraltete Rauigkeits-Näherung ist hier
+        unproblematischer als bei echten Höhen-/Strömungsdaten.
+        """
+        biome_map = self.data_lod_manager.get_calculator_output(
+            "biome.integrate_layers", "biome_map", lod_level)
+        if biome_map is None:
+            return None
+        if biome_map.shape[:2] != tuple(target_shape):
+            biome_map = self._resize_nearest_labels(biome_map, target_shape)
+        ids = np.clip(biome_map.astype(np.int32), 0, len(_BIOME_ROUGHNESS_DAMPING) - 1)
+        return _BIOME_ROUGHNESS_DAMPING[ids]
+
     def _generate_atmospheric_noise(self, shape: Tuple[int, int], target_size: int,
                                     month_index: int = 0) -> np.ndarray:
         """
@@ -1921,9 +2079,48 @@ class WeatherSystemGenerator:
         wind_field[:, :, 0] += force_x
         wind_field[:, :, 1] += force_y
 
+    def _get_poisson_inv_eigs(self, height: int, width: int) -> np.ndarray:
+        """
+        Liefert (gecached) 1/lambda(p,q) für den separierbaren 2D-Neumann-Laplace,
+        den die DCT-Typ-2/3-Basis diagonalisiert: lambda(p,q) = 2cos(pi*p/H) +
+        2cos(pi*q/W) - 4. lambda(0,0)=0 (Mittelwert-Freiheitsgrad von phi) wird auf
+        einen Dummy-Wert gesetzt - div_hat[0,0] wird vor der Division ohnehin auf 0
+        gezwungen (siehe _apply_continuity_correction), der Dummy-Wert hier wird also
+        nie tatsächlich verwendet.
+        """
+        key = (height, width)
+        cached = self._poisson_eig_cache.get(key)
+        if cached is not None:
+            return cached
+        # Eigenwert-Berechnung selbst in float64 (nur ein einmaliger Aufwand pro
+        # Grid-Größe, dank Cache), der resultierende Nenner wird für die
+        # Multiplikation mit dem float32-DCT-Spektrum nach float32 zurückgecastet.
+        p = np.arange(height, dtype=np.float64)
+        q = np.arange(width, dtype=np.float64)
+        lam = (2.0 * np.cos(np.pi * p / height) - 2.0)[:, None] + \
+              (2.0 * np.cos(np.pi * q / width) - 2.0)[None, :]
+        lam[0, 0] = 1.0
+        inv_lam = (1.0 / lam).astype(np.float32)
+        self._poisson_eig_cache[key] = inv_lam
+        return inv_lam
+
     def _apply_continuity_correction(self, wind_field: np.ndarray, vertical_flux_term: Optional[np.ndarray] = None):
         """
-        Wendet Kontinuitäts-Correction für Massenerhaltung an (simplified).
+        Erzwingt Massenerhaltung (~Divergenzfreiheit) per Poisson-Projektion -
+        WindNinja-inspiriert (siehe [[project-wind-poisson-projection]]): WindNinja
+        baut ein initiales Windfeld u0 und löst dann eine Poisson-Gleichung
+        grad^2(phi) = div(u0) für ein Korrekturpotential phi (bei WindNinja per FEM+CG
+        auf einem 3D-Terrain-Mesh), danach u_final = u0 - grad(phi). Für dieses
+        reguläre Cartesian-Grid ist das direkte Äquivalent eine schnelle
+        DCT-basierte Poisson-Lösung mit Neumann-Randbedingung (kein Wind-Quell-/
+        Senken-Fluss über den Kartenrand) - derselbe Projektionsschritt wie in
+        "Stable Fluids" (Stam).
+
+        Ersetzt die frühere schwache lokale Iteration (nur 10% der lokalen Divergenz
+        pro Aufruf entfernt, Ränder nie korrigiert) durch eine einmalige globale
+        Lösung pro Aufruf, die das Feld in einem Schritt (bis auf
+        Diskretisierungs-/Rundungsfehler) tatsächlich divergenzfrei macht - siehe
+        Verifikation in [[project-wind-poisson-projection]].
 
         vertical_flux_term (optional, (H,W)): zusätzlicher Divergenz-Beitrag aus dem
         vertikalen Massenaustausch zwischen Atmosphären-Schichten (siehe
@@ -1931,43 +2128,58 @@ class WeatherSystemGenerator:
         (w_oben - w_unten)/dicke. Positiv = Netto-Massenzufluss von oben/unten in
         diese Schicht (die Horizontal-Korrektur muss dann netto AUSWärts divergieren,
         um den Zufluss auszugleichen), negativ = Netto-Abfluss (Konvergenz nötig).
-        None (Default) reproduziert exakt das alte Einzelschicht-2D-Verhalten.
+        Eine reine Neumann-Projektion kann nur Divergenz mit Domänen-Mittel ~0
+        entfernen; ein echter über die Schicht gemittelter Netto-Massenfluss bleibt
+        als realer Rest bestehen - das ist physikalisch korrekt (Nettomasse fließt
+        tatsächlich in/aus dieser Schicht), kein Solver-Defekt.
 
-        Vektorisiert via Array-Slicing statt der früheren Python-Doppelschleife
-        (identische zentrale-Differenz-Divergenz-Formel) - selber Grund wie
-        _apply_wind_diffusion oben. dudx/dvdy werden hier für einen größeren Bereich
-        vorberechnet als nötig (dudx für alle Zeilen, dvdy für alle Spalten), aber nur
-        der [1:-1, 1:-1]-Kernbereich (wo im Original BEIDE Differenzen gültig waren)
-        wird tatsächlich auf wind_field angewendet.
+        Divergenz/Gradient nutzen weiterhin das zentrale 2h-Schema dieser Datei,
+        jetzt aber auch an den Rändern via Spiegel-Ghost-Zellen (f[-1]:=f[0],
+        f[N]:=f[N-1] - die diskrete Neumann-Randbedingung), statt sie wie zuvor auf 0
+        zu lassen.
 
-        Nicht bit-identisch zum Original, sondern ein Jacobi- statt des alten
-        Gauss-Seidel-artigen Updates: die Schleife modifizierte wind_field SEQUENTIELL
-        in-place, wodurch spätere (y,x)-Zellen in derselben Passage bereits von
-        früheren Zellen korrigierte Nachbarwerte lasen (Scan-Reihenfolge-abhängiger
-        Seiteneffekt, nicht erkennbar als bewusste Design-Entscheidung). Diese Version
-        liest alle Divergenzen aus einem unveränderten Snapshot und wendet die
-        Korrektur erst danach an - isotrop, ordnungsunabhängig, deshalb die
-        physikalisch sauberere Variante derselben Formel. Abweichung vom Original ist
-        klein (empirisch < 2% des typischen Wind-Betrags bei zufälligen Testfeldern),
-        aber real und beabsichtigt, keine Rundungsungenauigkeit.
+        Poisson-Arithmetik läuft komplett in float32 (Messung: float64 brachte bei
+        realistischen, bereits geglätteten Windfeldern - hier läuft _apply_wind_diffusion
+        immer direkt davor - keine messbar bessere Divergenz-Reduktion (~96-98% in
+        beiden Fällen), kostete aber ~2x mehr Laufzeit, siehe
+        [[project-wind-poisson-projection]]. Die theoretische float32-Rauschgrenze bei
+        kleinen Eigenwerten (Verstärkungsfaktor ~10^5 bei N=1024) betrifft primär
+        adversarielle/reine Rauschfelder mit signifikanter Energie in der Domänen-Mittel-
+        Komponente, nicht die hier tatsächlich vorkommenden glatten Felder.
         """
         height, width = wind_field.shape[:2]
+        u = wind_field[:, :, 0]
+        v = wind_field[:, :, 1]
 
-        dudx = np.zeros((height, width), dtype=wind_field.dtype)
-        dvdy = np.zeros((height, width), dtype=wind_field.dtype)
-        dudx[:, 1:-1] = (wind_field[:, 2:, 0] - wind_field[:, :-2, 0]) * 0.5
-        dvdy[1:-1, :] = (wind_field[2:, :, 1] - wind_field[:-2, :, 1]) * 0.5
-
-        divergence = dudx + dvdy
+        div = np.zeros((height, width), dtype=np.float32)
+        div[:, 1:-1] = (u[:, 2:] - u[:, :-2]) * 0.5
+        div[:, 0] = (u[:, 1] - u[:, 0]) * 0.5
+        div[:, -1] = (u[:, -1] - u[:, -2]) * 0.5
+        div[1:-1, :] += (v[2:, :] - v[:-2, :]) * 0.5
+        div[0, :] += (v[1, :] - v[0, :]) * 0.5
+        div[-1, :] += (v[-1, :] - v[-2, :]) * 0.5
         if vertical_flux_term is not None:
             # Netto-Zufluss von oben/unten wirkt wie negative horizontale Divergenz
             # (die Zelle "will" sich horizontal ausdehnen, um den Zufluss
             # auszugleichen) - siehe Docstring oben.
-            divergence = divergence - vertical_flux_term
-        correction_factor = -divergence * 0.1
+            div -= vertical_flux_term.astype(np.float32)
 
-        wind_field[1:-1, 1:-1, 0] += correction_factor[1:-1, 1:-1] * 0.5
-        wind_field[1:-1, 1:-1, 1] += correction_factor[1:-1, 1:-1] * 0.5
+        inv_lambda = self._get_poisson_inv_eigs(height, width)
+        div_hat = dctn(div, type=2, norm='ortho')
+        div_hat[0, 0] = 0.0  # Mittelwert-Freiheitsgrad von phi, siehe Docstring
+        phi = idctn((div_hat * inv_lambda).astype(np.float32), type=2, norm='ortho')
+
+        grad_x = np.zeros((height, width), dtype=np.float32)
+        grad_y = np.zeros((height, width), dtype=np.float32)
+        grad_x[:, 1:-1] = (phi[:, 2:] - phi[:, :-2]) * 0.5
+        grad_x[:, 0] = (phi[:, 1] - phi[:, 0]) * 0.5
+        grad_x[:, -1] = (phi[:, -1] - phi[:, -2]) * 0.5
+        grad_y[1:-1, :] = (phi[2:, :] - phi[:-2, :]) * 0.5
+        grad_y[0, :] = (phi[1, :] - phi[0, :]) * 0.5
+        grad_y[-1, :] = (phi[-1, :] - phi[-2, :]) * 0.5
+
+        wind_field[:, :, 0] -= grad_x
+        wind_field[:, :, 1] -= grad_y
 
     def _transport_moisture_simple(self, humid_map: np.ndarray, wind_field: np.ndarray,
                                   dt: float = 0.5) -> np.ndarray:

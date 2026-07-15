@@ -22,6 +22,14 @@ uniform bool useShadows;
 uniform sampler2D overlayTexture;
 uniform bool useOverlay;
 uniform float overlayStrength;
+// Alpha-gewichtetes Blending statt fixem overlayStrength*0.5 - fuer Texturen
+// mit echtem transparentem Hintergrund (z.B. der Settlement-Plot-"Skin",
+// siehe MapDisplay3D._render_settlement_plot_skin(),
+// [[project-settlement-plot-physics-rebuild]] Teil 4), wo nur die tatsaechlich
+// gezeichneten Linien/Punkte das Terrain einfaerben sollen, nicht die leere
+// Restflaeche. Default false -> bestehende RGB-Overlays (civ_map etc.)
+// bleiben unveraendert (dort liefert die Textur ohnehin implizit alpha=1).
+uniform bool useAlphaOverlay;
 
 // Contour Lines (globaler Shell-Toggle, siehe MapDisplay3D.set_contour_overlay()).
 // FragPos.y ist bereits Weltraum-Hoehe = rohe Heightmap-Meter * heightScale (siehe
@@ -113,8 +121,13 @@ vec3 getSettlementColor() {
     // Settlement base with optional civ map overlay
     vec3 baseColor = getTerrainColor();
     if (useOverlay) {
-        vec3 overlayColor = texture(overlayTexture, TexCoord).rgb;
-        return mix(baseColor, overlayColor, overlayStrength * 0.5);  // Subtle overlay
+        vec4 overlaySample = texture(overlayTexture, TexCoord);
+        if (useAlphaOverlay) {
+            // Nur dort einfaerben, wo die Textur tatsaechlich etwas gezeichnet
+            // hat (alpha>0) - Rest bleibt reines Terrain.
+            return mix(baseColor, overlaySample.rgb, overlaySample.a * overlayStrength);
+        }
+        return mix(baseColor, overlaySample.rgb, overlayStrength * 0.5);  // Subtle overlay
     }
     return baseColor;
 }

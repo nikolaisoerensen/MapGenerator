@@ -14,12 +14,17 @@ Zwei Scheduler-Klassen mit unterschiedlichem Zweck:
   Zwischenschritt beim Zerlegen jedes einzelnen Generators.
 - CalculatorDispatcher: verwaltet den KOMPLETTEN Graph generatorübergreifend und
   löst den bisherigen 6-Knoten dependency_tree in generation_orchestrator.py ab -
-  damit können z.B. Settlement-Phasen #28-#33 starten, ohne auf Biome zu warten
-  (nur #34 plot_nodes braucht biome_map).
+  damit kann z.B. Settlement komplett starten, ohne auf Biome zu warten (kein
+  settlement.*-Knoten hängt von einem biome.*-Output ab, siehe
+  [[project-settlement-plot-physics-rebuild]] - settlement.plot_nodes brauchte
+  früher biome_map, seit dem Umbau auf PlotPhysicsSystem nicht mehr).
 
 water.erosion_feedback (Water->Terrain-Rückkopplung, "Problem #22" in den Docs) ist
 laut Dokumentation bekannt kaputt (produziert keine Wirkung) und deshalb hier
-bewusst NICHT als aktiver Knoten aufgenommen - 29 aktive Calculators, nicht 30.
+bewusst NICHT als aktiver Knoten aufgenommen. settlement.city_blocks/
+settlement.landscape_voronoi wurden im Zuge des Settlement-Plot-Physics-Umbaus
+entfernt (siehe oben) - Zähler in der Doku ("29 aktive Calculators") ist damit
+veraltet, aktuelle Zahl siehe len(CALCULATOR_GRAPH).
 """
 
 from dataclasses import dataclass, field
@@ -107,14 +112,11 @@ _CALCULATOR_SPECS = [
     CalculatorSpec("settlement.city_boundary", "settlement",
                    ["settlement.settlements", "terrain.redistribution", "terrain.slope"],
                    ["city_mask", "city_cost_map"]),
-    CalculatorSpec("settlement.city_blocks", "settlement",
-                   ["settlement.city_boundary", "settlement.settlements", "terrain.redistribution"],
-                   ["street_mask", "house_parcel_map"]),
-    CalculatorSpec("settlement.landscape_voronoi", "settlement",
-                   ["settlement.city_boundary", "terrain.redistribution", "terrain.slope"],
-                   ["voronoi_seed_positions", "voronoi_cell_map"]),
+    # settlement.city_blocks/settlement.landscape_voronoi (CityBlockSystem/
+    # LandscapeVoronoiSystem) entfernt - vollständig durch settlement.plot_nodes
+    # (PlotPhysicsSystem) ersetzt, siehe [[project-settlement-plot-physics-rebuild]].
     CalculatorSpec("settlement.pathfinding", "settlement",
-                   ["settlement.settlements", "settlement.landscape_voronoi", "terrain.slope"], ["roads"]),
+                   ["settlement.settlements", "terrain.slope"], ["roads"]),
     CalculatorSpec("settlement.outer_roads", "settlement",
                    ["settlement.settlements", "settlement.suitability", "terrain.slope"], ["outer_roads"]),
     CalculatorSpec("settlement.roadsites", "settlement", ["settlement.pathfinding"], ["roadsite_list"]),
@@ -125,9 +127,13 @@ _CALCULATOR_SPECS = [
                    ["settlement.civ_influence", "terrain.redistribution", "terrain.slope"], ["landmark_list"]),
     CalculatorSpec("settlement.landmark_roads", "settlement",
                    ["settlement.landmarks", "settlement.pathfinding", "terrain.slope"], ["landmark_roads"]),
+    # settlement.plot_nodes (PlotPhysicsSystem, siehe [[project-settlement-plot-physics-rebuild]]) -
+    # läuft NUR am finalen LOD (Guard innerhalb von _calc_plot_nodes selbst, kein
+    # Dispatcher-Feature dafür vorhanden) - braucht city_mask (settlement.city_boundary,
+    # für die Stadt/Wildnis-Unterscheidung) statt biome_map/pathfinding wie zuvor.
     CalculatorSpec("settlement.plot_nodes", "settlement",
-                   ["settlement.civ_influence", "settlement.settlements", "settlement.pathfinding",
-                    "terrain.redistribution", "biome.integrate_layers"],
+                   ["settlement.civ_influence", "settlement.settlements", "settlement.city_boundary",
+                    "terrain.redistribution"],
                    ["plot_nodes", "plots", "plot_map", "plot_edges", "plot_node_positions"]),
 ]
 
@@ -139,8 +145,10 @@ CALCULATOR_GRAPH: Dict[str, CalculatorSpec] = {spec.calculator_id: spec for spec
 # (in den Docs nicht erfasst, aber real im Code vorhanden - siehe core/geology_generator.py),
 # plus 5 neue Settlement-Knoten (city_boundary, city_blocks, landscape_voronoi,
 # outer_roads, landmark_roads) aus dem Settlement-Rework (siehe docs/backlog.md
-# Ticket #4) = 39 aktive Knoten.
-assert len(CALCULATOR_GRAPH) == 39, f"Erwartet 39 aktive Calculators, gefunden {len(CALCULATOR_GRAPH)}"
+# Ticket #4) = 39 aktive Knoten. Davon 2 (city_blocks, landscape_voronoi) im
+# Zuge von [[project-settlement-plot-physics-rebuild]] wieder entfernt (durch
+# settlement.plot_nodes/PlotPhysicsSystem vollständig ersetzt) = 37 aktive Knoten.
+assert len(CALCULATOR_GRAPH) == 37, f"Erwartet 37 aktive Calculators, gefunden {len(CALCULATOR_GRAPH)}"
 
 
 class CalculatorRoundScheduler:

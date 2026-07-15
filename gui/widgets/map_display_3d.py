@@ -1536,16 +1536,71 @@ class MapDisplay3D(QOpenGLWidget):
 
     def _render_plot_boundaries(self):
         """
-        Funktionsweise: Rendert Plot-Grenzen als Wireframe-Mesh
-        Aufgabe: Visualisierung von Settlement-Plot-Geometrie
+        Funktionsweise: Rendert das PlotPhysicsSystem-Ergebnis als texturierten
+        "Skin" auf dem Terrain-Mesh statt eigener 3D-Wireframe-/Marker-
+        Geometrie (Nutzer-Vorgabe: "die 2D-Darstellung als Skin auf das
+        Terrain legen", siehe [[project-settlement-plot-physics-rebuild]]
+        Teil 4) - overlay_data["settlement"]["plots"] enthält bereits die
+        fertig gerasterte (H,W,4)-RGBA-Textur (siehe map_display_2d.py's
+        rasterize_plot_boundaries_rgba(), gepusht von settlement_tab.py's
+        apply_3d_overlays()). Hier nur noch Hochladen + zweiter Draw-Call mit
+        useAlphaOverlay=1 (siehe terrain.frag) - echte Transparenz an
+        unbemalten Stellen statt des pauschalen overlayStrength-Mix der
+        übrigen Scalar-Overlays.
+        Aufgabe: Zeichnet Plot-Kantennetz/Straßen-Tiers/Wildnisgrenzen/Kerne/
+        Nodes auf der Terrain-Oberfläche.
         """
-        plot_data = self.overlay_data["settlement"]["plots"]
-        if plot_data is None:
+        rgba = self.overlay_data["settlement"]["plots"]
+        if (rgba is None or not isinstance(rgba, np.ndarray) or rgba.ndim != 3 or rgba.shape[2] != 4
+                or not self.shader_program or self.vertex_buffer is None):
             return
 
-        # TODO: Implementierung von Plot-Boundary-Rendering
-        # - Wireframe-Mesh auf Terrain projiziert
-        # - Plot-Node-Marker an Eckpunkten
+        texture_id = gl.glGenTextures(1)
+        try:
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, rgba.shape[1], rgba.shape[0],
+                             0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, np.ascontiguousarray(rgba))
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+
+            overlay_tex_location = gl.glGetUniformLocation(self.shader_program, "overlayTexture")
+            if overlay_tex_location >= 0:
+                gl.glUniform1i(overlay_tex_location, 1)
+
+            use_overlay_location = gl.glGetUniformLocation(self.shader_program, "useOverlay")
+            if use_overlay_location >= 0:
+                gl.glUniform1i(use_overlay_location, 1)
+
+            use_alpha_overlay_location = gl.glGetUniformLocation(self.shader_program, "useAlphaOverlay")
+            if use_alpha_overlay_location >= 0:
+                gl.glUniform1i(use_alpha_overlay_location, 1)
+
+            overlay_strength_location = gl.glGetUniformLocation(self.shader_program, "overlayStrength")
+            if overlay_strength_location >= 0:
+                gl.glUniform1f(overlay_strength_location, 1.0)
+
+            render_mode_location = gl.glGetUniformLocation(self.shader_program, "renderMode")
+            if render_mode_location >= 0:
+                gl.glUniform1i(render_mode_location, 5)  # settlement
+
+            gl.glDepthFunc(gl.GL_LEQUAL)
+            gl.glBindVertexArray(self.vao)
+            gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.index_buffer)
+            gl.glDrawElements(gl.GL_TRIANGLES, len(self.mesh_indices), gl.GL_UNSIGNED_INT, None)
+            gl.glBindVertexArray(0)
+            gl.glDepthFunc(gl.GL_LESS)
+
+            if use_overlay_location >= 0:
+                gl.glUniform1i(use_overlay_location, 0)
+            if use_alpha_overlay_location >= 0:
+                gl.glUniform1i(use_alpha_overlay_location, 0)
+        finally:
+            gl.glDeleteTextures(1, [texture_id])
 
     def _render_settlement_markers(self, marker_type):
         """

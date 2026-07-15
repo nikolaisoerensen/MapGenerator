@@ -2882,6 +2882,12 @@ class DataLODManager(QObject):
         """Gibt Map-Size für LOD-Level zurück"""
         return self.lod_hub.get_lod_size_for_level(lod_level)
 
+    def get_max_lod_for_map_size(self) -> int:
+        """Gibt maximale sinnvolle LOD-Stufe für aktuelle target_map_size zurück"""
+        if self.lod_hub.lod_config:
+            return self.lod_hub.lod_config.get_max_lod_for_map_size()
+        return 7
+
     # =============================================================================
     # GENERATOR INTEGRATION - PUNKT 9 LÖSUNG
     # =============================================================================

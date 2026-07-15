@@ -187,37 +187,10 @@ class SETTLEMENT:
                         "werden (niedrig=nah an Zivilisation, hoch=tiefe "
                         "Wildnis)."
     }
-    PLOTSIZE = {
-        "min": 0.5, "max": 5.0, "default": 2.0, "step": 0.1,
-        "description": "Durchschnittliche Grundstücksgröße innerhalb einer "
-                        "Siedlung."
-    }
     CITY_REACH_FACTOR = {
         "min": 1.0, "max": 10.0, "default": 4.0, "step": 0.5,
         "description": "Wie weit sich eine Stadt maximal ausdehnen kann, "
                         "bezogen auf ihre Grundgröße."
-    }
-    VORONOI_BASE_SPACING = {
-        "min": 4.0, "max": 64.0, "default": 16.0, "step": 2.0,
-        "description": "Grundabstand zwischen den Voronoi-Zellen, die "
-                        "Stadtblöcke/-viertel definieren."
-    }
-    VORONOI_RELAX_ITERATIONS = {
-        "min": 1, "max": 10, "default": 4, "step": 1,
-        "description": "Anzahl der Glättungsdurchläufe für das Voronoi-"
-                        "Zellraster - mehr Durchläufe ergeben gleichmäßigere, "
-                        "natürlicher wirkende Zellformen."
-    }
-    ROAD_VORONOI_EDGE_BIAS = {
-        "min": 0.0, "max": 5.0, "default": 1.5, "step": 0.1,
-        "description": "Wie stark sich Straßen an den Grenzen der Voronoi-"
-                        "Zellen orientieren statt geradewegs zum Ziel zu "
-                        "verlaufen."
-    }
-    HOUSE_SPACING = {
-        "min": 1.0, "max": 16.0, "default": 4.0, "step": 0.5,
-        "description": "Mindestabstand zwischen einzelnen Häusern "
-                        "innerhalb eines Grundstücks/Blocks."
     }
     CIV_INFLUENCE_RANGE = {
         "min": 0.05, "max": 0.6, "default": 0.30, "step": 0.01, "suffix": "x diag",
@@ -241,27 +214,6 @@ class SETTLEMENT:
                         "Parzelle erhöhen - steile Grundstücke werden "
                         "dadurch seltener/kleiner bebaut."
     }
-    PLOT_PATH_TRAFFIC_THRESHOLD = {
-        "min": 1, "max": 500, "default": 25, "step": 1,
-        "description": "Mindest-Verkehrsaufkommen, ab dem zwischen "
-                        "Parzellen ein einfacher Fußweg entsteht."
-    }
-    PLOT_ROAD_TRAFFIC_THRESHOLD = {
-        "min": 1, "max": 500, "default": 75, "step": 1,
-        "description": "Mindest-Verkehrsaufkommen, ab dem statt eines "
-                        "Fußwegs eine richtige Straße gebaut wird."
-    }
-    PLOT_INTERCITY_TRAFFIC = {
-        "min": 0, "max": 200, "default": 30, "step": 1,
-        "description": "Zusätzliches simuliertes Verkehrsaufkommen "
-                        "zwischen verschiedenen Städten."
-    }
-    PLOT_TRAFFIC_ATTRACTION = {
-        "min": 0.0, "max": 1.0, "default": 0.05, "step": 0.01,
-        "description": "Wie stark einzelne Grundstücke selbst Verkehr "
-                        "anziehen (z.B. Marktplätze, wichtige Gebäude)."
-    }
-
 
 class WEATHER:
     """Parameter für core/weather_generator.py"""

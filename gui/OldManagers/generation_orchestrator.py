@@ -299,6 +299,11 @@ class GenerationOrchestrator(QObject):
     generation_started = pyqtSignal(str, int)  # (generator_type, lod_level)
     generation_failed = pyqtSignal(str, int, str)  # (generator_type, lod_level, error)
     generation_progress = pyqtSignal(int, str)  # (progress, message)
+    # settlement.plot_nodes-spezifisch (siehe [[project-settlement-plot-physics-rebuild]]
+    # Teil F) - traegt einen Snapshot des noch konvergierenden Wege-/Plot-Netzes
+    # (Node-Positionen/-Typen), damit der Settlement-Tab die Physik-Iterationen
+    # live mitverfolgen kann, statt nur die fertige plot_map am Ende zu sehen.
+    settlement_plot_live_update = pyqtSignal(object)  # snapshot dict
 
     # Zusätzliche Signals für erweiterte Funktionalität
     dependency_invalidated = pyqtSignal(str, list)  # (generator_type: str, affected_generators: List[str])
@@ -362,8 +367,9 @@ class GenerationOrchestrator(QObject):
             },
             GeneratorType.SETTLEMENT: {
                 "high_impact": ["settlements", "landmarks", "roadsites", "plotnodes"],
-                "medium_impact": ["civ_influence_decay", "terrain_factor_villages"],
-                "low_impact": ["plotsize", "landmark_wilderness", "road_slope_to_distance_ratio"]
+                "medium_impact": ["civ_influence_decay", "terrain_factor_villages",
+                                  "plot_base_spacing", "plot_civ_spacing_factor"],
+                "low_impact": ["plot_height_cost_factor", "landmark_wilderness", "road_slope_to_distance_ratio"]
             }
         }
 
@@ -821,11 +827,18 @@ class GenerationOrchestrator(QObject):
             parent=self
         )
         thread.calculator_completed.connect(self.on_calculator_completed)
-        # Hinweis: kein Progress-Signal verdrahtet - die _calc_*-Methoden rufen
-        # zwar self._update_progress() intern auf, das war aber schon im alten
-        # GenerationThread nie an ein Qt-Signal angebunden (progress_callback
-        # dort war ebenfalls nie an eine calculate_*-Methode übergeben) - vor-
-        # bestehende Lücke, keine Regression durch diesen Umbau.
+        # Hinweis: ansonsten kein generelles Progress-Signal verdrahtet - die
+        # _calc_*-Methoden rufen zwar self._update_progress() intern auf, das
+        # war aber schon im alten GenerationThread nie an ein Qt-Signal
+        # angebunden (progress_callback dort war ebenfalls nie an eine
+        # calculate_*-Methode übergeben) - vorbestehende Lücke, keine
+        # Regression durch diesen Umbau. EINZIGE Ausnahme (bewusst eng
+        # begrenzt, siehe [[project-settlement-plot-physics-rebuild]] Teil F):
+        # settlement.plot_nodes bekommt einen echten Live-Callback, damit die
+        # bis zu 100 Physik-Iterationen im Settlement-Tab sichtbar mitlaufen -
+        # kein genereller Umbau der Progress-Infrastruktur für alle Generatoren.
+        if calculator_id == "settlement.plot_nodes":
+            thread.settlement_plot_live_update.connect(self.settlement_plot_live_update.emit)
 
         thread_key = f"{calculator_id}@{lod_level}"
         with QMutexLocker(self.thread_mutex):
@@ -1246,6 +1259,10 @@ class CalculatorThread(QThread):
     """
 
     calculator_completed = pyqtSignal(str, int, bool, str)  # (calculator_id, lod_level, success, error_message)
+    # settlement.plot_nodes-spezifisch (siehe [[project-settlement-plot-physics-rebuild]]
+    # Teil F, GenerationOrchestrator.settlement_plot_live_update) - trägt einen
+    # Snapshot-Payload (object), gesetzt via generator_instance.live_plot_callback.
+    settlement_plot_live_update = pyqtSignal(object)
 
     def __init__(self, generator_instance, calculator_id: str, lod_level: int, parent=None):
         super().__init__(parent)
@@ -1256,6 +1273,17 @@ class CalculatorThread(QThread):
     def run(self):
         """Funktionsweise: Thread-Execution für einen einzelnen Calculator-Knoten"""
         try:
+            # Live-Fortschritts-Callback nur für settlement.plot_nodes (siehe
+            # settlement_plot_live_update oben) - self.settlement_plot_live_update.emit
+            # läuft hier zwar im Worker-Thread, Qt liefert die verbundene Ziel-
+            # Methode (GenerationOrchestrator.settlement_plot_live_update.emit)
+            # aber automatisch per QueuedConnection an den GUI-Thread aus, da
+            # Sender und Empfänger in unterschiedlichen Threads leben - der
+            # Snapshot-Payload wird dabei kopiert (kein geteilter, mutable
+            # Zustand über die Thread-Grenze).
+            if self.calculator_id == "settlement.plot_nodes" and hasattr(self.generator_instance, "live_plot_callback"):
+                self.generator_instance.live_plot_callback = self._emit_live_plot_update
+
             method_name = "_calc_" + self.calculator_id.split(".", 1)[1]
             method = getattr(self.generator_instance, method_name)
             method(self.calculator_id, self.lod_level)
@@ -1266,3 +1294,9 @@ class CalculatorThread(QThread):
             logging.getLogger(__name__).error(
                 f"Calculator '{self.calculator_id}' failed at LOD {self.lod_level}: {e}")
             self.calculator_completed.emit(self.calculator_id, self.lod_level, False, str(e))
+        finally:
+            if self.calculator_id == "settlement.plot_nodes" and hasattr(self.generator_instance, "live_plot_callback"):
+                self.generator_instance.live_plot_callback = None
+
+    def _emit_live_plot_update(self, snapshot):
+        self.settlement_plot_live_update.emit(snapshot)

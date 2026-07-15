@@ -81,6 +81,9 @@ class SettlementTab(BaseMapTab):
         if self.generation_orchestrator:
             self.generation_orchestrator.generation_completed.connect(self.on_settlement_generation_completed)
             self.generation_orchestrator.lod_progression_completed.connect(self.on_lod_progression_completed)
+            # Live-Fortschritt während der Plot-Physik-Konvergenz (bis zu 100
+            # Iterationen) - siehe [[project-settlement-plot-physics-rebuild]] Teil F.
+            self.generation_orchestrator.settlement_plot_live_update.connect(self.on_settlement_plot_live_update)
 
     def generate(self):
         """
@@ -168,7 +171,10 @@ class SettlementTab(BaseMapTab):
     def create_settlement_parameter_panel(self) -> QGroupBox:
         """
         Funktionsweise: Erstellt Parameter-Panel mit allen Settlement-Parametern
-        Aufgabe: Alle 9 Parameter aus value_default.SETTLEMENT strukturiert organisiert
+        Aufgabe: Alle GUI-exponierten Parameter aus value_default.SETTLEMENT
+        strukturiert organisiert - Location-Counts, Civ-Influence, Road-Network,
+        Wilderness und Plot Physics (PlotPhysicsSystem-Feder-Masse-Simulation,
+        siehe [[project-settlement-plot-physics-rebuild]])
         Return: QGroupBox mit Parameter-Slidern
         """
         panel = QGroupBox("Settlement Parameters")
@@ -251,11 +257,11 @@ class SettlementTab(BaseMapTab):
         road_group.setLayout(road_layout)
         layout.addWidget(road_group)
 
-        # Wilderness and Plot Parameters
-        misc_group = QGroupBox("Wilderness & Plots")
+        # Wilderness Parameters
+        misc_group = QGroupBox("Wilderness")
         misc_layout = QVBoxLayout()
 
-        misc_params = ["landmark_wilderness", "plotsize"]
+        misc_params = ["landmark_wilderness"]
         for param_name in misc_params:
             param_config = get_parameter_config("settlement", param_name)
 
@@ -275,6 +281,34 @@ class SettlementTab(BaseMapTab):
 
         misc_group.setLayout(misc_layout)
         layout.addWidget(misc_group)
+
+        # Plot Physics Parameters (PlotPhysicsSystem, siehe
+        # [[project-settlement-plot-physics-rebuild]] Teil A-D) - Grundabstand,
+        # Verdichtung zur Stadtmitte und Steigungs-"Baukosten" der
+        # Feder-Masse-Simulation, die die Grundstücks-/Straßen-Geometrie erzeugt.
+        plot_physics_group = QGroupBox("Plot Physics")
+        plot_physics_layout = QVBoxLayout()
+
+        plot_physics_params = ["plot_base_spacing", "plot_civ_spacing_factor", "plot_height_cost_factor"]
+        for param_name in plot_physics_params:
+            param_config = get_parameter_config("settlement", param_name)
+
+            slider = ParameterSlider(
+                label=param_name.replace("_", " ").title(),
+                min_val=param_config["min"],
+                max_val=param_config["max"],
+                default_val=param_config["default"],
+                step=param_config.get("step", 0.1),
+                suffix=param_config.get("suffix", ""),
+                description=param_config.get("description", "")
+            )
+
+            slider.valueChanged.connect(self.on_parameter_changed)
+            self.parameter_sliders[param_name] = slider
+            plot_physics_layout.addWidget(slider)
+
+        plot_physics_group.setLayout(plot_physics_layout)
+        layout.addWidget(plot_physics_group)
 
         panel.setLayout(layout)
         return panel
@@ -322,20 +356,14 @@ class SettlementTab(BaseMapTab):
         self.display_mode.addButton(self.civ_map_radio, 1)
         layout.addWidget(self.civ_map_radio)
 
+        # "Plot Boundaries" zeigt seit [[project-settlement-plot-physics-rebuild]]
+        # das PlotPhysicsSystem-Ergebnis (einziges Voronoi-Mesh, city_core/
+        # wilderness_core/standard_plot_node vereint) - "Landscape Voronoi"/
+        # "City Blocks" (frühere getrennte Systeme) sind entfallen.
         self.plot_map_radio = QRadioButton("Plot Boundaries")
         self.plot_map_radio.toggled.connect(self.update_display_mode)
         self.display_mode.addButton(self.plot_map_radio, 2)
         layout.addWidget(self.plot_map_radio)
-
-        self.landscape_voronoi_radio = QRadioButton("Landscape Voronoi")
-        self.landscape_voronoi_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.landscape_voronoi_radio, 3)
-        layout.addWidget(self.landscape_voronoi_radio)
-
-        self.city_blocks_radio = QRadioButton("City Blocks")
-        self.city_blocks_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.city_blocks_radio, 4)
-        layout.addWidget(self.city_blocks_radio)
 
         return layout
 
@@ -506,7 +534,28 @@ class SettlementTab(BaseMapTab):
             self.logger.error(f"Error processing settlement generation completion: {e}")
             self.handle_generation_error(e)
 
-    @pyqtSlot(str, int)
+    @pyqtSlot(object)
+    def on_settlement_plot_live_update(self, snapshot: dict):
+        """
+        Funktionsweise: Slot für Live-Fortschritt der Plot-Physik-Konvergenz
+        (siehe [[project-settlement-plot-physics-rebuild]] Teil F) - zeichnet
+        den noch nicht konvergierten Zwischenzustand nach, solange der
+        Settlement-Tab mit aktivem "Plot Boundaries"-Modus in 2D sichtbar ist.
+        Aufgabe: Analog zu draw.py im ursprünglichen Physics Lab, nur im
+        echten Tool statt im Sandbox-Fenster.
+        """
+        try:
+            if self.display_mode.checkedId() != 2 or self.current_view != "2d":
+                return
+            current_display = self.get_current_display()
+            if not current_display:
+                return
+            display = current_display.display
+            if hasattr(display, 'draw_plot_physics_snapshot'):
+                display.draw_plot_physics_snapshot(snapshot)
+        except Exception as e:
+            self.logger.debug(f"Settlement plot live update failed: {e}")
+
     def on_lod_progression_completed(self, result_id: str, lod_level: int):
         """
         Funktionsweise: Slot für LOD-Progression Updates
@@ -648,20 +697,22 @@ class SettlementTab(BaseMapTab):
             if civ_map is not None:
                 self._push_data_to_current_display(civ_map, "civ_map")
 
-        elif current_mode == 2:  # Plot Boundaries
-            plot_map = self.data_lod_manager.get_settlement_data("plot_map")
-            if plot_map is not None:
-                self._push_data_to_current_display(plot_map, "plot_map")
-
-        elif current_mode == 3:  # Landscape Voronoi (settlement.landscape_voronoi, #37)
-            voronoi_cell_map = self.data_lod_manager.get_settlement_data("voronoi_cell_map")
-            if voronoi_cell_map is not None:
-                self._push_data_to_current_display(voronoi_cell_map, "voronoi_cell_map")
-
-        elif current_mode == 4:  # City Blocks (settlement.city_blocks, #36)
-            house_parcel_map = self.data_lod_manager.get_settlement_data("house_parcel_map")
-            if house_parcel_map is not None:
-                self._push_data_to_current_display(house_parcel_map, "house_parcel_map")
+        elif current_mode == 2:  # Plot Boundaries (PlotPhysicsSystem, siehe [[project-settlement-plot-physics-rebuild]])
+            # Terrain als Hintergrund (analog zu tools/biome_lab/draw.py's
+            # Terrain-Heatmap) statt der vorherigen generischen Nearest-Core-
+            # ID-Rasterdarstellung von plot_map - die eigentliche Plot-
+            # Geometrie kommt als Vektor-Overlay obendrauf (siehe unten).
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            if heightmap is not None:
+                self._push_data_to_current_display(heightmap, "heightmap")
+                current_display = self.get_current_display()
+                display = current_display.display if current_display else None
+                if display is not None and hasattr(display, 'overlay_plot_boundaries'):
+                    plot_nodes = self.data_lod_manager.get_settlement_data("plot_nodes")
+                    plot_edges = self.data_lod_manager.get_settlement_data("plot_edges")
+                    plot_cores = self.data_lod_manager.get_settlement_data("plot_cores")
+                    wilderness_polygons = self.data_lod_manager.get_settlement_data("wilderness_polygons")
+                    display.overlay_plot_boundaries(plot_nodes, plot_edges, plot_cores, wilderness_polygons)
 
         self._apply_settlement_overlays()
 
@@ -706,11 +757,6 @@ class SettlementTab(BaseMapTab):
             if outer_roads:
                 display.overlay_roads(outer_roads, color='dimgray', linewidth=1.0)
 
-        if hasattr(display, 'overlay_street_mask') and self.city_blocks_radio.isChecked():
-            street_mask = self.data_lod_manager.get_settlement_data("street_mask")
-            if street_mask is not None:
-                display.overlay_street_mask(street_mask)
-
         if hasattr(display, 'overlay_city_boundary_contour') and self.show_city_boundary_cb.isChecked():
             city_mask = self.data_lod_manager.get_settlement_data("city_mask")
             if city_mask is not None:
@@ -718,13 +764,38 @@ class SettlementTab(BaseMapTab):
 
     def apply_3d_overlays(self):
         """
-        Funktionsweise: 3D-Overlays (Terrain/Settlement-Marker) für Settlement
-        Aufgabe: Aktuell bewusst kein Effekt - der 3D-Ausbau wurde auf den
-        Basis-Routing-Fix reduziert (siehe [[project-ui-redesign]]), echte
-        Overlay-Texturen/Marker-Geometrie in MapDisplay3D existieren noch nicht.
-        Die Checkboxen bleiben bedienbar, lösen aber (noch) nichts aus.
+        Funktionsweise: Rendert das PlotPhysicsSystem-Ergebnis als texturierten
+        "Skin" auf dem 3D-Terrain (siehe [[project-settlement-plot-physics-rebuild]]
+        Teil 4, Nutzer-Vorgabe: "die 2D-Darstellung als Skin auf das Terrain
+        legen") - rasterisiert dieselbe Geometrie wie overlay_plot_boundaries()
+        (2D) headless über map_display_2d.rasterize_plot_boundaries_rgba() und
+        pusht sie als RGBA-Overlay-Textur. Läuft unabhängig vom aktuell
+        sichtbaren 2D/3D-Modus (das 3D-Widget existiert immer, siehe base_tab.py
+        _push_data_to_current_display()-Kommentar), sichtbar wird der Skin aber
+        nur, wenn "Plot Boundaries" (mode 2) aktiv ist.
+        Aufgabe: Ersetzt den vorherigen No-Op-Platzhalter.
         """
-        pass
+        if not self.map_display_3d or not hasattr(self.map_display_3d.display, 'update_overlay_data'):
+            return
+
+        display_3d = self.map_display_3d.display
+        is_plot_mode = self.display_mode.checkedId() == 2
+
+        if is_plot_mode:
+            plot_nodes = self.data_lod_manager.get_settlement_data("plot_nodes")
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            if plot_nodes and heightmap is not None:
+                plot_edges = self.data_lod_manager.get_settlement_data("plot_edges")
+                plot_cores = self.data_lod_manager.get_settlement_data("plot_cores")
+                wilderness_polygons = self.data_lod_manager.get_settlement_data("wilderness_polygons")
+                from gui.widgets.map_display_2d import rasterize_plot_boundaries_rgba
+                rgba = rasterize_plot_boundaries_rgba(
+                    plot_nodes, plot_edges, plot_cores, wilderness_polygons,
+                    map_size=heightmap.shape[0], resolution=heightmap.shape[0])
+                display_3d.update_overlay_data("settlement", "plots", rgba)
+
+        if hasattr(display_3d, 'set_layer_visibility'):
+            display_3d.set_layer_visibility("settlement", "plots", is_plot_mode)
 
     @pyqtSlot()
     def update_display_mode(self):
