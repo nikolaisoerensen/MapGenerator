@@ -8,12 +8,12 @@ cross_section, soil_moist_map, erosion_map, sedimentation_map, evaporation_map, 
 und water_biomes_map für Biome und Settlement.
 """
 
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
     QButtonGroup, QCheckBox, QLabel
 )
-from PyQt5.QtCore import pyqtSlot
-from PyQt5.QtGui import QFont
+from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtGui import QFont
 import logging
 import numpy as np
 from typing import Dict, Any
@@ -108,7 +108,7 @@ class WaterTab(BaseMapTab):
     def _create_parameter_group(self, title: str, param_keys, default_step: float):
         """Erstellt eine Parameter-GroupBox für eine Teilmenge der Water-Parameter"""
         group = QGroupBox(title)
-        group.setFont(QFont("Arial", 10, QFont.Bold))
+        group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         layout = QVBoxLayout()
 
         for param_key in param_keys:

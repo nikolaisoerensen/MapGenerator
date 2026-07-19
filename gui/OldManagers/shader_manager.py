@@ -40,9 +40,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import OpenGL.GL as gl
+from PyQt6.QtCore import QObject, pyqtSignal
 from opensimplex import OpenSimplex
-from PyQt5.QtCore import QObject, pyqtSignal
-from PyQt5.QtGui import QOffscreenSurface, QOpenGLContext, QSurfaceFormat
+from PyQt6.QtGui import QOffscreenSurface, QOpenGLContext, QSurfaceFormat
 
 SHADERS_ROOT = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "shaders")
@@ -1125,7 +1125,7 @@ class GPUWorker(threading.Thread):
         try:
             surface_format = QSurfaceFormat()
             surface_format.setVersion(4, 3)
-            surface_format.setProfile(QSurfaceFormat.CoreProfile)
+            surface_format.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
 
             self._surface = QOffscreenSurface()
             self._surface.setFormat(surface_format)

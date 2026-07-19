@@ -12,7 +12,7 @@ import logging
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field
 
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 
 
 @dataclass

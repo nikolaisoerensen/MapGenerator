@@ -35,11 +35,11 @@ import sys
 import time
 
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QMainWindow
-from PyQt5.QtCore import QTimer
+from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtCore import QTimer
 
 import matplotlib
-matplotlib.use("Qt5Agg")
+matplotlib.use("QtAgg")
 
 from .logging_setup import logger
 from .scene import SceneMixin
@@ -243,7 +243,7 @@ def main():
     app = QApplication.instance() or QApplication(sys.argv)
     window = PlotPhysicsLab()
     window.show()
-    exit_code = app.exec_()
+    exit_code = app.exec()
     proc = getattr(window, "_voronoi_proc", None)
     conn = getattr(window, "_voronoi_conn", None)
     if proc is not None and proc.is_alive():

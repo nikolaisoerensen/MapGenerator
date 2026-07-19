@@ -8,13 +8,13 @@ die "Hintergrund"-Slider wirken erst nach einem Klick auf
 "Reset Plot Nodes" (siehe topology.py::_reset_plot_nodes).
 """
 import numpy as np
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton,
     QCheckBox, QGroupBox, QFormLayout, QSizePolicy, QScrollArea, QPlainTextEdit
 )
-from PyQt5.QtCore import Qt
+from PyQt6.QtCore import Qt
 
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
 
@@ -29,7 +29,10 @@ class UIMixin:
 
         self.figure = Figure(figsize=(8, 8))
         self.canvas = FigureCanvasQTAgg(self.figure)
-        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
         self.ax = self.figure.add_subplot(111)
         layout.addWidget(self.canvas, stretch=3)
         self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
@@ -45,7 +48,7 @@ class UIMixin:
         scroll_area = QScrollArea()
         scroll_area.setWidget(panel)
         scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_area.setFixedWidth(470)
         layout.addWidget(scroll_area, stretch=0)
 
@@ -183,7 +186,7 @@ class UIMixin:
         abschalten als auch stark verstaerken, ohne die Slider-Mitte zu verzerren."""
         RESOLUTION = 100  # Slider-Schritte pro Exponent-Einheit, fuer feine Aufloesung
 
-        slider = QSlider(Qt.Horizontal)
+        slider = QSlider(Qt.Orientation.Horizontal)
         slider.setMinimum(int(round(min_exp * RESOLUTION)))
         slider.setMaximum(int(round(max_exp * RESOLUTION)))
         default_exp = float(np.log(default) / np.log(base)) if default > 0 else 0.0
@@ -211,7 +214,7 @@ class UIMixin:
 
     def _add_slider(self, form, attr_name, label, min_val, max_val, default, scale, live=False,
                      invalidate_wiggle_cache=False):
-        slider = QSlider(Qt.Horizontal)
+        slider = QSlider(Qt.Orientation.Horizontal)
         slider.setMinimum(int(round(min_val * scale)))
         slider.setMaximum(int(round(max_val * scale)))
         slider.setValue(int(round(default * scale)))

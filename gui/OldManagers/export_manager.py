@@ -17,7 +17,7 @@
 # from dataclasses import dataclass
 #
 # import numpy as np
-# from PyQt5.QtCore import QObject, pyqtSignal, QDateTime, QThread, QMutex
+# from PyQt6.QtCore import QObject, pyqtSignal, QDateTime, QThread, QMutex
 #
 #
 # @dataclass
