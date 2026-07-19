@@ -1,0 +1,61 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D slopeMagnitude;
+// .r = seed_id (>=0) oder -1 = noch nicht erreicht, .g = kumulierte Kosten vom Seed
+layout(rg32f, binding = 1) uniform readonly image2D stateIn;
+layout(rg32f, binding = 2) uniform writeonly image2D stateOut;
+
+uniform int u_size;
+uniform int u_jump_distance;
+uniform float u_terrain_factor;
+uniform float u_max_cost;
+
+// Portierung von _terrain_cost_voronoi() (core/settlement_generator.py): EIN
+// Jump-Flooding-Schritt fuer eine gegebene Sprungdistanz. Der Host (Python) ruft
+// diesen Shader mehrfach mit halbierender u_jump_distance auf (Ping-Pong
+// zwischen zwei Texturen), bis jump_distance = 1 erreicht ist - dasselbe Muster
+// wie shaders/water/jumpFloodLakes.comp, hier mit slope-gewichteten statt
+// hoehenbeschraenkten Kosten:
+//   effective_distance = distance * (1 + terrain_factor * slope_magnitude)
+// (dieselbe Formel-Familie wie im Settlement-Deskriptor). u_max_cost begrenzt
+// die Ausbreitung optional (z.B. fuer Stadtgrenzen mit settlement.radius *
+// reach_factor) - ein sehr grosser Wert (siehe Python-Dispatch) deaktiviert das
+// Limit faktisch fuer das globale Landschafts-Voronoi.
+//
+// Naeherung: JFA betrachtet nur den direkten Sprung-Nachbarn und dessen
+// gespeicherte Kosten, nicht dessen volle Pfad-Historie - Standard-JFA-
+// Approximation, kein exakter Shortest-Path wie die CPU-Dijkstra-Referenz.
+// Kleine Abweichungen zwischen GPU- und CPU-Ergebnis sind deshalb erwartet.
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    vec2 self_state = imageLoad(stateIn, coord).rg;
+    float best_seed = self_state.r;
+    float best_cost = self_state.g;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 ncoord = coord + ivec2(dx, dy) * u_jump_distance;
+            if (ncoord.x < 0 || ncoord.x >= u_size || ncoord.y < 0 || ncoord.y >= u_size) continue;
+
+            vec2 neighbor_state = imageLoad(stateIn, ncoord).rg;
+            float neighbor_seed = neighbor_state.r;
+            if (neighbor_seed < 0.0) continue;
+
+            float step_dist = length(vec2(ivec2(dx, dy) * u_jump_distance));
+            float slope_mag = imageLoad(slopeMagnitude, coord).r;
+            float step_cost = step_dist * (1.0 + u_terrain_factor * slope_mag);
+            float candidate_cost = neighbor_state.g + step_cost;
+
+            if (candidate_cost <= u_max_cost && (best_seed < 0.0 || candidate_cost < best_cost)) {
+                best_cost = candidate_cost;
+                best_seed = neighbor_seed;
+            }
+        }
+    }
+
+    imageStore(stateOut, coord, vec4(best_seed, best_cost, 0.0, 0.0));
+}

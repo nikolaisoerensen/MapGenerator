@@ -116,7 +116,8 @@ class GeologyTab(BaseMapTab):
                 max_val=config["max"],
                 default_val=config["default"],
                 step=config.get("step", 1),
-                suffix=config.get("suffix", "")
+                suffix=config.get("suffix", ""),
+                description=config.get("description", "")
             )
             slider.valueChanged.connect(
                 lambda value, key=param_key: self._on_parameter_changed(key, value)
@@ -148,7 +149,8 @@ class GeologyTab(BaseMapTab):
                 max_val=config["max"],
                 default_val=config["default"],
                 step=config.get("step", 0.1),
-                suffix=config.get("suffix", "")
+                suffix=config.get("suffix", ""),
+                description=config.get("description", "")
             )
             slider.valueChanged.connect(
                 lambda value, key=param_key: self._on_parameter_changed(key, value)

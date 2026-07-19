@@ -9,9 +9,9 @@ ohne Dependencies liefert er heightmap, slopemap und shadowmap für alle nachgel
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
-    QButtonGroup, QCheckBox, QSlider, QLabel
+    QButtonGroup, QLabel
 )
-from PyQt6.QtCore import pyqtSlot, Qt
+from PyQt6.QtCore import pyqtSlot
 from PyQt6.QtGui import QFont
 import logging
 import numpy as np
@@ -19,7 +19,7 @@ from typing import Dict, Any, Optional
 
 from gui.tabs.base_tab import BaseMapTab
 from gui.widgets.widgets import (
-    ParameterSlider, RandomSeedButton, NoWheelSlider
+    ParameterSlider, RandomSeedButton
 )
 from gui.config.value_default import TERRAIN, get_parameter_config, validate_parameter_set
 
@@ -44,14 +44,6 @@ class TerrainTab(BaseMapTab):
         self.statistics_display = None
         self.display_mode_group = None
         self.current_display_mode = "height"
-
-        # Shadow und Overlay Controls
-        # Contour Lines/Shadows selbst sind globale Shell-Checkboxen (Spalte 2,
-        # siehe MapEditorWindow); shadow_enabled wird von set_shadow_overlay()
-        # gesetzt, shadow_angle_slider bleibt Terrain-spezifisch.
-        self.shadow_enabled = False
-        self.shadow_angle_slider = None
-        self.grid_checkbox = None
 
         # LOD-System Tracking
         self.current_lod = 1
@@ -136,7 +128,8 @@ class TerrainTab(BaseMapTab):
                     max_val=config["max"],
                     default_val=config["default"],
                     step=config["step"],
-                    suffix=config.get("suffix", "")
+                    suffix=config.get("suffix", ""),
+                    description=config.get("description", "")
                 )
 
                 # Parameter-Change Handler
@@ -160,7 +153,8 @@ class TerrainTab(BaseMapTab):
             min_val=config["min"],
             max_val=config["max"],
             default_val=config["default"],
-            step=config["step"]
+            step=config["step"],
+            description=config.get("description", "")
         )
 
         seed_slider.valueChanged.connect(
@@ -223,13 +217,6 @@ class TerrainTab(BaseMapTab):
         display_mode_layout = self._create_display_mode_controls()
         controls_layout.addLayout(display_mode_layout)
 
-        # Separator
-        controls_layout.addWidget(self._create_vertical_separator())
-
-        # Overlay Controls (Shadow/Contour/Grid)
-        overlay_layout = self._create_overlay_controls()
-        controls_layout.addLayout(overlay_layout)
-
         controls_widget.setLayout(controls_layout)
         return controls_widget
 
@@ -253,55 +240,6 @@ class TerrainTab(BaseMapTab):
         layout.addWidget(slope_radio)
 
         return layout
-
-    def _create_overlay_controls(self):
-        """
-        Erstellt Terrain-spezifische Overlay Controls (Shadow-Winkel/Grid).
-        Contour Lines und der Shadow-Toggle selbst sind globale Shell-Checkboxen
-        (Spalte 2, siehe MapEditorWindow) - hier bleibt nur der Terrain-eigene
-        Sonnenwinkel-Parameter, der von set_shadow_overlay() gesteuert wird.
-        """
-        layout = QHBoxLayout()
-
-        # Shadow Angle Slider (0-6 entspricht 7 Sonnenstände)
-        shadow_angle_layout = QHBoxLayout()
-        shadow_angle_layout.addWidget(QLabel("Shadow Angle:"))
-
-        self.shadow_angle_slider = NoWheelSlider(Qt.Orientation.Horizontal)
-        self.shadow_angle_slider.setRange(0, 6)
-        self.shadow_angle_slider.setValue(3)
-        self.shadow_angle_slider.setMaximumWidth(60)
-        self.shadow_angle_slider.valueChanged.connect(self._on_shadow_angle_changed)
-        shadow_angle_layout.addWidget(self.shadow_angle_slider)
-
-        layout.addLayout(shadow_angle_layout)
-
-        # Grid Overlay (Terrain-spezifisch, nicht Teil der globalen Checkboxen)
-        self.grid_checkbox = QCheckBox("Grid")
-        self.grid_checkbox.toggled.connect(self._on_grid_toggled)
-        layout.addWidget(self.grid_checkbox)
-
-        return layout
-
-    def set_shadow_overlay(self, checked: bool):
-        """
-        Überschreibt BaseMapTab: globaler Shadows-Toggle inklusive
-        Terrain-spezifischem Sonnenwinkel-Parameter.
-        """
-        self.shadow_enabled = checked
-        try:
-            current_display = self.get_current_display()
-            if current_display and hasattr(current_display.display, 'set_shadow_overlay'):
-                current_display.display.set_shadow_overlay(checked, self.shadow_angle_slider.value())
-        except Exception as e:
-            self.logger.debug(f"Shadow overlay toggle failed: {e}")
-
-    def _create_vertical_separator(self):
-        """Erstellt vertikalen Separator für UI-Layout"""
-        separator = QWidget()
-        separator.setFixedWidth(1)
-        separator.setStyleSheet("background-color: #bdc3c7;")
-        return separator
 
     # =============================================================================
     # EVENT HANDLERS
@@ -397,31 +335,6 @@ class TerrainTab(BaseMapTab):
             self.current_display_mode = mode
             self.update_display_mode()
             self.logger.debug(f"Display mode changed to: {mode}")
-
-    def _on_shadow_angle_changed(self, angle: int):
-        """Handler für Shadow Angle Changes (nur relevant, wenn Shadows global aktiv sind)"""
-        try:
-            if self.shadow_enabled:
-                current_display = self.get_current_display()
-                if current_display and hasattr(current_display.display, 'set_shadow_overlay'):
-                    current_display.display.set_shadow_overlay(True, angle)
-
-            self.logger.debug(f"Shadow angle changed to: {angle}")
-
-        except Exception as e:
-            self.logger.debug(f"Shadow angle change failed: {e}")
-
-    def _on_grid_toggled(self, checked: bool):
-        """Handler für Grid Overlay Toggle"""
-        try:
-            current_display = self.get_current_display()
-            if current_display and hasattr(current_display.display, 'set_grid_overlay'):
-                current_display.display.set_grid_overlay(checked)
-
-            self.logger.debug(f"Grid overlay: {checked}")
-
-        except Exception as e:
-            self.logger.debug(f"Grid overlay toggle failed: {e}")
 
     # =============================================================================
     # DISPLAY UPDATE SYSTEM

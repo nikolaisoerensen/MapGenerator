@@ -150,6 +150,14 @@ class MapEditorWindow(QMainWindow):
         self.side_tab_widget = None
         self.tab_order = []  # lowercase tab names, Index == main_tab_bar/stack index
         self.tabs = {}
+        # Globale 2D/3D-Präferenz, tabübergreifend (User-Report: "beim Wechsel des
+        # Tabs ist man vom 3D Modus wieder im 2D Modus") - jeder Tab hat zwar sein
+        # eigenes current_view, aber ein frisch angezeigter Tab, der nie manuell
+        # umgeschaltet wurde, soll trotzdem den zuletzt GEWÄHLTEN Modus zeigen statt
+        # immer bei seinem eigenen 2D-Default zu bleiben. Aktualisiert via
+        # BaseMapTab.view_switched-Signal (siehe _register_tab_view_signal()),
+        # angewendet in _on_tab_changed().
+        self.global_view_mode = "2d"
         self.pipeline_status_panel = None
         self.footer_progress_bar = None
         self.generate_button = None
@@ -176,6 +184,12 @@ class MapEditorWindow(QMainWindow):
 
         # Start status monitoring
         self.status_update_timer.start(EditorConstants.STATUS_UPDATE_INTERVAL_MS)
+
+        # Auto-Start (Tracker #16 Task 8): alle 6 Generatoren sofort mit
+        # Default-Parametern anfragen, erst nachdem das Fenster fertig
+        # konstruiert ist und die Event-Loop läuft (QTimer.singleShot(0, ...),
+        # analog zum bereits etablierten Muster in generation_orchestrator.py).
+        QTimer.singleShot(0, self._auto_start_generation)
 
         self.logger.info("MapEditor window initialized successfully")
 
@@ -350,7 +364,11 @@ class MapEditorWindow(QMainWindow):
             self.navigation_manager = NavigationManager(data_lod_manager=self.data_lod_manager)
 
             self.logger.info("Creating GenerationOrchestrator...")
-            self.generation_orchestrator = GenerationOrchestrator(data_lod_manager=self.data_lod_manager)
+            # Denselben ShaderManager wie die 3D-Ansicht übergeben - vorher hatte der
+            # Orchestrator gar keinen shader_manager-Parameter, jeder Generator lief
+            # dadurch immer auf CPU-Fallback (siehe GPU-Fundament-Fix dieser Session).
+            self.generation_orchestrator = GenerationOrchestrator(
+                data_lod_manager=self.data_lod_manager, shader_manager=self.shader_manager)
 
         except Exception as e:
             self.logger.error(f"Manager creation failed: {e}")
@@ -599,6 +617,9 @@ class MapEditorWindow(QMainWindow):
             self.tabs[tab_name.lower()] = tab_instance
             self.tab_generation_status[tab_name.lower()] = {}
 
+            if hasattr(tab_instance, 'view_switched'):
+                tab_instance.view_switched.connect(self._on_tab_view_switched)
+
             # DEBUG: Signal-Verbindung prüfen
             self.logger.info(f"DEBUG: Checking for generation_completed signal...")
             if hasattr(tab_instance, 'generation_completed'):
@@ -744,6 +765,7 @@ class MapEditorWindow(QMainWindow):
             self.generation_orchestrator.generation_progress.connect(self._on_generation_progress)
             self.generation_orchestrator.batch_generation_completed.connect(self._on_batch_generation_completed)
             self.generation_orchestrator.dependency_invalidated.connect(self._on_dependency_invalidated)
+            self.generation_orchestrator.calculator_status_changed.connect(self._on_calculator_status_changed)
 
     def activate_tab(self, tab_name: str) -> bool:
         """
@@ -807,20 +829,37 @@ class MapEditorWindow(QMainWindow):
             if self.navigation_manager:
                 self.navigation_manager.current_tab = tab_name_lower
 
+            tab_instance = self.tabs.get(tab_name_lower)
+
             # Globale Contour/Shadow-Checkboxen gelten tab-übergreifend - beim
             # Wechsel auf den neu aktiven Tab anwenden, damit dessen Display
             # den aktuellen globalen Zustand übernimmt.
             self._apply_global_overlays_to_active_tab()
 
+            # Globale 2D/3D-Präferenz auf den neu aktiven Tab anwenden, falls er
+            # noch nicht im gewünschten Modus ist (siehe global_view_mode oben).
+            if tab_instance and hasattr(tab_instance, 'current_view') and hasattr(tab_instance, 'switch_view'):
+                if tab_instance.current_view != self.global_view_mode:
+                    tab_instance.switch_view(self.global_view_mode)
+
             # Erzwingt einen Display-Refresh mit dem aktuell gewählten Render-Modus.
             # Ohne das bleibt der Viewport leer, bis der Nutzer den Modus manuell
             # umschaltet - der Default-Radio (z.B. "Height") feuert beim Erstellen
             # kein toggled-Signal, weil setChecked(True) vor dem connect() passiert.
-            tab_instance = self.tabs.get(tab_name_lower)
             if tab_instance and hasattr(tab_instance, 'update_display_mode'):
                 tab_instance.update_display_mode()
 
             self.logger.debug(f"Tab changed to: {tab_text}")
+
+    @pyqtSlot(str)
+    def _on_tab_view_switched(self, view_type: str):
+        """
+        Hält die globale 2D/3D-Präferenz aktuell, sobald der Nutzer auf
+        IRGENDEINEM Tab manuell zwischen 2D/3D umschaltet (BaseMapTab.
+        view_switched-Signal, siehe _add_successful_tab()). _on_tab_changed()
+        wendet global_view_mode dann auf den jeweils neu aktivierten Tab an.
+        """
+        self.global_view_mode = view_type
 
     def _get_active_tab_instance(self):
         """Liefert die BaseMapTab-Instanz des aktuell im main_tab_bar aktiven Tabs."""
@@ -888,8 +927,6 @@ class MapEditorWindow(QMainWindow):
             self.active_generations_label.setText(f"Generations: {len(self.active_generations)} active")
 
         self.status_indicator.set_warning(f"Generating {generator_type} LOD {lod_level}")
-        if self.pipeline_status_panel:
-            self.pipeline_status_panel.set_calculating(generator_type, lod_level)
         self.logger.debug(f"Generation started: {generation_key}")
 
     @pyqtSlot(str, dict)
@@ -919,12 +956,8 @@ class MapEditorWindow(QMainWindow):
                 self.status_indicator.set_success("All generations complete")
             else:
                 self.status_indicator.set_success(f"{generator_type} LOD {lod_level} complete")
-            if self.pipeline_status_panel:
-                self.pipeline_status_panel.set_finished(generator_type, lod_level)
         else:
             self.status_indicator.set_error(f"{generator_type} LOD {lod_level} failed")
-            if self.pipeline_status_panel:
-                self.pipeline_status_panel.set_failed(generator_type, f"LOD {lod_level} failed")
 
         self._refresh_footer_progress()
         self.logger.info(f"Generation completed: {generation_key} success={success}")
@@ -933,6 +966,19 @@ class MapEditorWindow(QMainWindow):
     def _on_generation_progress(self, progress_percent: int, message: str):
         """Handle generation progress updates (global, ohne generator_type/lod_level)"""
         self.status_indicator.set_warning(f"{message} ({progress_percent}%)")
+
+    @pyqtSlot(dict)
+    def _on_calculator_status_changed(self, snapshot: dict):
+        """
+        Treibt die PipelineStatusPanel-Spalte granular über alle 34 Calculator-
+        Knoten an (siehe GenerationOrchestrator.calculator_status_changed).
+        Ersetzt die bisherigen verstreuten set_calculating()/set_finished()/
+        set_failed()/set_queued()-Aufrufe an einzelnen Stellen (die nur die
+        6 Generatoren kannten und ein neues, höheres Ziel-LOD nicht sofort
+        sichtbar machten) durch einen einzigen reaktiven Snapshot-Apply.
+        """
+        if self.pipeline_status_panel:
+            self.pipeline_status_panel.apply_snapshot(snapshot)
 
     @pyqtSlot(bool, str)
     def _on_batch_generation_completed(self, success: bool, summary_message: str):
@@ -1130,6 +1176,45 @@ class MapEditorWindow(QMainWindow):
 
     # Generation Control Methods
 
+    def _auto_start_generation(self):
+        """
+        Tracker #16 Task 8: startet automatisch alle 6 Generatoren mit ihren
+        Default-Parametern, sobald der Map Editor öffnet. Geht bewusst NICHT
+        über tab_instance.generate() - das würde bei Geology/Weather/Water/
+        Biome/Settlement sofort an check_input_dependencies() scheitern, da
+        Terrain zu diesem Zeitpunkt (alle 6 Requests praktisch gleichzeitig)
+        noch nichts geliefert hat. Stattdessen direkter Aufruf von
+        request_generation() wie schon in _regenerate_all_generators(), nur
+        mit den echten Default-Parametern jedes Tabs statt einem leeren dict.
+        Der globale CalculatorDispatcher (siehe generation_orchestrator.py,
+        Tracker #16) sorgt dafür, dass kein Generator seinen tatsächlichen
+        Abhängigkeiten vorauseilt, auch wenn alle 6 Requests gleichzeitig
+        gestellt werden - echtes Lockstep auf Calculator-Knoten-Ebene, nicht
+        nur auf Generator-Ebene.
+        """
+        if not self.generation_orchestrator:
+            return
+
+        for generator_type in ("terrain", "geology", "weather", "water", "biome", "settlement"):
+            tab_instance = self.tabs.get(generator_type)
+            if not tab_instance or not hasattr(tab_instance, 'get_current_parameters'):
+                continue
+
+            try:
+                parameters = tab_instance.get_current_parameters()
+            except Exception as e:
+                self.logger.warning(f"Auto-Start: Default-Parameter für {generator_type} nicht lesbar: {e}")
+                parameters = {}
+
+            self.generation_orchestrator.request_generation(
+                generator_type=generator_type,
+                parameters=parameters,
+                target_lod=None,
+                source_tab="auto_start",
+            )
+
+        self.logger.info("Auto-Start: alle 6 Generatoren mit Default-Parametern angefragt")
+
     def _generate_current_tab(self):
         """Generate content for currently active tab"""
         if not self.generation_orchestrator:
@@ -1191,8 +1276,6 @@ class MapEditorWindow(QMainWindow):
             # Queue all generators
             for generator_type in generator_sequence:
                 if generator_type in self.tabs:
-                    if self.pipeline_status_panel:
-                        self.pipeline_status_panel.set_queued(generator_type)
                     self.generation_orchestrator.request_generation(
                         generator_type=generator_type,
                         parameters={},
@@ -1376,7 +1459,8 @@ class MapEditorWindow(QMainWindow):
             (self.generation_orchestrator.generation_completed, self._on_generation_completed),
             (self.generation_orchestrator.generation_progress, self._on_generation_progress),
             (self.generation_orchestrator.batch_generation_completed, self._on_batch_generation_completed),
-            (self.generation_orchestrator.dependency_invalidated, self._on_dependency_invalidated)
+            (self.generation_orchestrator.dependency_invalidated, self._on_dependency_invalidated),
+            (self.generation_orchestrator.calculator_status_changed, self._on_calculator_status_changed)
         ]
 
         for signal, slot in signals_to_disconnect:

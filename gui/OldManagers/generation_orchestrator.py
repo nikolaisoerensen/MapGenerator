@@ -58,12 +58,15 @@
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QObject, pyqtSignal, QThread, QMutex, QMutexLocker, QTimer
-from typing import Dict, List, Set, Any
+from typing import Dict, List, Set, Any, Callable
 import functools
 import logging
 import time
 from enum import Enum
 import os
+
+from gui.OldManagers.calculator_graph import CALCULATOR_GRAPH, CalculatorDispatcher
+from gui.OldManagers.shader_manager import ShaderManager
 
 def get_orchestrator_error_decorators():
     """
@@ -277,102 +280,9 @@ class GenerationStateTracker:
         return status_list
 
 
-class DependencyQueue:
-    """
-    Funktionsweise: Intelligente Queue für Generation-Requests mit Dependency-Resolution
-    Aufgabe: Verwaltet wartende Requests und prüft automatisch Dependencies
-    """
-
-    def __init__(self):
-        self.queued_requests = {}  # request_id -> GenerationRequest
-        self.dependency_cache = {}  # generator_type -> required_dependencies
-
-        # Dependency-Matrix definieren
-        self.dependencies = {
-            GeneratorType.TERRAIN: set(),
-            GeneratorType.GEOLOGY: {GeneratorType.TERRAIN},
-            GeneratorType.WEATHER: {GeneratorType.TERRAIN},
-            GeneratorType.WATER: {GeneratorType.TERRAIN, GeneratorType.GEOLOGY, GeneratorType.WEATHER},
-            GeneratorType.BIOME: {GeneratorType.TERRAIN, GeneratorType.WEATHER, GeneratorType.WATER},
-            GeneratorType.SETTLEMENT: {GeneratorType.TERRAIN, GeneratorType.WATER, GeneratorType.BIOME}
-        }
-
-    def add_request(self, request: GenerationRequest):
-        """
-        Funktionsweise: Fügt Request zur Queue hinzu
-        Parameter: request - GenerationRequest
-        """
-        self.queued_requests[request.request_id] = request
-
-    def remove_request(self, request_id: str) -> GenerationRequest:
-        """
-        Funktionsweise: Entfernt Request aus Queue
-        Parameter: request_id
-        Return: Entfernter Request oder None
-        """
-        return self.queued_requests.pop(request_id, None)
-
-    def get_available_requests(self, completed_generators: Dict[str, Set[int]], active_limit: int = 3) -> List[GenerationRequest]:
-        """
-        Funktionsweise: Findet alle Requests die gestartet werden können
-        Parameter: completed_generators - Dict[generator_type, Set[completed_lods]], active_limit
-        Return: Liste startbarer Requests (respektiert active_limit)
-        """
-        available = []
-
-        for request in self.queued_requests.values():
-            if len(available) >= active_limit:
-                break
-
-            if self.can_start_request(request, completed_generators):
-                available.append(request)
-
-        # Nach Priority sortieren
-        available.sort(key=lambda r: (-r.priority, r.timestamp))
-        return available[:active_limit]
-
-    def can_start_request(self, request: GenerationRequest, completed_generators: Dict[str, Set[int]]) -> bool:
-        """
-        Funktionsweise: Prüft ob Request gestartet werden kann basierend auf Dependencies
-        Parameter: request, completed_generators - Dict[generator_type, Set[abgeschlossene LOD-Level]]
-        Return: bool - Request kann gestartet werden
-        """
-        required_deps = self.dependencies.get(request.generator_type, set())
-
-        for dep_type in required_deps:
-            dep_key = dep_type.value
-            # Mindestens ein LOD-Level muss abgeschlossen sein
-            if not completed_generators.get(dep_key):
-                return False
-
-        return True
-
-    def get_timed_out_requests(self, current_time: float, timeout_seconds: int = 600) -> List[GenerationRequest]:
-        """
-        Funktionsweise: Findet alle Requests die zu lange in Queue warten
-        Parameter: current_time, timeout_seconds
-        Return: Liste von timed-out Requests
-        """
-        timed_out = []
-        for request in self.queued_requests.values():
-            if current_time - request.timestamp > timeout_seconds:
-                timed_out.append(request)
-        return timed_out
-
-    def clear(self):
-        """Leert komplette Queue"""
-        self.queued_requests.clear()
-
-    def get_queue_status(self) -> Dict[str, Any]:
-        """
-        Funktionsweise: Gibt aktuellen Queue-Status zurück
-        Return: Dict mit Queue-Statistiken
-        """
-        return {
-            "total_queued": len(self.queued_requests),
-            "by_generator": {gen.value: sum(1 for r in self.queued_requests.values() if r.generator_type == gen)
-                           for gen in GeneratorType}
-        }
+# DependencyQueue (6-Knoten-Generator-Ebene) wurde durch CalculatorDispatcher
+# (siehe gui/OldManagers/calculator_graph.py, 34 Calculator-Knoten) ersetzt -
+# Tracker #16 LOD-Lockstep-Umbau.
 
 
 class GenerationOrchestrator(QObject):
@@ -389,15 +299,33 @@ class GenerationOrchestrator(QObject):
     generation_started = pyqtSignal(str, int)  # (generator_type, lod_level)
     generation_failed = pyqtSignal(str, int, str)  # (generator_type, lod_level, error)
     generation_progress = pyqtSignal(int, str)  # (progress, message)
+    # settlement.plot_nodes-spezifisch (siehe [[project-settlement-plot-physics-rebuild]]
+    # Teil F) - traegt einen Snapshot des noch konvergierenden Wege-/Plot-Netzes
+    # (Node-Positionen/-Typen), damit der Settlement-Tab die Physik-Iterationen
+    # live mitverfolgen kann, statt nur die fertige plot_map am Ende zu sehen.
+    settlement_plot_live_update = pyqtSignal(object)  # snapshot dict
 
     # Zusätzliche Signals für erweiterte Funktionalität
     dependency_invalidated = pyqtSignal(str, list)  # (generator_type: str, affected_generators: List[str])
     batch_generation_completed = pyqtSignal(bool, str)  # (success: bool, summary_message: str)
     queue_status_changed = pyqtSignal(list)  # (thread_status_list: List[Dict])
+    # calculator_id -> {"status": "idle"/"waiting"/"calculating"/"finished"/"error",
+    # "target_lod": int, "completed_lod": int, "error_message": str oder None} -
+    # granularer Status ALLER 34 Calculator-Knoten für PipelineStatusPanel
+    # (siehe _calculator_status_snapshot())
+    calculator_status_changed = pyqtSignal(dict)
 
-    def __init__(self, data_lod_manager):
+    def __init__(self, data_lod_manager, shader_manager=None):
         super().__init__()
         self.data_lod_manager = data_lod_manager
+        # Ein einziger, geteilter ShaderManager (und damit ein einziger GPUWorker/GL-
+        # Kontext) für alle Generatoren - vorher gab es NIRGENDS eine Injektion, jeder
+        # Generator instanziierte mit shader_manager=None (Default) und lief dadurch
+        # immer auf CPU-Fallback, unabhängig von jeglicher Shader-Implementierung
+        # (siehe Shader-Inventur/GPU-Fundament-Fix dieser Session). map_editor.py
+        # übergibt hier seinen bereits für die 3D-Ansicht erzeugten ShaderManager;
+        # ohne injizierten Manager (Standalone-Nutzung/Tests) wird einer angelegt.
+        self.shader_manager = shader_manager if shader_manager is not None else ShaderManager()
         self.logger = logging.getLogger(__name__)
 
         # Dependency-Tree Definition (basierend auf Core-Generator Requirements)
@@ -413,7 +341,7 @@ class GenerationOrchestrator(QObject):
         # Parameter-Impact-Matrix (welche Parameter-Änderungen invalidieren nachgelagerte Generatoren)
         self.impact_matrix = {
             GeneratorType.TERRAIN: {
-                "high_impact": ["map_seed", "size", "amplitude", "octaves", "frequency"],
+                "high_impact": ["map_seed", "map_size", "amplitude", "octaves", "frequency"],
                 "medium_impact": ["persistence", "lacunarity"],
                 "low_impact": ["redistribute_power"]
             },
@@ -439,8 +367,9 @@ class GenerationOrchestrator(QObject):
             },
             GeneratorType.SETTLEMENT: {
                 "high_impact": ["settlements", "landmarks", "roadsites", "plotnodes"],
-                "medium_impact": ["civ_influence_decay", "terrain_factor_villages"],
-                "low_impact": ["plotsize", "landmark_wilderness", "road_slope_to_distance_ratio"]
+                "medium_impact": ["civ_influence_decay", "terrain_factor_villages",
+                                  "plot_base_spacing", "plot_civ_spacing_factor"],
+                "low_impact": ["plot_height_cost_factor", "landmark_wilderness", "road_slope_to_distance_ratio"]
             }
         }
 
@@ -453,19 +382,34 @@ class GenerationOrchestrator(QObject):
         # Generator-Instanzen (Lazy Loading)
         self._generator_instances = {}
 
-        # Threading-Management
-        self.generation_threads = {}
+        # Threading-Management (jetzt pro CALCULATOR-Knoten statt pro Generator -
+        # siehe CalculatorThread/_dispatch_calculator())
+        self.calculator_threads = {}  # f"{calculator_id}_{lod_level}" -> CalculatorThread
         self.thread_mutex = QMutex()
-        self.active_requests = set()
+        self.in_flight_calculators = set()  # calculator_id, die gerade in einem Thread laufen
+        self._announced_generator_rounds = set()  # {(generator_name, lod_level)} - Dedup für generation_started
+        self._calculator_errors = {}  # calculator_id -> error_message, für PipelineStatusPanel "Error"-Status
 
-        # LOD-Progression Tracking mit DataManager-Integration
-        self.lod_progression_queue = {}  # generator_type -> [LOD64, LOD128, LOD256, FINAL]
-        self.lod_completion_status = {}  # generator_type -> {LOD64: True, LOD128: False, ...}
+        # Globaler Calculator-Dispatcher (Tracker #16 LOD-Lockstep-Umbau) - löst das
+        # bisherige lod_progression_queue/lod_completion_status/DependencyQueue-Trio
+        # ab. Verwaltet ALLE 34 Calculator-Knoten aus allen 6 Generatoren
+        # gemeinsam, mit echter Runden-Synchronisation (siehe
+        # gui/OldManagers/calculator_graph.py). executors werden nur für den
+        # synchronen run_all_rounds()-Pfad gebraucht (Tests/Fallback) - die
+        # eigentliche GUI-Pipeline dispatcht jeden Knoten einzeln asynchron über
+        # CalculatorThread und ruft mark_completed() aus dessen Completion-Signal.
+        self.calculator_dispatcher = CalculatorDispatcher(executors=self._build_calculator_executors())
 
-        # Dependency-Queue System
-        self.dependency_queue = DependencyQueue()
+        # Parameter je Generator aus der letzten request_generation()-Anfrage -
+        # Grundlage für assemble_*_data(lod, parameters) und
+        # generator_instance.set_active_parameters(parameters)
+        self._active_parameters: Dict[str, Dict[str, Any]] = {}
+
+        # Aktive Requests je Generator (für Cancel/Timeout/Signal-Payload) -
+        # ersetzt das bisherige DependencyQueue+processing_requests-Duo
+        self.active_requests_by_generator: Dict[str, GenerationRequest] = {}
+
         self.state_tracker = GenerationStateTracker()
-        self.processing_requests = set()
 
         # Request-Tracking für result_id Management
         self.active_request_mapping = {}  # request_id -> GenerationRequest
@@ -475,7 +419,6 @@ class GenerationOrchestrator(QObject):
         self.memory_usage_tracking = {}
 
         # Setup
-        self.setup_lod_tracking()
         self.setup_threading()
         self.setup_dependency_resolution()
 
@@ -487,35 +430,29 @@ class GenerationOrchestrator(QObject):
 
         self.logger.info(f"Parallel generation limit: {self.max_parallel_generations}")
 
-    def setup_lod_tracking(self):
-        """
-        Funktionsweise: Initialisiert LOD-Completion-Tracking für alle Generatoren - NUMERISCH
-        Aufgabe: Baseline für LOD-Progression-Management mit DataManager-Integration
-        """
-        for generator_type in GeneratorType:
-            # Numerisches LOD-Tracking statt String-basiert
-            self.lod_completion_status[generator_type.value] = {}
-            # Wird dynamisch gefüllt wenn LODs completed werden
-            # Beispiel: {"terrain": {1: True, 2: True, 3: False, 4: False}}
-
     def setup_threading(self):
         """
         Funktionsweise: Konfiguriert Threading-System für Background-LOD-Enhancement
         Aufgabe: Thread-Pool-Setup ohne UI-Blocking
         """
-        # Thread-Management
-        self.generation_threads = {}
+        # Thread-Management (siehe auch __init__ - hier nur nochmal explizit für
+        # Klarheit, falls setup_threading() später erneut aufgerufen wird)
+        self.calculator_threads = {}
         self.thread_mutex = QMutex()
-        self.active_requests = set()
+        self.in_flight_calculators = set()
 
     def setup_dependency_resolution(self):
         """
-        Funktionsweise: Konfiguriert Dependency-Queue-Resolution-System
-        Aufgabe: Timer für kontinuierliche Queue-Verarbeitung und Deadlock-Prevention
+        Funktionsweise: Konfiguriert den Runden-Advancement-Timer für den globalen
+        CalculatorDispatcher
+        Aufgabe: Timer für kontinuierliches Voranschreiten der Runden und
+            Deadlock-Prevention
         """
-        # Queue-Resolution Timer
+        # Runden-Advancement-Timer - prüft periodisch, ob neue Calculator-Knoten
+        # bereit sind (z.B. falls ein Completion-Signal aus irgendeinem Grund
+        # keinen sofortigen Re-Trigger ausgelöst hat)
         self.queue_resolution_timer = QTimer()
-        self.queue_resolution_timer.timeout.connect(self.resolve_dependency_queue)
+        self.queue_resolution_timer.timeout.connect(self.advance_calculator_dispatch)
         self.queue_resolution_timer.start(2000)  # Alle 2 Sekunden
 
         # Timeout-Management Timer
@@ -555,25 +492,30 @@ class GenerationOrchestrator(QObject):
             parameters = {}
 
         # Ziel-LOD robust bestimmen: int direkt, numerischer String, aus map_size, sonst
-        # (für alle Nicht-Terrain-Generatoren) das aktuelle Terrain-LOD, sonst Minimum.
+        # (für alle Nicht-Terrain-Generatoren) aus der zuletzt ANGEFRAGTEN Terrain-
+        # map_size, sonst Minimum.
         # Nachgelagerte Generatoren haben keinen eigenen map_size-Parameter - ihre Auflösung
-        # richtet sich nach der bereits erreichten Terrain-Auflösung.
+        # richtet sich nach der Terrain-Auflösung. Wichtig: hier darf NICHT das bereits
+        # ABGESCHLOSSENE Terrain-LOD (get_current_lod_level) verwendet werden - beim
+        # Auto-Start werden alle 6 Generatoren praktisch gleichzeitig angefragt, BEVOR
+        # Terrain überhaupt zu rechnen begonnen hat, d.h. dessen completed LOD ist noch
+        # 0 und alle nachgelagerten Generatoren blieben für immer bei target_lod=1
+        # hängen (Terrain lief dann z.B. bis LOD3, der Rest nie über LOD1 hinaus).
+        # Terrain wird in der Auto-Start-Schleife zuerst angefragt, seine map_size steht
+        # also in _last_parameters bereits, bevor die übrigen 5 Generatoren dran sind.
         if not isinstance(target_lod, int):
             try:
                 target_lod = int(target_lod)
             except (TypeError, ValueError):
                 map_size = parameters.get("map_size")
+                if map_size is None:
+                    map_size = self._last_parameters.get(GeneratorType.TERRAIN, {}).get("map_size")
                 try:
                     from gui.OldManagers.data_lod_manager import calculate_max_lod_for_size
                     target_lod = calculate_max_lod_for_size(int(map_size))
                 except (TypeError, ValueError):
-                    terrain_lod = self.data_lod_manager.get_current_lod_level("terrain")
-                    if gen_type_enum != GeneratorType.TERRAIN and terrain_lod:
-                        self.logger.info(f"target_lod aus map_size nicht bestimmbar, übernehme Terrain-LOD {terrain_lod}")
-                        target_lod = terrain_lod
-                    else:
-                        self.logger.info("target_lod nicht bestimmbar, nutze LOD 1")
-                        target_lod = 1
+                    self.logger.info("target_lod nicht bestimmbar, nutze LOD 1")
+                    target_lod = 1
 
         # Eine noch laufende oder wartende Generation für DENSELBEN Generator wird
         # hart abgebrochen, bevor der neue Request gestellt wird - verhindert dass
@@ -608,79 +550,83 @@ class GenerationOrchestrator(QObject):
             affected_generators = set(affected_generators)
             affected_generators.add(gen_type_enum)
 
-        # Cache-Invalidation für betroffene Generatoren (inkl. sich selbst bei Parameter-Änderung)
+        # Cache-Invalidation für betroffene Generatoren (inkl. sich selbst bei Parameter-Änderung).
+        # target_lod wird mitgegeben, damit betroffene Generatoren automatisch auf
+        # dasselbe (ggf. neue, höhere) Ziel-LOD "mitziehen" statt auf ihrem alten
+        # Ziel-LOD stehen zu bleiben (z.B. wenn eine map_size-Änderung an Terrain
+        # alle 5 anderen Generatoren invalidiert - die sollen dann auch dasselbe
+        # neue Final-LOD anstreben, nicht für immer beim alten hängen bleiben).
         if affected_generators:
-            self.invalidate_downstream_dependencies(internal_request.generator_type, affected_generators)
+            self.invalidate_downstream_dependencies(internal_request.generator_type, affected_generators, target_lod)
 
         # Baseline für künftige Parameter-Vergleiche aktualisieren
         self._last_parameters[gen_type_enum] = dict(internal_request.parameters)
 
-        # Request zur DependencyQueue hinzufügen
-        self.dependency_queue.add_request(internal_request)
-        self.state_tracker.set_request_queued(internal_request)
+        # Generator-Instanz holen und mit aktuellen Parametern versorgen - alle
+        # _calc_*-Methoden lesen diese über self._current_parameters/Instanz-
+        # Attribute (siehe set_active_parameters() in core/*_generator.py)
+        generator_instance = self.get_generator_instance(gen_type_enum)
+        if generator_instance is None:
+            self.logger.error(f"No generator instance available for {gen_type_enum.value}")
+            return None
+        generator_instance.set_active_parameters(internal_request.parameters)
 
-        # Request-Mapping für result_id Management
+        self._active_parameters[gen_type_enum.value] = internal_request.parameters
+        self.active_requests_by_generator[gen_type_enum.value] = internal_request
         self.active_request_mapping[internal_request.request_id] = internal_request
+
+        # Alte Error-States dieses Generators löschen - ein neuer Request soll
+        # eine zuvor fehlgeschlagene Knoten-Anzeige im PipelineStatusPanel
+        # nicht für immer auf "Error" stehen lassen
+        for cid in self._calculator_ids_for(gen_type_enum.value):
+            self._calculator_errors.pop(cid, None)
+
+        # Beim globalen Calculator-Dispatcher anfragen: setzt das Ziel-LOD für
+        # ALLE Calculator-Knoten dieses Generators (siehe CalculatorDispatcher.
+        # request()) - ersetzt das bisherige DependencyQueue.add_request()
+        self.calculator_dispatcher.request(gen_type_enum.value, target_lod)
+        self.state_tracker.set_request_queued(internal_request)
 
         # Queue-Status-Update emittieren
         self.emit_queue_status_update()
 
-        self.logger.info(f"Generation queued: {internal_request.request_id}")
+        self.logger.info(f"Generation queued: {internal_request.request_id} -> target_lod {target_lod}")
+
+        # Sofort versuchen, statt auf den nächsten 2s-Timer-Tick zu warten
+        QTimer.singleShot(0, self.advance_calculator_dispatch)
+
         return internal_request.request_id
 
     @threading_handler("dependency_resolution")
-    def resolve_dependency_queue(self):
+    def advance_calculator_dispatch(self):
         """
-        Funktionsweise: Kontinuierliche Dependency-Queue-Resolution mit Threading-Protection
-        Aufgabe: Startet alle verfügbaren Requests aus Queue, respektiert Dependencies und Limits
+        Funktionsweise: Treibt den globalen CalculatorDispatcher voran - dispatcht
+        alle aktuell bereiten, noch nicht laufenden Calculator-Knoten als eigene
+        CalculatorThread-Instanzen
+        Aufgabe: Ersetzt das bisherige resolve_dependency_queue() (6-Knoten-
+        Generator-Ebene) durch echte Runden-Synchronisation auf allen 34
+        Calculator-Knoten (Tracker #16 LOD-Lockstep-Umbau) - ein Knoten läuft
+        erst, wenn alle seine Abhängigkeiten DIESELBE Runde erreicht haben, und
+        keine Runde N+1 beginnt, bevor Runde N für alle angefragten Knoten
+        abgeschlossen ist.
         """
         first_run = not getattr(self, "_first_resolution_logged", False)
         if first_run:
             self._first_resolution_logged = True
-            self.logger.info("Queue resolution: step 1 (get_completed_generators)")
+            self.logger.info("Calculator dispatch: erster Advancement-Tick")
 
-        completed = self.get_completed_generators()
+        ready = self.calculator_dispatcher.get_next_ready_batch()
+        round_n = self.calculator_dispatcher.current_round
 
-        if first_run:
-            self.logger.info("Queue resolution: step 2 (get_available_requests)")
-
-        available_requests = self.dependency_queue.get_available_requests(
-            completed_generators=completed,
-            active_limit=3  # Max 3 parallele Generationen
-        )
-
-        if first_run:
-            self.logger.info("Queue resolution: step 3 (request loop)")
-
-        for request in available_requests:
+        for calculator_id in ready:
+            if calculator_id in self.in_flight_calculators:
+                continue
             try:
-                # Request aus Queue entfernen und zu aktiven verschieben
-                self.dependency_queue.remove_request(request.request_id)
-                self.processing_requests.add(request)
-
-                # State-Tracker aktualisieren
-                self.state_tracker.set_request_active(request)
-
-                # LOD-Progression starten
-                success = self.start_lod_progression(request)
-
-                if not success:
-                    self.state_tracker.set_request_failed(request, "Failed to start LOD progression")
-                    self.processing_requests.discard(request)
-
+                self._dispatch_calculator(calculator_id, round_n)
             except Exception as e:
-                self.logger.error(f"Failed to start request {request.request_id}: {e}")
-                self.state_tracker.set_request_failed(request, str(e))
-                self.processing_requests.discard(request)
+                self.logger.error(f"Failed to dispatch calculator {calculator_id}: {e}")
 
-        if first_run:
-            self.logger.info("Queue resolution: step 4 (emit_queue_status_update)")
-
-        # Queue-Status-Update emittieren
         self.emit_queue_status_update()
-
-        if first_run:
-            self.logger.info("Queue resolution: first tick completed")
 
     @threading_handler("timeout_check")
     def check_generation_timeouts(self):
@@ -689,238 +635,310 @@ class GenerationOrchestrator(QObject):
         Aufgabe: Deadlock-Prevention durch Timeout-Management
         """
         current_time = time.time()
-        timed_out_requests = []
+        timed_out_generators = []
 
-        # Prüfe aktive Requests auf Timeout
-        for request in list(self.processing_requests):
-            if current_time - request.timestamp > 300:  # 5 Minuten Timeout
-                timed_out_requests.append(request)
-                self.logger.warning(f"Request {request.request_id} timed out")
+        for generator_name, request in list(self.active_requests_by_generator.items()):
+            if current_time - request.timestamp <= 300:  # 5 Minuten Timeout
+                continue
+            calc_ids = self._calculator_ids_for(generator_name)
+            still_pending = any(
+                self.calculator_dispatcher.target_lod[cid] > 0
+                and self.calculator_dispatcher.completed_lod[cid] < self.calculator_dispatcher.target_lod[cid]
+                for cid in calc_ids
+            )
+            if still_pending:
+                timed_out_generators.append(generator_name)
+                self.logger.warning(f"Generation for '{generator_name}' timed out")
 
-        # Prüfe Queue-Requests auf Timeout
-        queue_timeouts = self.dependency_queue.get_timed_out_requests(current_time, timeout_seconds=600)
+        for generator_name in timed_out_generators:
+            self.cleanup_timed_out_generator(generator_name)
 
-        # Timeout-Requests aufräumen
-        for request in timed_out_requests + queue_timeouts:
-            self.cleanup_timed_out_request(request)
-
-        if timed_out_requests or queue_timeouts:
+        if timed_out_generators:
             self.emit_queue_status_update()
 
-    def cleanup_timed_out_request(self, request: GenerationRequest):
+    def cleanup_timed_out_generator(self, generator_name: str):
         """
-        Funktionsweise: Räumt timed-out Request auf und stoppt zugehörigen Thread
-        Parameter: request - Request der timed-out ist
+        Funktionsweise: Räumt einen timed-out Generator auf
+        Aufgabe: Stoppt alle in-flight Calculator-Threads dieses Generators und
+            setzt sein Ziel-LOD zurück auf 0 (kein weiterer Dispatch-Versuch)
         """
-        # Request aus aktiven entfernen
-        self.processing_requests.discard(request)
+        calc_ids = set(self._calculator_ids_for(generator_name))
 
-        # Request-Mapping aufräumen
-        self.active_request_mapping.pop(request.request_id, None)
-
-        # Thread stoppen falls vorhanden
-        thread_key = f"{request.generator_type.value}_{request.target_lod}"
         with QMutexLocker(self.thread_mutex):
-            if thread_key in self.generation_threads:
-                thread = self.generation_threads[thread_key]
+            for thread_key, thread in list(self.calculator_threads.items()):
+                if thread.calculator_id not in calc_ids:
+                    continue
                 if thread.isRunning():
                     thread.terminate()
                     thread.wait(3000)
-                del self.generation_threads[thread_key]
+                del self.calculator_threads[thread_key]
+                self.in_flight_calculators.discard(thread.calculator_id)
 
-        # State-Tracker aktualisieren
-        self.state_tracker.set_request_failed(request, "Timeout")
+        for cid in calc_ids:
+            self.calculator_dispatcher.target_lod[cid] = 0
+            self._calculator_errors[cid] = "Timeout"
 
-        self.logger.info(f"Cleaned up timed-out request: {request.request_id}")
+        request = self.active_requests_by_generator.pop(generator_name, None)
+        if request:
+            self.active_request_mapping.pop(request.request_id, None)
+            self.state_tracker.set_request_failed(request, "Timeout")
 
-    def get_completed_generators(self) -> Dict[str, Set[int]]:
+        self.logger.info(f"Cleaned up timed-out generator: {generator_name}")
+        self.emit_queue_status_update()
+
+    def _calculator_ids_for(self, generator_name: str) -> List[str]:
+        """Alle Calculator-Knoten-IDs, die zu diesem Generator gehören."""
+        return [cid for cid, spec in CALCULATOR_GRAPH.items() if spec.generator == generator_name]
+
+    def _sync_state_tracker_from_dispatcher(self):
         """
-        Funktionsweise: Sammelt alle abgeschlossenen Generatoren pro LOD-Level
-        Aufgabe: Einheitlicher Status-Check über lod_completion_status für alle Generatoren
-        Return: Dict[generator_type, Set[completed_lod_levels]]
+        Funktionsweise: Leitet den Per-Generator-Status (für PipelineStatusPanel/
+        Tabs) aus dem feingranularen Calculator-Dispatcher-Zustand ab
+        Aufgabe: Die UI zeigt weiterhin 6 Generator-Zeilen, obwohl intern jetzt 34
+            Calculator-Knoten einzeln fortschreiten - current_lod eines Generators
+            ist das Minimum über seine Knoten (der langsamste bestimmt den
+            sichtbaren Fortschritt), progress ist der Anteil abgeschlossener
+            Knoten-Runden am Gesamt-Soll.
         """
-        completed = {}
         for generator_type in GeneratorType:
-            completed[generator_type.value] = set()
+            gname = generator_type.value
+            calc_ids = self._calculator_ids_for(gname)
+            target = max((self.calculator_dispatcher.target_lod[cid] for cid in calc_ids), default=0)
+            if target == 0:
+                continue  # nicht angefragt - Status unverändert lassen (z.B. "Idle")
 
-            status = self.lod_completion_status.get(generator_type.value, {})
-            for lod_level, is_completed in status.items():
-                if is_completed:
-                    completed[generator_type.value].add(lod_level)
+            completed_levels = [self.calculator_dispatcher.completed_lod[cid] for cid in calc_ids]
+            min_completed = min(completed_levels)
 
-        return completed
+            state = self.state_tracker.thread_states[gname]
+            state.current_lod = min_completed
+
+            total_steps = len(calc_ids) * target
+            done_steps = sum(min(c, target) for c in completed_levels)
+            state.progress = int((done_steps / total_steps) * 100) if total_steps else 0
+
+            if min_completed >= target:
+                state.status = "Completed"
+            elif any(cid in self.in_flight_calculators for cid in calc_ids):
+                state.status = "Generating"
+            else:
+                state.status = "Queued"
 
     def emit_queue_status_update(self):
         """
         Funktionsweise: Emittiert aktuellen Queue-Status für UI-Updates
-        Aufgabe: Stellt 6-Thread-Status für UI-Display bereit
+        Aufgabe: Stellt 6-Thread-Status UND granularen 34-Knoten-Status für
+            UI-Display bereit
         """
+        self._sync_state_tracker_from_dispatcher()
         status_list = self.state_tracker.get_all_thread_status()
         self.queue_status_changed.emit(status_list)
+        self.calculator_status_changed.emit(self._calculator_status_snapshot())
 
-    def start_lod_progression(self, request: GenerationRequest) -> bool:
+    def _calculator_status_snapshot(self) -> Dict[str, Dict[str, Any]]:
         """
-        Funktionsweise: Startet LOD-Progression für eine Generation-Request mit DataManager-Integration
-        Parameter: request
-        Return: bool - Success
+        Funktionsweise: Baut den granularen Status ALLER 34 Calculator-Knoten
+            für die PipelineStatusPanel-Anzeige
+        Aufgabe: Wird bei JEDER emit_queue_status_update()-Ausführung neu
+            gebaut - insbesondere sofort innerhalb von request_generation(),
+            noch bevor irgendein Thread neu gestartet wird. Ein Knoten, dessen
+            target_lod gerade z.B. durch eine map_size-Änderung gestiegen ist,
+            zeigt dadurch sofort "waiting" statt weiter fälschlich "finished"
+            für das inzwischen überholte, niedrigere LOD zu behaupten.
+        Return: calculator_id -> {"status", "target_lod", "completed_lod", "error_message"}
         """
-        generator_type = request.generator_type
-        target_lod = request.target_lod
+        snapshot = {}
+        for calculator_id in CALCULATOR_GRAPH:
+            target = self.calculator_dispatcher.target_lod[calculator_id]
+            completed = self.calculator_dispatcher.completed_lod[calculator_id]
+            error_message = self._calculator_errors.get(calculator_id)
 
-        # LOD-Progression-Queue erstellen basierend auf verfügbaren DataManager-Daten
-        lod_sequence = self.create_lod_sequence(generator_type, target_lod)
+            if error_message:
+                status = "error"
+            elif target == 0:
+                status = "idle"
+            elif calculator_id in self.in_flight_calculators:
+                status = "calculating"
+            elif completed >= target:
+                status = "finished"
+            else:
+                status = "waiting"
 
-        if not lod_sequence:
-            return False
+            snapshot[calculator_id] = {
+                "status": status,
+                "target_lod": target,
+                "completed_lod": completed,
+                "error_message": error_message,
+            }
+        return snapshot
 
-        # Queue speichern für Tracking
-        self.lod_progression_queue[generator_type.value] = lod_sequence
-
-        # Erste LOD-Stufe starten
-        return self.execute_next_lod_level(generator_type, request.parameters, request.request_id)
-
-    def create_lod_sequence(self, generator_type: GeneratorType, target_lod: int) -> List[int]:
-        """Erstellt numerische LOD-Sequence von aktuellem Level bis Target"""
-        current_lod = self.data_lod_manager.get_current_lod_level(generator_type.value)
-
-        if current_lod >= target_lod:
-            return []  # Bereits erreicht oder überschritten
-
-        return list(range(current_lod + 1, target_lod + 1))
-
-    def execute_next_lod_level(self, generator_type: GeneratorType, parameters: Dict[str, Any], request_id: str) -> bool:
+    def _build_calculator_executors(self) -> Dict[str, Callable]:
         """
-        Funktionsweise: Führt nächstes LOD-Level in der Progression aus
-        Parameter: generator_type, parameters, request_id
-        Return: bool - Success
+        Funktionsweise: Baut die executors-Dict für den CalculatorDispatcher-
+        Konstruktor (Pflicht-Parameter, siehe CalculatorDispatcher.__init__)
+        Aufgabe: Nur für den synchronen run_all_rounds()-Fallback (Tests) sowie
+            als Validierungs-Grundlage relevant - die echte GUI-Pipeline
+            dispatcht jeden Knoten asynchron über CalculatorThread (siehe
+            _dispatch_calculator()), ruft diese Executors also nie direkt auf
         """
-        queue_key = generator_type.value
+        return {cid: self._run_calculator_sync for cid in CALCULATOR_GRAPH}
 
-        if queue_key not in self.lod_progression_queue or not self.lod_progression_queue[queue_key]:
-            # Progression abgeschlossen - Final Completion Signal emittieren
-            self.emit_final_completion_signal(request_id, generator_type)
-            return True
+    def _run_calculator_sync(self, calculator_id: str, lod_level: int):
+        """Synchron: löst Generator-Instanz + _calc_*-Methode auf und ruft sie direkt auf."""
+        generator_name = CALCULATOR_GRAPH[calculator_id].generator
+        generator_instance = self.get_generator_instance(GeneratorType(generator_name))
+        method = getattr(generator_instance, "_calc_" + calculator_id.split(".", 1)[1])
+        method(calculator_id, lod_level)
 
-        # Nächstes LOD-Level aus Queue
-        current_lod = self.lod_progression_queue[queue_key].pop(0)
-
-        # War deklariert, wurde aber nirgends emittiert - dadurch blieb die
-        # Pipeline-Status-Spalte im Shell-Layout permanent auf "Unknown"
-        # stehen, obwohl im Hintergrund tatsächlich generiert wurde.
-        self.generation_started.emit(generator_type.value, current_lod)
-
-        # Generator-Instanz holen
+    def _dispatch_calculator(self, calculator_id: str, lod_level: int):
+        """
+        Funktionsweise: Startet EINEN Calculator-Knoten als eigenen Background-Thread
+        Aufgabe: Asynchroner Dispatch-Baustein des LOD-Lockstep-Umbaus (Tracker
+            #16) - ersetzt das bisherige "ein Thread pro (Generator, LOD)" durch
+            "ein Thread pro (Calculator-Knoten, LOD)", damit z.B.
+            Settlement-Phasen #28-#33 nicht mehr hinter dem GESAMTEN
+            Biome-Generator in der Warteschlange stehen
+        """
+        generator_name = CALCULATOR_GRAPH[calculator_id].generator
+        generator_type = GeneratorType(generator_name)
         generator_instance = self.get_generator_instance(generator_type)
 
         if not generator_instance:
-            self.logger.error(f"No generator instance available for {generator_type.value}")
-            return False
+            self.logger.error(f"No generator instance available for {generator_name}")
+            return
 
-        # Generation in Thread starten
-        thread = GenerationThread(
+        # generation_started nur EINMAL pro (Generator, Runde) emittieren -
+        # PipelineStatusPanel zeigt ohnehin nur Generator-Ebene an, nicht jeden
+        # einzelnen Calculator-Knoten. Reines "läuft gerade ein anderer Knoten
+        # dieses Generators" reicht nicht als Dedup-Kriterium, da z.B. Terrains
+        # Knoten strikt sequenziell laufen (nie gleichzeitig in-flight) - ohne
+        # dieses Set würde das Signal bei jedem einzelnen Knoten neu feuern.
+        round_key = (generator_name, lod_level)
+        if round_key not in self._announced_generator_rounds:
+            self._announced_generator_rounds.add(round_key)
+            self.generation_started.emit(generator_name, lod_level)
+
+        self.in_flight_calculators.add(calculator_id)
+
+        thread = CalculatorThread(
             generator_instance=generator_instance,
-            generator_type=generator_type,
-            lod_level=current_lod,
-            parameters=parameters,
-            data_lod_manager=self.data_lod_manager,
-            request_id=request_id,
+            calculator_id=calculator_id,
+            lod_level=lod_level,
             parent=self
         )
+        thread.calculator_completed.connect(self.on_calculator_completed)
+        # Hinweis: ansonsten kein generelles Progress-Signal verdrahtet - die
+        # _calc_*-Methoden rufen zwar self._update_progress() intern auf, das
+        # war aber schon im alten GenerationThread nie an ein Qt-Signal
+        # angebunden (progress_callback dort war ebenfalls nie an eine
+        # calculate_*-Methode übergeben) - vorbestehende Lücke, keine
+        # Regression durch diesen Umbau. EINZIGE Ausnahme (bewusst eng
+        # begrenzt, siehe [[project-settlement-plot-physics-rebuild]] Teil F):
+        # settlement.plot_nodes bekommt einen echten Live-Callback, damit die
+        # bis zu 100 Physik-Iterationen im Settlement-Tab sichtbar mitlaufen -
+        # kein genereller Umbau der Progress-Infrastruktur für alle Generatoren.
+        if calculator_id == "settlement.plot_nodes":
+            thread.settlement_plot_live_update.connect(self.settlement_plot_live_update.emit)
 
-        # Thread-Signals verbinden
-        thread.generation_completed.connect(self.on_lod_generation_completed)
-        thread.generation_progress.connect(self.on_generation_progress)
-
-        # Thread starten
+        thread_key = f"{calculator_id}@{lod_level}"
         with QMutexLocker(self.thread_mutex):
-            thread_key = f"{generator_type.value}_{current_lod}"
-            self.generation_threads[thread_key] = thread
+            self.calculator_threads[thread_key] = thread
 
         thread.start()
 
-        return True
-
-    def on_lod_generation_completed(self, request_id: str, generator_type: str, lod_level: str, success: bool,
-                                    result_data: dict):
+    def on_calculator_completed(self, calculator_id: str, lod_level: int, success: bool, error_message: str):
         """
-        Funktionsweise: Callback für abgeschlossene LOD-Generation mit DataManager-Integration
-        Parameter: request_id, generator_type, lod_level, success, result_data
+        Funktionsweise: Callback für abgeschlossenen Calculator-Knoten
+        Aufgabe: Aktualisiert den globalen CalculatorDispatcher, baut bei
+            vollständiger Generator-Runde das Domain-Objekt zusammen und treibt
+            die nächste Runde an (Tracker #16 LOD-Lockstep-Umbau)
         """
-        # LOD-Status aktualisieren
-        if success:
-            self.lod_completion_status[generator_type][lod_level] = True
-            self.state_tracker.set_request_completed(generator_type, lod_level)
+        self.in_flight_calculators.discard(calculator_id)
 
-            # DataManager-Integration: Ergebnis automatisch speichern
-            self.save_generation_result_to_data_lod_manager(generator_type, lod_level, result_data)
-
-        # LOD-Progression-Signal emittieren (für sofortige UI-Updates mit bestem verfügbarem LOD)
-        self.lod_progression_completed.emit(request_id, lod_level)
-
-        # Thread aufräumen
-        thread_key = f"{generator_type}_{lod_level}"
+        thread_key = f"{calculator_id}@{lod_level}"
         with QMutexLocker(self.thread_mutex):
-            if thread_key in self.generation_threads:
-                del self.generation_threads[thread_key]
+            self.calculator_threads.pop(thread_key, None)
+
+        generator_name = CALCULATOR_GRAPH[calculator_id].generator
 
         if success:
-            # Nächstes LOD-Level starten
+            self.calculator_dispatcher.mark_completed(calculator_id, lod_level)
             try:
-                generator_type_enum = GeneratorType(generator_type)
-
-                # Original-Request aus Mapping holen für Parameter
-                original_request = self.active_request_mapping.get(request_id)
-                if original_request:
-                    self.execute_next_lod_level(generator_type_enum, original_request.parameters, request_id)
-                else:
-                    self.logger.warning(f"Could not find original request for {request_id}")
-
-            except ValueError:
-                self.logger.error(f"Invalid generator_type in callback: {generator_type}")
+                self._maybe_assemble_generator(generator_name, lod_level)
+            except Exception as e:
+                self.logger.error(f"Failed to assemble '{generator_name}' data for LOD {lod_level}: {e}")
         else:
-            # Bei Fehler: Request aus aktiven entfernen
-            original_request = self.active_request_mapping.get(request_id)
-            if original_request:
-                self.processing_requests.discard(original_request)
-                self.active_request_mapping.pop(request_id, None)
-                self.state_tracker.set_request_failed(original_request, result_data.get("error", "Unknown error"))
+            self.logger.error(f"Calculator '{calculator_id}' failed at LOD {lod_level}: {error_message}")
+            self._calculator_errors[calculator_id] = error_message
+            request = self.active_requests_by_generator.get(generator_name)
+            if request:
+                self.state_tracker.set_request_failed(request, error_message)
+            self.generation_failed.emit(generator_name, lod_level, error_message)
+            # Ziel-LOD für den GESAMTEN Generator zurücksetzen - ein
+            # fehlgeschlagener Knoten macht die restliche Runde für diesen
+            # Generator ohnehin unmöglich (nachgelagerte Knoten desselben
+            # Generators würden sonst für immer auf ihn warten)
+            for cid in self._calculator_ids_for(generator_name):
+                self.calculator_dispatcher.target_lod[cid] = 0
 
-        # Queue-Resolution triggern falls neue Dependencies verfügbar
-        QTimer.singleShot(100, self.resolve_dependency_queue)
+        QTimer.singleShot(50, self.advance_calculator_dispatch)
 
-    def save_generation_result_to_data_lod_manager(self, generator_type: str, lod_level, result_data: dict):
+    def _maybe_assemble_generator(self, generator_name: str, lod_level: int):
         """
-        Funktionsweise: Legt das Generierungs-Ergebnis über den passenden Complete-Setter im DataLODManager ab
-        Aufgabe: Routet das fertige Data-Objekt eines Generators an set_<domain>_data_complete_lod, das es
-                 in seine einzelnen Data-Keys zerlegt und pro LOD speichert
-        Parameter: generator_type, lod_level, result_data (enthält generator_output und parameters_used)
+        Funktionsweise: Prüft ob ALLE Calculator-Knoten eines Generators
+        lod_level erreicht haben, und baut in diesem Fall das fertige
+        Domain-Objekt zusammen
+        Aufgabe: Ersetzt save_generation_result_to_data_lod_manager()/
+            emit_final_completion_signal() aus dem alten 6-Knoten-Dispatch -
+            läuft jetzt pro Generator UND pro Runde (nicht nur beim finalen
+            Ziel-LOD), damit lod_progression_completed weiterhin für
+            Zwischen-LODs feuert wie bisher
         """
-        try:
-            generator_output = result_data.get("generator_output")
-            parameters_used = result_data.get("parameters_used", {})
+        calc_ids = self._calculator_ids_for(generator_name)
+        if not all(self.calculator_dispatcher.completed_lod[cid] >= lod_level for cid in calc_ids):
+            return  # noch nicht alle Knoten dieser Runde fertig
 
-            if generator_output is None:
-                return
+        generator_type = GeneratorType(generator_name)
+        generator_instance = self.get_generator_instance(generator_type)
+        parameters = self._active_parameters.get(generator_name, {})
 
-            complete_setters = {
-                "terrain": self.data_lod_manager.set_terrain_data_complete_lod,
-                "geology": self.data_lod_manager.set_geology_data_complete_lod,
-                "weather": self.data_lod_manager.set_weather_data_complete_lod,
-                "water": self.data_lod_manager.set_water_data_complete_lod,
-                "biome": self.data_lod_manager.set_biome_data_complete_lod,
-                "settlement": self.data_lod_manager.set_settlement_data_complete_lod,
+        assemble_method = getattr(generator_instance, f"assemble_{generator_name}_data")
+        generator_output = assemble_method(lod_level, parameters)
+
+        complete_setters = {
+            "terrain": self.data_lod_manager.set_terrain_data_complete_lod,
+            "geology": self.data_lod_manager.set_geology_data_complete_lod,
+            "weather": self.data_lod_manager.set_weather_data_complete_lod,
+            "water": self.data_lod_manager.set_water_data_complete_lod,
+            "biome": self.data_lod_manager.set_biome_data_complete_lod,
+            "settlement": self.data_lod_manager.set_settlement_data_complete_lod,
+        }
+        complete_setters[generator_name](generator_output, lod_level, parameters)
+        self.logger.debug(f"{generator_name}-Daten für LOD {lod_level} abgelegt")
+
+        request = self.active_requests_by_generator.get(generator_name)
+        request_id = request.request_id if request else f"{generator_name}_{lod_level}"
+        target_lod = max((self.calculator_dispatcher.target_lod[cid] for cid in calc_ids), default=0)
+
+        if lod_level >= target_lod:
+            # Finale Completion - komplette Ziel-LOD-Progression abgeschlossen
+            generator_data = self.get_generator_data_from_data_lod_manager(generator_name)
+            result_data = {
+                "generator_type": generator_name,
+                "lod_level": lod_level,
+                "success": True,
+                "data": generator_data,
+                "source_tab": request.source_tab if request else generator_name,
+                "timestamp": time.time(),
             }
-
-            setter = complete_setters.get(generator_type)
-            if setter is None:
-                self.logger.warning(f"Kein Complete-Setter für Generator-Typ '{generator_type}'")
-                return
-
-            setter(generator_output, lod_level, parameters_used)
-            self.logger.debug(f"{generator_type}-Daten für LOD {lod_level} abgelegt")
-
-        except Exception as e:
-            self.logger.error(f"Failed to save generation result to DataManager: {e}")
+            self.generation_completed.emit(request_id, result_data)
+            self.active_requests_by_generator.pop(generator_name, None)
+            if request:
+                self.active_request_mapping.pop(request.request_id, None)
+            self.logger.info(f"Final completion emitted for {generator_name} (LOD {lod_level})")
+        else:
+            # Zwischen-LOD - sofortige UI-Updates mit bestem verfügbarem LOD
+            self.lod_progression_completed.emit(request_id, lod_level)
 
     def on_generation_progress(self, progress: int, message: str):
         """
@@ -929,39 +947,6 @@ class GenerationOrchestrator(QObject):
         """
         # Vereinfachtes Progress-Signal emittieren (homogen für alle Tabs)
         self.generation_progress.emit(progress, message)
-
-    def emit_final_completion_signal(self, request_id: str, generator_type: GeneratorType):
-        """
-        Funktionsweise: Emittiert Final-Completion-Signal wenn alle LOD-Level abgeschlossen sind
-        Parameter: request_id, generator_type
-        """
-        # Original-Request aus Mapping holen
-        original_request = self.active_request_mapping.get(request_id)
-        if not original_request:
-            self.logger.warning(f"Could not find original request for final completion: {request_id}")
-            return
-
-        # Generator-Output aus DataManager holen
-        generator_data = self.get_generator_data_from_data_lod_manager(generator_type.value)
-
-        # result_data für Tab-Kompatibilität zusammenstellen
-        result_data = {
-            "generator_type": generator_type.value,
-            "lod_level": original_request.target_lod,
-            "success": True,
-            "data": generator_data,
-            "source_tab": original_request.source_tab,
-            "timestamp": time.time()
-        }
-
-        # Final-Completion-Signal emittieren (homogen für alle Tabs)
-        self.generation_completed.emit(request_id, result_data)
-
-        # Request aus aktiven entfernen
-        self.processing_requests.discard(original_request)
-        self.active_request_mapping.pop(request_id, None)
-
-        self.logger.info(f"Final completion emitted for {request_id}")
 
     def get_generator_data_from_data_lod_manager(self, generator_type: str) -> dict:
         """
@@ -1018,24 +1003,39 @@ class GenerationOrchestrator(QObject):
         """
         if generator_type.value not in self._generator_instances:
             try:
+                # data_lod_manager injizieren: alle _calc_*-Methoden lesen/schreiben
+                # jetzt über DataLODManager.get_calculator_output()/
+                # set_calculator_output() (siehe Tracker #16 LOD-Lockstep-Umbau) -
+                # ohne diese Injektion bleibt self.data_lod_manager auf dem
+                # Generator None und jeder Calculator-Aufruf schlägt fehl.
+                # shader_manager injizieren, wo der jeweilige Generator-Konstruktor das
+                # unterstützt (Terrain/Weather/Water/Biome/Settlement) - Geology hat
+                # bisher KEINE Shader-Anbindung implementiert (siehe Shader-Inventur),
+                # ihr Konstruktor kennt den Parameter noch nicht.
                 if generator_type == GeneratorType.TERRAIN:
                     from core.terrain_generator import BaseTerrainGenerator
-                    self._generator_instances[generator_type.value] = BaseTerrainGenerator()
+                    self._generator_instances[generator_type.value] = BaseTerrainGenerator(
+                        data_lod_manager=self.data_lod_manager, shader_manager=self.shader_manager)
                 elif generator_type == GeneratorType.GEOLOGY:
                     from core.geology_generator import GeologySystemGenerator
-                    self._generator_instances[generator_type.value] = GeologySystemGenerator()
+                    self._generator_instances[generator_type.value] = GeologySystemGenerator(
+                        data_lod_manager=self.data_lod_manager)
                 elif generator_type == GeneratorType.WEATHER:
                     from core.weather_generator import WeatherSystemGenerator
-                    self._generator_instances[generator_type.value] = WeatherSystemGenerator()
+                    self._generator_instances[generator_type.value] = WeatherSystemGenerator(
+                        data_lod_manager=self.data_lod_manager, shader_manager=self.shader_manager)
                 elif generator_type == GeneratorType.WATER:
                     from core.water_generator import HydrologySystemGenerator
-                    self._generator_instances[generator_type.value] = HydrologySystemGenerator()
+                    self._generator_instances[generator_type.value] = HydrologySystemGenerator(
+                        data_lod_manager=self.data_lod_manager, shader_manager=self.shader_manager)
                 elif generator_type == GeneratorType.BIOME:
                     from core.biome_generator import BiomeClassificationSystem
-                    self._generator_instances[generator_type.value] = BiomeClassificationSystem()
+                    self._generator_instances[generator_type.value] = BiomeClassificationSystem(
+                        data_lod_manager=self.data_lod_manager, shader_manager=self.shader_manager)
                 elif generator_type == GeneratorType.SETTLEMENT:
                     from core.settlement_generator import SettlementGenerator
-                    self._generator_instances[generator_type.value] = SettlementGenerator()
+                    self._generator_instances[generator_type.value] = SettlementGenerator(
+                        data_lod_manager=self.data_lod_manager, shader_manager=self.shader_manager)
 
             except ImportError as e:
                 self.logger.error(f"Failed to import generator for {generator_type.value}: {e}")
@@ -1117,10 +1117,17 @@ class GenerationOrchestrator(QObject):
         return dependents
 
     def invalidate_downstream_dependencies(self, generator_type: GeneratorType,
-                                         affected_generators: Set[GeneratorType]):
+                                         affected_generators: Set[GeneratorType],
+                                         target_lod: int = None):
         """
         Funktionsweise: Invalidiert Cache und LOD-Status für alle betroffenen Generatoren
         Parameter: generator_type, affected_generators
+        Parameter: target_lod - wenn gesetzt, ziehen betroffene Generatoren automatisch
+            auf dasselbe Ziel-LOD mit (z.B. eine map_size-Änderung an Terrain hebt das
+            Final-LOD an - die dadurch invalidierten 5 anderen Generatoren sollen
+            dasselbe neue Final-LOD anstreben, statt für immer bei ihrem alten,
+            niedrigeren Ziel-LOD zu verharren). request() kann Ziel-LODs nur anheben,
+            nie absenken (siehe CalculatorDispatcher.request()), also risikolos hier.
         """
         for affected_type in affected_generators:
             # DataManager Cache invalidieren
@@ -1128,6 +1135,9 @@ class GenerationOrchestrator(QObject):
 
             # LOD-Status zurücksetzen
             self.reset_lod_status(affected_type)
+
+            if target_lod is not None:
+                self.calculator_dispatcher.request(affected_type.value, target_lod)
 
             self.logger.info(f"Invalidated {affected_type.value} due to {generator_type.value} changes")
 
@@ -1137,11 +1147,17 @@ class GenerationOrchestrator(QObject):
 
     def reset_lod_status(self, generator_type: GeneratorType):
         """
-        Funktionsweise: Setzt LOD-Completion-Status für Generator zurück
+        Funktionsweise: Setzt den Rechenstand für Generator zurück
         Parameter: generator_type
+        Aufgabe: Setzt completed_lod für ALLE Calculator-Knoten dieses Generators
+            im globalen CalculatorDispatcher auf 0 zurück (ersetzt das alte
+            lod_completion_status[generator_type.value] = {}) - über
+            reset_completed(), nicht direktes Dict-Schreiben, siehe dortigen
+            Docstring (sonst Endlosschleife in get_next_ready_batch() bei jeder
+            Regenerierung nach einem bereits vollständig abgeschlossenen Lauf)
         """
-        self.lod_completion_status[generator_type.value] = {}
-        # Wird dynamisch gefüllt bei LOD-Completions
+        for cid in self._calculator_ids_for(generator_type.value):
+            self.calculator_dispatcher.reset_completed(cid)
 
     def get_current_parameters(self, generator_type: GeneratorType) -> Dict[str, Any]:
         """
@@ -1159,9 +1175,9 @@ class GenerationOrchestrator(QObject):
         """
         return {
             "data_lod_manager_usage": self.data_lod_manager.get_memory_usage(),
-            "active_threads": len(self.generation_threads),
-            "processing_requests": len(self.processing_requests),
-            "queued_requests": len(self.dependency_queue.queued_requests)
+            "active_threads": len(self.calculator_threads),
+            "active_requests": len(self.active_requests_by_generator),
+            "pending_calculators": len(self.calculator_dispatcher.get_pending_nodes()),
         }
 
     def cancel_generation(self, generator_type: str) -> bool:
@@ -1169,27 +1185,36 @@ class GenerationOrchestrator(QObject):
         Funktionsweise: Bricht laufende Generation für spezifischen Generator ab
         Parameter: generator_type
         Return: bool - Cancellation erfolgreich
+        Aufgabe: Stoppt alle in-flight Calculator-Threads dieses Generators und
+            räumt dessen Request-Tracking auf - rührt bewusst NICHT an
+            target_lod/completed_lod im CalculatorDispatcher (das ist
+            invalidate_downstream_dependencies()/reset_lod_status() vorbehalten,
+            die nur bei tatsächlich wirkungsvollen Parameter-Änderungen greifen)
         """
-        cancelled_requests = []
+        calc_ids = set(self._calculator_ids_for(generator_type))
+        in_flight_for_generator = [cid for cid in calc_ids if cid in self.in_flight_calculators]
+        request = self.active_requests_by_generator.get(generator_type)
 
-        # Aktive Requests finden und abbrechen
-        for request in list(self.processing_requests):
-            if request.generator_type.value == generator_type:
-                cancelled_requests.append(request)
+        if not in_flight_for_generator and not request:
+            return False
 
-        # Queue-Requests finden und entfernen
-        queue_requests_to_cancel = [req for req in self.dependency_queue.queued_requests.values()
-                                   if req.generator_type.value == generator_type]
+        with QMutexLocker(self.thread_mutex):
+            for thread_key, thread in list(self.calculator_threads.items()):
+                if thread.calculator_id not in calc_ids:
+                    continue
+                if thread.isRunning():
+                    thread.terminate()
+                    thread.wait(3000)
+                del self.calculator_threads[thread_key]
+                self.in_flight_calculators.discard(thread.calculator_id)
 
-        # Alle gefundenen Requests abbrechen
-        for request in cancelled_requests + queue_requests_to_cancel:
-            self.cleanup_timed_out_request(request)
+        if request:
+            self.active_requests_by_generator.pop(generator_type, None)
+            self.active_request_mapping.pop(request.request_id, None)
+            self.state_tracker.set_request_failed(request, "Cancelled")
 
-        if cancelled_requests or queue_requests_to_cancel:
-            self.logger.info(f"Cancelled {len(cancelled_requests + queue_requests_to_cancel)} requests for {generator_type}")
-            return True
-
-        return False
+        self.logger.info(f"Cancelled generation for {generator_type}")
+        return True
 
     def cleanup_resources(self):
         """
@@ -1204,152 +1229,74 @@ class GenerationOrchestrator(QObject):
 
         # Alle Threads stoppen
         with QMutexLocker(self.thread_mutex):
-            for thread in self.generation_threads.values():
+            for thread in self.calculator_threads.values():
                 if thread.isRunning():
                     thread.terminate()
                     thread.wait(3000)  # 3s Timeout
+            self.calculator_threads.clear()
 
-        # Queues leeren
-        if hasattr(self, 'dependency_queue'):
-            self.dependency_queue.clear()
-        self.processing_requests.clear()
-        self.lod_progression_queue.clear()
+        self.in_flight_calculators.clear()
+        self.active_requests_by_generator.clear()
         self.active_request_mapping.clear()
 
         self.logger.info("Generation orchestrator cleanup completed")
 
 
-class GenerationThread(QThread):
+class CalculatorThread(QThread):
     """
-    Funktionsweise: Worker-Thread für einzelne Generator-Ausführung mit homogenen Signals
-    Aufgabe: Background-Generation ohne UI-Blocking
+    Funktionsweise: Worker-Thread für EINEN einzelnen Calculator-Knoten (nicht
+    mehr für einen kompletten Generator-LOD-Durchlauf)
+    Aufgabe: Background-Ausführung von generator_instance._calc_<name>() ohne
+        UI-Blocking - Grundbaustein des LOD-Lockstep-Umbaus (Tracker #16): jeder
+        der 34 Calculator-Knoten läuft als eigener, unabhängig dispatchbarer
+        Thread, gesteuert vom globalen CalculatorDispatcher (siehe
+        gui/OldManagers/calculator_graph.py). Die _calc_*-Methode liest ihre
+        Inputs selbst über DataLODManager.get_calculator_output()/
+        get_terrain_data_combined() und persistiert ihren Output selbst über
+        set_calculator_output() (siehe core/*_generator.py) - gibt also nichts
+        zurück, anders als das alte GenerationThread, das ein komplettes
+        Domain-Objekt zurückbekam.
     """
 
-    generation_completed = pyqtSignal(str, str, int, bool,
-                                      dict)  # (request_id, generator_type, lod_level, success, result_data)
-    generation_progress = pyqtSignal(int, str)  # (progress, message) - homogen für alle Tabs
+    calculator_completed = pyqtSignal(str, int, bool, str)  # (calculator_id, lod_level, success, error_message)
+    # settlement.plot_nodes-spezifisch (siehe [[project-settlement-plot-physics-rebuild]]
+    # Teil F, GenerationOrchestrator.settlement_plot_live_update) - trägt einen
+    # Snapshot-Payload (object), gesetzt via generator_instance.live_plot_callback.
+    settlement_plot_live_update = pyqtSignal(object)
 
-    def __init__(self, generator_instance, generator_type: GeneratorType, lod_level: int,
-                 parameters: Dict[str, Any], data_lod_manager, request_id: str, parent=None):
+    def __init__(self, generator_instance, calculator_id: str, lod_level: int, parent=None):
         super().__init__(parent)
         self.generator_instance = generator_instance
-        self.generator_type = generator_type
+        self.calculator_id = calculator_id
         self.lod_level = lod_level
-        self.parameters = parameters
-        self.data_lod_manager = data_lod_manager
-        self.request_id = request_id
 
     def run(self):
-        """
-        Funktionsweise: Thread-Execution für Generator mit homogenen Signals
-        """
+        """Funktionsweise: Thread-Execution für einen einzelnen Calculator-Knoten"""
         try:
-            # Progress-Callback definieren
-            def progress_callback(step_name, progress_percent, detail_message):
-                self.generation_progress.emit(progress_percent, f"{step_name}: {detail_message}")
+            # Live-Fortschritts-Callback nur für settlement.plot_nodes (siehe
+            # settlement_plot_live_update oben) - self.settlement_plot_live_update.emit
+            # läuft hier zwar im Worker-Thread, Qt liefert die verbundene Ziel-
+            # Methode (GenerationOrchestrator.settlement_plot_live_update.emit)
+            # aber automatisch per QueuedConnection an den GUI-Thread aus, da
+            # Sender und Empfänger in unterschiedlichen Threads leben - der
+            # Snapshot-Payload wird dabei kopiert (kein geteilter, mutable
+            # Zustand über die Thread-Grenze).
+            if self.calculator_id == "settlement.plot_nodes" and hasattr(self.generator_instance, "live_plot_callback"):
+                self.generator_instance.live_plot_callback = self._emit_live_plot_update
 
-            # Generator ausführen: pro Generator-Typ die passende Einstiegsmethode
-            if self.generator_type == GeneratorType.TERRAIN:
-                result = self.generator_instance.calculate_heightmap(self.parameters, self.lod_level)
-            elif self.generator_type == GeneratorType.GEOLOGY:
-                heightmap_combined = self.data_lod_manager.get_terrain_data_combined("heightmap", self.lod_level)
-                slopemap = self.data_lod_manager.get_terrain_data_lod("slopemap", self.lod_level)
-                if heightmap_combined is None or slopemap is None:
-                    raise ValueError("Missing terrain dependencies (heightmap_combined/slopemap) for geology generation")
+            method_name = "_calc_" + self.calculator_id.split(".", 1)[1]
+            method = getattr(self.generator_instance, method_name)
+            method(self.calculator_id, self.lod_level)
 
-                # Kumuliertes Tektonik-Höhen-Delta aus dem letzten abgeschlossenen Geology-LOD
-                # holen (None beim allerersten Lauf) - derselbe Akkumulations-Ansatz wie bei Water.
-                previous_height_delta = self.data_lod_manager.get_geology_data_lod("height_delta", self.lod_level)
-
-                result = self.generator_instance.calculate_geology(
-                    heightmap_combined, slopemap, self.parameters, self.lod_level,
-                    previous_height_delta=previous_height_delta)
-            elif self.generator_type == GeneratorType.WEATHER:
-                heightmap_combined = self.data_lod_manager.get_terrain_data_combined("heightmap", self.lod_level)
-                shadowmap = self.data_lod_manager.get_terrain_data_lod("shadowmap", self.lod_level)
-                if heightmap_combined is None or shadowmap is None:
-                    raise ValueError("Missing terrain dependencies (heightmap_combined/shadowmap) for weather generation")
-                result = self.generator_instance.calculate_weather_system(
-                    heightmap_combined, shadowmap, self.parameters, self.lod_level)
-            elif self.generator_type == GeneratorType.WATER:
-                dependencies = {
-                    "heightmap": self.data_lod_manager.get_terrain_data_combined("heightmap", self.lod_level),
-                    "slopemap": self.data_lod_manager.get_terrain_data_lod("slopemap", self.lod_level),
-                    "hardness_map": self.data_lod_manager.get_geology_data_lod("hardness_map", self.lod_level),
-                    "rock_map": self.data_lod_manager.get_geology_data_lod("rock_map", self.lod_level),
-                    "precip_map": self.data_lod_manager.get_weather_data_lod("precip_map", self.lod_level),
-                    "temp_map": self.data_lod_manager.get_weather_data_lod("temp_map", self.lod_level),
-                    "wind_map": self.data_lod_manager.get_weather_data_lod("wind_map", self.lod_level),
-                    "humid_map": self.data_lod_manager.get_weather_data_lod("humid_map", self.lod_level),
-                }
-                missing = [key for key, value in dependencies.items() if value is None]
-                if missing:
-                    raise ValueError(f"Missing dependencies for water generation: {', '.join(missing)}")
-
-                # Kumulierte Erosion/Sedimentation aus dem letzten abgeschlossenen Water-LOD holen
-                # (None beim allerersten Lauf) - der Generator addiert seine frische Berechnung
-                # dieser Passage darauf, statt bei der Basis-Heightmap neu zu starten.
-                previous_erosion_map = self.data_lod_manager.get_water_data_lod("erosion_map", self.lod_level)
-                previous_sedimentation_map = self.data_lod_manager.get_water_data_lod(
-                    "sedimentation_map", self.lod_level)
-
-                result = self.generator_instance.calculate_hydrology(
-                    dependencies, self.parameters, self.lod_level,
-                    previous_erosion_map=previous_erosion_map,
-                    previous_sedimentation_map=previous_sedimentation_map)
-            elif self.generator_type == GeneratorType.BIOME:
-                multi_input_data = {
-                    "heightmap": self.data_lod_manager.get_terrain_data_combined("heightmap", self.lod_level),
-                    "temp_map": self.data_lod_manager.get_weather_data_lod("temp_map", self.lod_level),
-                    "precip_map": self.data_lod_manager.get_weather_data_lod("precip_map", self.lod_level),
-                    "soil_moist_map": self.data_lod_manager.get_water_data_lod("soil_moist_map", self.lod_level),
-                    "water_biomes_map": self.data_lod_manager.get_water_data_lod("water_biomes_map", self.lod_level),
-                }
-                missing = [key for key, value in multi_input_data.items() if value is None]
-                if missing:
-                    raise ValueError(f"Missing dependencies for biome generation: {', '.join(missing)}")
-                result = self.generator_instance.calculate_biomes(
-                    multi_input_data, self.parameters, self.lod_level)
-            elif self.generator_type == GeneratorType.SETTLEMENT:
-                # SettlementGenerator holt seine Dependencies selbst über _get_dependencies() -
-                # jetzt LOD-genau wie bei den anderen 5 Generatoren (self.lod_level als
-                # explizites Ceiling), nicht mehr "bestes global verfügbares LOD" (siehe
-                # [[project-generation-pipeline-dependencies]] zur LOD-Synchronisation).
-                dependencies = self.generator_instance._get_dependencies(self.data_lod_manager, self.lod_level)
-                result = self.generator_instance._execute_generation(
-                    self.lod_level, dependencies, self.parameters)
-            else:
-                logging.getLogger(__name__).warning(
-                    f"Generator-Dispatch für {self.generator_type.value} noch nicht verdrahtet")
-                result = None
-
-            # Success basierend auf Result
-            success = result is not None
-
-            # result_data für homogene Tab-Integration
-            result_data = {
-                "generator_type": self.generator_type.value,
-                "lod_level": self.lod_level,
-                "parameters_used": self.parameters,
-                "timestamp": time.time(),
-                "success": success,
-                "generator_output": result
-            }
-
-            self.generation_completed.emit(
-                self.request_id,
-                self.generator_type.value,
-                self.lod_level,
-                success,
-                result_data
-            )
+            self.calculator_completed.emit(self.calculator_id, self.lod_level, True, "")
 
         except Exception as e:
-            # Error-Handling mit homogenen Signals
-            self.generation_completed.emit(
-                self.request_id,
-                self.generator_type.value,
-                self.lod_level,
-                False,
-                {"error": str(e)}
-            )
+            logging.getLogger(__name__).error(
+                f"Calculator '{self.calculator_id}' failed at LOD {self.lod_level}: {e}")
+            self.calculator_completed.emit(self.calculator_id, self.lod_level, False, str(e))
+        finally:
+            if self.calculator_id == "settlement.plot_nodes" and hasattr(self.generator_instance, "live_plot_callback"):
+                self.generator_instance.live_plot_callback = None
+
+    def _emit_live_plot_update(self, snapshot):
+        self.settlement_plot_live_update.emit(snapshot)

@@ -50,9 +50,45 @@ die Grundlage für einen künftigen Umbau auf echte Calculator-/LOD-Synchronisat
 | 31 | Roadsites | `settlement_generator.py:calculate_roadsites` | `roads`(30) | `roadsite_list` | Settlement |
 | 32 | Zivilisations-Einfluss | `settlement_generator.py:CivilizationInfluenceMapper` | `heightmap`, `slopemap`(3), `settlement_list`(29), `roads`(30), `roadsite_list`(31) | `civ_map` | Settlement |
 | 33 | Landmarks | `settlement_generator.py:calculate_landmarks` | `civ_map`(32), `heightmap`, `slopemap`(3) | `landmark_list` | Settlement |
-| 34 | Plots | `settlement_generator.py:PlotNodeSystem` | `civ_map`(32), `settlement_list`(29), `heightmap`, `biome_map`(25) | `plot_nodes`, `plots`, `plot_map` | Settlement |
+| 34 | Plots | `settlement_generator.py:PlotNodeSystem` | `civ_map`(32), `settlement_list`(29), `roads`(30), `heightmap`, `biome_map`(25) | `plot_nodes`, `plots`, `plot_map`, `plot_edges` | Settlement |
+| 35 | Stadtgrenze | `settlement_generator.py:CityBoundaryAnalyzer` | `settlement_list`(29), `heightmap`, `slopemap`(3) | `city_mask`, `city_cost_map` | Settlement |
+| 36 | Innerstädtische Blöcke | `settlement_generator.py:CityBlockSystem` | `city_mask`(35), `settlement_list`(29), `heightmap` | `street_mask`, `house_parcel_map` | Settlement |
+| 37 | Landschafts-Voronoi | `settlement_generator.py:LandscapeVoronoiSystem` | `city_mask`(35), `heightmap`, `slopemap`(3) | `voronoi_seed_positions`, `voronoi_cell_map` | Settlement |
+| 38 | Außenverbindungen | `settlement_generator.py:calculate_outer_connections` | `settlement_list`(29), `suitability_map`(28), `slopemap`(3) | `outer_roads` | Settlement |
+| 39 | Landmark-Anbindung | `settlement_generator.py:calculate_landmark_roads` | `landmark_list`(33), `roads`(30), `slopemap`(3) | `landmark_roads` | Settlement |
 
-(29 tatsächliche Calculator + der kaputte Rückkopplungsschritt #22 = 30 Zeilen in der Tabelle.)
+(29 tatsächliche Calculator + der kaputte Rückkopplungsschritt #22 = 30 Zeilen in der Tabelle,
+plus 5 neue Settlement-Knoten #35-#39 aus dem Settlement-Rework = 39 aktive Calculators in
+`gui/OldManagers/calculator_graph.py`.)
+
+**Settlement-Rework (Ticket #4 in docs/backlog.md), Stand 2026-07-09:** #35 (Stadtgrenze),
+#36 (innerstädtische Blöcke) und #37 (Landschafts-Voronoi) hängen nur von `settlement_list`(29)
+ab, laufen also parallel zu #30-#33. #37 nutzt einen terrain-cost-gewichteten Multi-Source-Flood
+(`_terrain_cost_voronoi()`, CPU-Referenz fürs spätere GPU-JFA - siehe
+`shaders/water/jumpFloodLakes.comp` für dasselbe Muster bei Lake-Detection) und einen Warm-Start
+über LOD-Stufen hinweg (Seed-Positionen relativ 0..1 gespeichert, siehe
+`_calc_landscape_voronoi()`). #36 nutzt denselben Flood (maskiert auf den Stadt-Footprint) für die
+Hausparzellen-Zuweisung, aber ein eigenes Minimum-Spanning-Tree-Straßenskelett zwischen
+Haus-Ankerpunkten statt Voronoi-Kanten (Häuser richten sich an echten Wegen aus). #30
+(Straßennetz) bevorzugt jetzt den Verlauf entlang der Voronoi-Zellgrenzen von #37 (Edge-Bias-
+Kostenterm in `PathfindingSystem`, siehe `_voronoi_edge_distance_map()`). #38/#39 sind
+deterministische Zusatzverbindungen (Außenrand bzw. Landmarks ans Straßennetz) ohne
+Zufallsmechanismus - das dekorative Zufalls-Wegenetz ist bewusst auf Phase 2 verschoben.
+Alle 5 neuen Knoten sind CPU-Referenzimplementierungen und per Smoke-Test verifiziert.
+
+**#34 (Plots) überarbeitet, Stand 2026-07-09 (User-Feedback-Runde 3):** Node-Abstoßung ist
+jetzt civ-wert-abhängig (hoher Civ-Wert -> kleinerer Mindestabstand -> kleinere Plots), jede
+Delaunay-Kante ist über eine neue `PlotEdge`-Struktur adressierbar (`edge_id`, `node_a`,
+`node_b`, Länge, Wegintegral-Höhenkosten statt Endpunkt-Differenz). Neuer Schritt
+`simulate_plot_traffic()`: jede Plotnode simuliert eine Familie, die einmal zur nächsten
+Siedlung läuft (Multi-Source-Dijkstra über den kleinen Plot-Graphen, nicht das Pixel-Grid),
+plus Inter-City-Traffic zwischen durch #30 verbundenen Siedlungspaaren - klassifiziert Kanten
+ab Traffic-Schwellwert zu "path"/"road". Deshalb hängt #34 jetzt zusätzlich von #30 (`roads`)
+ab. Noch offen: das bisherige #34-Ergebnis wird noch nicht mit dem neuen Landschafts-Voronoi
+(#37) verschmolzen/eingeschränkt, GPU-Anbindung (Ticket #40) für #35-#37 noch
+nicht umgesetzt (CPU-Referenz ist aber bereits so geschrieben, dass sie 1:1 auf den GPU-JFA-
+Shader übertragbar ist), und die UI (`settlement_tab.py`) zeigt die neuen Datenstrukturen noch
+nicht an.
 
 ## Parallelisierbare Geschwister-Paare
 

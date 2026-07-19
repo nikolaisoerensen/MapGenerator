@@ -37,9 +37,8 @@ Output:
 import numpy as np
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 from collections import deque
+from typing import Dict, Any, List, Optional
 import logging
-
-from gui.OldManagers.calculator_graph import CalculatorRoundScheduler
 
 
 class BiomeData:
@@ -96,6 +95,39 @@ class BiomeClassificationSystem:
         self.base_biome_classifier = None
         self.super_biome_override_system = None
         self.supersampling_manager = None
+
+    def set_active_parameters(self, parameters: Dict[str, Any]):
+        """Setzt die Parameter, die alle _calc_*-Methoden bis zur nächsten frischen
+        Anfrage verwenden (vom GenerationOrchestrator aufgerufen). Biome speichert
+        Parameter als Instanz-Attribute (self.biome_temp_factor etc.), nicht als
+        eigenes dict - _update_parameters() übernimmt das bereits."""
+        self._update_parameters(parameters)
+
+    def _ensure_data_lod_manager(self):
+        """Lazy-Fallback für Standalone-Nutzung (Tests, calculate_biomes() ohne
+        injizierten Manager) - die echte Pipeline injiziert immer einen über
+        GenerationOrchestrator.get_generator_instance()."""
+        if self.data_lod_manager is None:
+            from gui.OldManagers.data_lod_manager import DataLODManager
+            self.data_lod_manager = DataLODManager()
+        return self.data_lod_manager
+
+    def _ensure_sub_components(self):
+        """Lazy-Initialisierung der Sub-Komponenten mit den aktuellen Parametern
+        (wie zuvor in _try_cpu_classification(), jetzt auch von den einzelnen
+        _calc_*-Methoden genutzt)."""
+        if not self.base_biome_classifier:
+            self.base_biome_classifier = BaseBiomeClassifier(
+                self.biome_temp_factor, self.biome_wetness_factor,
+                self.elevation_factor, self.soil_moisture_factor)
+        if not self.super_biome_override_system:
+            self.super_biome_override_system = SuperBiomeOverrideSystem(
+                self.sea_level, self.bank_width, self.edge_softness,
+                self.alpine_level, self.snow_level, self.cliff_slope,
+                shader_manager=self.shader_manager)
+        if not self.supersampling_manager:
+            self.supersampling_manager = SupersamplingManager(
+                self.biome_seed, self.supersampling_quality, shader_manager=self.shader_manager)
 
     def _initialize_base_biomes(self):
         """
@@ -234,8 +266,11 @@ class BiomeClassificationSystem:
             mean_temp_low = np.mean(temp_map[heightmap < np.percentile(heightmap, 25)])
             mean_temp_high = np.mean(temp_map[heightmap > np.percentile(heightmap, 75)])
 
-            # Höhere Lagen sollten tendenziell kälter sein
-            if mean_temp_low <= mean_temp_high:
+            # Höhere Lagen sollten tendenziell kälter sein - die Bedingung war
+            # umgekehrt: "low <= high" (Tiefland kälter/gleich Hochland) wurde als
+            # gültig durchgewunken, das eigentlich realistische "low > high"
+            # (Tiefland wärmer) loggte fälschlich eine "inverted"-Warnung.
+            if mean_temp_low >= mean_temp_high:
                 return True
             else:
                 self.logger.warning("Temperature-elevation relationship appears inverted")
@@ -304,51 +339,52 @@ class BiomeClassificationSystem:
         """
         CPU-Fallback mit optimierten NumPy-Vectorization und Multiprocessing
 
-        Läuft intern über CalculatorRoundScheduler statt einer flachen Aufruf-
-        Sequenz (siehe gui/OldManagers/calculator_graph.py - Biome-Calculator-
-        Knoten #23-#27 aus docs/generation_pipeline_dependencies.md). Phase des
-        LOD-Lockstep-Umbaus (Tracker #16): nur Biome-intern zerlegt, externes
-        Verhalten (_try_cpu_classification() Signatur/Rückgabe) bleibt unverändert.
+        Läuft über die einzeln aufrufbaren _calc_*-Methoden (siehe
+        gui/OldManagers/calculator_graph.py - Biome-Calculator-Knoten #23-#27 aus
+        docs/generation_pipeline_dependencies.md). Die echte GUI-Pipeline
+        (GenerationOrchestrator) ruft dieselben Methoden ab jetzt einzeln über den
+        globalen CalculatorDispatcher auf (Tracker #16 LOD-Lockstep-Umbau) - der
+        Effekt ist identisch, da beide Wege denselben Storage nutzen. Externes
+        Verhalten (Signatur/Rückgabe, Mutation des übergebenen biome_data) bleibt
+        unverändert.
         """
         try:
             self.logger.info("Starting CPU-based biome classification")
 
-            # Sub-Komponenten initialisieren
-            if not self.base_biome_classifier:
-                self.base_biome_classifier = BaseBiomeClassifier(
-                    self.biome_temp_factor, self.biome_wetness_factor,
-                    self.elevation_factor, self.soil_moisture_factor)
+            self._ensure_data_lod_manager()
+            self._ensure_sub_components()
 
-            if not self.super_biome_override_system:
-                self.super_biome_override_system = SuperBiomeOverrideSystem(
-                    self.sea_level, self.bank_width, self.edge_softness,
-                    self.alpine_level, self.snow_level, self.cliff_slope)
+            lod_level = biome_data.lod_level
 
-            if not self.supersampling_manager:
-                self.supersampling_manager = SupersamplingManager(self.biome_seed, self.supersampling_quality)
+            # Standalone-Convenience-Pfad: input_data kommt hier als direktes dict,
+            # nicht aus dem DataLODManager - für die _calc_*-Methoden (die jetzt
+            # IMMER aus dem Storage lesen) gespiegelt, analog zu Geology/Water.
+            self.data_lod_manager.set_calculator_output(
+                "terrain.redistribution", lod_level, {"heightmap": input_data['heightmap']})
+            self.data_lod_manager.set_calculator_output(
+                "weather.temperature", lod_level, {"temp_map": input_data['temp_map']})
+            self.data_lod_manager.set_calculator_output(
+                "weather.precipitation", lod_level, {"precip_map": input_data['precip_map']})
+            self.data_lod_manager.set_calculator_output(
+                "water.soil_moisture", lod_level, {"soil_moist_map": input_data['soil_moist_map']})
+            self.data_lod_manager.set_calculator_output(
+                "water.flow_network", lod_level, {"water_biomes_map": input_data['water_biomes_map']})
 
-            context = {"input_data": input_data}
-
-            scheduler = CalculatorRoundScheduler(
-                calculator_ids=[
-                    "biome.base_classification", "biome.super_override", "biome.integrate_layers",
-                    "biome.supersampling", "biome.climate_classification",
-                ],
-                executors={
-                    "biome.base_classification": self._calc_base_classification,
-                    "biome.super_override": self._calc_super_override,
-                    "biome.integrate_layers": self._calc_integrate_layers,
-                    "biome.supersampling": self._calc_supersampling,
-                    "biome.climate_classification": self._calc_climate_classification,
-                },
-            )
-            scheduler.run_round(target_lod=biome_data.lod_level, context=context)
+            for calculator_id in (
+                "biome.base_classification", "biome.super_override", "biome.integrate_layers",
+                "biome.supersampling", "biome.climate_classification",
+            ):
+                getattr(self, "_calc_" + calculator_id.split(".", 1)[1])(calculator_id, lod_level)
 
             # Results setzen
-            biome_data.biome_map = context["final_biome_map"]
-            biome_data.biome_map_super = context["biome_map_super"]
-            biome_data.super_biome_mask = context["super_biome_mask"]
-            biome_data.climate_classification = context["climate_classification"]
+            biome_data.biome_map = self.data_lod_manager.get_calculator_output(
+                "biome.integrate_layers", "biome_map", lod_level)
+            biome_data.biome_map_super = self.data_lod_manager.get_calculator_output(
+                "biome.supersampling", "biome_map_super", lod_level)
+            biome_data.super_biome_mask = self.data_lod_manager.get_calculator_output(
+                "biome.super_override", "super_biome_mask", lod_level)
+            biome_data.climate_classification = self.data_lod_manager.get_calculator_output(
+                "biome.climate_classification", "climate_classification", lod_level)
 
             return True
 
@@ -356,40 +392,126 @@ class BiomeClassificationSystem:
             self.logger.warning(f"CPU classification error: {e}")
             return False
 
-    def _calc_base_classification(self, context) -> None:
+    def assemble_biome_data(self, lod_level: int, parameters: Dict[str, Any]):
+        """
+        Funktionsweise: Baut das finale BiomeData-Objekt aus den einzeln
+        gespeicherten Calculator-Outputs zusammen (inkl. Statistics/Validity-State)
+        Aufgabe: Wird vom GenerationOrchestrator aufgerufen, sobald alle 5 Biome-
+            Calculator-Knoten ein LOD abgeschlossen haben (siehe Task 18 im
+            LOD-Lockstep-Umbau)
+        """
+        final_biome_map = self.data_lod_manager.get_calculator_output(
+            "biome.integrate_layers", "biome_map", lod_level)
+        biome_map_super = self.data_lod_manager.get_calculator_output(
+            "biome.supersampling", "biome_map_super", lod_level)
+        super_biome_mask = self.data_lod_manager.get_calculator_output(
+            "biome.super_override", "super_biome_mask", lod_level)
+        climate_classification = self.data_lod_manager.get_calculator_output(
+            "biome.climate_classification", "climate_classification", lod_level)
+
+        if final_biome_map is None or super_biome_mask is None:
+            raise ValueError(f"assemble_biome_data: fehlende Calculator-Outputs für LOD {lod_level}")
+
+        biome_data = BiomeData()
+        biome_data.lod_level = lod_level
+        biome_data.actual_size = final_biome_map.shape[0]
+        biome_data.parameter_hash = self._calculate_parameter_hash(parameters)
+        biome_data.biome_map = final_biome_map
+        biome_data.biome_map_super = biome_map_super
+        biome_data.super_biome_mask = super_biome_mask
+        biome_data.climate_classification = climate_classification
+        biome_data.biome_statistics = self._calculate_biome_statistics(biome_data)
+        biome_data.validity_state = self._validate_biome_data(biome_data)
+
+        return biome_data
+
+    def _get_prepared_biome_inputs(self, lod_level: int, needed: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Holt NUR die tatsächlich angeforderten Biome-Dependencies
+        (Terrain/Weather/Water-Outputs) für dieses LOD. `needed` MUSS pro
+        _calc_*-Methode exakt deren echte CALCULATOR_GRAPH-Abhängigkeiten
+        widerspiegeln - sonst würde z.B. biome.climate_classification (haengt
+        laut Graph NUR von weather.temperature/weather.precipitation ab)
+        fälschlich auch auf water.soil_moisture/water.flow_network warten,
+        obwohl der Dispatcher diesen Knoten längst für bereit hält.
+        """
+        if needed is None:
+            needed = ["heightmap", "temp_map", "precip_map", "soil_moist_map", "water_biomes_map"]
+
+        fetchers = {
+            "heightmap": lambda: self.data_lod_manager.get_calculator_combined_heightmap(lod_level),
+            "temp_map": lambda: self.data_lod_manager.get_calculator_output(
+                "weather.temperature", "temp_map", lod_level),
+            "precip_map": lambda: self.data_lod_manager.get_calculator_output(
+                "weather.precipitation", "precip_map", lod_level),
+            "soil_moist_map": lambda: self.data_lod_manager.get_calculator_output(
+                "water.soil_moisture", "soil_moist_map", lod_level),
+            "water_biomes_map": lambda: self.data_lod_manager.get_calculator_output(
+                "water.flow_network", "water_biomes_map", lod_level),
+        }
+
+        values = {key: fetchers[key]() for key in needed}
+        missing = [name for name, value in values.items() if value is None]
+        if missing:
+            raise ValueError(f"Biome: fehlende Dependencies für LOD {lod_level}: {', '.join(missing)}")
+
+        return values
+
+    def _calc_base_classification(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'biome.base_classification' (#23) - Sibling zu super_override"""
-        input_data = context["input_data"]
-        context["base_biome_map"] = self.base_biome_classifier.classify_base_biomes(
-            input_data['heightmap'], input_data['temp_map'],
-            input_data['precip_map'], input_data['soil_moist_map'])
+        self._ensure_sub_components()
+        inputs = self._get_prepared_biome_inputs(
+            lod_level, needed=["heightmap", "temp_map", "precip_map", "soil_moist_map"])
+        base_biome_map = self.base_biome_classifier.classify_base_biomes(
+            inputs['heightmap'], inputs['temp_map'], inputs['precip_map'], inputs['soil_moist_map'])
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"base_biome_map": base_biome_map})
 
-    def _calc_super_override(self, context) -> None:
+    def _calc_super_override(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'biome.super_override' (#24) - Sibling zu base_classification"""
-        input_data = context["input_data"]
+        self._ensure_sub_components()
+        inputs = self._get_prepared_biome_inputs(
+            lod_level, needed=["heightmap", "temp_map", "water_biomes_map", "soil_moist_map"])
         super_biome_mask, super_biome_probabilities = self.super_biome_override_system.apply_super_biome_overrides(
-            input_data['heightmap'], input_data['temp_map'],
-            input_data['water_biomes_map'], input_data['soil_moist_map'])
-        context["super_biome_mask"] = super_biome_mask
-        context["super_biome_probabilities"] = super_biome_probabilities
+            inputs['heightmap'], inputs['temp_map'], inputs['water_biomes_map'], inputs['soil_moist_map'])
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level,
+            {"super_biome_mask": super_biome_mask, "super_biome_probabilities": super_biome_probabilities})
 
-    def _calc_integrate_layers(self, context) -> None:
+    def _calc_integrate_layers(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'biome.integrate_layers' (#25)"""
-        context["final_biome_map"] = self._integrate_biome_layers(
-            context["base_biome_map"], context["super_biome_mask"])
+        base_biome_map = self.data_lod_manager.get_calculator_output(
+            "biome.base_classification", "base_biome_map", lod_level)
+        super_biome_mask = self.data_lod_manager.get_calculator_output(
+            "biome.super_override", "super_biome_mask", lod_level)
+        if base_biome_map is None or super_biome_mask is None:
+            raise ValueError(f"biome.integrate_layers: fehlende Inputs für LOD {lod_level}")
 
-    def _calc_supersampling(self, context) -> None:
+        final_biome_map = self._integrate_biome_layers(base_biome_map, super_biome_mask)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"biome_map": final_biome_map})
+
+    def _calc_supersampling(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'biome.supersampling' (#26)"""
-        context["biome_map_super"] = self.supersampling_manager.apply_supersampling(
-            context["final_biome_map"], context["super_biome_probabilities"])
+        self._ensure_sub_components()
+        final_biome_map = self.data_lod_manager.get_calculator_output(
+            "biome.integrate_layers", "biome_map", lod_level)
+        super_biome_probabilities = self.data_lod_manager.get_calculator_output(
+            "biome.super_override", "super_biome_probabilities", lod_level)
+        if final_biome_map is None or super_biome_probabilities is None:
+            raise ValueError(f"biome.supersampling: fehlende Inputs für LOD {lod_level}")
 
-    def _calc_climate_classification(self, context) -> None:
+        biome_map_super = self.supersampling_manager.apply_supersampling(final_biome_map, super_biome_probabilities)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"biome_map_super": biome_map_super})
+
+    def _calc_climate_classification(self, calculator_id: str, lod_level: int) -> None:
         """
         Calculator-Node 'biome.climate_classification' (#27) - haengt nur von
         temp_map/precip_map ab, kann parallel zu allem anderen in Biome laufen.
         """
-        input_data = context["input_data"]
-        context["climate_classification"] = self._create_climate_classification(
-            input_data['temp_map'], input_data['precip_map'])
+        inputs = self._get_prepared_biome_inputs(lod_level, needed=["temp_map", "precip_map"])
+        climate_classification = self._create_climate_classification(
+            inputs['temp_map'], inputs['precip_map'])
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"climate_classification": climate_classification})
 
     def _try_simple_classification(self, biome_data, input_data):
         """
@@ -510,8 +632,23 @@ class BiomeClassificationSystem:
 
     def _create_climate_classification(self, temp_map, precip_map):
         """
-        Erstellt Whittaker-Klimazone-Zuordnung
+        Erstellt Whittaker-Klimazone-Zuordnung - 3-stufiges Fallback-System
         """
+        # GPU-Shader (Optimal)
+        if self.shader_manager:
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    "biome", "climateClassification", {"temp_map": temp_map, "precip_map": precip_map}, {})
+                if result.get("success"):
+                    return result["climate_map"]
+            except Exception as e:
+                self.logger.warning(f"GPU climate classification failed: {e}, falling back to CPU")
+
+        # CPU-Fallback (Gut)
+        return self._create_climate_classification_cpu(temp_map, precip_map)
+
+    def _create_climate_classification_cpu(self, temp_map, precip_map):
+        """CPU-Implementierung der Whittaker-Klimazone-Zuordnung"""
         height, width = temp_map.shape
         climate_map = np.zeros((height, width), dtype=np.uint8)
 
@@ -713,7 +850,12 @@ class BaseBiomeClassifier:
         self.elevation_factor = elevation_factor
         self.soil_moisture_factor = soil_moisture_factor
 
-        # Base-Biome Definitionen (15 Biome nach Whittaker-Standards)
+        # Base-Biome Definitionen (15 Biome nach Whittaker-Standards). 'temp' und
+        # 'elevation' passen direkt zu temp_map (°C) und heightmap (m). 'precip' und
+        # 'moisture' sind hier bewusst die KLASSISCHEN Whittaker-Referenzwerte in
+        # Jahres-mm (0-4000) bzw. einer Jahres-Feuchte-Skala (0-1500) - siehe
+        # _rescale_precip_moisture_ranges() für die tatsächlich verwendeten,
+        # auf dieses Projekt skalierten Werte.
         self.biome_definitions = {
             0: {'name': 'ice_cap', 'temp': (-40, -5), 'precip': (0, 300), 'elevation': (0, 8000), 'moisture': (0, 200)},
             1: {'name': 'tundra', 'temp': (-15, 5), 'precip': (100, 600), 'elevation': (0, 2000), 'moisture': (100, 400)},
@@ -731,6 +873,38 @@ class BaseBiomeClassifier:
             13: {'name': 'coastal_dunes', 'temp': (5, 35), 'precip': (300, 1500), 'elevation': (0, 100), 'moisture': (200, 800)},
             14: {'name': 'badlands', 'temp': (-5, 45), 'precip': (0, 400), 'elevation': (200, 2500), 'moisture': (0, 200)}
         }
+        self._rescale_precip_moisture_ranges()
+
+    def _rescale_precip_moisture_ranges(self):
+        """
+        Skaliert 'precip'- und 'moisture'-Bereiche von klassischen Jahres-Whittaker-
+        Werten auf die tatsächliche Größenordnung von precip_map/soil_moist_map in
+        diesem Projekt herunter.
+
+        precip_map (core/weather_generator.py) ist eine einzelne Tages-Momentaufnahme
+        in gH2O/m² (kein Jahres-Niederschlag) und erreicht empirisch selbst bei
+        extremen Wetter-Parametern (hohe Temperatur/Wind/Terrain-Faktoren) nur
+        Werte bis ~50 (Default-Parameter: ~0-3) - nie annähernd die klassischen
+        0-4000mm/Jahr. soil_moist_map (core/water_generator.py) ist hart auf 0-100
+        (Prozent) begrenzt, nie die klassischen 0-1500. Ohne diese Reskalierung lag
+        JEDER real erreichbare precip_map/soil_moist_map-Wert weit unterhalb des
+        Minimums fast aller Biome-Bereiche (nur die trockensten Biome wie Desert/
+        Badlands/Ice-Cap haben ein Minimum nahe 0) - die Gauß-Fitness dieser Achsen
+        wurde dadurch für praktisch jedes feuchtere Biom systematisch mit dem
+        "outside_range"-Faktor 0.1 bestraft, unabhängig von der tatsächlichen
+        Feuchte vor Ort. Precipitation-Skala 4000->50 (Faktor 80), Moisture-Skala
+        1500->100 (Faktor 15) - beide behalten die relative Whittaker-Struktur
+        zwischen den 15 Biomen bei, nur die absolute Größenordnung ändert sich.
+        """
+        precip_scale = 50.0 / 4000.0
+        moisture_scale = 100.0 / 1500.0
+
+        for biome_def in self.biome_definitions.values():
+            p_min, p_max = biome_def['precip']
+            biome_def['precip'] = (p_min * precip_scale, p_max * precip_scale)
+
+            m_min, m_max = biome_def['moisture']
+            biome_def['moisture'] = (m_min * moisture_scale, m_max * moisture_scale)
 
     def classify_base_biomes(self, heightmap, temp_map, precip_map, soil_moist_map):
         """
@@ -790,7 +964,8 @@ class SuperBiomeOverrideSystem:
     """
 
     def __init__(self, sea_level=10.0, bank_width=3.0, edge_softness=1.0,
-                 alpine_level=1500.0, snow_level=2000.0, cliff_slope=60.0):
+                 alpine_level=1500.0, snow_level=2000.0, cliff_slope=60.0,
+                 shader_manager=None):
         """
         Initialisiert Super-Biome-Override-System mit Unified-Edge-Softness-Control
         """
@@ -800,6 +975,7 @@ class SuperBiomeOverrideSystem:
         self.alpine_level = alpine_level
         self.snow_level = snow_level
         self.cliff_slope = cliff_slope
+        self.shader_manager = shader_manager
 
         # Super-Biome-Offset (nach 15 Base-Biomes)
         self.super_biome_offset = 15
@@ -847,16 +1023,41 @@ class SuperBiomeOverrideSystem:
 
     def _detect_ocean_connectivity(self, heightmap, water_biomes_map):
         """
-        Flood-Fill von lokalen Minima die mit Kartenrand verbunden sind
+        Flood-Fill von lokalen Minima die mit Kartenrand verbunden sind -
+        3-stufiges Fallback-System
         """
+        # Potentielle Ocean-Bereiche (unter sea_level) - Kurzschluss vorab, damit
+        # weder GPU noch CPU-Pfad bei einer garantiert leeren Maske aufgerufen wird
+        if not np.any(heightmap < self.sea_level):
+            return np.zeros(heightmap.shape, dtype=bool)
+
+        # GPU-Pfad bewusst DEAKTIVIERT (shaders/biome/oceanConnectivity{Seed,
+        # Propagate}.comp existieren, sind korrekt/verifiziert - siehe Session-
+        # Analyse): eine echte, korrekte Wellenausbreitung (nicht Jump-Flooding, das
+        # bei verwinkelten Küstenlinien falsch durch "Wände" springen könnte) braucht
+        # pro Aufruf 4*(width+height) sequenzielle GPU-Passes, um bei stark
+        # gewundenen Küstenlinien Konvergenz zu garantieren. Gemessen: bei 256px
+        # ~390ms GPU vs. ~50ms CPU-BFS - die Python-deque-BFS besucht jeden
+        # erreichbaren Pixel genau einmal und ist hier schlicht die schnellere
+        # Lösung. GPU-Pfad bleibt aus, bis ein Abbruchkriterium (frühzeitiges Ende
+        # bei Konvergenz) implementiert ist.
+        if False and self.shader_manager:
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    "biome", "oceanConnectivity", {"heightmap": heightmap, "sea_level": self.sea_level}, {})
+                if result.get("success"):
+                    return result["ocean_mask"]
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    f"GPU ocean connectivity failed: {e}, falling back to CPU")
+
+        # CPU-Fallback (Gut)
+        return self._detect_ocean_connectivity_cpu(heightmap)
+
+    def _detect_ocean_connectivity_cpu(self, heightmap):
+        """CPU-Implementierung: Flood-Fill von lokalen Minima die mit Kartenrand verbunden sind"""
         height, width = heightmap.shape
         ocean_mask = np.zeros((height, width), dtype=bool)
-
-        # Potentielle Ocean-Bereiche (unter sea_level)
-        potential_ocean = heightmap < self.sea_level
-
-        if not np.any(potential_ocean):
-            return ocean_mask
 
         # Flood-Fill von Kartenrändern
         visited = np.zeros((height, width), dtype=bool)
@@ -892,8 +1093,14 @@ class SuperBiomeOverrideSystem:
         """
         Berechnet Cliff-Probabilities mit Slope-Threshold und Edge-Softness
         """
-        # Gradient berechnen
-        grad_y, grad_x = np.gradient(heightmap)
+        # Gradient berechnen - ohne spacing rechnet np.gradient() mit 1 Pixel = 1m
+        # Horizontal-Abstand, obwohl ein Pixel real ~50-300m abdeckt (siehe
+        # TERRAIN.WORLD_SIZE_KM und core/terrain_generator.py SlopeCalculator für
+        # denselben Bug an anderer Stelle) - das ließ praktisch die gesamte Karte
+        # als Steilhang (>80°) erscheinen, unabhängig vom cliff_slope-Parameter.
+        from gui.config.value_default import TERRAIN
+        spacing = (TERRAIN.WORLD_SIZE_KM * 1000.0) / heightmap.shape[0]
+        grad_y, grad_x = np.gradient(heightmap, spacing)
         slope_magnitude = np.sqrt(grad_x**2 + grad_y**2)
         slope_degrees = np.degrees(np.arctan(slope_magnitude))
 
@@ -994,17 +1201,49 @@ class SupersamplingManager:
     2x2-Supersampling mit diskretisierter Zufalls-Rotation für Natural-Biome-Transitions
     """
 
-    def __init__(self, biome_seed=42, supersampling_quality=1.0):
+    def __init__(self, biome_seed=42, supersampling_quality=1.0, shader_manager=None):
         """
         Initialisiert Supersampling-Manager mit reproduzierbarer Randomization
         """
         self.biome_seed = biome_seed
         self.supersampling_quality = supersampling_quality
+        self.shader_manager = shader_manager
+
+    _PROBABILITY_KEYS = ("cliff", "beach", "lake_edge", "river_bank", "snow_level", "alpine_level")
 
     def apply_supersampling(self, biome_map, super_biome_probabilities):
         """
-        Wendet 2x2-Supersampling mit diskretisierter Rotation an
+        Wendet 2x2-Supersampling mit diskretisierter Rotation an - 3-stufiges
+        Fallback-System (GPU nur, wenn super_biome_probabilities exakt die von
+        apply_super_biome_overrides() gelieferten 6 Keys in bekannter Reihenfolge hat).
         """
+        if self.shader_manager and super_biome_probabilities and \
+                tuple(super_biome_probabilities.keys()) == self._PROBABILITY_KEYS:
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    "biome", "supersampling",
+                    {
+                        "biome_map": biome_map,
+                        "cliff_prob": super_biome_probabilities["cliff"],
+                        "beach_prob": super_biome_probabilities["beach"],
+                        "lake_edge_prob": super_biome_probabilities["lake_edge"],
+                        "river_bank_prob": super_biome_probabilities["river_bank"],
+                        "snow_prob": super_biome_probabilities["snow_level"],
+                        "alpine_prob": super_biome_probabilities["alpine_level"],
+                        "biome_seed": self.biome_seed,
+                        "supersampling_quality": self.supersampling_quality,
+                    },
+                    {}
+                )
+                if result.get("success"):
+                    return result["biome_map_super"]
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"GPU supersampling failed: {e}, falling back to CPU")
+
+        return self._apply_supersampling_cpu(biome_map, super_biome_probabilities)
+
+    def _apply_supersampling_cpu(self, biome_map, super_biome_probabilities):
+        """CPU-Implementierung des 2x2-Supersampling mit diskretisierter Rotation"""
         height, width = biome_map.shape
         super_height, super_width = height * 2, width * 2
         biome_map_super = np.zeros((super_height, super_width), dtype=np.uint8)

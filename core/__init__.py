@@ -54,10 +54,12 @@ from .settlement_generator import (
     TerrainSuitabilityAnalyzer,
     PathfindingSystem,
     CivilizationInfluenceMapper,
-    PlotNodeSystem,
+    PlotPhysicsSystem,
     Location,
     Plot,
-    PlotNode
+    PlotNode,
+    PlotCore,
+    PlotEdge
 )
 
 # Version Info
@@ -103,7 +105,10 @@ __all__ = [
     'TerrainSuitabilityAnalyzer',
     'PathfindingSystem',
     'CivilizationInfluenceMapper',
+    'PlotPhysicsSystem',
     'PlotNode',
+    'PlotCore',
+    'PlotEdge',
     'Location',
     'Plot'
 ]

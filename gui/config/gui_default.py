@@ -79,20 +79,79 @@ class CanvasSettings:
     CANVAS_2D = {
         "background_color": "#2c3e50",
         "grid_color": "#34495e",
-        "contour_colors": ["#3498db", "#e74c3c", "#f39c12"],
+        # Kein Blau mehr (sah wie Wasser aus, siehe elevation_vmin/vmax unten) -
+        # matplotlib zyklt durch diese Liste je Contour-Level, betraf also nicht
+        # nur niedrige Höhen sondern Linien über die ganze Karte verteilt.
+        "contour_colors": ["#7f8c8d", "#e74c3c", "#f39c12"],
         "dpi": 100,
         # Feste Höhen-Farbskala (Meter) statt Auto-Skalierung pro Heightmap,
         # damit z.B. ein 200m-Hügel und ein 3500m-Berg nicht dieselbe volle
         # Farbspanne bekommen - entspricht realen topografischen Karten.
         # Werte oberhalb von elevation_vmax clippen auf die höchste Farbe.
         "elevation_vmin": 0.0,
-        "elevation_vmax": 4000.0
+        "elevation_vmax": 4000.0,
+        # Feste Farbskalen pro Daten-Layer (colormap_name, vmin, vmax) - ersetzt
+        # die bisherige Auto-Skalierung pro Frame (matplotlib nimmt sonst das
+        # aktuelle Min/Max der gerade angezeigten Daten), die bei wechselnden
+        # Karten (z.B. der saisonalen Monats-Animation im Weather-Tab) zu
+        # "flackernden" Farben führte, weil derselbe Absolutwert je nach Frame
+        # eine andere Farbe bekam. Dieselbe Tabelle treibt sowohl die 2D-
+        # imshow()-Aufrufe (map_display_2d.py) als auch die 3D-Overlay-Textur-
+        # Einfärbung (map_display_3d.py _colorize_layer()). Werte sind erste
+        # plausible Richtwerte (analog zur RAIN_THRESHOLD-Kalibrierung dieser
+        # Session empirisch nachjustierbar) - precip_map orientiert sich an der
+        # bereits dokumentierten realen Größenordnung (~0-2.8 bei Default-
+        # Parametern). rock_map/biome_map/super_biome_mask sind bewusst NICHT
+        # hier gelistet - sie nutzen bereits eigene kategorische Farbtabellen
+        # (ColorSchemes.BIOME_COLOR_TABLE etc.), keine kontinuierliche Skala.
+        "layer_ranges": {
+            "temp_map": ("RdBu_r", -30.0, 40.0),        # Blau=kalt, Rot=warm
+            # vmax war 5.0 (kalibriert gegen die alte Einzelschuss-Magnus-Formel,
+            # precip_map lag damals bei Default-Parametern nur bei ~0-2.8). Der
+            # seit [[project-3layer-wind-cfd]] gekoppelte 3-Schicht-Atmosphäre-Loop
+            # akkumuliert Kondensation über den GANZEN Zeitschritt-Loop statt aus
+            # einem Einzelschuss-Snapshot - precip_map liegt jetzt bei
+            # Default-Parametern empirisch bei min~4-7, max~28-34, mean~13-16.
+            # 100% der Pixel lagen über der alten 5.0-Grenze und clippten auf die
+            # gleiche Voll-Sättigungsfarbe ("Niederschlag konstant bei 5mm"-Report,
+            # war eine Farbskalen-Kalibrierung, kein Physik-Bug). vmax mit Puffer
+            # nach oben neu gesetzt - bei künftigen Änderungen an der Atmosphäre-
+            # Engine erneut gegen einen frischen Diagnose-Lauf prüfen.
+            "precip_map": ("Greens", 0.0, 35.0),
+            "humid_map": ("Blues", 0.0, 100.0),
+            "wind_map": ("Blues", 0.0, 30.0),           # Windstärke m/s (Heatmap-Teil von _render_wind_map)
+            "water_map": ("Blues", 0.0, 10.0),
+            "flow_map": ("Blues", 0.0, 50.0),
+            # Logarithmisch statt linear: Werteverteilung ist stark
+            # rechtsschief (die meisten Pixel exakt 0, wenige Ausreißer
+            # deutlich höher) - eine lineare Skala ließ den typischen/
+            # repräsentativen Wertebereich (~0.1, empirisch am echten
+            # Datensatz bestimmt) kaum vom Hintergrund unterscheiden.
+            # 0.02-0.5 log-normalisiert legt 0.1 exakt auf das geometrische
+            # Mittel (Skalenmitte). Erosion/Sedimentation nutzen denselben
+            # Wertebereich (gleicher Mechanismus, siehe core/water_generator.py
+            # ErosionSedimentationSystem).
+            "erosion_map": ("Reds", 0.02, 0.5, "log"),
+            "sedimentation_map": ("Oranges", 0.02, 0.5, "log"),
+            "soil_moist_map": ("Blues", 0.0, 100.0),
+            "slopemap": ("viridis", 0.0, 90.0),         # Grad
+            "hardness_map": ("viridis", 0.0, 100.0),
+        }
     }
 
     # 3D Canvas Settings
     CANVAS_3D = {
         "background_color": (0.17, 0.24, 0.31, 1.0),  # RGBA
-        "light_position": (1.0, 1.0, 1.0),
+        # Sonne kommt aus Süden (nicht an generate_seasonal_sun_angles()
+        # gekoppelt, das ist die separate Terrain-Shadowmap-Berechnung -
+        # hier reicht ein fester, plausibler Wert für die 3D-Preview).
+        # Koordinaten-Konvention (verifiziert): map_display_2d.py nutzt
+        # imshow(..., origin='lower') -> Zeile 0 der Heightmap liegt UNTEN
+        # im Bild = Süden, letzte Zeile = Norden. _generate_terrain_mesh()
+        # bildet Zeile 0 auf negatives world-Z ab (pos_z = (y_idx/(h-1)-0.5)*...).
+        # Also: world -Z = Süden, world +Z = Norden. Süd-Sonne braucht daher
+        # negatives Z, mittig in X, ~45 Grad Elevation.
+        "light_position": (0.0, 10.6, -10.6),
         # Terrain-Mesh wird immer auf ein 10x10-Einheiten XZ-Footprint normiert
         # (siehe MapDisplay3D.terrain_scale_factor). 5.0 war kleiner als der
         # Mesh-Diagonal-Halbradius (~7.07) selbst - bei 45° FOV landeten

@@ -45,8 +45,6 @@ class WaterTab(BaseMapTab):
         self.dependency_status = None
         self.gpu_status = None
         self.display_mode_group = None
-        self.river_overlay_checkbox = None
-        self.terrain_3d_checkbox = None
         self.current_display_mode = "height"
 
         self.logger = logging.getLogger("WaterTab")
@@ -93,7 +91,8 @@ class WaterTab(BaseMapTab):
 
         try:
             self._create_parameter_group("Lake Detection", ["lake_volume_threshold", "rain_threshold"], 0.01)
-            self._create_parameter_group("Flow Dynamics", ["manning_coefficient", "diffusion_radius"], 0.001)
+            self._create_parameter_group(
+                "Flow Dynamics", ["stream_threshold", "manning_coefficient", "diffusion_radius"], 0.001)
             self._create_parameter_group(
                 "Erosion & Sedimentation",
                 ["erosion_strength", "sediment_capacity_factor", "settling_velocity"], 0.01)
@@ -121,7 +120,8 @@ class WaterTab(BaseMapTab):
                 max_val=config["max"],
                 default_val=config["default"],
                 step=config.get("step", default_step),
-                suffix=config.get("suffix", "")
+                suffix=config.get("suffix", ""),
+                description=config.get("description", "")
             )
             slider.valueChanged.connect(
                 lambda value, key=param_key: self._on_parameter_changed(key, value)
@@ -170,11 +170,6 @@ class WaterTab(BaseMapTab):
         display_mode_layout = self._create_display_mode_controls()
         controls_layout.addLayout(display_mode_layout)
 
-        controls_layout.addWidget(self._create_vertical_separator())
-
-        overlay_layout = self._create_overlay_controls()
-        controls_layout.addLayout(overlay_layout)
-
         controls_widget.setLayout(controls_layout)
         return controls_widget
 
@@ -202,27 +197,6 @@ class WaterTab(BaseMapTab):
             layout.addWidget(radio)
 
         return layout
-
-    def _create_overlay_controls(self):
-        """Erstellt River-Network- und 3D-Terrain-Overlay-Toggles"""
-        layout = QHBoxLayout()
-
-        self.river_overlay_checkbox = QCheckBox("River Network")
-        self.river_overlay_checkbox.toggled.connect(self.update_display_mode)
-        layout.addWidget(self.river_overlay_checkbox)
-
-        self.terrain_3d_checkbox = QCheckBox("3D Terrain")
-        self.terrain_3d_checkbox.toggled.connect(self.update_display_mode)
-        layout.addWidget(self.terrain_3d_checkbox)
-
-        return layout
-
-    def _create_vertical_separator(self):
-        """Erstellt vertikalen Separator für UI-Layout"""
-        separator = QWidget()
-        separator.setFixedWidth(1)
-        separator.setStyleSheet("background-color: #bdc3c7;")
-        return separator
 
     # =============================================================================
     # EVENT HANDLERS
@@ -276,6 +250,23 @@ class WaterTab(BaseMapTab):
                 data = self.data_lod_manager.get_water_data(self.current_display_mode)
                 data_type = self.current_display_mode
 
+            # See/Fluss-Farbunterscheidung (siehe [[project-water-flood-calibration]]):
+            # water_biomes_map als Referenz hinterlegen, BEVOR water_map gerendert wird -
+            # analog zu set_contour_reference_heightmap weiter unten in _push_data_to_
+            # current_display(). Nur für den water_map-Modus relevant, aber billig genug,
+            # um es einfach immer mitzuschicken (_render_water_map/_render_overlay
+            # ignorieren es sonst). An BEIDE Displays pushen (nicht nur current_display) -
+            # gleiches Muster wie die Shademap in base_tab.py: self.map_display_3d
+            # existiert immer, auch wenn gerade 2D sichtbar ist, damit beim Umschalten
+            # zu 3D die See-Färbung sofort stimmt statt erst nach erneutem Radio-
+            # Button-Klick (User-Report: Seen in 3D nicht sichtbar).
+            water_biomes_map = self.data_lod_manager.get_water_data("water_biomes_map")
+            if hasattr(current_display.display, 'set_water_biomes_reference'):
+                current_display.display.set_water_biomes_reference(water_biomes_map)
+            if (self.map_display_3d and self.map_display_3d is not current_display
+                    and hasattr(self.map_display_3d.display, 'set_water_biomes_reference')):
+                self.map_display_3d.display.set_water_biomes_reference(water_biomes_map)
+
             if data is not None and hasattr(current_display, 'update_display'):
                 display_id = f"WaterTab_{self.current_view}_{data_type}"
 
@@ -291,18 +282,6 @@ class WaterTab(BaseMapTab):
                         )
                 else:
                     self._push_data_to_current_display(data, data_type)
-
-            # River-Network-Overlay
-            if self.river_overlay_checkbox and self.river_overlay_checkbox.isChecked():
-                flow_map = self.data_lod_manager.get_water_data("flow_map")
-                if flow_map is not None and hasattr(current_display.display, 'overlay_river_network'):
-                    current_display.display.overlay_river_network(flow_map)
-
-            # 3D Terrain Overlay
-            if self.terrain_3d_checkbox and self.terrain_3d_checkbox.isChecked():
-                heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
-                if heightmap is not None and hasattr(current_display.display, 'overlay_3d_terrain'):
-                    current_display.display.overlay_3d_terrain(heightmap)
 
         except Exception as e:
             self.logger.debug(f"Water display mode update failed: {e}")

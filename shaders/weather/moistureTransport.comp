@@ -1,0 +1,48 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D humidIn;
+layout(rg32f, binding = 1) uniform readonly image2D windMap;
+layout(r32f, binding = 2) uniform writeonly image2D humidOut;
+
+uniform int u_width;
+uniform int u_height;
+uniform float u_dt;
+
+// Portierung von WeatherSystemGenerator._transport_moisture_simple() (core/weather_generator.py) -
+// liest ausschliesslich aus humidIn (unveraendertes Eingabe-Snapshot), schreibt separat -
+// exaktes Jacobi-Aequivalent, 1:1 parallelisierbar.
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_width || coord.y >= u_height) return;
+
+    if (coord.x < 1 || coord.x >= u_width - 1 || coord.y < 1 || coord.y >= u_height - 1) {
+        imageStore(humidOut, coord, imageLoad(humidIn, coord));
+        return;
+    }
+
+    vec2 wind = imageLoad(windMap, coord).rg;
+    float windX = wind.x * u_dt * 0.1;
+    float windY = wind.y * u_dt * 0.1;
+
+    float sourceX = clamp(float(coord.x) - windX, 0.0, float(u_width - 1));
+    float sourceY = clamp(float(coord.y) - windY, 0.0, float(u_height - 1));
+
+    int x0 = int(sourceX);
+    int y0 = int(sourceY);
+    int x1 = min(x0 + 1, u_width - 1);
+    int y1 = min(y0 + 1, u_height - 1);
+    float fx = sourceX - float(x0);
+    float fy = sourceY - float(y0);
+
+    float h00 = imageLoad(humidIn, ivec2(x0, y0)).r;
+    float h10 = imageLoad(humidIn, ivec2(x1, y0)).r;
+    float h01 = imageLoad(humidIn, ivec2(x0, y1)).r;
+    float h11 = imageLoad(humidIn, ivec2(x1, y1)).r;
+
+    float h0 = mix(h00, h10, fx);
+    float h1 = mix(h01, h11, fx);
+    float result = mix(h0, h1, fy);
+
+    imageStore(humidOut, coord, vec4(result, 0.0, 0.0, 0.0));
+}

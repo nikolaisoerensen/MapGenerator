@@ -72,6 +72,7 @@ Kommunikationskanäle:
 """
 
 import numpy as np
+import matplotlib.pyplot as plt
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QSlider, QLabel
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
@@ -79,7 +80,83 @@ import OpenGL.GL as gl
 import OpenGL.arrays.vbo as glvbo
 from OpenGL.GL import shaders
 import math
-from gui.config.gui_default import CanvasSettings
+from gui.config.gui_default import CanvasSettings, ColorSchemes
+from gui.config.value_default import TERRAIN
+from gui.widgets.map_display_2d import _calculate_contour_levels, _get_layer_range
+
+# 3D-interne Overlay-Layer-Namen (siehe self.overlay_data) -> Key in
+# CanvasSettings.CANVAS_2D["layer_ranges"] (dieselbe Tabelle, die auch die
+# 2D-Ansicht für feste Farbskalen nutzt, siehe map_display_2d.py). Layer ohne
+# Eintrag hier (rock_map, biome_map, super_biome_mask, civ_map) sind
+# kategorisch/RGB und werden in _colorize_layer() gesondert behandelt.
+_LAYER_RANGE_KEY_MAP = {
+    "temperature": "temp_map", "precipitation": "precip_map",
+    "humidity": "humid_map", "wind": "wind_map",
+    "water_map": "water_map", "soil_moisture": "soil_moist_map",
+    "erosion": "erosion_map", "sedimentation": "sedimentation_map",
+    "flow_map": "flow_map", "hardness_map": "hardness_map", "slope": "slopemap",
+}
+
+
+def _colorize_layer(data, layer_name):
+    """
+    Funktionsweise: Wandelt ein Overlay-Daten-Array in ein (H,W,3) uint8
+    RGB-Array um, für den Upload als Overlay-Textur in _render_overlay().
+    Nutzt für kontinuierliche Skalar-Layer dieselbe
+    CanvasSettings.CANVAS_2D["layer_ranges"]-Tabelle wie die 2D-Ansicht
+    (konsistente Farbgebung zwischen 2D und 3D), für kategorische Layer
+    (rock_map, biome_map, super_biome_mask) eine direkte Index-/RGB-
+    Umsetzung analog zu map_display_2d.py's _render_rock_map()/
+    _render_biome_map().
+    Parameter: data (numpy.ndarray) - Rohe Overlay-Daten, layer_name (str) -
+    3D-interner Layer-Name (Key aus self.overlay_data[tab_type])
+    Rückgabe: numpy.ndarray (H,W,3) uint8
+    """
+    if layer_name == "rock_map":
+        # Bereits (H,W,3) Gesteinsanteile, uint8 - wie 2D direkt als RGB nutzen.
+        rgb = np.clip(data.astype(np.float32), 0.0, 255.0).astype(np.uint8)
+        if rgb.ndim == 2:
+            rgb = np.stack([rgb, rgb, rgb], axis=-1)
+        return rgb
+
+    if layer_name in ("biome_map", "super_biome_mask"):
+        # Index -> Farbe direkt aus derselben Tabelle wie die 2D-Legende.
+        n_categories = len(ColorSchemes.BIOME_COLOR_TABLE)
+        indices = np.clip(data.astype(np.int32), 0, n_categories - 1)
+        lookup = np.array(
+            [_hex_to_rgb(hex_color) for _, hex_color in ColorSchemes.BIOME_COLOR_TABLE], dtype=np.uint8)
+        return lookup[indices]
+
+    if data.ndim == 3 and data.shape[2] == 2:
+        # Vektorfeld (z.B. wind) - Magnitude als Skalar-Grundlage nutzen.
+        data = np.sqrt(data[:, :, 0] ** 2 + data[:, :, 1] ** 2)
+
+    range_key = _LAYER_RANGE_KEY_MAP.get(layer_name)
+    cmap_name, vmin, vmax, scale = _get_layer_range(range_key) if range_key else (None, None, None, "linear")
+    if vmin is not None:
+        if scale == "log":
+            # Gleiche Epsilon-Floor-Logik wie 2D's _render_generic_map() (siehe
+            # map_display_2d.py) - hält 2D/3D farblich konsistent für stark
+            # rechtsschiefe Layer (erosion_map/sedimentation_map).
+            epsilon = vmin * 0.01
+            safe_data = np.maximum(data.astype(np.float64), epsilon)
+            log_range = max(np.log(vmax) - np.log(vmin), 1e-9)
+            norm = np.clip((np.log(safe_data) - np.log(vmin)) / log_range, 0.0, 1.0)
+        else:
+            norm = np.clip((data - vmin) / max(vmax - vmin, 1e-9), 0.0, 1.0)
+    else:
+        cmap_name = "viridis"
+        data_min, data_max = float(data.min()), float(data.max())
+        norm = (data - data_min) / max(data_max - data_min, 1e-9)
+
+    rgb = (plt.get_cmap(cmap_name)(norm)[:, :, :3] * 255.0).astype(np.uint8)
+    return rgb
+
+
+def _hex_to_rgb(hex_color):
+    """Wandelt '#rrggbb' in ein (r,g,b) uint8-Tupel um."""
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
 
 
 def _validate_heightmap(heightmap):
@@ -280,8 +357,10 @@ class MapDisplay3D(QOpenGLWidget):
     rendering_error = pyqtSignal(str)  # Error-Messages
 
     # Reale Weltgröße, die die Karte immer abdeckt (unabhängig von map_size/
-    # Pixelauflösung) - siehe _calculate_terrain_scaling().
-    WORLD_SIZE_KM = 10.0
+    # Pixelauflösung) - siehe _calculate_terrain_scaling(). Zentral in
+    # gui/config/value_default.py TERRAIN.WORLD_SIZE_KM, damit SlopeCalculator
+    # dieselbe Annahme verwendet.
+    WORLD_SIZE_KM = TERRAIN.WORLD_SIZE_KM
 
     def __init__(self, parent=None):
         """
@@ -300,7 +379,37 @@ class MapDisplay3D(QOpenGLWidget):
 
         # Rendering-Daten
         self.heightmap = None
-        self.shademap = None  # 64x64 Shadow-Map
+        self.shademap = None  # Shadow-Map (beliebige Auflösung, wird auf Heightmap-Größe hochskaliert)
+        # Globaler Schatten-Toggle (Shell-Footer "Shadows"-Checkbox, siehe
+        # BaseMapTab.set_shadow_overlay()/set_shadow_overlay() unten) - gilt
+        # tab-übergreifend, da _render_terrain_base() (das Basis-Mesh, von
+        # jedem Tab-Render-Pfad aufgerufen) den Schatten-Multiplikator anwendet.
+        self.shadows_enabled = True
+        # Globaler Contour-Lines-Toggle (Shell-Footer, siehe set_contour_overlay()
+        # unten). Anders als 2D braucht 3D keine separate Referenz-Heightmap - das
+        # Mesh basiert immer auf der kombinierten Heightmap (heightmap_combined),
+        # unabhängig vom aktuell gezeigten renderMode/Overlay, FragPos.y im Shader
+        # entspricht also immer der echten Roh-Höhe. contour_interval wird aus
+        # derselben _calculate_contour_levels()-Logik wie 2D abgeleitet (siehe
+        # update_heightmap()), damit beide Ansichten dieselben Höhenlinien-Abstände
+        # zeigen.
+        self.contours_enabled = True
+        self.contour_interval = 25.0
+        # See/Fluss-Farbunterscheidung im Water-Tab (analog zu 2D's
+        # set_water_biomes_reference(), siehe map_display_2d.py _render_water_map()) -
+        # ohne water_biomes_map teilen sich Seen und Flüsse dieselbe flache Blues-
+        # Tiefenskala; ein flacher See (oft nur wenig über LAKE_VOLUME_THRESHOLD) sah
+        # dadurch in 3D fast identisch zu unbewässertem Land aus (User-Report: "Seen
+        # ... nicht zu sehen im 3D Modus"), da 2D diese fehlende Kontrastierung schon
+        # länger über einen separaten Solid-Color-Overlay-Pass kompensiert, der in 3D
+        # bisher komplett fehlte.
+        self.water_biomes_reference = None
+        # Separates Mini-Shader-Programm für die Wind-Vektor-Pfeile (Weather-Tab,
+        # Layer "wind") - der Haupt-Terrain-Shader erwartet Normal/TexCoord/LightPos-
+        # Varyings, die für simple farbige GL_LINES nicht gebraucht werden, siehe
+        # shaders/3d_display/wind_vector.vert/.frag. Vorher zeigte "wind" in 3D nur
+        # eine schwache Magnitude-Heatmap ohne Richtung ("nichts zu erkennen").
+        self.wind_shader_program = None
         self.current_tab = "terrain"  # Aktueller Tab-Typ
 
         # Mesh-Daten
@@ -321,20 +430,23 @@ class MapDisplay3D(QOpenGLWidget):
 
         # Layer-Visibility für verschiedene Tabs
         self.layer_visibility = {
-            "terrain": {"base": True, "shadows": True},
+            "terrain": {"base": True, "slope": False},
             "geology": {"rock_map": True, "hardness_map": False},
             "weather": {"precipitation": True, "temperature": False, "wind": False, "humidity": False},
-            "water": {"water_map": True, "soil_moisture": False, "erosion": False, "sedimentation": False},
-            "biome": {"biome_map": True},
+            "water": {"water_map": True, "soil_moisture": False, "erosion": False, "sedimentation": False,
+                      "flow_map": False},
+            "biome": {"biome_map": True, "super_biome_mask": False},
             "settlement": {"plots": True, "settlements": True, "landmarks": True, "roads": True, "civ_map": False}
         }
 
         # Overlay-Daten für verschiedene Tabs
         self.overlay_data = {
+            "terrain": {"slope": None},
             "geology": {"rock_map": None, "hardness_map": None},
             "weather": {"precipitation": None, "temperature": None, "wind": None, "humidity": None},
-            "water": {"water_map": None, "soil_moisture": None, "erosion": None, "sedimentation": None},
-            "biome": {"biome_map": None},
+            "water": {"water_map": None, "soil_moisture": None, "erosion": None, "sedimentation": None,
+                      "flow_map": None},
+            "biome": {"biome_map": None, "super_biome_mask": None},
             "settlement": {"plots": None, "settlements": [], "landmarks": [], "roads": [], "civ_map": None}
         }
 
@@ -380,6 +492,7 @@ class MapDisplay3D(QOpenGLWidget):
             # Shader-Programm laden
             print("DEBUG: Loading shaders...")
             self._load_shaders()
+            self._compile_wind_shader()
 
             # Lighting-Setup
             if self.shader_program:
@@ -475,20 +588,89 @@ class MapDisplay3D(QOpenGLWidget):
         self.heightmap = heightmap
         self.current_tab = tab_type
         self._calculate_terrain_scaling()
-        self._generate_terrain_mesh()
+
+        # Contour-Intervall aus derselben Logik wie map_display_2d.py's
+        # _calculate_contour_levels() ableiten (levels[1]-levels[0], da beide
+        # Level-Arrays aus einem festen Intervall + np.arange() entstehen) -
+        # eine Quelle der Wahrheit für 2D/3D-konsistente Höhenlinien-Abstände.
+        contour_levels = _calculate_contour_levels(heightmap)
+        if len(contour_levels) >= 2:
+            self.contour_interval = float(contour_levels[1] - contour_levels[0])
+
+        # _generate_terrain_mesh() erstellt/löscht OpenGL-Buffer direkt (glGenBuffers,
+        # glDeleteBuffers, VBO-Upload) - das läuft hier NICHT innerhalb von paintGL(),
+        # wo Qt automatisch den richtigen Kontext dieses Widgets aktiv setzt, sondern
+        # als normaler Methodenaufruf (z.B. aus einem Signal-Handler). Ohne
+        # makeCurrent() davor landen diese GL-Aufrufe im Kontext, der zufällig gerade
+        # aktiv ist - bei mehreren MapDisplay3DWidget-Instanzen (eine pro Tab, siehe
+        # base_tab.py) potenziell der FALSCHE Kontext oder gar keiner, was Buffer-
+        # Erstellung fehlschlagen lässt oder Zustand eines anderen Tabs verändert.
+        self.makeCurrent()
+        try:
+            self._generate_terrain_mesh()
+        finally:
+            self.doneCurrent()
+
         self.update()
 
     def update_shademap(self, shademap):
         """
         Funktionsweise: Aktualisiert Shademap für Terrain-Schattierung
-        Aufgabe: Setzt neue 64x64 Shadow-Daten für Upscaling
-        Parameter: shademap (numpy.ndarray) - 64x64 Shadow-Map
+        Aufgabe: Setzt neue Shadow-Daten für Upscaling auf Heightmap-Auflösung
+        Parameter: shademap (numpy.ndarray, 2D) - Shadow-Map in beliebiger
+        Auflösung (_upscale_shademap() skaliert bilinear auf die tatsächliche
+        Heightmap-Größe hoch - anders als der frühere hartkodierte 64x64-Check
+        hier nahelegte, der nie zu einer echten Rendering-Nutzung führte, da
+        diese Methode bislang von keiner Aufrufstelle im Code erreicht wurde).
         """
-        if shademap is not None and shademap.shape != (64, 64):
-            self.rendering_error.emit("Shademap must be 64x64 resolution")
+        if shademap is not None and (not hasattr(shademap, 'ndim') or shademap.ndim != 2):
+            self.rendering_error.emit("Shademap must be a 2D array")
             return
 
         self.shademap = shademap
+        self.update()
+
+    def set_shadow_overlay(self, checked: bool, angle: int = None):
+        """
+        Funktionsweise: Globaler Schatten-Toggle (Shell-Footer "Shadows"-
+        Checkbox, siehe BaseMapTab.set_shadow_overlay()) - fehlte hier bisher
+        komplett, weshalb der hasattr()-Guard im Aufrufer lautlos fehlschlug
+        und der Toggle im 3D-Modus wirkungslos blieb.
+        Aufgabe: Setzt self.shadows_enabled, das _render_terrain_base() (über
+        _bind_shadow_texture()) bei jedem Frame abfragt.
+        Parameter: checked (bool) - Schatten an/aus. angle (optional, derzeit
+        ungenutzt) - der frühere manuelle Sonnenwinkel-Slider im Terrain-Tab
+        wurde entfernt (siehe Kanban-Punkt "Shadow Angle entfernen"); die
+        Shademap selbst wird bereits mit einem festen Standard-Sonnenwinkel
+        geliefert (siehe BaseMapTab._push_data_to_current_display()).
+        """
+        self.shadows_enabled = checked
+        self.update()
+
+    def set_contour_overlay(self, checked: bool):
+        """
+        Funktionsweise: Globaler Contour-Lines-Toggle (Shell-Footer "Contour
+        Lines"-Checkbox, siehe BaseMapTab.set_contour_overlay()) - fehlte hier
+        bisher komplett (nur MapDisplay2D hatte set_contour_overlay()), weshalb
+        der hasattr()-Guard im Aufrufer lautlos fehlschlug und Höhenlinien im
+        3D-Modus nie sichtbar waren.
+        Aufgabe: Setzt self.contours_enabled, das _render_terrain_base() bei
+        jedem Frame als useContours-Uniform an den Fragment-Shader weiterreicht.
+        """
+        self.contours_enabled = checked
+        self.update()
+
+    def set_water_biomes_reference(self, water_biomes_map):
+        """
+        Funktionsweise: Hinterlegt water_biomes_map (0=kein Wasser, 1-3=Creek/
+        River/Grand River, 4=Lake) für die See/Fluss-Farbunterscheidung in
+        _render_overlay() - analog zu MapDisplay2D.set_water_biomes_reference().
+        Fehlte hier bisher komplett (der hasattr()-Guard in water_tab.py
+        schlug für 3D lautlos fehl), weshalb Seen in 3D nur die normale,
+        oft kaum sichtbare Wassertiefen-Farbskala bekamen statt der klar
+        abgesetzten See-Farbe.
+        """
+        self.water_biomes_reference = water_biomes_map
         self.update()
 
     def update_overlay_data(self, tab_type, layer_name, data):
@@ -663,6 +845,29 @@ class MapDisplay3D(QOpenGLWidget):
             self.rendering_error.emit(f"Terrain shader compilation failed: {str(e)}")
             self._load_fallback_shaders()
 
+    def _compile_wind_shader(self):
+        """
+        Funktionsweise: Kompiliert das separate Mini-Shader-Programm für die
+        Wind-Vektor-Pfeile (siehe self.wind_shader_program oben).
+        Aufgabe: Einmalig bei initializeGL() geladen, danach von
+        _render_wind_vectors() pro Frame genutzt. Scheitert die Kompilierung,
+        bleibt self.wind_shader_program None - _render_wind_vectors() no-opt
+        dann still (Wind-Heatmap-Overlay bleibt trotzdem sichtbar).
+        """
+        vertex_shader_code = self._load_shader_from_file("shader/wind_vector.vert")
+        fragment_shader_code = self._load_shader_from_file("shader/wind_vector.frag")
+
+        if vertex_shader_code is None or fragment_shader_code is None:
+            return
+
+        try:
+            vertex_shader = shaders.compileShader(vertex_shader_code, gl.GL_VERTEX_SHADER)
+            fragment_shader = shaders.compileShader(fragment_shader_code, gl.GL_FRAGMENT_SHADER)
+            self.wind_shader_program = shaders.compileProgram(vertex_shader, fragment_shader)
+        except Exception as e:
+            self.rendering_error.emit(f"Wind vector shader compilation failed: {str(e)}")
+            self.wind_shader_program = None
+
     def _load_fallback_shaders(self):
         """
         Funktionsweise: Lädt einfache Fallback-Shader für Wireframe-Rendering
@@ -743,12 +948,20 @@ class MapDisplay3D(QOpenGLWidget):
         dx = dz_dx * self.terrain_height_scale
         dy = dz_dy * self.terrain_height_scale
 
-        # Cross-Product [-step,0,dy] x [0,step,dx] ausmultipliziert (siehe alte
-        # _calculate_vertex_normal): (-dy*step, dx*step, -step^2)
+        # Cross-Product der beiden Tangenten entlang der Vertex-Nachbarn: Tangente
+        # X-Richtung (Spalten) = (step, dx, 0), Tangente Z-Richtung (Zeilen) =
+        # (0, dy, step) - cross(T_x, T_z) = (-dx*step, step^2, -dy*step).
+        # Frühere Fassung (vor diesem Fix) hatte X/Z vertauscht und normal_z als
+        # von dy unabhängige Konstante -step^2 - dadurch beeinflussten Nord/Süd-
+        # Gefälle (Zeilen-Gradient dy) die Beleuchtung nie, nur Ost/West-Gefälle
+        # (dx, fälschlich im X-Slot der alten Formel gelandet). Sichtbar geworden
+        # als "Sonne kommt aus Osten" trotz Süd-Lichtposition, siehe [[project-3d-sun-normal-fix]] -
+        # jede Lichtrichtung mit -Z-Anteil (Süden) beleuchtete dadurch praktisch
+        # das gesamte Terrain gleichmäßig statt gezielt Süd-Hänge.
         step_size = self.terrain_scale_factor
-        normal_x = -dy * step_size
-        normal_y = dx * step_size
-        normal_z = np.full((height, width), -step_size ** 2, dtype=np.float32)
+        normal_x = -dx * step_size
+        normal_y = np.full((height, width), step_size ** 2, dtype=np.float32)
+        normal_z = -dy * step_size
 
         length = np.sqrt(normal_x ** 2 + normal_y ** 2 + normal_z ** 2)
         safe_length = np.where(length > 0, length, 1.0)
@@ -926,8 +1139,8 @@ class MapDisplay3D(QOpenGLWidget):
 
         self._render_terrain_base()
 
-        if self.layer_visibility["terrain"]["shadows"] and self.shademap is not None:
-            self._render_shadows()
+        if self.layer_visibility["terrain"]["slope"]:
+            self._render_overlay("terrain", "slope")
 
     def _render_geology_tab(self):
         """
@@ -953,6 +1166,8 @@ class MapDisplay3D(QOpenGLWidget):
         for layer in weather_layers:
             if self.layer_visibility["weather"][layer]:
                 self._render_overlay("weather", layer)
+                if layer == "wind":
+                    self._render_wind_vectors()
 
     def _render_water_tab(self):
         """
@@ -961,7 +1176,7 @@ class MapDisplay3D(QOpenGLWidget):
         """
         self._render_terrain_base()
 
-        water_layers = ["water_map", "soil_moisture", "erosion", "sedimentation"]
+        water_layers = ["water_map", "soil_moisture", "erosion", "sedimentation", "flow_map"]
         for layer in water_layers:
             if self.layer_visibility["water"][layer]:
                 self._render_overlay("water", layer)
@@ -975,6 +1190,9 @@ class MapDisplay3D(QOpenGLWidget):
 
         if self.layer_visibility["biome"]["biome_map"]:
             self._render_overlay("biome", "biome_map")
+
+        if self.layer_visibility["biome"]["super_biome_mask"]:
+            self._render_overlay("biome", "super_biome_mask")
 
     def _render_settlement_tab(self):
         """
@@ -1031,11 +1249,37 @@ class MapDisplay3D(QOpenGLWidget):
             if overlay_strength_location >= 0:
                 gl.glUniform1f(overlay_strength_location, 0.5)  # Default-Stärke
 
+            # Contour-Lines jeden Frame neu setzen (wie useOverlay/useShadows oben -
+            # Shader-Uniforms behalten sonst ihren letzten Wert über Frames hinweg).
+            use_contours_location = gl.glGetUniformLocation(self.shader_program, "useContours")
+            if use_contours_location >= 0:
+                gl.glUniform1i(use_contours_location, 1 if self.contours_enabled else 0)
+
+            contour_interval_location = gl.glGetUniformLocation(self.shader_program, "contourInterval")
+            if contour_interval_location >= 0:
+                gl.glUniform1f(contour_interval_location, self.contour_interval)
+
+            # useShadows jeden Frame neu setzen (wie useOverlay oben) - Shader-Uniforms
+            # behalten sonst ihren letzten Wert über Draw-Calls/Frames hinweg. Vorher
+            # wurde hier IMMER auf 0 zurückgesetzt (_render_shadows() aktivierte den
+            # Uniform separat, NACH diesem Draw-Call - zu spät, um noch zu wirken, siehe
+            # Git-Historie) - jetzt wird die Schatten-Textur HIER, VOR dem Draw-Call,
+            # erstellt/gebunden, gilt dadurch tab-übergreifend für jeden Aufrufer von
+            # _render_terrain_base() (Terrain/Geology/Weather/Water/Biome/Settlement -
+            # alle rendern über diese eine gemeinsame Basis-Mesh-Funktion), gesteuert vom
+            # globalen Shell-Footer "Shadows"-Toggle (self.shadows_enabled, siehe
+            # set_shadow_overlay()).
+            shadow_texture_id = self._bind_shadow_texture()
+
         elif self.shader_fallback_active:
             # Fallback-Shader Parameter
             wireframe_color_location = gl.glGetUniformLocation(self.shader_program, "wireframeColor")
             if wireframe_color_location >= 0:
                 gl.glUniform3f(wireframe_color_location, 0.7, 0.7, 0.7)  # Grau
+            shadow_texture_id = None
+
+        else:
+            shadow_texture_id = None
 
         # VAO binden und rendern
         gl.glBindVertexArray(self.vao)
@@ -1043,53 +1287,321 @@ class MapDisplay3D(QOpenGLWidget):
         gl.glDrawElements(gl.GL_TRIANGLES, len(self.mesh_indices), gl.GL_UNSIGNED_INT, None)
         gl.glBindVertexArray(0)
 
-    def _render_shadows(self):
+        if shadow_texture_id is not None:
+            gl.glDeleteTextures(1, [shadow_texture_id])
+
+    def _bind_shadow_texture(self):
         """
-        Funktionsweise: Rendert Shademap-Integration
-        Aufgabe: Upscaling und Anwendung der 64x64 Shademap auf Terrain
+        Funktionsweise: Erstellt bei aktiviertem Schatten-Toggle eine Ein-Kanal-
+        Textur aus der (auf Heightmap-Auflösung hochskalierten) Shademap, bindet
+        sie an Texture-Unit 2 (Unit 1 ist bereits von overlayTexture belegt, siehe
+        _render_overlay()) und setzt shadowMap/useShadows entsprechend. Setzt
+        useShadows=0, wenn Schatten deaktiviert sind oder keine Shademap vorliegt.
+        Aufgabe: Gemeinsamer Schatten-Setup-Schritt für _render_terrain_base(),
+        wird VOR dessen Draw-Call aufgerufen (anders als die frühere _render_
+        shadows(), die NACH dem Draw-Call lief und dadurch nie sichtbar wurde).
+        Return: Textur-ID zum späteren Löschen (nach dem Draw-Call), oder None.
         """
-        if self.shademap is None or not self.shader_program:
-            return
-
-        # Shademap auf Heightmap-Auflösung hochskalieren
-        upscaled_shadows = _upscale_shademap(self.shademap, self.heightmap.shape)
-
-        if upscaled_shadows is None:
-            return
-
-        # Shadow-Textur erstellen und binden
-        # TODO: Implementierung der Textur-Upload und Shader-Integration
         use_shadows_location = gl.glGetUniformLocation(self.shader_program, "useShadows")
+
+        if not self.shadows_enabled or self.shademap is None or self.heightmap is None:
+            if use_shadows_location >= 0:
+                gl.glUniform1i(use_shadows_location, 0)
+            return None
+
+        upscaled_shadows = _upscale_shademap(self.shademap, self.heightmap.shape)
+        if upscaled_shadows is None:
+            if use_shadows_location >= 0:
+                gl.glUniform1i(use_shadows_location, 0)
+            return None
+
+        shadow_data = np.ascontiguousarray(np.clip(upscaled_shadows, 0.0, 1.0).astype(np.float32))
+
+        texture_id = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_R32F, shadow_data.shape[1], shadow_data.shape[0],
+                         0, gl.GL_RED, gl.GL_FLOAT, shadow_data)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+
+        gl.glActiveTexture(gl.GL_TEXTURE2)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+
+        shadow_map_location = gl.glGetUniformLocation(self.shader_program, "shadowMap")
+        if shadow_map_location >= 0:
+            gl.glUniform1i(shadow_map_location, 2)
         if use_shadows_location >= 0:
             gl.glUniform1i(use_shadows_location, 1)
 
+        return texture_id
+
     def _render_overlay(self, tab_type, layer_name):
         """
-        Funktionsweise: Rendert Tab-spezifische Overlay-Layer
-        Aufgabe: Anwendung von Overlay-Daten auf Terrain-Oberfläche
+        Funktionsweise: Rendert Tab-spezifische Overlay-Layer als Textur auf
+        dem Terrain-Mesh.
+        Aufgabe: Färbt overlay_data über _colorize_layer() zu einer RGB-
+        Textur ein, lädt sie hoch und zeichnet das Mesh ein zweites Mal mit
+        useOverlay=1 (der Shader mischt Basis- und Overlay-Farbe intern PRO
+        FRAGMENT, siehe getWeatherColor() etc. in terrain.frag - ein
+        einziger zusätzlicher Draw-Call pro sichtbarem Layer reicht). Der
+        zweite Draw-Call liegt auf EXAKT derselben Tiefe wie der Basis-Pass
+        aus _render_terrain_base() (identisches Mesh) - Default-Tiefentest
+        GL_LESS würde ihn deshalb komplett verdecken, daher hier temporär
+        auf GL_LEQUAL umgeschaltet.
         Parameter: tab_type (str), layer_name (str) - Tab und Layer-Identifikation
         """
         overlay_data = self.overlay_data[tab_type][layer_name]
-        if overlay_data is None:
+        if overlay_data is None or not self.shader_program or self.vertex_buffer is None:
             return
 
-        # TODO: Implementierung overlay-spezifischer Rendering-Modi
-        # - Texture-Blending für verschiedene Overlay-Typen
-        # - Farbschema-Anwendung basierend auf Layer-Typ
-        # - Multi-Channel Rendering für kombinierte Overlays
+        try:
+            rgb = _colorize_layer(np.asarray(overlay_data), layer_name)
+        except Exception:
+            return
+
+        # See-Pixel klar absetzen (analog zu map_display_2d.py's _render_water_map()
+        # Lake-Overlay-Pass, alpha=0.85) - ohne das teilen sich Seen und Flüsse
+        # dieselbe flache Blues-Tiefenskala und flache Seen sind kaum von Land zu
+        # unterscheiden (siehe set_water_biomes_reference()).
+        if layer_name == "water_map" and self.water_biomes_reference is not None:
+            water_biomes = np.asarray(self.water_biomes_reference)
+            if water_biomes.shape[:2] == rgb.shape[:2]:
+                lake_mask = water_biomes == 4
+                lake_color = np.array([11, 61, 145], dtype=np.float32)  # #0b3d91
+                rgb = rgb.astype(np.float32)
+                rgb[lake_mask] = rgb[lake_mask] * 0.15 + lake_color * 0.85
+                rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+
+        texture_id = gl.glGenTextures(1)
+        try:
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, rgb.shape[1], rgb.shape[0],
+                             0, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, np.ascontiguousarray(rgb))
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+
+            overlay_tex_location = gl.glGetUniformLocation(self.shader_program, "overlayTexture")
+            if overlay_tex_location >= 0:
+                gl.glUniform1i(overlay_tex_location, 1)
+
+            use_overlay_location = gl.glGetUniformLocation(self.shader_program, "useOverlay")
+            if use_overlay_location >= 0:
+                gl.glUniform1i(use_overlay_location, 1)
+
+            overlay_strength_location = gl.glGetUniformLocation(self.shader_program, "overlayStrength")
+            if overlay_strength_location >= 0:
+                gl.glUniform1f(overlay_strength_location, 0.75)
+
+            render_mode_location = gl.glGetUniformLocation(self.shader_program, "renderMode")
+            if render_mode_location >= 0:
+                mode_value = {"terrain": 0, "geology": 1, "weather": 2, "water": 3, "biome": 4, "settlement": 5}
+                gl.glUniform1i(render_mode_location, mode_value.get(tab_type, 0))
+
+            gl.glDepthFunc(gl.GL_LEQUAL)
+            gl.glBindVertexArray(self.vao)
+            gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.index_buffer)
+            gl.glDrawElements(gl.GL_TRIANGLES, len(self.mesh_indices), gl.GL_UNSIGNED_INT, None)
+            gl.glBindVertexArray(0)
+            gl.glDepthFunc(gl.GL_LESS)
+
+            if use_overlay_location >= 0:
+                gl.glUniform1i(use_overlay_location, 0)
+        finally:
+            gl.glDeleteTextures(1, [texture_id])
+
+    def _render_wind_vectors(self):
+        """
+        Funktionsweise: Zeichnet Windrichtungs-Pfeile als GL_LINES über dem
+        Terrain-Mesh (analog zu map_display_2d.py's matplotlib-Quiver in
+        _render_wind_map()) - die reine Magnitude-Heatmap aus _render_overlay()
+        zeigt nur Windstärke, keine Richtung, und blendet auf dem Terrain kaum
+        sichtbar ein (User-Report: "nichts zu erkennen").
+        Aufgabe: Sampled ein grobes Raster aus overlay_data["weather"]["wind"]
+        ((H,W,2) u/v m/s in Spalten-/Zeilen-Richtung, siehe _generate_terrain_
+        mesh's pos_x/pos_z-Konvention: u->X/Ost-West, v->Z/Süd-Nord), platziert
+        an jedem Sample-Punkt einen kleinen Pfeil (Schaft + zwei Widerhaken)
+        knapp über der Terrain-Oberfläche. Länge/Farbe skalieren mit der
+        lokalen Windstärke (weiß=schwach, orange-rot=stark).
+        """
+        if not self.wind_shader_program or self.heightmap is None:
+            return
+
+        wind_data = self.overlay_data.get("weather", {}).get("wind")
+        if wind_data is None:
+            return
+
+        wind_data = np.asarray(wind_data)
+        height, width = self.heightmap.shape
+        if wind_data.ndim != 3 or wind_data.shape[2] != 2 or wind_data.shape[:2] != (height, width):
+            return  # Shape-Mismatch (z.B. während eines LOD-Übergangs) - nächster Frame passt wieder
+
+        grid = 14
+        y_idx = np.linspace(0, height - 1, min(grid, height)).astype(int)
+        x_idx = np.linspace(0, width - 1, min(grid, width)).astype(int)
+        yy, xx = np.meshgrid(y_idx, x_idx, indexing='ij')
+
+        u = wind_data[yy, xx, 0].astype(np.float32)
+        v = wind_data[yy, xx, 1].astype(np.float32)
+        magnitude = np.sqrt(u ** 2 + v ** 2)
+        max_mag = float(magnitude.max())
+        if max_mag < 1e-6:
+            return
+
+        pos_x = (xx.astype(np.float32) / (width - 1) - 0.5) * width * self.terrain_scale_factor
+        pos_z = (yy.astype(np.float32) / (height - 1) - 0.5) * height * self.terrain_scale_factor
+        terrain_h = self.heightmap[yy, xx].astype(np.float32)
+        hover = 0.05  # etwas über der Oberfläche schweben, gegen Z-Fighting mit dem Mesh
+        pos_y = terrain_h * self.terrain_height_scale + hover
+
+        # Pfeillänge proportional zur lokalen Windstärke (relativ zum stärksten
+        # Sample im aktuellen Raster), gedeckelt auf einen Bruchteil des
+        # Rasterabstands, damit sich benachbarte Pfeile nicht überlappen.
+        cell_span = self.terrain_scale_factor * max(width, height) / grid
+        max_arrow_len = cell_span * 0.8
+        safe_mag = np.where(magnitude > 1e-6, magnitude, 1.0)
+        unit_x = u / safe_mag
+        unit_z = v / safe_mag
+        arrow_len = (magnitude / max_mag) * max_arrow_len
+        dir_x = unit_x * arrow_len
+        dir_z = unit_z * arrow_len
+
+        # Widerhaken: unit_dir um +-150 Grad in der XZ-Ebene gedreht, kurze Länge.
+        theta = np.radians(150.0)
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        barb1_x = unit_x * cos_t - unit_z * sin_t
+        barb1_z = unit_x * sin_t + unit_z * cos_t
+        barb2_x = unit_x * cos_t + unit_z * sin_t
+        barb2_z = -unit_x * sin_t + unit_z * cos_t
+        barb_len = arrow_len * 0.35
+
+        tip_x, tip_z = pos_x + dir_x, pos_z + dir_z
+
+        # Farbe: weiß (schwach) -> orange-rot (stark), linear nach Magnitude.
+        t = (magnitude / max_mag)[..., None]
+        calm_color = np.array([0.9, 0.9, 0.9], dtype=np.float32)
+        strong_color = np.array([1.0, 0.25, 0.05], dtype=np.float32)
+        color = calm_color * (1 - t) + strong_color * t
+
+        def _seg(ax_, ay_, az_, bx_, by_, bz_):
+            a = np.stack([ax_, ay_, az_], axis=-1)
+            b = np.stack([bx_, by_, bz_], axis=-1)
+            return a, b
+
+        shaft_a, shaft_b = _seg(pos_x, pos_y, pos_z, tip_x, pos_y, tip_z)
+        barb1_a, barb1_b = _seg(tip_x, pos_y, tip_z, tip_x + barb1_x * barb_len, pos_y, tip_z + barb1_z * barb_len)
+        barb2_a, barb2_b = _seg(tip_x, pos_y, tip_z, tip_x + barb2_x * barb_len, pos_y, tip_z + barb2_z * barb_len)
+
+        positions = np.stack([shaft_a, shaft_b, barb1_a, barb1_b, barb2_a, barb2_b], axis=-2)  # (grid,grid,6,3)
+        colors = np.broadcast_to(color[:, :, None, :], positions.shape)
+
+        vertex_data = np.concatenate([positions, colors], axis=-1).reshape(-1, 6).astype(np.float32)
+        vertex_data = np.ascontiguousarray(vertex_data)
+
+        vao = gl.glGenVertexArrays(1)
+        vbo = gl.glGenBuffers(1)
+        try:
+            gl.glUseProgram(self.wind_shader_program)
+
+            for name, matrix in (("model", self.model_matrix), ("view", self.view_matrix),
+                                  ("projection", self.projection_matrix)):
+                if matrix is None:
+                    continue
+                location = gl.glGetUniformLocation(self.wind_shader_program, name)
+                if location >= 0:
+                    gl.glUniformMatrix4fv(location, 1, gl.GL_TRUE, matrix.flatten())
+
+            gl.glBindVertexArray(vao)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, vbo)
+            gl.glBufferData(gl.GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, gl.GL_STREAM_DRAW)
+
+            stride = 6 * 4
+            gl.glEnableVertexAttribArray(0)
+            gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, stride, None)
+            gl.glEnableVertexAttribArray(1)
+            gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, stride, gl.GLvoidp(3 * 4))
+
+            gl.glLineWidth(2.0)
+            gl.glDrawArrays(gl.GL_LINES, 0, vertex_data.shape[0])
+
+            gl.glBindVertexArray(0)
+        finally:
+            gl.glDeleteBuffers(1, [vbo])
+            gl.glDeleteVertexArrays(1, [vao])
 
     def _render_plot_boundaries(self):
         """
-        Funktionsweise: Rendert Plot-Grenzen als Wireframe-Mesh
-        Aufgabe: Visualisierung von Settlement-Plot-Geometrie
+        Funktionsweise: Rendert das PlotPhysicsSystem-Ergebnis als texturierten
+        "Skin" auf dem Terrain-Mesh statt eigener 3D-Wireframe-/Marker-
+        Geometrie (Nutzer-Vorgabe: "die 2D-Darstellung als Skin auf das
+        Terrain legen", siehe [[project-settlement-plot-physics-rebuild]]
+        Teil 4) - overlay_data["settlement"]["plots"] enthält bereits die
+        fertig gerasterte (H,W,4)-RGBA-Textur (siehe map_display_2d.py's
+        rasterize_plot_boundaries_rgba(), gepusht von settlement_tab.py's
+        apply_3d_overlays()). Hier nur noch Hochladen + zweiter Draw-Call mit
+        useAlphaOverlay=1 (siehe terrain.frag) - echte Transparenz an
+        unbemalten Stellen statt des pauschalen overlayStrength-Mix der
+        übrigen Scalar-Overlays.
+        Aufgabe: Zeichnet Plot-Kantennetz/Straßen-Tiers/Wildnisgrenzen/Kerne/
+        Nodes auf der Terrain-Oberfläche.
         """
-        plot_data = self.overlay_data["settlement"]["plots"]
-        if plot_data is None:
+        rgba = self.overlay_data["settlement"]["plots"]
+        if (rgba is None or not isinstance(rgba, np.ndarray) or rgba.ndim != 3 or rgba.shape[2] != 4
+                or not self.shader_program or self.vertex_buffer is None):
             return
 
-        # TODO: Implementierung von Plot-Boundary-Rendering
-        # - Wireframe-Mesh auf Terrain projiziert
-        # - Plot-Node-Marker an Eckpunkten
+        texture_id = gl.glGenTextures(1)
+        try:
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, rgba.shape[1], rgba.shape[0],
+                             0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, np.ascontiguousarray(rgba))
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+
+            overlay_tex_location = gl.glGetUniformLocation(self.shader_program, "overlayTexture")
+            if overlay_tex_location >= 0:
+                gl.glUniform1i(overlay_tex_location, 1)
+
+            use_overlay_location = gl.glGetUniformLocation(self.shader_program, "useOverlay")
+            if use_overlay_location >= 0:
+                gl.glUniform1i(use_overlay_location, 1)
+
+            use_alpha_overlay_location = gl.glGetUniformLocation(self.shader_program, "useAlphaOverlay")
+            if use_alpha_overlay_location >= 0:
+                gl.glUniform1i(use_alpha_overlay_location, 1)
+
+            overlay_strength_location = gl.glGetUniformLocation(self.shader_program, "overlayStrength")
+            if overlay_strength_location >= 0:
+                gl.glUniform1f(overlay_strength_location, 1.0)
+
+            render_mode_location = gl.glGetUniformLocation(self.shader_program, "renderMode")
+            if render_mode_location >= 0:
+                gl.glUniform1i(render_mode_location, 5)  # settlement
+
+            gl.glDepthFunc(gl.GL_LEQUAL)
+            gl.glBindVertexArray(self.vao)
+            gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.index_buffer)
+            gl.glDrawElements(gl.GL_TRIANGLES, len(self.mesh_indices), gl.GL_UNSIGNED_INT, None)
+            gl.glBindVertexArray(0)
+            gl.glDepthFunc(gl.GL_LESS)
+
+            if use_overlay_location >= 0:
+                gl.glUniform1i(use_overlay_location, 0)
+            if use_alpha_overlay_location >= 0:
+                gl.glUniform1i(use_alpha_overlay_location, 0)
+        finally:
+            gl.glDeleteTextures(1, [texture_id])
 
     def _render_settlement_markers(self, marker_type):
         """
@@ -1229,11 +1741,16 @@ class MapDisplay3DWidget(QWidget):
     def _setup_terrain_controls(self):
         """
         Funktionsweise: Erstellt Controls für Terrain-Tab
-        Aufgabe: Basis-Terrain und Shadows-Controls
+        Aufgabe: Basis-Terrain und Shadows-Sichtbarkeit (KEINE Layer-Auswahl -
+        welcher Daten-Layer auf dem Mesh liegt, entscheiden ausschließlich die
+        radio buttons über dem Canvas, siehe BaseMapTab._push_data_to_
+        current_display()/_LAYER_SELECTION_KEYS_3D in gui/tabs/base_tab.py -
+        die frühere separate "Slope"-Checkbox hier war dazu redundant und
+        konnte unabhängig von der 2D-Auswahl aktiv bleiben; entfernt).
         """
         self._clear_tab_controls()
 
-        # Terrain Base
+        # Terrain Base (Mesh-Sichtbarkeit selbst, keine Layer-Auswahl)
         terrain_checkbox = QCheckBox("Terrain")
         terrain_checkbox.setChecked(True)
         terrain_checkbox.toggled.connect(
@@ -1242,101 +1759,65 @@ class MapDisplay3DWidget(QWidget):
         self.control_widgets["terrain_base"] = terrain_checkbox
         self.control_layout.insertWidget(0, terrain_checkbox)
 
-        # Shadows
+        # Shadows (Beleuchtungs-Sichtbarkeit, keine Layer-Auswahl) - ruft
+        # set_shadow_overlay() auf (denselben globalen Toggle wie die Shell-
+        # Footer-Checkbox, siehe MapDisplay3D.set_shadow_overlay()), nicht
+        # mehr set_layer_visibility() - Schatten gelten jetzt tab-übergreifend
+        # über die gemeinsame _render_terrain_base(), nicht mehr nur lokal
+        # für den Terrain-Tab.
         shadows_checkbox = QCheckBox("Shadows")
         shadows_checkbox.setChecked(True)
         shadows_checkbox.toggled.connect(
-            lambda checked: self.display_3d.set_layer_visibility("terrain", "shadows", checked)
+            lambda checked: self.display_3d.set_shadow_overlay(checked)
         )
         self.control_widgets["terrain_shadows"] = shadows_checkbox
         self.control_layout.insertWidget(1, shadows_checkbox)
 
     def _setup_geology_controls(self):
         """
-        Funktionsweise: Erstellt Controls für Geology-Tab
-        Aufgabe: Rock-Map und Hardness-Map Controls
+        Funktionsweise: Geology-Tab hat keine eigenen 3D-Basis-Controls mehr -
+        welcher Layer (Rock Types/Hardness) auf dem Mesh liegt, entscheiden
+        ausschließlich die radio buttons über dem Canvas (siehe
+        BaseMapTab._push_data_to_current_display()/_LAYER_SELECTION_KEYS_3D).
+        Die früheren "Rock Types"/"Hardness"-Checkboxen hier waren dazu
+        redundant (Mehrfachauswahl möglich, wo eigentlich immer nur einer der
+        beiden Layer gleichzeitig Sinn ergibt) - entfernt.
         """
         self._clear_tab_controls()
-
-        # Rock Map
-        rock_checkbox = QCheckBox("Rock Types")
-        rock_checkbox.setChecked(True)
-        rock_checkbox.toggled.connect(
-            lambda checked: self.display_3d.set_layer_visibility("geology", "rock_map", checked)
-        )
-        self.control_widgets["geology_rock"] = rock_checkbox
-        self.control_layout.insertWidget(0, rock_checkbox)
-
-        # Hardness Map
-        hardness_checkbox = QCheckBox("Hardness")
-        hardness_checkbox.setChecked(False)
-        hardness_checkbox.toggled.connect(
-            lambda checked: self.display_3d.set_layer_visibility("geology", "hardness_map", checked)
-        )
-        self.control_widgets["geology_hardness"] = hardness_checkbox
-        self.control_layout.insertWidget(1, hardness_checkbox)
 
     def _setup_weather_controls(self):
         """
-        Funktionsweise: Erstellt Controls für Weather-Tab
-        Aufgabe: Precipitation, Temperature, Wind und Humidity-Controls
+        Funktionsweise: Weather-Tab hat keine eigenen 3D-Basis-Controls mehr -
+        welcher Layer (Precipitation/Temperature/Wind/Humidity) auf dem Mesh
+        liegt, entscheiden ausschließlich die radio buttons über dem Canvas
+        (siehe BaseMapTab._push_data_to_current_display()/
+        _LAYER_SELECTION_KEYS_3D). Die früheren 4 Checkboxen hier waren dazu
+        redundant - entfernt.
         """
         self._clear_tab_controls()
-
-        weather_layers = [
-            ("Precipitation", "precipitation", True),
-            ("Temperature", "temperature", False),
-            ("Wind", "wind", False),
-            ("Humidity", "humidity", False)
-        ]
-
-        for i, (label, layer_name, default_checked) in enumerate(weather_layers):
-            checkbox = QCheckBox(label)
-            checkbox.setChecked(default_checked)
-            checkbox.toggled.connect(
-                lambda checked, layer=layer_name: self.display_3d.set_layer_visibility("weather", layer, checked)
-            )
-            self.control_widgets[f"weather_{layer_name}"] = checkbox
-            self.control_layout.insertWidget(i, checkbox)
 
     def _setup_water_controls(self):
         """
-        Funktionsweise: Erstellt Controls für Water-Tab
-        Aufgabe: Water, Soil-Moisture, Erosion und Sedimentation-Controls
+        Funktionsweise: Water-Tab hat keine eigenen 3D-Basis-Controls mehr -
+        welcher Layer (Water/Soil Moisture/Erosion/Sedimentation/Flow) auf
+        dem Mesh liegt, entscheiden ausschließlich die radio buttons über
+        dem Canvas (siehe BaseMapTab._push_data_to_current_display()/
+        _LAYER_SELECTION_KEYS_3D). Die früheren 5 Checkboxen hier waren dazu
+        redundant (User-Report: mehrere gleichzeitig aktivierbar, z.B. Wasser-
+        UND Fluss-Overlay gleichzeitig, unabhängig von der 2D-Auswahl) -
+        entfernt.
         """
         self._clear_tab_controls()
-
-        water_layers = [
-            ("Water", "water_map", True),
-            ("Soil Moisture", "soil_moisture", False),
-            ("Erosion", "erosion", False),
-            ("Sedimentation", "sedimentation", False)
-        ]
-
-        for i, (label, layer_name, default_checked) in enumerate(water_layers):
-            checkbox = QCheckBox(label)
-            checkbox.setChecked(default_checked)
-            checkbox.toggled.connect(
-                lambda checked, layer=layer_name: self.display_3d.set_layer_visibility("water", layer, checked)
-            )
-            self.control_widgets[f"water_{layer_name}"] = checkbox
-            self.control_layout.insertWidget(i, checkbox)
 
     def _setup_biome_controls(self):
         """
-        Funktionsweise: Erstellt Controls für Biome-Tab
-        Aufgabe: Biome-Map Control
+        Funktionsweise: Biome-Tab hat keine eigenen 3D-Basis-Controls mehr -
+        welcher Layer (Biome Map/Super Biomes) auf dem Mesh liegt,
+        entscheiden ausschließlich die radio buttons über dem Canvas (siehe
+        BaseMapTab._push_data_to_current_display()/_LAYER_SELECTION_KEYS_3D).
+        Die früheren 2 Checkboxen hier waren dazu redundant - entfernt.
         """
         self._clear_tab_controls()
-
-        # Biome Map
-        biome_checkbox = QCheckBox("Biome Map")
-        biome_checkbox.setChecked(True)
-        biome_checkbox.toggled.connect(
-            lambda checked: self.display_3d.set_layer_visibility("biome", "biome_map", checked)
-        )
-        self.control_widgets["biome_map"] = biome_checkbox
-        self.control_layout.insertWidget(0, biome_checkbox)
 
     def _setup_settlement_controls(self):
         """
@@ -1426,3 +1907,38 @@ class MapDisplay3DWidget(QWidget):
         Aufgabe: Interface-Methode für externe Overlay-Updates
         """
         self.display_3d.update_overlay_data(tab_type, layer_name, data)
+
+    def set_layer_visibility(self, tab_type, layer_name, visible):
+        """
+        Funktionsweise: Delegiert Layer-Sichtbarkeit an 3D-Display.
+        Aufgabe: Interface-Methode für BaseMapTab._push_data_to_current_display() -
+        fehlte hier bisher komplett (nur MapDisplay3D selbst hatte diese Methode),
+        weshalb der hasattr()-Guard in base_tab.py auf self.map_display_3d.display
+        (= diese Wrapper-Instanz, NICHT self.display_3d direkt) lautlos fehlschlug
+        und die radio-button-Layer-Auswahl im 3D-Modus wirkungslos blieb.
+        """
+        self.display_3d.set_layer_visibility(tab_type, layer_name, visible)
+
+    def set_shadow_overlay(self, checked: bool, angle: int = None):
+        """
+        Funktionsweise: Delegiert Schatten-Toggle an 3D-Display.
+        Aufgabe: Interface-Methode für BaseMapTab.set_shadow_overlay() - gleicher
+        fehlender Delegations-Grund wie set_layer_visibility() oben.
+        """
+        self.display_3d.set_shadow_overlay(checked, angle)
+
+    def set_contour_overlay(self, checked: bool):
+        """
+        Funktionsweise: Delegiert Contour-Lines-Toggle an 3D-Display.
+        Aufgabe: Interface-Methode für BaseMapTab.set_contour_overlay() - gleicher
+        fehlender Delegations-Grund wie set_layer_visibility() oben.
+        """
+        self.display_3d.set_contour_overlay(checked)
+
+    def set_water_biomes_reference(self, water_biomes_map):
+        """
+        Funktionsweise: Delegiert See/Fluss-Referenzdaten an 3D-Display.
+        Aufgabe: Interface-Methode für water_tab.py - gleicher fehlender
+        Delegations-Grund wie set_layer_visibility() oben.
+        """
+        self.display_3d.set_water_biomes_reference(water_biomes_map)

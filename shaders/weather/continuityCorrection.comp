@@ -1,0 +1,42 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rg32f, binding = 0) uniform readonly image2D windIn;
+layout(rg32f, binding = 1) uniform writeonly image2D windOut;
+
+uniform int u_width;
+uniform int u_height;
+
+// Portierung von WeatherSystemGenerator._apply_continuity_correction() (core/weather_generator.py).
+// WICHTIGER UNTERSCHIED zum CPU-Original: das CPU-Original modifiziert wind_field IN-PLACE
+// waehrend derselben Zeilen-Schleife - eine spaeter besuchte Zelle kann also bereits
+// korrigierte Werte einer FRUEHER besuchten Zelle (z.B. Zeile y-1) lesen (echte
+// Gauss-Seidel-Abhaengigkeit, nicht parallelisierbar ohne exakt dieselbe Reihenfolge).
+// Diese Version ist ein Jacobi-Schritt (liest ausschliesslich aus windIn, dem Zustand VOR
+// dieser Passage) - dieselbe bewusste, dokumentierte Naeherung wie in
+// shaders/water/sedimentTransport.comp. Physikalisch aequivalent (Divergenz-Daempfung),
+// nicht bit-identisch zum CPU-Pfad.
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_width || coord.y >= u_height) return;
+
+    vec2 current = imageLoad(windIn, coord).rg;
+
+    if (coord.x < 1 || coord.x >= u_width - 1 || coord.y < 1 || coord.y >= u_height - 1) {
+        imageStore(windOut, coord, vec4(current, 0.0, 0.0));
+        return;
+    }
+
+    float windXRight = imageLoad(windIn, coord + ivec2(1, 0)).r;
+    float windXLeft = imageLoad(windIn, coord + ivec2(-1, 0)).r;
+    float windYDown = imageLoad(windIn, coord + ivec2(0, 1)).g;
+    float windYUp = imageLoad(windIn, coord + ivec2(0, -1)).g;
+
+    float dudx = (windXRight - windXLeft) * 0.5;
+    float dvdy = (windYDown - windYUp) * 0.5;
+    float divergence = dudx + dvdy;
+    float correctionFactor = -divergence * 0.1;
+
+    vec2 result = current + vec2(correctionFactor * 0.5, correctionFactor * 0.5);
+    imageStore(windOut, coord, vec4(result, 0.0, 0.0));
+}

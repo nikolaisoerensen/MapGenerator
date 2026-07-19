@@ -4,9 +4,23 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QChe
 from PyQt6.QtCore import pyqtSignal
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.colors import ListedColormap
+from matplotlib.collections import LineCollection
+from matplotlib.colors import ListedColormap, LogNorm
 from matplotlib.figure import Figure
 from gui.config.gui_default import CanvasSettings, ColorSchemes
+
+# Farbschema fuer PlotPhysicsSystem-Kerne/-Nodes (siehe
+# [[project-settlement-plot-physics-rebuild]]) - geteilt zwischen der Live-
+# Konvergenz-Vorschau (draw_plot_physics_snapshot) und dem finalen
+# "eingefrorenen" Ergebnis (overlay_plot_boundaries), damit beide Ansichten
+# optisch konsistent bleiben.
+PLOT_CORE_COLOR_BY_TYPE = {
+    "standard_plot_node": "#3498db", "wilderness_core": "#2ecc71", "city_core": "#e74c3c",
+}
+PLOT_NODE_COLOR_BY_TYPE = {
+    "standard_plot_node": "#bdc3c7", "wilderness_node": "#27ae60",
+    "map_border_node": "#7f8c8d", "city_border_node": "#c0392b",
+}
 
 def _validate_input_data(data):
     """
@@ -18,13 +32,13 @@ def _validate_input_data(data):
     if not isinstance(data, np.ndarray):
         return False
 
-    # Echte 2D-Daten (Skalarfelder) ODER RGB/RGBA-Bilddaten (z.B. Geology
-    # rock_map, (H,W,3) Gesteinsanteile) sind gültig für imshow(). Andere
-    # Kanalzahlen (z.B. (H,W,2) dx/dy-Gradienten wie slopemap/wind_map) sind
-    # NICHT direkt darstellbar - der Aufrufer muss sie vorher auf ein
-    # darstellbares Format reduzieren (siehe TerrainTab/WeatherTab
-    # update_display_mode()).
-    if data.ndim == 3 and data.shape[2] not in (3, 4):
+    # Echte 2D-Daten (Skalarfelder), RGB/RGBA-Bilddaten (z.B. Geology
+    # rock_map, (H,W,3) Gesteinsanteile) ODER (H,W,2) Vektorfelder (wind_map -
+    # eigener Pfeil-Renderer _render_wind_map()) sind gültig für die
+    # Darstellung. Andere Kanalzahlen (z.B. slopemap) sind NICHT direkt
+    # darstellbar - der Aufrufer muss sie vorher auf ein darstellbares Format
+    # reduzieren (siehe TerrainTab update_display_mode()).
+    if data.ndim == 3 and data.shape[2] not in (2, 3, 4):
         return False
     elif data.ndim not in (2, 3):
         return False
@@ -39,6 +53,27 @@ def _validate_input_data(data):
         return False
 
     return True
+
+def _get_layer_range(layer_key):
+    """
+    Funktionsweise: Liefert (colormap, vmin, vmax, scale) für einen Layer aus
+    CanvasSettings.CANVAS_2D["layer_ranges"], oder (None, None, None, "linear")
+    wenn kein Eintrag existiert (Aufrufer fällt dann auf Auto-Skalierung
+    zurück). Aufgabe: Zentraler Lookup, von allen _render_*-Methoden genutzt,
+    damit Farbskalen zwischen Frames (z.B. der saisonalen Monats-Animation im
+    Weather-Tab) stabil bleiben statt pro Frame neu zu skalieren. scale ist
+    "linear" (Default, bestehende 3-Tupel-Einträge) oder "log" (z.B.
+    erosion_map/sedimentation_map - stark rechtsschiefe Werteverteilung,
+    lineare Skala ließ den typischen Wertebereich kaum unterscheidbar
+    erscheinen) - siehe _render_generic_map()/map_display_3d.py's
+    _colorize_layer() für die tatsächliche Normalisierung.
+    """
+    entry = CanvasSettings.CANVAS_2D.get("layer_ranges", {}).get(layer_key)
+    if entry is None:
+        return None, None, None, "linear"
+    if len(entry) == 3:
+        return entry[0], entry[1], entry[2], "linear"
+    return entry
 
 def _calculate_contour_levels(heightmap):
     """
@@ -67,6 +102,93 @@ def _calculate_contour_levels(heightmap):
 
     return np.arange(start, end + interval, interval)
 
+
+def rasterize_plot_boundaries_rgba(plot_nodes, plot_edges, plot_cores, wilderness_polygons,
+                                    map_size, resolution=512):
+    """
+    Funktionsweise: Rendert dieselbe Plot-Geometrie wie MapDisplay2D.
+    overlay_plot_boundaries() (Kantennetz/Straßen-Tiers/Wildnisgrenzen/Kerne/
+    Nodes), aber headless auf eine feste (resolution, resolution, 4)-RGBA-
+    Textur statt in ein Qt-Canvas - der transparente Hintergrund (alpha=0)
+    laesst das Terrain ueberall durchscheinen, wo nichts gezeichnet wurde.
+    Aufgabe: Gemeinsame Rasterisierungs-Basis fuer den 3D-"Skin"-Textur-
+    Upload (siehe map_display_3d.py's _render_settlement_plot_skin(),
+    [[project-settlement-plot-physics-rebuild]] Teil 4) - "die 2D-Darstellung
+    als Skin auf das Terrain legen" (Nutzer-Vorgabe) statt eigener 3D-
+    Wireframe-/Marker-Geometrie.
+    Parameter: plot_nodes/plot_edges/plot_cores/wilderness_polygons wie
+    overlay_plot_boundaries(), map_size (int) - Kartengroesse in Pixeln
+    (Koordinatensystem der node_location-Werte), resolution (int) -
+    Ziel-Texturaufloesung.
+    Return: (resolution, resolution, 4) uint8 RGBA-Array, Zeile 0 = y=0
+    (row-index==y-Konvention wie heightmap/civ_map - siehe Docstring-
+    Kommentar an der Aufrufstelle in map_display_3d.py).
+    """
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    if not plot_nodes:
+        return np.zeros((resolution, resolution, 4), dtype=np.uint8)
+
+    dpi = 100
+    fig = Figure(figsize=(resolution / dpi, resolution / dpi), dpi=dpi)
+    canvas = FigureCanvasAgg(fig)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, map_size)
+    ax.set_ylim(0, map_size)
+    ax.set_axis_off()
+    fig.patch.set_alpha(0.0)
+    ax.patch.set_alpha(0.0)
+
+    node_by_id = {n.node_id: n for n in plot_nodes}
+    grey_segments, path_segments, road_segments = [], [], []
+    for edge in (plot_edges or {}).values():
+        a = node_by_id.get(edge.node_a)
+        b = node_by_id.get(edge.node_b)
+        if a is None or b is None:
+            continue
+        seg = (a.node_location, b.node_location)
+        if edge.classification == "road":
+            road_segments.append(seg)
+        elif edge.classification == "path":
+            path_segments.append(seg)
+        else:
+            grey_segments.append(seg)
+
+    for segments, color, width, alpha in (
+        (grey_segments, 'dimgray', 0.7, 0.6),
+        (path_segments, '#f1c40f', 1.4, 0.9),
+        (road_segments, '#e67e22', 3.0, 0.95),
+    ):
+        if segments:
+            ax.add_collection(LineCollection(segments, colors=color, linewidths=width, alpha=alpha, zorder=3))
+
+    outline_segments = []
+    for poly_coords in (wilderness_polygons or []):
+        coords = np.asarray(poly_coords, dtype=float)
+        if len(coords) < 2:
+            continue
+        outline_segments.extend((tuple(coords[i]), tuple(coords[i + 1])) for i in range(len(coords) - 1))
+    if outline_segments:
+        ax.add_collection(LineCollection(outline_segments, colors='magenta', linewidths=1.8, alpha=0.85, zorder=3))
+
+    xs = [n.node_location[0] for n in plot_nodes]
+    ys = [n.node_location[1] for n in plot_nodes]
+    colors = [PLOT_NODE_COLOR_BY_TYPE.get(n.node_type, "#bdc3c7") for n in plot_nodes]
+    ax.scatter(xs, ys, c=colors, marker='.', s=8, alpha=0.7, zorder=4)
+
+    for node_type, color in PLOT_CORE_COLOR_BY_TYPE.items():
+        cxs = [c.node_location[0] for c in (plot_cores or []) if c.node_type == node_type]
+        cys = [c.node_location[1] for c in (plot_cores or []) if c.node_type == node_type]
+        if cxs:
+            ax.scatter(cxs, cys, c=color, marker='o', s=45, edgecolors='white', linewidths=0.6, zorder=5)
+
+    canvas.draw()
+    buffer = np.asarray(canvas.buffer_rgba(), dtype=np.uint8)
+    # buffer_rgba() liefert Zeile 0 = oberer Bildrand (screen-space) = y=map_size;
+    # geflippt, damit Zeile 0 = y=0 gilt (row-index==y, wie heightmap/civ_map).
+    return np.flipud(buffer)
+
 class MapDisplay2D(QWidget):
     """
     Funktionsweise: 2D-Visualisierung von Heightmaps und anderen Generator-Outputs mit Matplotlib
@@ -89,6 +211,7 @@ class MapDisplay2D(QWidget):
         self.current_layer = "heightmap"
         self.contour_lines_enabled = True
         self._contour_reference_heightmap = None  # für Contour-Overlay auf Nicht-Heightmap-Layern
+        self._water_biomes_reference = None  # für See/Fluss-Farbunterscheidung in _render_water_map
         self.shadow_overlay_enabled = False
         self.shadow_angle_index = None
         self.measure_mode = False
@@ -154,8 +277,14 @@ class MapDisplay2D(QWidget):
         self.ax.set_aspect('equal')
         self.ax.set_facecolor(CanvasSettings.CANVAS_2D["background_color"])
 
-        # Standard-Colormap für Heightmaps
-        self.heightmap_cmap = plt.cm.terrain
+        # Standard-Colormap für Heightmaps: plt.cm.terrain, aber ohne den
+        # Blau-Anteil (0-25% der Original-Colormap, sieht wie Wasser aus - bei
+        # elevation_vmax=4000 lag das Blau bei 0-1000m, Grün setzte erst ab 1000m
+        # ein). Nimmt nur den Grün-bis-Weiß-Teil (ab 25%) und streckt ihn auf den
+        # vollen 0-1 Bereich, damit Grün jetzt die niedrigste Farbe ist (0m) und
+        # Weiß weiterhin die höchste (elevation_vmax). Die Farbskala am Rand
+        # (colorbar in _render_heightmap) nutzt automatisch dieselbe Colormap.
+        self.heightmap_cmap = ListedColormap(plt.cm.terrain(np.linspace(0.25, 1.0, 256)))
 
         # Feste Biome-Colormap aus ColorSchemes.BIOME_COLOR_TABLE (dieselbe Quelle
         # wie BiomeLegendDialog) - vorher plt.cm.Set3, ein generischer 12-Farben-
@@ -223,12 +352,14 @@ class MapDisplay2D(QWidget):
             self._render_biome_map(data)
         elif layer_type == "water_map":
             self._render_water_map(data)
-        elif layer_type == "temperature_map":
+        elif layer_type == "temp_map":
             self._render_temperature_map(data)
-        elif layer_type == "precipitation_map":
+        elif layer_type == "precip_map":
             self._render_precipitation_map(data)
+        elif layer_type == "wind_map":
+            self._render_wind_map(data)
         else:
-            self._render_generic_map(data)
+            self._render_generic_map(data, layer_type)
 
         # Contour-Lines-Overlay auf Nicht-Heightmap-Layern (Heightmap zeichnet
         # ihre eigenen Konturen bereits in _render_heightmap direkt aus den
@@ -249,6 +380,16 @@ class MapDisplay2D(QWidget):
         die Layer-Daten kommen im selben Zug über update_display().
         """
         self._contour_reference_heightmap = heightmap
+
+    def set_water_biomes_reference(self, water_biomes_map):
+        """
+        Öffentlicher Hook (analog zu set_contour_reference_heightmap): hinterlegt
+        water_biomes_map (0=kein Wasser, 1-3=Creek/River/Grand River, 4=Lake), damit
+        _render_water_map See-Pixel farblich von Fluss-Pixeln absetzen kann. Wird von
+        WaterTab.update_display_mode() vor jedem "water_map"-Display-Update mitgeschickt
+        - kein eigenes Redraw, die Layer-Daten kommen im selben Zug über update_display().
+        """
+        self._water_biomes_reference = water_biomes_map
 
     def _reset_measure_tools(self):
         """
@@ -323,7 +464,9 @@ class MapDisplay2D(QWidget):
         MapDisplay2D kann nur echte 2D-Bilder zeichnen).
         Parameter: slope_degrees (numpy.ndarray) - Steigung in Grad zum Rendern
         """
-        im = self.ax.imshow(slope_degrees, cmap=plt.cm.YlOrRd, origin='lower', interpolation='bilinear')
+        _, vmin, vmax, _ = _get_layer_range("slopemap")
+        im = self.ax.imshow(slope_degrees, cmap=plt.cm.YlOrRd, origin='lower', interpolation='bilinear',
+                             vmin=vmin, vmax=vmax)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Slope (°)')
@@ -373,11 +516,27 @@ class MapDisplay2D(QWidget):
         Funktionsweise: Rendert Water-Map mit Blau-Farbschema
         Aufgabe: Spezialisierte Darstellung für Wasser-Daten
         Parameter: water_map (numpy.ndarray) - Wasser-Daten zum Rendern
+
+        See-Pixel (water_biomes_map-Klasse 4, siehe core/water_generator.py
+        _classify_water_bodies) werden - falls set_water_biomes_reference() vorher
+        aufgerufen wurde - zusätzlich in einer klar abgesetzten Farbe overlayed, damit
+        Seen auf den ersten Blick von Flüssen unterscheidbar sind (beide teilten sich
+        vorher exakt dieselbe Blues-Tiefenskala, ein flacher See sah dadurch identisch
+        zu einem schmalen Bach aus). water_biomes_reference bleibt optional/None-
+        toleriert (Rückwärtskompatibilität, falls kein Aufrufer es setzt).
         """
-        im = self.ax.imshow(water_map, cmap=plt.cm.Blues, origin='lower', interpolation='bilinear')
+        _, vmin, vmax, _ = _get_layer_range("water_map")
+        im = self.ax.imshow(water_map, cmap=plt.cm.Blues, origin='lower', interpolation='bilinear',
+                             vmin=vmin, vmax=vmax)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Water Depth (m)')
+
+        water_biomes_map = self._water_biomes_reference
+        if water_biomes_map is not None and water_biomes_map.shape[:2] == water_map.shape[:2]:
+            lake_mask = np.ma.masked_where(water_biomes_map != 4, np.ones_like(water_map))
+            self.ax.imshow(lake_mask, cmap=ListedColormap(['#0b3d91']), origin='lower',
+                            interpolation='nearest', vmin=0, vmax=1, alpha=0.85)
 
     def _render_temperature_map(self, temp_map):
         """
@@ -385,7 +544,9 @@ class MapDisplay2D(QWidget):
         Aufgabe: Spezialisierte Darstellung für Temperatur-Daten
         Parameter: temp_map (numpy.ndarray) - Temperatur-Daten zum Rendern
         """
-        im = self.ax.imshow(temp_map, cmap=plt.cm.RdBu_r, origin='lower', interpolation='bilinear')
+        _, vmin, vmax, _ = _get_layer_range("temp_map")
+        im = self.ax.imshow(temp_map, cmap=plt.cm.RdBu_r, origin='lower', interpolation='bilinear',
+                             vmin=vmin, vmax=vmax)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Temperature (°C)')
@@ -396,18 +557,96 @@ class MapDisplay2D(QWidget):
         Aufgabe: Spezialisierte Darstellung für Niederschlags-Daten
         Parameter: precip_map (numpy.ndarray) - Niederschlags-Daten zum Rendern
         """
-        im = self.ax.imshow(precip_map, cmap=plt.cm.Greens, origin='lower', interpolation='bilinear')
+        _, vmin, vmax, _ = _get_layer_range("precip_map")
+        im = self.ax.imshow(precip_map, cmap=plt.cm.Greens, origin='lower', interpolation='bilinear',
+                             vmin=vmin, vmax=vmax)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Precipitation (mm)')
 
-    def _render_generic_map(self, data):
+    def _render_wind_map(self, wind_map):
+        """
+        Funktionsweise: Windstärke als Heatmap-Hintergrund + Stromlinien
+        (matplotlib streamplot, folgt dem tatsächlichen Strömungsverlauf und
+        macht Wirbel/Verwirbelungen deutlich sichtbar - reine Pfeile an
+        diskreten Punkten zeigen das nicht) + zusätzliche Richtungs-Pfeile
+        (matplotlib quiver) auf einem gegenüber vorher verdichteten,
+        weiterhin map_size-unabhängigen Raster (32 -> 48 Punkte je Achse).
+        Aufgabe: Ersetzt die frühere reine Windstärke-Heatmap (wind_map kam
+        vorher bereits als Magnitude reduziert an) - zeigt jetzt zusätzlich
+        die tatsächliche Windrichtung. Pfeillänge UND -farbe skalieren mit
+        der lokalen Windstärke.
+        Parameter: wind_map (numpy.ndarray) - (H,W,2) u/v-Windkomponenten in m/s
+        """
+        height, width = wind_map.shape[0], wind_map.shape[1]
+        magnitude = np.sqrt(wind_map[:, :, 0] ** 2 + wind_map[:, :, 1] ** 2)
+
+        _, vmin, vmax, _ = _get_layer_range("wind_map")
+        im = self.ax.imshow(magnitude, cmap=plt.cm.Blues, origin='lower',
+                             interpolation='bilinear', alpha=0.5, vmin=vmin, vmax=vmax)
+        self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
+        self.current_colorbar.set_label('Wind Speed (m/s)')
+
+        # Stromlinien auf ein moderates, von map_size entkoppeltes Raster
+        # (max. 256) resampled - streamplot integriert Pfadlinien statt nur
+        # Einzelpunkte zu samplen, das skaliert bei sehr großen Karten
+        # (1024x1024) sonst spürbar schlechter als quiver. streamplot
+        # verlangt exakt äquidistante Koordinaten-Arrays - deshalb per
+        # bilinearer zoom()-Interpolation auf ein reguläres Zielraster
+        # resampled statt (wie beim quiver) einzelne Pixel per gerundetem
+        # Integer-Index herauszugreifen (das würde bei windschiefer
+        # Rundung ungleiche Abstände erzeugen -> matplotlib-Fehler).
+        stream_grid = min(256, height, width)
+        if stream_grid >= 4:
+            zoom_factors = (stream_grid / height, stream_grid / width)
+            su = zoom(wind_map[:, :, 0], zoom_factors, order=1)
+            sv = zoom(wind_map[:, :, 1], zoom_factors, order=1)
+            smag = zoom(magnitude, zoom_factors, order=1)
+            sx = np.linspace(0, width - 1, stream_grid)
+            sy = np.linspace(0, height - 1, stream_grid)
+            self.ax.streamplot(sx, sy, su, sv,
+                                color=smag, cmap=plt.cm.plasma, density=1.3,
+                                linewidth=0.8, arrowsize=0.9)
+
+        grid = 48
+        y_idx = np.linspace(0, height - 1, min(grid, height)).astype(int)
+        x_idx = np.linspace(0, width - 1, min(grid, width)).astype(int)
+        yy, xx = np.meshgrid(y_idx, x_idx, indexing='ij')
+        u = wind_map[yy, xx, 0]
+        v = wind_map[yy, xx, 1]
+        mag_sampled = magnitude[yy, xx]
+
+        self.ax.quiver(xx, yy, u, v, mag_sampled, cmap=plt.cm.plasma,
+                        angles='xy', scale_units='xy', width=0.0022, alpha=0.85)
+
+    def _render_generic_map(self, data, layer_type=None):
         """
         Funktionsweise: Rendert unbekannte Datentypen mit Standard-Colormap
-        Aufgabe: Fallback-Rendering für beliebige numerische Daten
-        Parameter: data (numpy.ndarray) - Beliebige Daten zum Rendern
+        Aufgabe: Fallback-Rendering für beliebige numerische Daten - nutzt
+        eine feste Farbskala aus CanvasSettings.CANVAS_2D["layer_ranges"],
+        falls layer_type dort einen Eintrag hat (z.B. humid_map,
+        hardness_map, erosion_map, sedimentation_map, flow_map,
+        soil_moist_map), sonst Auto-Skalierung wie bisher.
+        Parameter: data (numpy.ndarray) - Beliebige Daten zum Rendern,
+        layer_type (str) - Layer-Key für den Farbskalen-Lookup
         """
-        im = self.ax.imshow(data, cmap=plt.cm.viridis, origin='lower', interpolation='bilinear')
+        cmap_name, vmin, vmax, scale = _get_layer_range(layer_type) if layer_type else (None, None, None, "linear")
+        cmap = plt.cm.get_cmap(cmap_name) if cmap_name else plt.cm.viridis
+
+        if scale == "log" and vmin is not None and vmax is not None:
+            # Stark rechtsschiefe Werteverteilung (die meisten Pixel exakt 0,
+            # z.B. erosion_map/sedimentation_map) - LogNorm kann keine
+            # nicht-positiven Werte verarbeiten, daher vor dem Rendern auf ein
+            # kleines Epsilon (deutlich unter vmin) geklemmt, damit reine
+            # Nullen sauber unter die Skala fallen (unterste Farbe) statt als
+            # matplotlibs "bad"-Farbe für den Großteil der Karte zu erscheinen.
+            epsilon = vmin * 0.01
+            plot_data = np.maximum(data, epsilon)
+            norm = LogNorm(vmin=vmin, vmax=vmax, clip=True)
+            im = self.ax.imshow(plot_data, cmap=cmap, origin='lower', interpolation='bilinear', norm=norm)
+        else:
+            im = self.ax.imshow(data, cmap=cmap, origin='lower', interpolation='bilinear',
+                                 vmin=vmin, vmax=vmax)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Value')
@@ -454,11 +693,14 @@ class MapDisplay2D(QWidget):
             self.ax.legend(loc='upper right', fontsize=8, framealpha=0.7)
         self.canvas.draw()
 
-    def overlay_roads(self, roads):
+    def overlay_roads(self, roads, color='darkorange', linewidth=1.2, alpha=0.85, zorder=4):
         """
         Funktionsweise: Zeichnet Road-Pfade als Linien über das aktuell
         angezeigte Bild
-        Aufgabe: Overlay für SettlementTab "Road Network"
+        Aufgabe: Overlay für SettlementTab "Road Network" - mehrfach mit
+        unterschiedlicher color aufrufbar, um Hauptstraßen/Landmark-
+        Anbindungen/Außenverbindungen optisch zu unterscheiden (siehe
+        SettlementTab.update_settlement_display())
         Parameter: roads (List[List[Tuple]]) - Liste von Pfaden, je Pfad eine
         Liste von (x,y[,...])-Punkten
         """
@@ -470,7 +712,152 @@ class MapDisplay2D(QWidget):
                 continue
             xs = [p[0] for p in path]
             ys = [p[1] for p in path]
-            self.ax.plot(xs, ys, color='darkorange', linewidth=1.2, alpha=0.85, zorder=4)
+            self.ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, zorder=zorder)
+
+        self.canvas.draw()
+
+    def overlay_city_boundary_contour(self, city_mask, color='gold', linewidth=2.2):
+        """
+        Funktionsweise: Zeichnet die Stadtgrenze (siehe CityBoundaryAnalyzer in
+        core/settlement_generator.py) als geschlossene Kontur statt als
+        gefuellte Flaeche
+        Aufgabe: Overlay fuer SettlementTab "City Boundary" - bewusst deutlich
+        und "stadtmauerartig" (Nutzer-Vorgabe), kombinierbar mit jedem anderen
+        Basis-Layer statt eines eigenen exklusiven Anzeigemodus
+        Parameter: city_mask (numpy.ndarray[int]) - Settlement-ID pro Pixel,
+        -1 = ausserhalb jeder Stadt (siehe city_mask-Konvention im Core)
+        """
+        if self.current_data is None or city_mask is None:
+            return
+
+        inside = (city_mask >= 0).astype(np.float32)
+        if not np.any(inside):
+            return
+
+        self.ax.contour(inside, levels=[0.5], colors=[color], linewidths=linewidth, zorder=6)
+        self.canvas.draw()
+
+    def draw_plot_physics_snapshot(self, snapshot: dict):
+        """
+        Funktionsweise: Zeichnet einen Zwischenzustand der noch nicht
+        konvergierten Plot-Physik (siehe core.settlement_generator.
+        PlotPhysicsSystem._report_live_state(), [[project-settlement-plot-physics-rebuild]]
+        Teil F) - Plotkerne (standard_plot_node/wilderness_core/city_core)
+        als farbige Punkte, PlotNode-Kreuzungen als kleine graue Punkte.
+        Entfernt vorherige Snapshot-Marker, bevor neu gezeichnet wird, damit
+        sich nicht Dutzende Layer aus früheren Iterationen überlagern.
+        Aufgabe: Live-Fortschrittsanzeige während der Physik-Konvergenz,
+        analog zu draw.py im ursprünglichen tools/biome_lab/ Physics Lab.
+        Parameter: snapshot (dict) - "core_positions"/"plot_node_positions":
+        je eine Liste von (x, y, node_type)-Tupeln.
+        """
+        if self.current_data is None:
+            return
+
+        for artist in getattr(self, '_plot_physics_scatter_artists', []):
+            try:
+                artist.remove()
+            except (ValueError, NotImplementedError):
+                pass
+        self._plot_physics_scatter_artists = []
+
+        plot_node_positions = snapshot.get("plot_node_positions") or []
+        if plot_node_positions:
+            xs = [p[0] for p in plot_node_positions]
+            ys = [p[1] for p in plot_node_positions]
+            colors = [PLOT_NODE_COLOR_BY_TYPE.get(p[2], "#bdc3c7") for p in plot_node_positions]
+            artist = self.ax.scatter(xs, ys, c=colors, marker='.', s=6, alpha=0.7, zorder=4)
+            self._plot_physics_scatter_artists.append(artist)
+
+        core_positions = snapshot.get("core_positions") or []
+        for node_type, color in PLOT_CORE_COLOR_BY_TYPE.items():
+            xs = [p[0] for p in core_positions if p[2] == node_type]
+            ys = [p[1] for p in core_positions if p[2] == node_type]
+            if xs:
+                artist = self.ax.scatter(xs, ys, c=color, marker='o', s=18,
+                                          edgecolors='white', linewidths=0.3, zorder=5)
+                self._plot_physics_scatter_artists.append(artist)
+
+        self.canvas.draw()
+
+    def overlay_plot_boundaries(self, plot_nodes, plot_edges=None, plot_cores=None, wilderness_polygons=None):
+        """
+        Funktionsweise: Zeichnet das konvergierte/eingefrorene Endergebnis von
+        PlotPhysicsSystem (siehe [[project-settlement-plot-physics-rebuild]]
+        Teil 3) - graues Voronoi-Kantennetz, Straßen/Wege nach
+        PlotEdge.classification eingefärbt, Wildnisgrenz-Polygone, sowie
+        Plotkerne/-Nodes farbig nach node_type. Ported aus tools/biome_lab/
+        draw.py's _rebuild_static_layer()/_update_dynamic_layer(), reduziert
+        auf einen einzigen statischen Zeichen-Durchlauf (kein Tick-Redraw
+        nötig, das Ergebnis liegt bereits konvergiert vor).
+        Aufgabe: Ersetzt die vorherige generische Nearest-Core-ID-Rasterdarstellung
+        von "plot_map" als Basis-Layer für den "Plot Boundaries"-Anzeigemodus.
+        Parameter: plot_nodes (List[PlotNode]) - Voronoi-Kreuzungen/Randnodes,
+        plot_edges (Dict[int, PlotEdge]) - Kanten mit .node_a/.node_b/.classification,
+        plot_cores (List[PlotNode]) - Plotkerne (node_type standard_plot_node/
+        wilderness_core/city_core), wilderness_polygons (List[(N,2) array]) -
+        Aussenkontur-Punkte je Wildnisgebiet.
+        """
+        if self.current_data is None or not plot_nodes:
+            return
+
+        for artist in getattr(self, '_plot_boundary_artists', []):
+            try:
+                artist.remove()
+            except (ValueError, NotImplementedError):
+                pass
+        self._plot_boundary_artists = []
+
+        node_by_id = {n.node_id: n for n in plot_nodes}
+
+        grey_segments, path_segments, road_segments = [], [], []
+        for edge in (plot_edges or {}).values():
+            a = node_by_id.get(edge.node_a)
+            b = node_by_id.get(edge.node_b)
+            if a is None or b is None:
+                continue
+            seg = (a.node_location, b.node_location)
+            if edge.classification == "road":
+                road_segments.append(seg)
+            elif edge.classification == "path":
+                path_segments.append(seg)
+            else:
+                grey_segments.append(seg)
+
+        for segments, color, width, alpha in (
+            (grey_segments, 'dimgray', 0.5, 0.5),
+            (path_segments, '#f1c40f', 1.0, 0.85),
+            (road_segments, '#e67e22', 2.2, 0.9),
+        ):
+            if segments:
+                lc = LineCollection(segments, colors=color, linewidths=width, alpha=alpha, zorder=3)
+                self.ax.add_collection(lc)
+                self._plot_boundary_artists.append(lc)
+
+        outline_segments = []
+        for poly_coords in (wilderness_polygons or []):
+            coords = np.asarray(poly_coords, dtype=float)
+            if len(coords) < 2:
+                continue
+            outline_segments.extend((tuple(coords[i]), tuple(coords[i + 1])) for i in range(len(coords) - 1))
+        if outline_segments:
+            lc = LineCollection(outline_segments, colors='magenta', linewidths=1.3, alpha=0.85, zorder=3)
+            self.ax.add_collection(lc)
+            self._plot_boundary_artists.append(lc)
+
+        xs = [n.node_location[0] for n in plot_nodes]
+        ys = [n.node_location[1] for n in plot_nodes]
+        colors = [PLOT_NODE_COLOR_BY_TYPE.get(n.node_type, "#bdc3c7") for n in plot_nodes]
+        artist = self.ax.scatter(xs, ys, c=colors, marker='.', s=5, alpha=0.6, zorder=4)
+        self._plot_boundary_artists.append(artist)
+
+        for node_type, color in PLOT_CORE_COLOR_BY_TYPE.items():
+            cxs = [c.node_location[0] for c in (plot_cores or []) if c.node_type == node_type]
+            cys = [c.node_location[1] for c in (plot_cores or []) if c.node_type == node_type]
+            if cxs:
+                artist = self.ax.scatter(cxs, cys, c=color, marker='o', s=20,
+                                          edgecolors='white', linewidths=0.4, zorder=5)
+                self._plot_boundary_artists.append(artist)
 
         self.canvas.draw()
 

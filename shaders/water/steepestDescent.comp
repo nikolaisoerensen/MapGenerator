@@ -1,0 +1,40 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D heightmap;
+// Richtungsindex 0-7 als float, -1.0 = kein absteigender Nachbar (lokales Minimum/Senke)
+layout(r32f, binding = 1) uniform writeonly image2D flowDirections;
+
+uniform int u_size;
+
+// Portierung von FlowNetworkBuilder._calculate_steepest_descent() (core/water_generator.py).
+// Reihenfolge und Distanzen MUESSEN exakt zu direction_offsets dort passen (Richtungsindex
+// wird von water.erosion_sedimentation als Nachbar-Auswahl-Index weiterverwendet).
+const ivec2 OFFSETS[8] = ivec2[8](
+    ivec2(1, 0), ivec2(1, 1), ivec2(0, 1), ivec2(-1, 1),
+    ivec2(-1, 0), ivec2(-1, -1), ivec2(0, -1), ivec2(1, -1)
+);
+const float DISTS[8] = float[8](1.0, 1.4142135, 1.0, 1.4142135, 1.0, 1.4142135, 1.0, 1.4142135);
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float current = imageLoad(heightmap, coord).r;
+    float steepest_gradient = 0.0;
+    int steepest_direction = -1;
+
+    for (int i = 0; i < 8; i++) {
+        ivec2 ncoord = coord + OFFSETS[i];
+        if (ncoord.x < 0 || ncoord.x >= u_size || ncoord.y < 0 || ncoord.y >= u_size) continue;
+
+        float neighbor = imageLoad(heightmap, ncoord).r;
+        float gradient = (current - neighbor) / DISTS[i];
+        if (gradient > steepest_gradient) {
+            steepest_gradient = gradient;
+            steepest_direction = i;
+        }
+    }
+
+    imageStore(flowDirections, coord, vec4(float(steepest_direction), 0.0, 0.0, 0.0));
+}

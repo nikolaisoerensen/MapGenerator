@@ -2882,6 +2882,12 @@ class DataLODManager(QObject):
         """Gibt Map-Size für LOD-Level zurück"""
         return self.lod_hub.get_lod_size_for_level(lod_level)
 
+    def get_max_lod_for_map_size(self) -> int:
+        """Gibt maximale sinnvolle LOD-Stufe für aktuelle target_map_size zurück"""
+        if self.lod_hub.lod_config:
+            return self.lod_hub.lod_config.get_max_lod_for_map_size()
+        return 7
+
     # =============================================================================
     # GENERATOR INTEGRATION - PUNKT 9 LÖSUNG
     # =============================================================================
@@ -3337,6 +3343,16 @@ class DataLODManager(QObject):
                 self._set_data_lod("weather", self._weather_data, key, value, lod_level, parameters)
                 data_keys.append(key)
 
+        # Saisonale Monats-Listen (je 6 np.ndarray) - Nicht-Array-Produkte,
+        # analog zum bestehenden ocean_outflow/biome_statistics-Muster
+        # (require_array=False), für die animierte Weather-Tab-Anzeige.
+        for key in ("wind_map_monthly", "temp_map_monthly", "precip_map_monthly", "humid_map_monthly"):
+            value = getattr(weather_data, key, None)
+            if value:
+                self._set_data_lod("weather", self._weather_data, key, value, lod_level,
+                                   parameters, require_array=False)
+                data_keys.append(key)
+
         self._update_cache_timestamp("weather", lod_level, "complete", parameters)
         data_keys.append("complete")
         self.lod_data_stored.emit("weather", lod_level, data_keys)
@@ -3398,14 +3414,22 @@ class DataLODManager(QObject):
         self._settlement_data[f"lod_{lod_level}_settlement_data_object"] = settlement_data
 
         data_keys = []
-        for key in ("plot_map", "civ_map", "combined_suitability_map"):
+        # city_mask/voronoi_cell_map/street_mask/house_parcel_map: neue Arrays aus
+        # dem Settlement-Rework (#35-#37, siehe docs/backlog.md Ticket #4) -
+        # ohne diese Ergänzung bleiben SettlementTab.update_settlement_display()s
+        # neue Display-Modi (City Boundary/Landscape Voronoi/City Blocks) leer,
+        # exakt derselbe Bug-Typ wie zuvor bei plot_map/civ_map (siehe
+        # docs/generation_pipeline_dependencies.md, Punkt 9 der Bugliste).
+        for key in ("plot_map", "civ_map", "combined_suitability_map",
+                    "city_mask", "voronoi_cell_map", "street_mask", "house_parcel_map"):
             value = getattr(settlement_data, key, None)
             if value is not None:
                 self._set_data_lod("settlement", self._settlement_data, key, value, lod_level, parameters)
                 data_keys.append(key)
 
         # Nicht-Array-Produkte: Location-Listen und Straßen/Plot-Strukturen
-        for key in ("settlement_list", "landmark_list", "roadsite_list", "roads", "plots", "plot_nodes"):
+        for key in ("settlement_list", "landmark_list", "roadsite_list", "roads", "plots", "plot_nodes",
+                    "landmark_roads", "outer_roads", "plot_edges"):
             value = getattr(settlement_data, key, None)
             if value:
                 self._set_data_lod("settlement", self._settlement_data, key, value, lod_level,

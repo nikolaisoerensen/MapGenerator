@@ -1,0 +1,39 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D heightmap;
+// .r = seed_id (eigener flacher Pixel-Index y*size+x, -1 = kein Seed), .g = Hoehe an dieser Stelle
+layout(rg32f, binding = 1) uniform writeonly image2D seedState;
+
+uniform int u_size;
+
+// Portierung von WaterGenerator._detect_local_minima() (core/water_generator.py):
+// ein Pixel ist Seed, wenn seine Hoehe STRIKT kleiner ist als alle 8 Nachbarn.
+// Randpixel (kein volles 3x3-Nachbarschaftsfenster) sind nie Seed - entspricht
+// dem CPU-Code, der nur range(1, size-1) durchsucht.
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float current = imageLoad(heightmap, coord).r;
+
+    if (coord.x < 1 || coord.x >= u_size - 1 || coord.y < 1 || coord.y >= u_size - 1) {
+        imageStore(seedState, coord, vec4(-1.0, current, 0.0, 0.0));
+        return;
+    }
+
+    bool isMinimum = true;
+    for (int dy = -1; dy <= 1 && isMinimum; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            float neighbor = imageLoad(heightmap, coord + ivec2(dx, dy)).r;
+            if (neighbor <= current) {
+                isMinimum = false;
+                break;
+            }
+        }
+    }
+
+    float seedId = isMinimum ? float(coord.y * u_size + coord.x) : -1.0;
+    imageStore(seedState, coord, vec4(seedId, current, 0.0, 0.0));
+}

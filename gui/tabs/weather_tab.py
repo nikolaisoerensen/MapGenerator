@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
     QButtonGroup, QLabel
 )
-from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtCore import pyqtSlot, QTimer
 from PyQt6.QtGui import QFont
 import logging
 import numpy as np
@@ -45,6 +45,13 @@ class WeatherTab(BaseMapTab):
         self.display_mode_group = None
         self.current_display_mode = "height"
 
+        # Saisonale Monats-Animation (siehe update_display_mode()) - Platzhalter
+        # vor super().__init__(), da QTimer(self) einen bereits konstruierten
+        # QWidget-Unterbau braucht (self ist an dieser Stelle noch keine gültige
+        # QObject-Instanz).
+        self._current_month_index = 0
+        self._month_cycle_timer = None
+
         self.logger = logging.getLogger("WeatherTab")
 
         # Manager-Integration
@@ -65,6 +72,14 @@ class WeatherTab(BaseMapTab):
 
         # Initialer Dependency-Check für die Status-Anzeige
         self.check_input_dependencies()
+
+        # Timer für die animierte Monats-Umschaltung (1x/Sekunde) - Start/Stop-
+        # Gating analog map_display_3d.py's animation_timer-Muster (aktiv nur
+        # solange die ausgewählte Karte Monatsdaten hat), siehe
+        # _update_month_cycle_timer_state()/_on_month_cycle_tick().
+        self._month_cycle_timer = QTimer(self)
+        self._month_cycle_timer.setInterval(1000)
+        self._month_cycle_timer.timeout.connect(self._on_month_cycle_tick)
 
         self.logger.info("WeatherTab initialized")
 
@@ -90,6 +105,7 @@ class WeatherTab(BaseMapTab):
         try:
             self._create_temperature_parameters()
             self._create_wind_parameters()
+            self._create_humidity_parameters()
             self._create_dependency_status()
             self._create_gpu_status()
 
@@ -113,7 +129,8 @@ class WeatherTab(BaseMapTab):
                 max_val=config["max"],
                 default_val=config["default"],
                 step=config.get("step", 1),
-                suffix=config.get("suffix", "")
+                suffix=config.get("suffix", ""),
+                description=config.get("description", "")
             )
             slider.valueChanged.connect(
                 lambda value, key=param_key: self._on_parameter_changed(key, value)
@@ -130,7 +147,7 @@ class WeatherTab(BaseMapTab):
         wind_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         wind_layout = QVBoxLayout()
 
-        for param_key in ("thermic_effect", "wind_speed_factor", "terrain_factor"):
+        for param_key in ("thermic_effect", "wind_speed_factor", "terrain_factor", "prevailing_wind_direction"):
             config = get_parameter_config("weather", param_key)
 
             slider = ParameterSlider(
@@ -139,7 +156,8 @@ class WeatherTab(BaseMapTab):
                 max_val=config["max"],
                 default_val=config["default"],
                 step=config.get("step", 0.1),
-                suffix=config.get("suffix", "")
+                suffix=config.get("suffix", ""),
+                description=config.get("description", "")
             )
             slider.valueChanged.connect(
                 lambda value, key=param_key: self._on_parameter_changed(key, value)
@@ -149,6 +167,35 @@ class WeatherTab(BaseMapTab):
 
         wind_group.setLayout(wind_layout)
         self.control_panel.layout().addWidget(wind_group)
+
+    def _create_humidity_parameters(self):
+        """Erstellt Humidity/Location-System Parameter Controls (Eintrittsfeuchte,
+        geografische Breite/Länge - treibt die saisonale Sonnenstandsberechnung
+        für die Monats-Shadowmaps, siehe core/terrain_generator.py generate_seasonal_sun_angles())"""
+        humidity_group = QGroupBox("Humidity & Location")
+        humidity_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        humidity_layout = QVBoxLayout()
+
+        for param_key in ("air_humidity_entry", "map_latitude", "map_longitude"):
+            config = get_parameter_config("weather", param_key)
+
+            slider = ParameterSlider(
+                label=param_key.replace("_", " ").title(),
+                min_val=config["min"],
+                max_val=config["max"],
+                default_val=config["default"],
+                step=config.get("step", 1),
+                suffix=config.get("suffix", ""),
+                description=config.get("description", "")
+            )
+            slider.valueChanged.connect(
+                lambda value, key=param_key: self._on_parameter_changed(key, value)
+            )
+            self.parameter_sliders[param_key] = slider
+            humidity_layout.addWidget(slider)
+
+        humidity_group.setLayout(humidity_layout)
+        self.control_panel.layout().addWidget(humidity_group)
 
     def _create_dependency_status(self):
         """Erstellt Dependency-Status-Anzeige (Verfügbarkeit der Terrain-Inputs)"""
@@ -238,11 +285,43 @@ class WeatherTab(BaseMapTab):
         if checked:
             self.current_display_mode = mode
             self.update_display_mode()
+            self._update_month_cycle_timer_state()
             self.logger.debug(f"Display mode changed to: {mode}")
 
     # =============================================================================
     # DISPLAY UPDATE SYSTEM
     # =============================================================================
+
+    def _update_month_cycle_timer_state(self):
+        """
+        Funktionsweise: Start/Stop-Gating für den Monats-Animations-Timer,
+        analog zu map_display_3d.py's animation_timer-Muster - läuft nur,
+        solange die aktuell ausgewählte Karte tatsächlich saisonale
+        Monatsdaten hat (temp_map/precip_map/humid_map/wind_map, NIE
+        "height"). Wird bei jedem Moduswechsel und nach erfolgreicher
+        Generierung neu geprüft.
+        """
+        monthly_key = f"{self.current_display_mode}_monthly"
+        has_monthly_data = (
+            self.current_display_mode in ("temp_map", "precip_map", "humid_map", "wind_map")
+            and self.data_lod_manager is not None
+            and self.data_lod_manager.get_weather_data(monthly_key)
+        )
+        if has_monthly_data and not self._month_cycle_timer.isActive():
+            self._current_month_index = 0
+            self._month_cycle_timer.start()
+        elif not has_monthly_data and self._month_cycle_timer.isActive():
+            self._month_cycle_timer.stop()
+
+    def _on_month_cycle_tick(self):
+        """Wird jede Sekunde vom _month_cycle_timer aufgerufen - schaltet auf
+        die nächste der 6 saisonalen Monats-Karten um und stößt ein Redraw an."""
+        monthly_list = self.data_lod_manager.get_weather_data(f"{self.current_display_mode}_monthly")
+        if not monthly_list:
+            self._month_cycle_timer.stop()
+            return
+        self._current_month_index = (self._current_month_index + 1) % len(monthly_list)
+        self.update_display_mode()
 
     def update_display_mode(self):
         """
@@ -264,15 +343,21 @@ class WeatherTab(BaseMapTab):
                 data_type = "heightmap"
                 display_data = data
             elif self.current_display_mode in ("temp_map", "precip_map", "humid_map", "wind_map"):
-                data = self.data_lod_manager.get_weather_data(self.current_display_mode)
-                data_type = self.current_display_mode
-                if data_type == "wind_map" and data is not None and hasattr(data, 'shape') and len(data.shape) == 3:
-                    # wind_map ist (H,W,2) u/v-Windkomponenten - MapDisplay2D
-                    # kann nur echte 2D-Bilder zeichnen, daher auf die
-                    # Windgeschwindigkeits-Magnitude reduzieren.
-                    display_data = np.sqrt(data[:, :, 0] ** 2 + data[:, :, 1] ** 2).astype(np.float32)
+                # Bei vorhandenen saisonalen Monatsdaten wird die aktuell
+                # animierte Monats-Karte gezeigt (siehe _on_month_cycle_tick()),
+                # sonst Fallback auf den saisonalen Mittelwert (z.B. direkt nach
+                # der Generierung, bevor der Timer den ersten Tick gemacht hat,
+                # oder für alte Cache-Einträge ohne Monatsdaten).
+                monthly_list = self.data_lod_manager.get_weather_data(f"{self.current_display_mode}_monthly")
+                if monthly_list:
+                    data = monthly_list[self._current_month_index % len(monthly_list)]
                 else:
-                    display_data = data
+                    data = self.data_lod_manager.get_weather_data(self.current_display_mode)
+                data_type = self.current_display_mode
+                # wind_map bleibt roh (H,W,2) u/v-Windkomponenten - MapDisplay2D
+                # rendert es über _render_wind_map() als Pfeil-Feld + Stärke-
+                # Heatmap, keine Magnitude-Reduktion mehr nötig.
+                display_data = data
             else:
                 return
 
@@ -332,6 +417,7 @@ class WeatherTab(BaseMapTab):
         try:
             if success:
                 self.update_display_mode()
+                self._update_month_cycle_timer_state()
 
                 if self.climate_stats:
                     results = {
@@ -423,6 +509,9 @@ class WeatherTab(BaseMapTab):
         """
         try:
             self.logger.debug("Cleaning up weather-specific resources")
+
+            if self._month_cycle_timer is not None and self._month_cycle_timer.isActive():
+                self._month_cycle_timer.stop()
 
             self.parameter_sliders.clear()
 

@@ -1,0 +1,86 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D biomeMap;
+// Feste Priority-Reihenfolge wie super_biome_probabilities.items() in Python
+// (Insertion-Order aus SuperBiomeOverrideSystem.apply_super_biome_overrides()):
+// cliff, beach, lake_edge, river_bank, snow_level, alpine_level.
+layout(r32f, binding = 1) uniform readonly image2D cliffProb;
+layout(r32f, binding = 2) uniform readonly image2D beachProb;
+layout(r32f, binding = 3) uniform readonly image2D lakeEdgeProb;
+layout(r32f, binding = 4) uniform readonly image2D riverBankProb;
+layout(r32f, binding = 5) uniform readonly image2D snowProb;
+layout(r32f, binding = 6) uniform readonly image2D alpineProb;
+layout(r32f, binding = 7) uniform writeonly image2D biomeMapSuperOut;
+
+uniform int u_width;   // Basis-Breite (vor Supersampling)
+uniform int u_height;  // Basis-Hoehe (vor Supersampling)
+uniform int u_biome_seed;
+uniform float u_supersampling_quality;
+
+// Portierung von SupersamplingManager.apply_supersampling() (core/biome_generator.py).
+// REVERSE_I[rotationHash][subY*2+subX] = i loest die vier sub_order-Listen aus dem
+// CPU-Original direkt auf (index i wird fuer den Sub-Pixel-Seed gebraucht, nicht
+// die geometrische Sub-Position selbst) - vorab von Hand aus den 4 Python-
+// sub_order-Definitionen abgeleitet.
+const int REVERSE_I[4][4] = int[4][4](
+    int[4](0, 1, 2, 3),
+    int[4](1, 3, 0, 2),
+    int[4](3, 2, 1, 0),
+    int[4](2, 0, 3, 1)
+);
+
+void main() {
+    ivec2 outCoord = ivec2(gl_GlobalInvocationID.xy);
+    int superWidth = u_width * 2;
+    int superHeight = u_height * 2;
+    if (outCoord.x >= superWidth || outCoord.y >= superHeight) return;
+
+    ivec2 baseCoord = outCoord / 2;
+    int subY = outCoord.y % 2;
+    int subX = outCoord.x % 2;
+
+    // +400000000/+1000000000 (durch 4 bzw. 1000 teilbar) verschieben den Operanden
+    // sicher ins Positive, bevor modulo genommen wird - GLSLs "%" ist fuer negative
+    // Operanden undefiniert (anders als Pythons immer nicht-negatives Modulo).
+    int rotationHash = ((u_biome_seed + 12345 + baseCoord.x * 997 + baseCoord.y * 991) + 400000000) % 4;
+    int subKey = subY * 2 + subX;
+    int i = REVERSE_I[rotationHash][subKey];
+
+    float assignedBiome = imageLoad(biomeMap, baseCoord).r;
+
+    int subSeed = ((u_biome_seed + 54321 + baseCoord.x * 4 + baseCoord.y * 4 + i * 3571) + 1000000000) % 1000;
+    float probability = float(subSeed) / 1000.0;
+
+    float cliffP = imageLoad(cliffProb, baseCoord).r * u_supersampling_quality;
+    if (probability < cliffP) {
+        assignedBiome = 20.0;  // cliff
+    } else {
+        float beachP = imageLoad(beachProb, baseCoord).r * u_supersampling_quality;
+        if (probability < beachP) {
+            assignedBiome = 21.0;  // beach
+        } else {
+            float lakeEdgeP = imageLoad(lakeEdgeProb, baseCoord).r * u_supersampling_quality;
+            if (probability < lakeEdgeP) {
+                assignedBiome = 22.0;  // lake_edge
+            } else {
+                float riverBankP = imageLoad(riverBankProb, baseCoord).r * u_supersampling_quality;
+                if (probability < riverBankP) {
+                    assignedBiome = 23.0;  // river_bank
+                } else {
+                    float snowP = imageLoad(snowProb, baseCoord).r * u_supersampling_quality;
+                    if (probability < snowP) {
+                        assignedBiome = 24.0;  // snow_level
+                    } else {
+                        float alpineP = imageLoad(alpineProb, baseCoord).r * u_supersampling_quality;
+                        if (probability < alpineP) {
+                            assignedBiome = 25.0;  // alpine_level
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    imageStore(biomeMapSuperOut, outCoord, vec4(assignedBiome, 0.0, 0.0, 0.0));
+}
