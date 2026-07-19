@@ -10,7 +10,7 @@ Debouncing, Throttling und Memory-Management
 import time
 import gc
 from functools import wraps
-from PyQt5.QtCore import QTimer, QObject, pyqtSignal, Qt
+from PyQt6.QtCore import QTimer, QObject, pyqtSignal, Qt
 
 
 class DebounceTimer(QObject):

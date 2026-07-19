@@ -159,10 +159,17 @@ class SETTLEMENT:
                         "entlang der Überlandstraßen."
     }
     PLOTNODES = {
-        "min": 50, "max": 5000, "default": 1000, "step": 10,
+        "min": 50, "max": 5000, "default": 200, "step": 10,
         "description": "Anzahl der Kandidaten-Punkte für die Grundstücks-/"
                         "Bebauungsplanung - mehr Punkte erlauben feinere "
                         "Parzellierung, kosten aber Rechenzeit."
+    }
+    CITY_SIZE = {
+        "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.05,
+        "description": "Grundgröße einer Stadt - leitet city_reach_factor, "
+                        "civ_influence_range und den Zwischenstädte-Verkehr "
+                        "gemeinsam ab (0=kleine, kompakte Stadt, 1=weit "
+                        "ausgreifende Großstadt)."
     }
     CIV_INFLUENCE_DECAY = {
         "min": 0.1, "max": 2.0, "default": 0.8, "step": 0.1,
@@ -198,21 +205,82 @@ class SETTLEMENT:
                         "Siedlung, als Anteil der Kartendiagonale."
     }
     PLOT_BASE_SPACING = {
-        "min": 2.0, "max": 40.0, "default": 10.0, "step": 1.0,
+        "min": 2.0, "max": 60.0, "default": 20.0, "step": 1.0,
         "description": "Grundabstand zwischen einzelnen Grundstücks-"
                         "Parzellen."
     }
     PLOT_CIV_SPACING_FACTOR = {
-        "min": 0.0, "max": 10.0, "default": 3.0, "step": 0.1,
+        "min": 0.0, "max": 10.0, "default": 8.0, "step": 0.1,
         "description": "Wie stark sich der Parzellenabstand mit der Nähe "
                         "zum Stadtzentrum verringert (dichtere Bebauung im "
                         "Zentrum)."
     }
     PLOT_HEIGHT_COST_FACTOR = {
-        "min": 0.0, "max": 10.0, "default": 2.0, "step": 0.1,
+        "min": 0.0, "max": 10.0, "default": 3.0, "step": 0.1,
         "description": "Wie stark Höhenunterschiede die 'Baukosten' einer "
                         "Parzelle erhöhen - steile Grundstücke werden "
                         "dadurch seltener/kleiner bebaut."
+    }
+
+    # --- Plot Physics Advanced (aus tools/biome_lab/ 1:1 übernommene
+    # Feder-Masse-Konstanten, bisher hardcodiert in PlotPhysicsSystem.__init__
+    # ohne UI-Slider, siehe [[project-settlement-physics-lab-parity]]) ---
+    CORE_PLOTNODE_SPRING_STIFFNESS = {
+        "min": 0.0, "max": 5.0, "default": 1.2, "step": 0.1,
+        "description": "Federsteifigkeit zwischen Plotkern und PlotNode "
+                        "(Abstands-Feder, hält PlotNodes in Kern-Nähe)."
+    }
+    PLOTNODE_PLOTNODE_SPRING_STIFFNESS = {
+        "min": 0.0, "max": 5.0, "default": 1.0, "step": 0.1,
+        "description": "Federsteifigkeit zwischen benachbarten PlotNodes "
+                        "entlang stark befahrener Verbindungen."
+    }
+    PRESSURE_STRENGTH = {
+        "min": 0.0, "max": 4.0, "default": 0.8, "step": 0.1,
+        "description": "Innendruck je Kern-Zelle (Flächenerhalt) - hält "
+                        "PlotNodes gleichmäßig über die Kern-Fläche verteilt."
+    }
+    CORE_MASS = {
+        "min": 0.1, "max": 5.0, "default": 1.0, "step": 0.1,
+        "description": "Trägheit der Plotkerne in der Feder-Masse-"
+                        "Simulation - höher = trägere, langsamere Bewegung."
+    }
+    PLOT_NODE_MASS = {
+        "min": 0.1, "max": 5.0, "default": 1.0, "step": 0.1,
+        "description": "Trägheit der PlotNodes (Voronoi-Kreuzungspunkte) in "
+                        "der Feder-Masse-Simulation."
+    }
+    PLOT_NODE_REPULSION_STRENGTH = {
+        "min": 0.0, "max": 20.0, "default": 4.0, "step": 0.5,
+        "description": "Kurzreichweitige Abstoßung zwischen nahen "
+                        "PlotNodes, unabhängig von direkter Netz-Nachbarschaft."
+    }
+    DAMPING = {
+        "min": 0.0, "max": 1.0, "default": 0.80, "step": 0.05,
+        "description": "Geschwindigkeits-Verlust pro Physik-Tick (0=sofort "
+                        "still, 1=keine Dämpfung) - steuert, wie schnell die "
+                        "Plot-Physik zur Ruhe kommt."
+    }
+    PLOT_GRAVITY_STRENGTH = {
+        "min": 0.0, "max": 0.05, "default": 0.01, "step": 0.001,
+        "description": "Rang-distanz-gewichtete Anziehung der Plotkerne zu "
+                        "den Siedlungszentren."
+    }
+    PLOT_CITY_REPULSION_STRENGTH = {
+        "min": 0.0, "max": 2.5, "default": 0.5, "step": 0.05,
+        "description": "Gegenkraft, die Plotkerne von der Stadtmauer/"
+                        "Kartenrand fernhält."
+    }
+    PLOT_TIER_FACTOR = {
+        "min": 0.2, "max": 5.0, "default": 1.0, "step": 0.1,
+        "description": "Skaliert die Verkehrs-Schwellen für Pfad/Weg/Straße "
+                        "- höhere Werte brauchen mehr Verkehr, um als "
+                        "Straße zu gelten."
+    }
+    POTENTIAL_STRENGTH = {
+        "min": 0.0, "max": 5.0, "default": 1.0, "step": 0.1,
+        "description": "Gesamtstärke des Potentialfelds, das alle Kräfte "
+                        "auf Kerne/PlotNodes überlagert."
     }
 
 class WEATHER:
@@ -385,12 +453,36 @@ class WATER:
     # (64x64, 5 Flow-Iterationen) gebunden - bei sehr großen Karten/hohen LODs
     # kann flow_accumulation deutlich höher werden (mehr akkumulierende
     # Upstream-Zellen), ggf. weitere Nachjustierung nötig.
+    # Nicht mehr im UI exponiert (siehe RIVER_ABUNDANCE unten) - bleibt als
+    # interner Default für ManningFlowCalculator's Performance-Gate
+    # (überspringt teure Tal-Breite-Suche für Pixel unterhalb dieses absoluten
+    # Werts) bestehen, bestimmt aber NICHT mehr, wie viele Pixel als Fluss
+    # KLASSIFIZIERT werden - das war als fester gH2O/m²-Wert skalen-/seed-
+    # abhängig und ließ je nach Karte "praktisch jeden Wasserzulauf" zum Fluss
+    # werden (Nutzer-Report, siehe RIVER_ABUNDANCE).
     STREAM_THRESHOLD = {
         "min": 5.0, "max": 150.0, "default": 35.0, "step": 1.0, "suffix": "gH2O/m²",
-        "description": "Mindest-Wassermenge, die sich bergab angesammelt "
-                        "haben muss, damit aus einzelnen Regenpixeln ein "
-                        "sichtbarer Bach/Fluss wird - steuert, wie dicht "
-                        "das Flussnetz insgesamt wirkt."
+        "description": "Interner Performance-Schwellwert für die Manning-"
+                        "Fließgeschwindigkeitsberechnung (kein UI-Regler mehr)."
+    }
+    # Ersetzt STREAM_THRESHOLD als primären Fluss-Dichte-Regler (Nutzer-Report:
+    # "extrem viele Flüsse... nicht jeden Wasserzulauf"). Statt eines festen
+    # gH2O/m²-Werts wird der tatsächliche Schwellwert live als PERZENTIL der
+    # flow_accumulation-Verteilung DIESER Karte berechnet (siehe
+    # water_generator.py's _river_flow_percentile_threshold()) - dadurch bleibt
+    # die Fluss-DICHTE (Anteil der wasserführenden Pixel, der als Fluss zählt)
+    # unabhängig von Kartengröße/Seed/Niederschlagsmenge konstant, statt bei
+    # jeder Karte neu kalibriert werden zu müssen. 0.0 = nur die stärksten
+    # ~0.5% der wasserführenden Pixel gelten als Fluss (sehr restriktiv), 1.0 =
+    # praktisch jedes wasserführende Pixel gilt als Fluss (sehr freizügig).
+    # Default 0.10 = nur die oberen ~10% gelten als Fluss (Nutzer-Vorgabe:
+    # "lieber zu wenige Flüsse als zu viele").
+    RIVER_ABUNDANCE = {
+        "min": 0.0, "max": 1.0, "default": 0.10, "step": 0.01,
+        "description": "Steuert, wie groß der Anteil der wasserführenden "
+                        "Pixel ist, der als Fluss gilt - niedrig = nur die "
+                        "stärksten Wasserläufe werden zu Flüssen, hoch = "
+                        "praktisch jeder Wasserzulauf gilt als Fluss."
     }
     MANNING_COEFFICIENT = {
         "min": 0.01, "max": 0.1, "default": 0.03, "step": 0.005,
@@ -428,8 +520,13 @@ class WATER:
     # (=min) ergab ein realistisches Bild ("wenn ich den auf 0 habe sieht es
     # realistisch aus"). default direkt auf min gesenkt statt weiter in der Mitte
     # zu kalibrieren.
+    # Slider-Bereich auf den tatsächlich sinnvollen Wertebereich zugeschnitten
+    # (Nutzer-Report: "eigentlich nur zwischen 0 und 0.02 sinnvoll") - der
+    # vorherige max=0.1 ließ 80% des Sliderwegs im Bereich liegen, in dem die
+    # ^2.5-Potenz von flow_speed (siehe Formel oben) die Transportkapazität
+    # praktisch immer sättigt, siehe Kalibrierungs-Historie oben.
     SEDIMENT_CAPACITY_FACTOR = {
-        "min": 0.0001, "max": 0.1, "default": 0.0001, "step": 0.0001,
+        "min": 0.0, "max": 0.02, "default": 0.0001, "step": 0.0002,
         "description": "Wie viel Sediment ein Fluss bei gegebener "
                         "Fließgeschwindigkeit maximal transportieren kann, "
                         "bevor er es ablagert - niedrigere Werte lassen "

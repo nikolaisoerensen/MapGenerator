@@ -1,11 +1,11 @@
 import numpy as np
 from scipy.ndimage import zoom
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QLabel
-from PyQt5.QtCore import pyqtSignal
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QLabel
+from PyQt6.QtCore import pyqtSignal
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.collections import LineCollection
-from matplotlib.colors import ListedColormap, LogNorm
+from matplotlib.colors import ListedColormap, LogNorm, LinearSegmentedColormap
 from matplotlib.figure import Figure
 from gui.config.gui_default import CanvasSettings, ColorSchemes
 
@@ -21,6 +21,54 @@ PLOT_NODE_COLOR_BY_TYPE = {
     "standard_plot_node": "#bdc3c7", "wilderness_node": "#27ae60",
     "map_border_node": "#7f8c8d", "city_border_node": "#c0392b",
 }
+
+# Traffic-Gradient fuer path/road-Kanten (hell-orange -> dunkelrot, Nutzer-
+# Vorgabe) statt der frueheren 2 Fixfarben je Tier - siehe
+# _build_traffic_colored_segments() und [[project-settlement-physics-lab-parity]].
+_TRAFFIC_GRADIENT_CMAP = LinearSegmentedColormap.from_list("traffic_avg", ["#ffcc80", "#8b0000"])
+
+def _build_traffic_colored_segments(plot_edges, node_by_id):
+    """
+    Baut Liniensegmente fuer Voronoi-Kanten - "none"-Kanten (reine Parzellen-
+    grenzen, keine Straßen) bleiben dimgray, "path"/"road"-Kanten bekommen
+    einen kontinuierlichen Farbverlauf + Liniendicke nach PlotEdge.traffic_avg
+    (Lauf-Durchschnitt ueber die gesamte Konvergenz-Simulation, siehe
+    PlotPhysicsSystem._classify_road_tiers()) statt der frueheren 2 diskreten
+    Tier-Farben. Gemeinsame Basis fuer overlay_plot_boundaries() (2D,
+    interaktiv) und rasterize_plot_boundaries_rgba() (3D-Textur-Export) -
+    beide hatten identische, duplizierte Bucketing-Logik.
+
+    Normiert per 95.-Perzentil statt hartem Max (analog zur Potentialfeld-
+    Normierung in tools/biome_lab/draw.py), damit ein einzelner Ausreißer-Wert
+    nicht den gesamten Verlauf auf ein Extrem zusammenstaucht.
+
+    Return: (none_segments, colored_segments, colors, linewidths) - colors/
+    linewidths sind leere Listen, wenn keine path/road-Kanten existieren.
+    """
+    none_segments = []
+    colored_segments = []
+    traffic_values = []
+    for edge in (plot_edges or {}).values():
+        a = node_by_id.get(edge.node_a)
+        b = node_by_id.get(edge.node_b)
+        if a is None or b is None:
+            continue
+        seg = (a.node_location, b.node_location)
+        if edge.classification in ("road", "path"):
+            colored_segments.append(seg)
+            traffic_values.append(max(0.0, float(getattr(edge, "traffic_avg", 0.0))))
+        else:
+            none_segments.append(seg)
+
+    colors, linewidths = [], []
+    if traffic_values:
+        traffic_arr = np.asarray(traffic_values, dtype=np.float64)
+        scale = float(np.percentile(traffic_arr, 95)) if traffic_arr.max() > 0 else 1.0
+        normalized = np.clip(traffic_arr / max(scale, 1e-6), 0.0, 1.0)
+        colors = [_TRAFFIC_GRADIENT_CMAP(t) for t in normalized]
+        linewidths = [1.0 + 2.0 * t for t in normalized]
+
+    return none_segments, colored_segments, colors, linewidths
 
 def _validate_input_data(data):
     """
@@ -141,27 +189,11 @@ def rasterize_plot_boundaries_rgba(plot_nodes, plot_edges, plot_cores, wildernes
     ax.patch.set_alpha(0.0)
 
     node_by_id = {n.node_id: n for n in plot_nodes}
-    grey_segments, path_segments, road_segments = [], [], []
-    for edge in (plot_edges or {}).values():
-        a = node_by_id.get(edge.node_a)
-        b = node_by_id.get(edge.node_b)
-        if a is None or b is None:
-            continue
-        seg = (a.node_location, b.node_location)
-        if edge.classification == "road":
-            road_segments.append(seg)
-        elif edge.classification == "path":
-            path_segments.append(seg)
-        else:
-            grey_segments.append(seg)
-
-    for segments, color, width, alpha in (
-        (grey_segments, 'dimgray', 0.7, 0.6),
-        (path_segments, '#f1c40f', 1.4, 0.9),
-        (road_segments, '#e67e22', 3.0, 0.95),
-    ):
-        if segments:
-            ax.add_collection(LineCollection(segments, colors=color, linewidths=width, alpha=alpha, zorder=3))
+    none_segments, colored_segments, colors, linewidths = _build_traffic_colored_segments(plot_edges, node_by_id)
+    if none_segments:
+        ax.add_collection(LineCollection(none_segments, colors='dimgray', linewidths=0.7, alpha=0.6, zorder=3))
+    if colored_segments:
+        ax.add_collection(LineCollection(colored_segments, colors=colors, linewidths=linewidths, alpha=0.9, zorder=3))
 
     outline_segments = []
     for poly_coords in (wilderness_polygons or []):
@@ -737,6 +769,72 @@ class MapDisplay2D(QWidget):
         self.ax.contour(inside, levels=[0.5], colors=[color], linewidths=linewidth, zorder=6)
         self.canvas.draw()
 
+    def overlay_civ_map(self, civ_map, alpha=0.35):
+        """
+        Funktionsweise: Zeichnet civ_map als halbtransparente Heatmap ueber
+        dem aktuellen Basis-Layer - Overlay statt exklusivem Anzeigemodus,
+        kombinierbar mit "Plot Boundaries"/"Terrain Suitability" (Punkt c,
+        siehe [[project-settlement-physics-lab-parity]]). Die exklusive
+        "Civilization Map"-Radio-Ansicht (update_settlement_display() Modus 1)
+        bleibt unveraendert bestehen; dies ist die zusaetzliche, kombinierbare
+        Variante fuer die neue "Civ Value"-Checkbox.
+        """
+        if self.current_data is None or civ_map is None:
+            return
+
+        for artist in getattr(self, '_civ_overlay_artists', []):
+            try:
+                artist.remove()
+            except (ValueError, NotImplementedError):
+                pass
+        self._civ_overlay_artists = []
+
+        im = self.ax.imshow(civ_map, cmap=plt.cm.plasma, origin='lower', alpha=alpha, zorder=2)
+        self._civ_overlay_artists.append(im)
+        self.canvas.draw()
+
+    def overlay_potential_field(self, potential_field, alpha=0.9):
+        """
+        Funktionsweise: Zeichnet PlotPhysicsSystem's Kraftfeld (siehe
+        [[project-settlement-physics-lab-parity]]) als Magnitude-Heatmap +
+        Richtungs-Quiver, 1:1 an tools/biome_lab/draw.py's
+        _update_dynamic_layer()/_refresh_potential_quiver() angelehnt (95.-
+        Perzentil-Normierung mit sanfter tanh-Kompression fuer Ausreißer,
+        viridis-Colormap fuer den Quiver).
+        Parameter: potential_field ((H,W,2) float array) - u/v-Kraftvektoren.
+        """
+        if self.current_data is None or potential_field is None:
+            return
+
+        for artist in getattr(self, '_potential_field_artists', []):
+            try:
+                artist.remove()
+            except (ValueError, NotImplementedError):
+                pass
+        self._potential_field_artists = []
+
+        magnitude = np.sqrt(potential_field[:, :, 0] ** 2 + potential_field[:, :, 1] ** 2)
+        knee = float(np.percentile(magnitude, 95)) if np.max(magnitude) > 0 else 1.0
+        knee = max(knee, 1e-9)
+        normalized = magnitude / knee
+        magnitude_display = np.where(
+            normalized <= 1.0, normalized, 1.0 + np.tanh(normalized - 1.0)) / 2.0
+
+        im = self.ax.imshow(magnitude_display, cmap=plt.cm.viridis, origin='lower', alpha=alpha, zorder=2)
+        self._potential_field_artists.append(im)
+
+        step = max(1, potential_field.shape[0] // 40)
+        h, w = potential_field.shape[:2]
+        yy, xx = np.mgrid[0:h:step, 0:w:step]
+        fx = potential_field[0:h:step, 0:w:step, 0]
+        fy = potential_field[0:h:step, 0:w:step, 1]
+        quiver_magnitude = np.sqrt(fx ** 2 + fy ** 2)
+        quiver = self.ax.quiver(xx, yy, fx, fy, quiver_magnitude, cmap=plt.cm.viridis,
+                                 alpha=0.95, zorder=3)
+        self._potential_field_artists.append(quiver)
+
+        self.canvas.draw()
+
     def draw_plot_physics_snapshot(self, snapshot: dict):
         """
         Funktionsweise: Zeichnet einen Zwischenzustand der noch nicht
@@ -810,29 +908,15 @@ class MapDisplay2D(QWidget):
 
         node_by_id = {n.node_id: n for n in plot_nodes}
 
-        grey_segments, path_segments, road_segments = [], [], []
-        for edge in (plot_edges or {}).values():
-            a = node_by_id.get(edge.node_a)
-            b = node_by_id.get(edge.node_b)
-            if a is None or b is None:
-                continue
-            seg = (a.node_location, b.node_location)
-            if edge.classification == "road":
-                road_segments.append(seg)
-            elif edge.classification == "path":
-                path_segments.append(seg)
-            else:
-                grey_segments.append(seg)
-
-        for segments, color, width, alpha in (
-            (grey_segments, 'dimgray', 0.5, 0.5),
-            (path_segments, '#f1c40f', 1.0, 0.85),
-            (road_segments, '#e67e22', 2.2, 0.9),
-        ):
-            if segments:
-                lc = LineCollection(segments, colors=color, linewidths=width, alpha=alpha, zorder=3)
-                self.ax.add_collection(lc)
-                self._plot_boundary_artists.append(lc)
+        none_segments, colored_segments, colors, linewidths = _build_traffic_colored_segments(plot_edges, node_by_id)
+        if none_segments:
+            lc = LineCollection(none_segments, colors='dimgray', linewidths=0.5, alpha=0.5, zorder=3)
+            self.ax.add_collection(lc)
+            self._plot_boundary_artists.append(lc)
+        if colored_segments:
+            lc = LineCollection(colored_segments, colors=colors, linewidths=linewidths, alpha=0.85, zorder=3)
+            self.ax.add_collection(lc)
+            self._plot_boundary_artists.append(lc)
 
         outline_segments = []
         for poly_coords in (wilderness_polygons or []):

@@ -6,8 +6,8 @@ __init__.py existiert in "gui"
 Navigation Widget für einheitliche Navigation zwischen Tabs
 """
 
-from PyQt5.QtWidgets import QWidget, QHBoxLayout, QPushButton, QSpacerItem, QSizePolicy, QVBoxLayout
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QSpacerItem, QSizePolicy, QVBoxLayout
+from PyQt6.QtCore import Qt, pyqtSignal
 
 
 class NavigationWidget(QWidget):

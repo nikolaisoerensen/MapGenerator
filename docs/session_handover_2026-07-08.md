@@ -6,7 +6,7 @@ Aufforderung skripten. Keine Abkürzungen bei einem so großen Programm — alle
 mit dem Gesamtkonzept. Bei kleinen Änderungen nur die betroffene Methode/Klasse zeigen.
 Keine Hotfixes — große Änderungen sauber einarbeiten und erklären. Dateien mit gleichem
 Aufbau erhalten denselben Stil. Verifikation von GUI-Änderungen: throwaway `.venv`
-Smoke-Test-Skripte über Bash (nicht PowerShell-Redirect), da es für diese PyQt5-Desktop-App
+Smoke-Test-Skripte über Bash (nicht PowerShell-Redirect), da es für diese PyQt6-Desktop-App
 keine Browser-Preview gibt. 3D-Rendering-Änderungen (`map_display_3d.py`, Shader) lassen
 sich NICHT headless verifizieren (`grabFramebuffer()` unzuverlässig in dieser Umgebung) —
 der Nutzer muss visuell in der laufenden App bestätigen.
@@ -163,8 +163,8 @@ Härtesystem, Glossy-3D-Shader auf matt reduziert (visuell noch nicht vom Nutzer
 
 ## Verifikationsmethode
 Alle Backend-Änderungen wurden über throwaway `.venv`-Python-Skripte verifiziert (Python-
-Interpreter mit PyQt5 liegt in `.venv/Scripts/python.exe` im Repo-Root, System-Python hat
-kein PyQt5) — Generatoren/Manager/Orchestrator bzw. ganze `MapEditorWindow`-Instanzen
+Interpreter mit PyQt6 liegt in `.venv/Scripts/python.exe` im Repo-Root, System-Python hat
+kein PyQt6) — Generatoren/Manager/Orchestrator bzw. ganze `MapEditorWindow`-Instanzen
 direkt konstruiert, `generate()`/`request_generation()` aufgerufen, auf die echten
 Orchestrator-Signale gewartet (`QEventLoop`+`QTimer`), Ergebnisse aus `DataLODManager`
 gelesen und auf Shape/Range/Konsistenz/Mass-Conservation geprüft. **Diese Skripte lagen im

@@ -12,9 +12,9 @@ Funktionsweise: Finale Welt-Übersicht und Export mit vollständiger Integration
 """
 
 import os
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
+from PyQt6.QtWidgets import *
+from PyQt6.QtCore import *
+from PyQt6.QtGui import *
 import numpy as np
 import logging
 from typing import Dict, Any, List, Optional
@@ -67,6 +67,17 @@ class OverviewTab(BaseMapTab):
         if hasattr(self, 'auto_simulation_panel') and self.auto_simulation_panel:
             self.auto_simulation_panel.set_generation_status("info", "Overview tab displays existing data")
 
+    def create_parameter_controls(self):
+        """
+        No-Op-Override: OverviewTab ist ein Summary-/Export-Tab ohne eigene
+        Generierungs-Parameter (siehe generate() oben - "has no generation
+        capability") und baut seine Widgets über setup_overview_ui() statt
+        über diesen Basisklassen-Hook - unterdrückt die sonst bei jedem
+        Tab-Start geloggte "should implement create_parameter_controls()"-
+        Warnung aus BaseMapTab, die für diesen Tab-Typ ohnehin nicht zutrifft.
+        """
+        pass
+
     def setup_overview_ui(self):
         """
         Funktionsweise: Erstellt komplette UI für Overview-Tab
@@ -89,14 +100,19 @@ class OverviewTab(BaseMapTab):
         self.quality_assurance = QualityAssuranceWidget()
         self.control_panel.layout().addWidget(self.quality_assurance)
 
-        # Performance Report
-        self.performance_report = PerformanceReportWidget()
-        self.control_panel.layout().addWidget(self.performance_report)
-
         # Export Controls (erweitert)
         self.export_controls = WorldExportWidget()
         self.export_controls.export_requested.connect(self.export_world_data)
         self.control_panel.layout().addWidget(self.export_controls)
+
+        # Layer-Export (alle Radio-Button-Layer als PNG, siehe
+        # gui/utils/map_export.py) - eigenständig von export_controls oben,
+        # da dessen world_data_complete-Gate aktuell dauerhaft blockiert
+        # (siehe check_world_completeness()).
+        from gui.utils.map_export import DEFAULT_EXPORT_ROOT
+        self.layer_export = LayerExportWidget(DEFAULT_EXPORT_ROOT)
+        self.layer_export.export_requested.connect(self.export_layers_to_disk)
+        self.control_panel.layout().addWidget(self.layer_export)
 
         # Parameter Summary
         self.parameter_summary = ParameterSummaryWidget()
@@ -130,14 +146,23 @@ class OverviewTab(BaseMapTab):
         if self.world_data_complete:
             self.update_composite_view()
 
-        # Performance Report aktualisieren
-        self.performance_report.update_generator_status(generator_type, True)
-
     def check_world_completeness(self):
         """
         Funktionsweise: Prüft Vollständigkeit aller Generator-Outputs
         Aufgabe: Aktiviert finale Features nur bei kompletter Welt
         """
+        # Datei-Namensvorschlag mit dem aktuellen Map-Seed aktuell halten
+        # (nur Placeholder, überschreibt nie manuell eingetippten Text - siehe
+        # LayerExportWidget.set_filename_suggestion()).
+        if hasattr(self, 'layer_export'):
+            try:
+                seed = self.parameter_manager.get_tab_parameters("terrain").get("map_seed") \
+                    if self.parameter_manager else None
+                self.layer_export.set_filename_suggestion(
+                    f"Mapseed_{seed}" if seed is not None else "Mapseed_xxxxxx")
+            except Exception as e:
+                self.logger.debug(f"Filename-Vorschlag nicht aktualisierbar: {e}")
+
         # Alle verfügbaren Daten sammeln
         available_data = self.collect_all_available_data()
 
@@ -181,7 +206,7 @@ class OverviewTab(BaseMapTab):
         }
 
         # Terrain Data
-        for key in ["heightmap", "slopemap", "shademap"]:
+        for key in ["heightmap", "slopemap", "shadowmap"]:
             data = self.data_lod_manager.get_terrain_data(key)
             if data is not None:
                 available_data["terrain"][key] = data
@@ -229,7 +254,7 @@ class OverviewTab(BaseMapTab):
         """
         # Required Data für komplette Welt
         required_data = {
-            "terrain": ["heightmap", "slopemap", "shademap"],
+            "terrain": ["heightmap", "slopemap", "shadowmap"],
             "geology": ["rock_map", "hardness_map"],
             "settlement": ["settlement_list", "civ_map"],
             "weather": ["temp_map", "precip_map"],
@@ -556,6 +581,23 @@ class OverviewTab(BaseMapTab):
             self.map_display.display_geological_cross_section(heightmap, rock_map)
 
     @pyqtSlot(str, dict)
+    @pyqtSlot(str, str)
+    def export_layers_to_disk(self, filename_prefix: str, output_root: str):
+        """
+        Funktionsweise: Slot für LayerExportWidget.export_requested - exportiert
+        alle aktuell verfügbaren Radio-Button-Layer als PNG (siehe
+        gui/utils/map_export.py) in output_root/filename_prefix/, unabhängig
+        vom world_data_complete-Status.
+        """
+        from gui.utils.map_export import export_all_layers
+        try:
+            success, message, _output_dir = export_all_layers(
+                self.data_lod_manager, self.parameter_manager, output_root, filename_prefix)
+        except Exception as e:
+            self.logger.error(f"Layer export failed: {e}")
+            success, message = False, f"Export failed: {e}"
+        self.layer_export.set_export_complete(success, message)
+
     def export_world_data(self, export_format: str, export_options: dict):
         """
         Funktionsweise: Exportiert komplette Welt-Daten in verschiedene Formate
@@ -913,6 +955,83 @@ class WorldExportWidget(QGroupBox):
         else:
             self.export_status.set_error(message)
 
+class LayerExportWidget(QGroupBox):
+    """
+    Funktionsweise: UI für den Export aller Radio-Button-Layer als Bilddateien
+    (siehe gui/utils/map_export.py) - Dateiname mit Mapseed-Vorschlag als
+    Placeholder (wird bei Seed-Änderungen aktualisiert, ohne bereits vom
+    Nutzer eingetippten Text zu überschreiben), Zielordner-Auswahl (Default:
+    <Projekt-Root>/exports), Export-Button, Status-Rückmeldung.
+    Aufgabe: Bewusst eigenständig von WorldExportWidget - dessen
+    world_data_complete-Gate blockiert aktuell dauerhaft (siehe
+    OverviewTab.check_world_completeness()), dieser Export funktioniert mit
+    jedem aktuellen Kartenstand, auch nur teilweise generiert.
+    Kommunikation: Signal export_requested(filename_prefix: str, output_root: str)
+    """
+
+    export_requested = pyqtSignal(str, str)
+
+    def __init__(self, default_export_root: str):
+        super().__init__("Export")
+        self.export_root = default_export_root
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+
+        filename_layout = QHBoxLayout()
+        filename_layout.addWidget(QLabel("Filename:"))
+        self.filename_edit = QLineEdit()
+        self.filename_edit.setPlaceholderText("Mapseed_xxxxxx")
+        filename_layout.addWidget(self.filename_edit)
+        layout.addLayout(filename_layout)
+
+        folder_layout = QHBoxLayout()
+        folder_layout.addWidget(QLabel("Folder:"))
+        self.folder_label = QLabel(self.export_root)
+        self.folder_label.setWordWrap(True)
+        folder_layout.addWidget(self.folder_label, 1)
+        self.browse_button = QPushButton("...")
+        self.browse_button.setMaximumWidth(30)
+        self.browse_button.clicked.connect(self._on_browse_clicked)
+        folder_layout.addWidget(self.browse_button)
+        layout.addLayout(folder_layout)
+
+        self.export_button = BaseButton("Export", "primary")
+        self.export_button.clicked.connect(self._on_export_clicked)
+        layout.addWidget(self.export_button)
+
+        self.export_status = StatusIndicator("Export Status")
+        self.export_status.set_unknown()
+        layout.addWidget(self.export_status)
+
+        self.setLayout(layout)
+
+    def set_filename_suggestion(self, filename: str):
+        """Aktualisiert nur den Placeholder (nicht den echten Feld-Text) -
+        überschreibt dadurch nie, was der Nutzer selbst eingetippt hat."""
+        self.filename_edit.setPlaceholderText(filename)
+
+    def _on_browse_clicked(self):
+        chosen = QFileDialog.getExistingDirectory(self, "Export-Ordner wählen", self.export_root)
+        if chosen:
+            self.export_root = chosen
+            self.folder_label.setText(chosen)
+
+    def _on_export_clicked(self):
+        filename_prefix = self.filename_edit.text().strip() or self.filename_edit.placeholderText()
+        if not filename_prefix:
+            self.export_status.set_error("Kein Dateiname angegeben")
+            return
+        self.export_requested.emit(filename_prefix, self.export_root)
+
+    def set_export_complete(self, success: bool, message: str):
+        if success:
+            self.export_status.set_success(message)
+        else:
+            self.export_status.set_error(message)
+
+
 class WorldCompletenessWidget(QGroupBox):
     """
     Funktionsweise: Widget für World-Completeness Status
@@ -924,7 +1043,17 @@ class WorldCompletenessWidget(QGroupBox):
         self.setup_ui()
 
     def setup_ui(self):
-        """Erstellt UI für Completeness-Status"""
+        """
+        Erstellt UI für Completeness-Status.
+
+        Die 6 Pro-Generator-StatusIndicator-Zeilen (Terrain/Geology/.../Biome
+        Complete-Incomplete) wurden entfernt - das linke PipelineStatusPanel
+        (immer sichtbar, auch während der Overview-Tab aktiv ist) zeigt
+        dieselbe Information bereits pro Calculator-Node granularer an. Nur
+        der Gesamt-Fortschrittsbalken und die Missing-Data-Liste sind
+        Informationen, die es im linken Panel nicht gibt - siehe
+        [[project-overview-tab-cleanup]].
+        """
         layout = QVBoxLayout()
 
         # Overall Completeness
@@ -932,16 +1061,6 @@ class WorldCompletenessWidget(QGroupBox):
         self.overall_progress.setRange(0, 100)
         layout.addWidget(QLabel("Overall Completion:"))
         layout.addWidget(self.overall_progress)
-
-        # Individual Generator Status
-        self.generator_status = {}
-        generators = ["terrain", "geology", "settlement", "weather", "water", "biome"]
-
-        for generator in generators:
-            indicator = StatusIndicator(generator.title())
-            indicator.set_unknown()
-            self.generator_status[generator] = indicator
-            layout.addWidget(indicator)
 
         # Missing Data Info
         self.missing_data_label = QLabel("Missing Data: Checking...")
@@ -957,17 +1076,6 @@ class WorldCompletenessWidget(QGroupBox):
         # Overall Progress
         completion_pct = completeness_status.get("completion_percentage", 0)
         self.overall_progress.setValue(int(completion_pct))
-
-        # Individual Generators
-        generator_status = completeness_status.get("generator_status", {})
-        for generator, indicator in self.generator_status.items():
-            if generator in generator_status:
-                if generator_status[generator]:
-                    indicator.set_success("Complete")
-                else:
-                    indicator.set_warning("Incomplete")
-            else:
-                indicator.set_unknown()
 
         # Missing Data
         missing_data = completeness_status.get("missing_data", {})
@@ -1145,49 +1253,6 @@ class QualityAssuranceWidget(QGroupBox):
         """Generiert detaillierten QA-Report"""
         # Würde normalerweise detaillierten Report generieren
         QMessageBox.information(self, "QA Report", "Quality Assurance Report would be generated here")
-
-class PerformanceReportWidget(QGroupBox):
-    """
-    Funktionsweise: Widget für Performance-Report aller Generatoren
-    Aufgabe: Zeigt Performance-Metriken und Generation-Zeiten
-    """
-
-    def __init__(self):
-        super().__init__("Performance Report")
-        self.generator_timings = {}
-        self.setup_ui()
-
-    def setup_ui(self):
-        """Erstellt UI für Performance-Report"""
-        layout = QVBoxLayout()
-
-        # Generator Performance
-        generators = ["terrain", "geology", "settlement", "weather", "water", "biome"]
-        self.generator_indicators = {}
-
-        for generator in generators:
-            indicator = StatusIndicator(f"{generator.title()} Generation")
-            indicator.set_unknown()
-            self.generator_indicators[generator] = indicator
-            layout.addWidget(indicator)
-
-        # Overall Performance Summary
-        self.performance_summary = QLabel("Performance Summary: Not calculated")
-        layout.addWidget(self.performance_summary)
-
-        self.setLayout(layout)
-
-    def update_generator_status(self, generator_type: str, success: bool):
-        """
-        Funktionsweise: Aktualisiert Generator-Status
-        Parameter: generator_type (str), success (bool)
-        """
-        if generator_type in self.generator_indicators:
-            indicator = self.generator_indicators[generator_type]
-            if success:
-                indicator.set_success("Completed")
-            else:
-                indicator.set_error("Failed")
 
 class ParameterSummaryWidget(QGroupBox):
     """

@@ -7,8 +7,8 @@ Wiederverwendbare ParameterSlider-Komponente
 Eliminiert Code-Duplikation zwischen allen Tabs
 """
 
-from PyQt5.QtWidgets import QWidget, QGridLayout, QLabel, QSlider, QSpinBox, QDoubleSpinBox
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QWidget, QGridLayout, QLabel, QSlider, QSpinBox, QDoubleSpinBox
+from PyQt6.QtCore import Qt, pyqtSignal
 
 
 class ParameterSlider(QWidget):

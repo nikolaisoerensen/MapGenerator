@@ -9,11 +9,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                              QVBoxLayout, QLabel, QSpinBox, QPushButton,
                              QFrame, QGridLayout, QSpacerItem, QSizePolicy, QCheckBox,
                              QGroupBox, QProgressBar)
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 
 from gui_old.managers.parameter_manager import WorldParameterManager
 from gui_old.widgets.map_canvas import TerrainCanvas

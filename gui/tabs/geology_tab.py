@@ -7,12 +7,12 @@ Terrain abhängiger Generator (heightmap_combined, slopemap) liefert er rock_map
 hardness_map für Water und alle nachgelagerten Systeme.
 """
 
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
     QButtonGroup, QCheckBox, QLabel, QGridLayout, QProgressBar
 )
-from PyQt5.QtCore import pyqtSlot
-from PyQt5.QtGui import QFont
+from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtGui import QFont
 import logging
 import numpy as np
 from typing import Dict, Any
@@ -100,7 +100,7 @@ class GeologyTab(BaseMapTab):
     def _create_hardness_parameters(self):
         """Erstellt Rock-Hardness Parameter Controls"""
         hardness_group = QGroupBox("Rock Hardness")
-        hardness_group.setFont(QFont("Arial", 10, QFont.Bold))
+        hardness_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         hardness_layout = QVBoxLayout()
 
         hardness_params = [
@@ -131,7 +131,7 @@ class GeologyTab(BaseMapTab):
     def _create_deformation_parameters(self):
         """Erstellt Tectonic-Deformation Parameter Controls"""
         deformation_group = QGroupBox("Tectonic Deformation")
-        deformation_group.setFont(QFont("Arial", 10, QFont.Bold))
+        deformation_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         deformation_layout = QVBoxLayout()
 
         deformation_params = [

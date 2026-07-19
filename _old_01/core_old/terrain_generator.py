@@ -5,11 +5,11 @@ Erste Seite: Terrain/Heightmap Parameter
 
 import sys
 import numpy as np
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                              QVBoxLayout, QLabel, QSlider, QSpinBox, QPushButton,
                              QFrame, QGridLayout, QSpacerItem, QSizePolicy, QCheckBox)
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPalette, QColor
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPalette, QColor
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure

@@ -57,7 +57,7 @@
 """
 from dataclasses import dataclass
 
-from PyQt5.QtCore import QObject, pyqtSignal, QThread, QMutex, QMutexLocker, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QThread, QMutex, QMutexLocker, QTimer
 from typing import Dict, List, Set, Any, Callable
 import functools
 import logging
@@ -356,7 +356,7 @@ class GenerationOrchestrator(QObject):
                 "low_impact": ["terrain_factor"]
             },
             GeneratorType.WATER: {
-                "high_impact": ["lake_volume_threshold", "rain_threshold", "erosion_strength"],
+                "high_impact": ["lake_volume_threshold", "rain_threshold", "erosion_strength", "river_abundance"],
                 "medium_impact": ["manning_coefficient", "sediment_capacity_factor"],
                 "low_impact": ["evaporation_base_rate", "diffusion_radius"]
             },

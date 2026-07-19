@@ -387,15 +387,39 @@ class LakeDetectionSystem:
         return filtered_lake_map, valid_lakes
 
 
+def _river_flow_percentile_threshold(flow_accumulation, river_abundance):
+    """
+    Funktionsweise: Leitet einen absoluten Fluss-Klassifikations-Schwellwert aus
+    einem 0..1-"Wieviel-Anteil-soll-Fluss-sein"-Regler UND der TATSÄCHLICHEN
+    flow_accumulation-Verteilung DIESER Karte ab, statt eines festen gH2O/m²-
+    Werts (siehe WATER.STREAM_THRESHOLD - skalen-/seed-abhängig, Nutzer-Report
+    "extrem viele Flüsse... nicht jeden Wasserzulauf").
+    Aufgabe: river_abundance=0.0 -> nur die stärksten ~0.5% der wasserführenden
+    Pixel gelten als Fluss (sehr restriktiv); river_abundance=1.0 -> praktisch
+    jedes wasserführende Pixel gilt als Fluss (sehr freizügig). Die Perzentil-
+    Grenzen werden leicht eingeklemmt (0.5..99.5), damit die Extremwerte nicht
+    buchstäblich Minimum/Maximum eines einzelnen Pixels treffen.
+    Parameter: flow_accumulation (H,W) float array, river_abundance (float 0..1)
+    Return: float - absoluter Schwellwert in derselben Einheit wie flow_accumulation
+    """
+    wet = flow_accumulation[flow_accumulation > 0]
+    if wet.size == 0:
+        return float('inf')
+    percentile = 100.0 * (1.0 - np.clip(river_abundance, 0.0, 1.0))
+    percentile = float(np.clip(percentile, 0.5, 99.5))
+    return float(np.percentile(wet, percentile))
+
+
 class FlowNetworkBuilder:
     """
     Funktionsweise: Baut Flussnetzwerk durch Steepest Descent mit Upstream-Akkumulation
     Aufgabe: Erstellt flow_map und water_biomes_map mit realistischen Flusssystemen
     """
 
-    def __init__(self, rain_threshold=0.2, stream_threshold=2.0, shader_manager=None):
+    def __init__(self, rain_threshold=0.2, stream_threshold=2.0, river_abundance=0.10, shader_manager=None):
         self.rain_threshold = rain_threshold
         self.stream_threshold = stream_threshold
+        self.river_abundance = river_abundance
         self.shader_manager = shader_manager
 
     def build_flow_network(self, heightmap, precip_map, lake_map, parameters, lod_iterations):
@@ -676,6 +700,15 @@ class FlowNetworkBuilder:
         # Seen zuerst markieren
         water_biomes_map[lake_map >= 0] = 4  # Lake
 
+        # Schwelle wird PRO KARTE aus der tatsächlichen flow_accumulation-
+        # Verteilung + self.river_abundance abgeleitet (siehe
+        # _river_flow_percentile_threshold()) statt eines festen gH2O/m²-Werts
+        # (self.stream_threshold, siehe dessen Docstring-Kommentar in
+        # value_default.py - nur noch Manning-interner Default, nicht mehr
+        # UI-Regler) - dadurch bleibt der ANTEIL der Karte, der als Fluss
+        # gilt, unabhängig von Kartengröße/Seed/Niederschlagsmenge konstant.
+        creek_threshold = _river_flow_percentile_threshold(flow_accumulation, self.river_abundance)
+
         # Flow-basierte Klassifikation
         for y in range(height):
             for x in range(width):
@@ -684,25 +717,11 @@ class FlowNetworkBuilder:
 
                 flow_amount = flow_accumulation[y, x]
 
-                # Schwellen relativ zu self.stream_threshold, NICHT zu
-                # self.rain_threshold. rain_threshold gated vorher BEIDES: ob
-                # ein Pixel überhaupt Regen-Quelle ist UND ob es (bei 1x
-                # rain_threshold) schon als Creek gilt - dadurch wurde jedes
-                # einzelne Regen-Pixel sofort zum Fluss, ganz ohne echte
-                # Akkumulation von Nachbar-Zellen ("Fluss überall wo Regen
-                # fällt"). stream_threshold ist eine eigene, deutlich höhere
-                # Schwelle für akkumulierten Durchfluss - ein Pixel mit nur
-                # seinem eigenen Regen (max ~2.8 bei Default-Wetter-Parametern)
-                # reicht damit i.d.R. nicht mehr aus, es braucht echten Zufluss
-                # von mehreren Quell-Pixeln, um als Fluss zu gelten. Die
-                # Akkumulation selbst (_accumulate_upstream_flow) bleibt
-                # unverändert - jedes Regen-Pixel trägt weiterhin korrekt zur
-                # Summe bei, nur die VISUELLE Klassifikation ist strenger.
-                if flow_amount >= self.stream_threshold * 20:  # Grand River
+                if flow_amount >= creek_threshold * 20:  # Grand River
                     water_biomes_map[y, x] = 3
-                elif flow_amount >= self.stream_threshold * 4:  # River
+                elif flow_amount >= creek_threshold * 4:  # River
                     water_biomes_map[y, x] = 2
-                elif flow_amount >= self.stream_threshold:  # Creek
+                elif flow_amount >= creek_threshold:  # Creek
                     water_biomes_map[y, x] = 1
 
         return water_biomes_map
@@ -1550,6 +1569,7 @@ class HydrologySystemGenerator:
                 'lake_volume_threshold': WATER.LAKE_VOLUME_THRESHOLD["default"],
                 'rain_threshold': WATER.RAIN_THRESHOLD["default"],
                 'stream_threshold': WATER.STREAM_THRESHOLD["default"],
+                'river_abundance': WATER.RIVER_ABUNDANCE["default"],
                 'manning_coefficient': WATER.MANNING_COEFFICIENT["default"],
                 'erosion_strength': WATER.EROSION_STRENGTH["default"],
                 'sediment_capacity_factor': WATER.SEDIMENT_CAPACITY_FACTOR["default"],
@@ -1565,6 +1585,7 @@ class HydrologySystemGenerator:
                 'lake_volume_threshold': 0.1,
                 'rain_threshold': 0.2,
                 'stream_threshold': 2.0,
+                'river_abundance': 0.10,
                 'manning_coefficient': 0.03,
                 'erosion_strength': 1.0,
                 'sediment_capacity_factor': 0.1,
@@ -2064,6 +2085,7 @@ class HydrologySystemGenerator:
         self.lake_detection.lake_volume_threshold = parameters.get('lake_volume_threshold', 0.02)
         self.flow_network.rain_threshold = parameters.get('rain_threshold', 3.0)
         self.flow_network.stream_threshold = parameters.get('stream_threshold', 35.0)
+        self.flow_network.river_abundance = parameters.get('river_abundance', 0.10)
         self.manning_calculator.manning_n = parameters.get('manning_coefficient', 0.03)
         self.erosion_system.erosion_strength = parameters.get('erosion_strength', 2.5)
         self.erosion_system.capacity_factor = parameters.get('sediment_capacity_factor', 0.0001)

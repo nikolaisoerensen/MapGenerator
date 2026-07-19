@@ -9,9 +9,9 @@ Funktionsweise: Settlement-Editor mit terrain_tab-ähnlicher UI-Struktur und vol
 - Live Settlement-Preview und 3D-Visualization mit Terrain-Integration
 """
 
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
+from PyQt6.QtWidgets import *
+from PyQt6.QtCore import *
+from PyQt6.QtGui import *
 import numpy as np
 import logging
 
@@ -138,6 +138,17 @@ class SettlementTab(BaseMapTab):
             self.handle_generation_error(e)
             raise
 
+    def create_parameter_controls(self):
+        """
+        No-Op-Override: SettlementTab baut sein Parameter-Panel über
+        setup_settlement_ui()/create_settlement_parameter_panel() statt über
+        diesen Basisklassen-Hook (architektonische Abweichung, kein
+        fehlendes Feature) - unterdrückt die sonst bei jedem Tab-Start
+        geloggte "should implement create_parameter_controls()"-Warnung aus
+        BaseMapTab.
+        """
+        pass
+
     def setup_settlement_ui(self):
         """
         Funktionsweise: Erstellt komplette UI für Settlement-System mit terrain_tab-ähnlicher Struktur
@@ -168,13 +179,46 @@ class SettlementTab(BaseMapTab):
         self.settlement_stats = SettlementStatisticsWidget()
         layout.addWidget(self.settlement_stats)
 
+    def _add_slider_group(self, layout: QVBoxLayout, title: str, param_names: list,
+                           default_step: float = 0.1) -> QGroupBox:
+        """
+        Baut eine QGroupBox mit einem ParameterSlider je param_name (identisches
+        Muster wie die bisherigen Einzel-Gruppen unten) und hängt sie an layout.
+        Extrahiert, weil das Panel durch die Physics-Lab-Parität (siehe
+        [[project-settlement-physics-lab-parity]]) auf 8 Gruppen/25 Slider
+        gewachsen ist - vorher war die Duplizierung bei 5 Gruppen noch
+        überschaubar.
+        """
+        group = QGroupBox(title)
+        group_layout = QVBoxLayout()
+        for param_name in param_names:
+            param_config = get_parameter_config("settlement", param_name)
+            slider = ParameterSlider(
+                label=param_name.replace("_", " ").title(),
+                min_val=param_config["min"],
+                max_val=param_config["max"],
+                default_val=param_config["default"],
+                step=param_config.get("step", default_step),
+                suffix=param_config.get("suffix", ""),
+                description=param_config.get("description", "")
+            )
+            slider.valueChanged.connect(self.on_parameter_changed)
+            self.parameter_sliders[param_name] = slider
+            group_layout.addWidget(slider)
+        group.setLayout(group_layout)
+        layout.addWidget(group)
+        return group
+
     def create_settlement_parameter_panel(self) -> QGroupBox:
         """
         Funktionsweise: Erstellt Parameter-Panel mit allen Settlement-Parametern
         Aufgabe: Alle GUI-exponierten Parameter aus value_default.SETTLEMENT
-        strukturiert organisiert - Location-Counts, Civ-Influence, Road-Network,
-        Wilderness und Plot Physics (PlotPhysicsSystem-Feder-Masse-Simulation,
-        siehe [[project-settlement-plot-physics-rebuild]])
+        strukturiert organisiert, angeglichen an tools/biome_lab's Plot Physics
+        Lab (siehe [[project-settlement-physics-lab-parity]]):
+        Grundgröße (Plot Nodes, Stadtgröße, Civ-Decay) oben, dann die
+        bisherigen Gruppen, eine neue "Plot Physics - Advanced"-Gruppe mit den
+        14 Live-Physik-Reglern des Lab, und eine "Forces"-Checkbox-Gruppe ganz
+        unten.
         Return: QGroupBox mit Parameter-Slidern
         """
         panel = QGroupBox("Settlement Parameters")
@@ -182,133 +226,82 @@ class SettlementTab(BaseMapTab):
 
         self.parameter_sliders = {}
 
-        # Location Count Parameters
-        locations_group = QGroupBox("Location Counts")
-        locations_layout = QVBoxLayout()
+        # Grundgröße - ganz oben (Nutzer-Vorgabe: Plot-Anzahl, Stadtgröße und
+        # Civ-Decay sollen als Erstes einstellbar sein, bevor man sich in die
+        # Detail-Parameter vertieft).
+        self._add_slider_group(layout, "Grundgröße", ["plotnodes", "city_size", "civ_influence_decay"])
 
-        location_params = ["settlements", "landmarks", "roadsites", "plotnodes"]
-        for param_name in location_params:
-            param_config = get_parameter_config("settlement", param_name)
+        # Location Count Parameters (plotnodes/civ_influence_decay jetzt oben)
+        self._add_slider_group(layout, "Location Counts", ["settlements", "landmarks", "roadsites"])
 
-            slider = ParameterSlider(
-                label=param_name.replace("_", " ").title(),
-                min_val=param_config["min"],
-                max_val=param_config["max"],
-                default_val=param_config["default"],
-                step=param_config.get("step", 1),
-                suffix=param_config.get("suffix", ""),
-                description=param_config.get("description", "")
-            )
-
-            slider.valueChanged.connect(self.on_parameter_changed)
-            self.parameter_sliders[param_name] = slider
-            locations_layout.addWidget(slider)
-
-        locations_group.setLayout(locations_layout)
-        layout.addWidget(locations_group)
-
-        # Influence and Terrain Parameters
-        influence_group = QGroupBox("Civilization Influence")
-        influence_layout = QVBoxLayout()
-
-        influence_params = ["civ_influence_decay", "terrain_factor_villages"]
-        for param_name in influence_params:
-            param_config = get_parameter_config("settlement", param_name)
-
-            slider = ParameterSlider(
-                label=param_name.replace("_", " ").title(),
-                min_val=param_config["min"],
-                max_val=param_config["max"],
-                default_val=param_config["default"],
-                step=param_config.get("step", 0.1),
-                suffix=param_config.get("suffix", ""),
-                description=param_config.get("description", "")
-            )
-
-            slider.valueChanged.connect(self.on_parameter_changed)
-            self.parameter_sliders[param_name] = slider
-            influence_layout.addWidget(slider)
-
-        influence_group.setLayout(influence_layout)
-        layout.addWidget(influence_group)
+        # Influence and Terrain Parameters (civ_influence_decay jetzt oben)
+        self._add_slider_group(layout, "Civilization Influence", ["terrain_factor_villages"])
 
         # Road Network Parameters
-        road_group = QGroupBox("Road Network")
-        road_layout = QVBoxLayout()
-
-        road_params = ["road_slope_to_distance_ratio"]
-        for param_name in road_params:
-            param_config = get_parameter_config("settlement", param_name)
-
-            slider = ParameterSlider(
-                label=param_name.replace("_", " ").title(),
-                min_val=param_config["min"],
-                max_val=param_config["max"],
-                default_val=param_config["default"],
-                step=param_config.get("step", 0.1),
-                suffix=param_config.get("suffix", ""),
-                description=param_config.get("description", "")
-            )
-
-            slider.valueChanged.connect(self.on_parameter_changed)
-            self.parameter_sliders[param_name] = slider
-            road_layout.addWidget(slider)
-
-        road_group.setLayout(road_layout)
-        layout.addWidget(road_group)
+        self._add_slider_group(layout, "Road Network", ["road_slope_to_distance_ratio"])
 
         # Wilderness Parameters
-        misc_group = QGroupBox("Wilderness")
-        misc_layout = QVBoxLayout()
-
-        misc_params = ["landmark_wilderness"]
-        for param_name in misc_params:
-            param_config = get_parameter_config("settlement", param_name)
-
-            slider = ParameterSlider(
-                label=param_name.replace("_", " ").title(),
-                min_val=param_config["min"],
-                max_val=param_config["max"],
-                default_val=param_config["default"],
-                step=param_config.get("step", 0.1),
-                suffix=param_config.get("suffix", ""),
-                description=param_config.get("description", "")
-            )
-
-            slider.valueChanged.connect(self.on_parameter_changed)
-            self.parameter_sliders[param_name] = slider
-            misc_layout.addWidget(slider)
-
-        misc_group.setLayout(misc_layout)
-        layout.addWidget(misc_group)
+        self._add_slider_group(layout, "Wilderness", ["landmark_wilderness"])
 
         # Plot Physics Parameters (PlotPhysicsSystem, siehe
         # [[project-settlement-plot-physics-rebuild]] Teil A-D) - Grundabstand,
         # Verdichtung zur Stadtmitte und Steigungs-"Baukosten" der
         # Feder-Masse-Simulation, die die Grundstücks-/Straßen-Geometrie erzeugt.
-        plot_physics_group = QGroupBox("Plot Physics")
-        plot_physics_layout = QVBoxLayout()
+        self._add_slider_group(
+            layout, "Plot Physics",
+            ["plot_base_spacing", "plot_civ_spacing_factor", "plot_height_cost_factor"])
 
-        plot_physics_params = ["plot_base_spacing", "plot_civ_spacing_factor", "plot_height_cost_factor"]
-        for param_name in plot_physics_params:
-            param_config = get_parameter_config("settlement", param_name)
+        # Plot Physics - Advanced: die 14 Live-Physik-Regler aus
+        # tools/biome_lab/ui.py (Reihenfolge übernommen), bisher in
+        # PlotPhysicsSystem hardcodiert ohne UI-Slider - siehe
+        # [[project-settlement-physics-lab-parity]].
+        self._add_slider_group(layout, "Plot Physics — Advanced", [
+            "core_plotnode_spring_stiffness", "plotnode_plotnode_spring_stiffness",
+            "pressure_strength", "core_mass", "plot_node_mass",
+            "plot_node_repulsion_strength", "damping", "plot_gravity_strength",
+            "plot_city_repulsion_strength", "plot_tier_factor", "potential_strength",
+        ])
 
-            slider = ParameterSlider(
-                label=param_name.replace("_", " ").title(),
-                min_val=param_config["min"],
-                max_val=param_config["max"],
-                default_val=param_config["default"],
-                step=param_config.get("step", 0.1),
-                suffix=param_config.get("suffix", ""),
-                description=param_config.get("description", "")
-            )
+        # Forces - Kraft-Schalter ganz unten (Nutzer-Vorgabe): anders als im
+        # Lab (Default alles AUS, zum einzelnen Isolieren von Kräften beim
+        # Debuggen) startet Production mit allem AN, damit die Simulation
+        # sofort funktioniert - die Checkboxen sind zum Experimentieren da,
+        # nicht als Pflicht-Setup.
+        forces_group = QGroupBox("Forces")
+        forces_layout = QVBoxLayout()
+        self.force_checkboxes = {}
+        force_labels = {
+            "enable_core_plotnode_spring": "Core ↔ PlotNode Feder",
+            "enable_plotnode_plotnode_spring": "PlotNode ↔ PlotNode Feder",
+            "enable_pressure": "Innendruck (Flächenerhalt)",
+            "enable_plot_node_repulsion": "PlotNode-Abstoßung",
+            "enable_field_cores": "Potentialfeld auf Kerne",
+            "enable_field_plotnodes": "Potentialfeld auf PlotNodes",
+            "enable_core_cell_containment": "Kern-Zellen-Eingrenzung",
+            "enable_wilderness_containment": "Wildnis-Eingrenzung",
+        }
+        for param_name, label in force_labels.items():
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(True)
+            checkbox.toggled.connect(self.on_parameter_changed)
+            self.force_checkboxes[param_name] = checkbox
+            forces_layout.addWidget(checkbox)
+        forces_group.setLayout(forces_layout)
+        layout.addWidget(forces_group)
 
-            slider.valueChanged.connect(self.on_parameter_changed)
-            self.parameter_sliders[param_name] = slider
-            plot_physics_layout.addWidget(slider)
-
-        plot_physics_group.setLayout(plot_physics_layout)
-        layout.addWidget(plot_physics_group)
+        # Hinweise/Legende - statisches Äquivalent zur Farb-/Marker-Legende
+        # aus tools/biome_lab/ui.py, mit den tatsächlichen Production-Farben
+        # (siehe map_display_2d.py's PLOT_CORE_COLOR_BY_TYPE/
+        # PLOT_NODE_COLOR_BY_TYPE) statt dem Lab-Text 1:1 zu kopieren.
+        hints_label = QLabel(
+            "Hinweise: Magenta = Wildnis-/Zivilisationskontur · Gold = "
+            "Stadtgrenze · Blau/Grün/Rot = Standard-/Wildnis-/Stadt-Kerne · "
+            "Straßenfarbe (hell-orange → dunkelrot) = durchschnittlicher "
+            "Verkehr über den gesamten Physik-Lauf."
+        )
+        hints_label.setWordWrap(True)
+        hints_label.setStyleSheet("font-size: 10px; color: #666; padding-top: 6px;")
+        layout.addWidget(hints_label)
 
         panel.setLayout(layout)
         return panel
@@ -323,47 +316,35 @@ class SettlementTab(BaseMapTab):
         controls_layout = QHBoxLayout()
         controls_layout.setContentsMargins(0, 0, 0, 0)
 
-        controls_layout.addLayout(self._create_settlement_display_mode_controls())
+        controls_layout.addLayout(self._create_settlement_overlay_toggle_controls())
         controls_layout.addWidget(self._create_vertical_separator())
         controls_layout.addLayout(self._create_settlement_filter_controls())
-        controls_layout.addWidget(self._create_vertical_separator())
-        controls_layout.addLayout(self._create_settlement_3d_controls())
 
         controls_widget.setLayout(controls_layout)
         return controls_widget
 
-    def _create_settlement_display_mode_controls(self) -> QHBoxLayout:
+    def _create_settlement_overlay_toggle_controls(self) -> QHBoxLayout:
         """
-        Erstellt Switcher zwischen den Settlement-Basis-Layern. Settlements/
-        Landmarks/Roadsites/Roads/City Boundary sind bewusst KEINE eigenen
-        Radio-Modi mehr, sondern Overlay-Checkboxen (siehe
-        _create_settlement_filter_controls()) - Nutzer-Vorgabe: "ich will ja
-        Plots und Straßen und alles gleichzeitig sehen können" statt zwischen
-        sich gegenseitig ausschließenden Ansichten wechseln zu müssen.
+        Kein exklusiver Basis-Layer-Umschalter mehr (die frühere Terrain-
+        Suitability/Civilization-Map/Plot-Boundaries-Radiogruppe ist entfallen,
+        siehe [[project-settlement-physics-lab-parity]]) - Basis ist jetzt
+        immer die Heightmap, wie bei den anderen Tabs (Nutzer-Vorgabe: "sonst
+        sieht man einfach so wie in anderen tabs nur die heightmap
+        (combined)"). Plot-Kerne/-Nodes/-Kanten/Wildnis-/Stadtgrenze werden
+        immer als Overlay gezeichnet (siehe update_settlement_display()),
+        nicht mehr an einen Radio-Modus gekoppelt. Nur Civ-Value und
+        Potential-Field bleiben als unabhängig kombinierbare Overlay-
+        Checkboxen bestehen.
         """
         layout = QHBoxLayout()
 
-        self.display_mode = QButtonGroup()
+        self.civ_overlay_cb = QCheckBox("Civ Value")
+        self.civ_overlay_cb.toggled.connect(self.update_display_mode)
+        layout.addWidget(self.civ_overlay_cb)
 
-        self.suitability_radio = QRadioButton("Terrain Suitability")
-        self.suitability_radio.setChecked(True)
-        self.suitability_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.suitability_radio, 0)
-        layout.addWidget(self.suitability_radio)
-
-        self.civ_map_radio = QRadioButton("Civilization Map")
-        self.civ_map_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.civ_map_radio, 1)
-        layout.addWidget(self.civ_map_radio)
-
-        # "Plot Boundaries" zeigt seit [[project-settlement-plot-physics-rebuild]]
-        # das PlotPhysicsSystem-Ergebnis (einziges Voronoi-Mesh, city_core/
-        # wilderness_core/standard_plot_node vereint) - "Landscape Voronoi"/
-        # "City Blocks" (frühere getrennte Systeme) sind entfallen.
-        self.plot_map_radio = QRadioButton("Plot Boundaries")
-        self.plot_map_radio.toggled.connect(self.update_display_mode)
-        self.display_mode.addButton(self.plot_map_radio, 2)
-        layout.addWidget(self.plot_map_radio)
+        self.potential_overlay_cb = QCheckBox("Potential Field")
+        self.potential_overlay_cb.toggled.connect(self.update_display_mode)
+        layout.addWidget(self.potential_overlay_cb)
 
         return layout
 
@@ -371,6 +352,15 @@ class SettlementTab(BaseMapTab):
         """
         Erstellt Overlay-Checkboxen - kombinierbar mit JEDEM Basis-Layer-Radio
         (siehe update_settlement_display()), nicht auf einen Modus beschränkt.
+
+        Kein "Roads"-Checkbox mehr (Nutzer-Vorgabe, siehe
+        [[project-settlement-physics-lab-parity]]): roads/landmark_roads/
+        outer_roads sind die ALTE, straßengerade Pfadfindung von vor dem
+        PlotPhysicsSystem-Umbau ("da sind Verbindungen zwischen den Straßen
+        die einfach gerade Linien sind... das ist alles noch alter Kram") -
+        das reale, um die Plots herumführende Wegenetz kommt jetzt aus
+        plot_edges (immer sichtbar via overlay_plot_boundaries() mit dem
+        Traffic-Farbverlauf, siehe update_settlement_display()).
         """
         layout = QHBoxLayout()
 
@@ -389,29 +379,10 @@ class SettlementTab(BaseMapTab):
         self.show_roadsites_cb.toggled.connect(self.update_display_mode)
         layout.addWidget(self.show_roadsites_cb)
 
-        self.show_roads_cb = QCheckBox("Roads")
-        self.show_roads_cb.setChecked(True)
-        self.show_roads_cb.toggled.connect(self.update_display_mode)
-        layout.addWidget(self.show_roads_cb)
-
         self.show_city_boundary_cb = QCheckBox("City Boundary")
         self.show_city_boundary_cb.setChecked(True)
         self.show_city_boundary_cb.toggled.connect(self.update_display_mode)
         layout.addWidget(self.show_city_boundary_cb)
-
-        return layout
-
-    def _create_settlement_3d_controls(self) -> QHBoxLayout:
-        """Erstellt 3D-Overlay-Checkboxes (aktuell ohne Effekt, siehe apply_3d_overlays())"""
-        layout = QHBoxLayout()
-
-        self.terrain_3d_cb = QCheckBox("3D Terrain")
-        self.terrain_3d_cb.toggled.connect(self.toggle_3d_terrain)
-        layout.addWidget(self.terrain_3d_cb)
-
-        self.settlement_markers_3d_cb = QCheckBox("3D Settlement Markers")
-        self.settlement_markers_3d_cb.toggled.connect(self.toggle_3d_markers)
-        layout.addWidget(self.settlement_markers_3d_cb)
 
         return layout
 
@@ -540,12 +511,14 @@ class SettlementTab(BaseMapTab):
         Funktionsweise: Slot für Live-Fortschritt der Plot-Physik-Konvergenz
         (siehe [[project-settlement-plot-physics-rebuild]] Teil F) - zeichnet
         den noch nicht konvergierten Zwischenzustand nach, solange der
-        Settlement-Tab mit aktivem "Plot Boundaries"-Modus in 2D sichtbar ist.
+        Settlement-Tab in 2D sichtbar ist (Plot-Physik-Overlay ist seit
+        [[project-settlement-physics-lab-parity]] immer aktiv, kein
+        exklusiver Modus mehr).
         Aufgabe: Analog zu draw.py im ursprünglichen Physics Lab, nur im
         echten Tool statt im Sandbox-Fenster.
         """
         try:
-            if self.display_mode.checkedId() != 2 or self.current_view != "2d":
+            if self.current_view != "2d":
                 return
             current_display = self.get_current_display()
             if not current_display:
@@ -587,6 +560,8 @@ class SettlementTab(BaseMapTab):
         parameters = {}
         for param_name, slider in self.parameter_sliders.items():
             parameters[param_name] = slider.getValue()
+        for param_name, checkbox in getattr(self, "force_checkboxes", {}).items():
+            parameters[param_name] = checkbox.isChecked()
         return parameters
 
     @pyqtSlot()
@@ -675,44 +650,35 @@ class SettlementTab(BaseMapTab):
 
     def update_settlement_display(self):
         """
-        Funktionsweise: Aktualisiert Display basierend auf aktuellem Basis-Layer
-        (Radio) und den unabhängig davon zuschaltbaren Overlay-Checkboxen
-        (Settlements/Landmarks/Roadsites/Roads/City Boundary)
-        Aufgabe: Basis-Layer und Overlays sind entkoppelt, damit z.B. Plots und
-        Straßen und Settlements gleichzeitig sichtbar sein können statt
-        zwischen exklusiven Modi wechseln zu müssen (Nutzer-Vorgabe)
+        Funktionsweise: Basis-Layer ist immer die Heightmap (wie bei den
+        anderen Tabs, siehe [[project-settlement-physics-lab-parity]] -
+        Nutzer-Vorgabe: "sonst sieht man einfach so wie in anderen tabs nur
+        die heightmap (combined)"). Die frühere exklusive Terrain-Suitability/
+        Civilization-Map/Plot-Boundaries-Radiogruppe ist entfallen - Plot-
+        Kerne/-Nodes/-Kanten/Wildnisgrenze werden jetzt IMMER als Vektor-
+        Overlay gezeichnet, nicht mehr an einen gewählten Modus gekoppelt
+        (Nutzer-Report: "dann sehe ich keine plotkerne, keine plotnodes,
+        nichts" - lag daran, dass dieses Overlay vorher nur im inzwischen
+        entfernten "Plot Boundaries"-Modus gezeichnet wurde).
+        Aufgabe: Alle weiteren Overlays (Settlements/Landmarks/Roadsites/
+        Roads/City Boundary per Checkbox, Civ-Value/Potential-Field per
+        Checkbox) bleiben unabhängig davon zuschaltbar.
 
         Nutzt wie die anderen Tabs get_current_display()/_push_data_to_current_display()
         statt eines nie zugewiesenen self.map_display.
         """
-        current_mode = self.display_mode.checkedId()
+        heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+        if heightmap is not None:
+            self._push_data_to_current_display(heightmap, "heightmap")
 
-        if current_mode == 0:  # Terrain Suitability
-            suitability_map = self.data_lod_manager.get_settlement_data("combined_suitability_map")
-            if suitability_map is not None:
-                self._push_data_to_current_display(suitability_map, "suitability_map")
-
-        elif current_mode == 1:  # Civilization Map
-            civ_map = self.data_lod_manager.get_settlement_data("civ_map")
-            if civ_map is not None:
-                self._push_data_to_current_display(civ_map, "civ_map")
-
-        elif current_mode == 2:  # Plot Boundaries (PlotPhysicsSystem, siehe [[project-settlement-plot-physics-rebuild]])
-            # Terrain als Hintergrund (analog zu tools/biome_lab/draw.py's
-            # Terrain-Heatmap) statt der vorherigen generischen Nearest-Core-
-            # ID-Rasterdarstellung von plot_map - die eigentliche Plot-
-            # Geometrie kommt als Vektor-Overlay obendrauf (siehe unten).
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-            if heightmap is not None:
-                self._push_data_to_current_display(heightmap, "heightmap")
-                current_display = self.get_current_display()
-                display = current_display.display if current_display else None
-                if display is not None and hasattr(display, 'overlay_plot_boundaries'):
-                    plot_nodes = self.data_lod_manager.get_settlement_data("plot_nodes")
-                    plot_edges = self.data_lod_manager.get_settlement_data("plot_edges")
-                    plot_cores = self.data_lod_manager.get_settlement_data("plot_cores")
-                    wilderness_polygons = self.data_lod_manager.get_settlement_data("wilderness_polygons")
-                    display.overlay_plot_boundaries(plot_nodes, plot_edges, plot_cores, wilderness_polygons)
+        current_display = self.get_current_display()
+        display = current_display.display if current_display else None
+        if display is not None and hasattr(display, 'overlay_plot_boundaries'):
+            plot_nodes = self.data_lod_manager.get_settlement_data("plot_nodes")
+            plot_edges = self.data_lod_manager.get_settlement_data("plot_edges")
+            plot_cores = self.data_lod_manager.get_settlement_data("plot_cores")
+            wilderness_polygons = self.data_lod_manager.get_settlement_data("wilderness_polygons")
+            display.overlay_plot_boundaries(plot_nodes, plot_edges, plot_cores, wilderness_polygons)
 
         self._apply_settlement_overlays()
 
@@ -743,24 +709,27 @@ class SettlementTab(BaseMapTab):
 
             display.overlay_settlements(display_settlements, display_landmarks, display_roadsites)
 
-        if hasattr(display, 'overlay_roads') and self.show_roads_cb.isChecked():
-            # Drei Farben für die drei Road-Kategorien (siehe
-            # calculate_road_network()/calculate_landmark_roads()/
-            # calculate_outer_connections() in core/settlement_generator.py)
-            roads = self.data_lod_manager.get_settlement_data("roads")
-            landmark_roads = self.data_lod_manager.get_settlement_data("landmark_roads")
-            outer_roads = self.data_lod_manager.get_settlement_data("outer_roads")
-            if roads:
-                display.overlay_roads(roads, color='darkorange')
-            if landmark_roads:
-                display.overlay_roads(landmark_roads, color='gold', linewidth=1.0)
-            if outer_roads:
-                display.overlay_roads(outer_roads, color='dimgray', linewidth=1.0)
+        # Kein overlay_roads()-Aufruf mehr (alte gerade Pfadfindung, siehe
+        # _create_settlement_filter_controls()-Docstring) - das reale
+        # Wegenetz kommt aus plot_edges, siehe update_settlement_display().
 
         if hasattr(display, 'overlay_city_boundary_contour') and self.show_city_boundary_cb.isChecked():
             city_mask = self.data_lod_manager.get_settlement_data("city_mask")
             if city_mask is not None:
                 display.overlay_city_boundary_contour(city_mask)
+
+        # Civ-Value/Potenzialfeld-Overlays (Punkt c, siehe
+        # [[project-settlement-physics-lab-parity]]) - kombinierbar mit jedem
+        # Basis-Layer, analog zu den Filter-Checkboxen oben.
+        if hasattr(display, 'overlay_civ_map') and self.civ_overlay_cb.isChecked():
+            civ_map = self.data_lod_manager.get_settlement_data("civ_map")
+            if civ_map is not None:
+                display.overlay_civ_map(civ_map)
+
+        if hasattr(display, 'overlay_potential_field') and self.potential_overlay_cb.isChecked():
+            potential_field = self.data_lod_manager.get_settlement_data("potential_field")
+            if potential_field is not None:
+                display.overlay_potential_field(potential_field)
 
     def apply_3d_overlays(self):
         """
@@ -771,31 +740,32 @@ class SettlementTab(BaseMapTab):
         (2D) headless über map_display_2d.rasterize_plot_boundaries_rgba() und
         pusht sie als RGBA-Overlay-Textur. Läuft unabhängig vom aktuell
         sichtbaren 2D/3D-Modus (das 3D-Widget existiert immer, siehe base_tab.py
-        _push_data_to_current_display()-Kommentar), sichtbar wird der Skin aber
-        nur, wenn "Plot Boundaries" (mode 2) aktiv ist.
+        _push_data_to_current_display()-Kommentar). Immer sichtbar, seit die
+        frühere exklusive "Plot Boundaries"-Radiogruppe entfallen ist (siehe
+        [[project-settlement-physics-lab-parity]]) - alles, was in 2D zu
+        sehen ist, ist jetzt auch in 3D zu sehen (Nutzer-Vorgabe).
         Aufgabe: Ersetzt den vorherigen No-Op-Platzhalter.
         """
         if not self.map_display_3d or not hasattr(self.map_display_3d.display, 'update_overlay_data'):
             return
 
         display_3d = self.map_display_3d.display
-        is_plot_mode = self.display_mode.checkedId() == 2
 
-        if is_plot_mode:
-            plot_nodes = self.data_lod_manager.get_settlement_data("plot_nodes")
-            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-            if plot_nodes and heightmap is not None:
-                plot_edges = self.data_lod_manager.get_settlement_data("plot_edges")
-                plot_cores = self.data_lod_manager.get_settlement_data("plot_cores")
-                wilderness_polygons = self.data_lod_manager.get_settlement_data("wilderness_polygons")
-                from gui.widgets.map_display_2d import rasterize_plot_boundaries_rgba
-                rgba = rasterize_plot_boundaries_rgba(
-                    plot_nodes, plot_edges, plot_cores, wilderness_polygons,
-                    map_size=heightmap.shape[0], resolution=heightmap.shape[0])
-                display_3d.update_overlay_data("settlement", "plots", rgba)
+        plot_nodes = self.data_lod_manager.get_settlement_data("plot_nodes")
+        heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+        has_plots = bool(plot_nodes) and heightmap is not None
+        if has_plots:
+            plot_edges = self.data_lod_manager.get_settlement_data("plot_edges")
+            plot_cores = self.data_lod_manager.get_settlement_data("plot_cores")
+            wilderness_polygons = self.data_lod_manager.get_settlement_data("wilderness_polygons")
+            from gui.widgets.map_display_2d import rasterize_plot_boundaries_rgba
+            rgba = rasterize_plot_boundaries_rgba(
+                plot_nodes, plot_edges, plot_cores, wilderness_polygons,
+                map_size=heightmap.shape[0], resolution=heightmap.shape[0])
+            display_3d.update_overlay_data("settlement", "plots", rgba)
 
         if hasattr(display_3d, 'set_layer_visibility'):
-            display_3d.set_layer_visibility("settlement", "plots", is_plot_mode)
+            display_3d.set_layer_visibility("settlement", "plots", has_plots)
 
     @pyqtSlot()
     def update_display_mode(self):
@@ -811,16 +781,6 @@ class SettlementTab(BaseMapTab):
             self.update_settlement_display()
         except AttributeError as e:
             self.logger.debug(f"Settlement display rendering not yet implemented: {e}")
-
-    @pyqtSlot(bool)
-    def toggle_3d_terrain(self, enabled: bool):
-        """Toggle für 3D Terrain Overlay"""
-        self.update_settlement_display()
-
-    @pyqtSlot(bool)
-    def toggle_3d_markers(self, enabled: bool):
-        """Toggle für 3D Settlement Markers"""
-        self.update_settlement_display()
 
 
 class SettlementStatisticsWidget(QGroupBox):

@@ -131,6 +131,16 @@ class SettlementData:
         self.landmark_roads = []  # List[List[Tuple]] - Landmark-Anbindungen ans Strassennetz
         self.outer_roads = []  # List[List[Tuple]] - Aussenverbindungen zur Kartengrenze
         self.plot_edges = {}  # Dict[int, PlotEdge] - adressierbares Kanten-Registry mit Traffic/Klassifikation
+        self.potential_field = None  # (height, width, 2) - PlotPhysicsSystem-Kraftfeld, siehe [[project-settlement-physics-lab-parity]]
+        # Vorher NIE über set_settlement_data_complete_lod() dekomponiert
+        # worden, obwohl settlement_tab.py sie schon länger über
+        # get_settlement_data() abfragte - dadurch blieben Plotkerne/
+        # Wildnisgrenzen/PlotNode-Positionen in der 2D/3D-Anzeige unsichtbar
+        # (Nutzer-Report "dann sehe ich keine plotkerne, keine plotnodes,
+        # nichts"), siehe [[project-settlement-physics-lab-parity]].
+        self.plot_cores = []  # List[PlotNode] - node_type in {standard_plot_node, wilderness_core, city_core}
+        self.wilderness_polygons = []  # List[(N,2) array] - Aussenkontur-Punkte je Wildnisgebiet
+        self.plot_node_positions = []  # List[(x_norm, y_norm)] - PlotNode-Positionen, normiert auf [0,1]
 
         # Interne Daten
         self.combined_suitability_map = None  # Terrain-Suitability für Settlement-Platzierung
@@ -316,6 +326,14 @@ class PlotEdge:
     movement_cost: float  # length * (1 + height_cost_factor * mittlere Steigung)
     traffic: float = 0.0  # fraktional: eine PlotNode teilt ihre "Familien-Masse" per Rang-Distanz-Gewicht auf mehrere Ziele auf
     classification: str = "none"  # "none" | "path" | "road"
+    # Lauf-Durchschnitt (nicht die abklingende EMA von `traffic`) ueber die
+    # gesamte Konvergenz-Simulation - treibt die Traffic-Gradient-
+    # Strassenfaerbung (hell-orange -> dunkelrot), siehe
+    # PlotPhysicsSystem._classify_road_tiers()/_simulate_traffic() und
+    # [[project-settlement-physics-lab-parity]]. Bewusst ein eigenes Feld
+    # statt `traffic` zu ueberladen, damit die Tier-Klassifikation (die
+    # weiterhin die abklingende EMA nutzt) unveraendert bleibt.
+    traffic_avg: float = 0.0
 
 
 @dataclass
@@ -1032,6 +1050,15 @@ class PlotPhysicsSystem:
 
     def __init__(self, map_size, plot_nodes_count=200, plot_base_spacing=60.0,
                  plot_civ_spacing_factor=8.0, plot_height_cost_factor=3.0,
+                 core_plotnode_spring_stiffness=1.2, plotnode_plotnode_spring_stiffness=1.0,
+                 pressure_strength=0.8, core_mass=1.0, plot_node_mass=1.0,
+                 plot_node_repulsion_strength=4.0, plot_gravity_strength=0.01,
+                 plot_city_repulsion_strength=0.5, potential_strength=1.0,
+                 damping=0.80, plot_tier_factor=1.0,
+                 enable_core_plotnode_spring=True, enable_plotnode_plotnode_spring=True,
+                 enable_pressure=True, enable_plot_node_repulsion=True,
+                 enable_field_cores=True, enable_field_plotnodes=True,
+                 enable_core_cell_containment=True, enable_wilderness_containment=True,
                  shader_manager=None, progress_callback=None, map_seed=None,
                  live_state_callback=None):
         self.map_size = int(map_size)
@@ -1050,29 +1077,38 @@ class PlotPhysicsSystem:
         if map_seed is not None:
             random.seed(map_seed)
 
-        # Kraft-Schalter: in der Produktion permanent aktiv (im Lab Debug-
-        # Checkboxen, um einzelne Kraefte zu isolieren, siehe Modul-Docstring).
-        self.enable_core_plotnode_spring = True
-        self.enable_plotnode_plotnode_spring = True
-        self.enable_pressure = True
-        self.enable_plot_node_repulsion = True
-        self.enable_field_cores = True
-        self.enable_field_plotnodes = True
-        self.enable_core_cell_containment = True
-        self.enable_wilderness_containment = True
+        # Kraft-Schalter: jetzt per Konstruktor-Parameter statt fest
+        # verdrahtet (siehe [[project-settlement-physics-lab-parity]]) -
+        # Production-Default bleibt "alles an" (anders als das Lab, das
+        # bewusst mit allem AUS startet, um Kraefte einzeln zu isolieren -
+        # das ist ein Debug-Workflow, kein sinnvoller Production-Default).
+        self.enable_core_plotnode_spring = bool(enable_core_plotnode_spring)
+        self.enable_plotnode_plotnode_spring = bool(enable_plotnode_plotnode_spring)
+        self.enable_pressure = bool(enable_pressure)
+        self.enable_plot_node_repulsion = bool(enable_plot_node_repulsion)
+        self.enable_field_cores = bool(enable_field_cores)
+        self.enable_field_plotnodes = bool(enable_field_plotnodes)
+        self.enable_core_cell_containment = bool(enable_core_cell_containment)
+        self.enable_wilderness_containment = bool(enable_wilderness_containment)
 
-        # Physik-/Feld-Basiswerte (1:1 aus tools/biome_lab/app.py's
-        # _BASE_*-Konstanten bei Multiplikator 1.0).
-        self.core_plotnode_spring_stiffness = 1.2
-        self.plotnode_plotnode_spring_stiffness = 1.0
-        self.pressure_strength = 0.8
-        self.core_mass = 1.0
-        self.plot_node_mass = 1.0
-        self.plot_node_repulsion_strength = 4.0
-        self.plot_gravity_strength = 0.01
-        self.plot_city_repulsion_strength = 0.5
-        self.norm_potential_strength = 1.0
-        self.damping = 0.80
+        # Physik-/Feld-Werte (Basis 1:1 aus tools/biome_lab/app.py's
+        # _BASE_*-Konstanten bei Multiplikator 1.0) - jetzt per Konstruktor-
+        # Parameter statt fest verdrahtet, siehe
+        # [[project-settlement-physics-lab-parity]].
+        self.core_plotnode_spring_stiffness = float(core_plotnode_spring_stiffness)
+        self.plotnode_plotnode_spring_stiffness = float(plotnode_plotnode_spring_stiffness)
+        self.pressure_strength = float(pressure_strength)
+        self.core_mass = float(core_mass)
+        self.plot_node_mass = float(plot_node_mass)
+        self.plot_node_repulsion_strength = float(plot_node_repulsion_strength)
+        self.plot_gravity_strength = float(plot_gravity_strength)
+        self.plot_city_repulsion_strength = float(plot_city_repulsion_strength)
+        self.potential_strength = float(potential_strength)
+        self.damping = float(damping)
+        # NEU (existierte im Lab nur implizit bei Multiplikator 1.0, siehe
+        # TIER_*_THRESHOLD-Konstanten oben) - skaliert die Traffic-Tier-
+        # Schwellen, siehe _classify_road_tiers().
+        self.plot_tier_factor = float(plot_tier_factor)
         self.wilderness_push_stiffness = 1.5
         self.spring_traffic_shrink = 0.002
         self.spring_min_shrink_fraction = 0.70
@@ -1112,6 +1148,12 @@ class PlotPhysicsSystem:
 
         self.ridge_traffic_history = {}
         self.ridge_traffic_shrink_ema = {}
+        # Lauf-Durchschnitt ueber die gesamte Konvergenz-Simulation (siehe
+        # PlotEdge.traffic_avg, [[project-settlement-physics-lab-parity]]) -
+        # getrennt von der abklingenden EMA oben, die weiterhin die Tier-
+        # Klassifikation treibt.
+        self.ridge_traffic_sum = {}
+        self.ridge_traffic_sample_count = 0
         self.path_cache = {}
         self.potential_field = None
 
@@ -1296,6 +1338,8 @@ class PlotPhysicsSystem:
         self._static_distances = None
         self.ridge_traffic_history = {}
         self.ridge_traffic_shrink_ema = {}
+        self.ridge_traffic_sum = {}
+        self.ridge_traffic_sample_count = 0
         self.path_cache = {}
         self.iteration = 0
         self.topology_ready = False
@@ -2588,7 +2632,7 @@ class PlotPhysicsSystem:
         field_arr[:, :, 0] += _edge_push(xx.astype(float)) - _edge_push((w - 1 - xx).astype(float))
         field_arr[:, :, 1] += _edge_push(yy.astype(float)) - _edge_push((h - 1 - yy).astype(float))
 
-        field_arr *= self.norm_potential_strength
+        field_arr *= self.potential_strength
         self.potential_field = field_arr
 
     def _compute_wilderness_hill_term(self, xx, yy):
@@ -2671,6 +2715,8 @@ class PlotPhysicsSystem:
         if not self.topology_ready or vertex_positions is None or not ridge_edges:
             self.ridge_traffic_history = {}
             self.ridge_traffic_shrink_ema = {}
+            self.ridge_traffic_sum = {}
+            self.ridge_traffic_sample_count = 0
             return
 
         def trace_and_add_predecessors(row_index, source_entry, target_entry, amount, contrib):
@@ -2757,6 +2803,14 @@ class PlotPhysicsSystem:
                 for rank, (_settlement_id_to, (_d, row_from, target_entry)) in enumerate(ranked):
                     amount = weights[rank] * self.plot_intercity_traffic
                     trace_and_add_predecessors(row_from, boundary_entries[row_from], target_entry, amount, fresh_contrib)
+
+        # Lauf-Durchschnitt ueber die gesamte Konvergenz-Simulation (siehe
+        # PlotEdge.traffic_avg, [[project-settlement-physics-lab-parity]]) -
+        # reitet auf demselben Aufruf-Rhythmus wie die EMA unten mit, aendert
+        # aber deren Verhalten nicht (separate Akkumulatoren).
+        self.ridge_traffic_sample_count += 1
+        for key, amount in fresh_contrib.items():
+            self.ridge_traffic_sum[key] = self.ridge_traffic_sum.get(key, 0.0) + amount
 
         traffic_decay = 0.15
         keep_factor = 1.0 - traffic_decay
@@ -2848,12 +2902,17 @@ class PlotPhysicsSystem:
                 continue
             key = self._edge_key(i, j)
             traffic = self.ridge_traffic_history.get(key, 0.0)
+            # Lauf-Durchschnitt (nicht die abklingende EMA oben) ueber die
+            # gesamte Konvergenz-Simulation, fuer die Traffic-Gradient-
+            # Strassenfaerbung - siehe _simulate_traffic() und
+            # [[project-settlement-physics-lab-parity]].
+            avg_traffic = self.ridge_traffic_sum.get(key, 0.0) / max(1, self.ridge_traffic_sample_count)
 
-            if traffic >= self.TIER_STRASSE_THRESHOLD:
+            if traffic >= self.TIER_STRASSE_THRESHOLD * self.plot_tier_factor:
                 tier, classification = "strasse", "road"
-            elif traffic >= self.TIER_WEG_THRESHOLD:
+            elif traffic >= self.TIER_WEG_THRESHOLD * self.plot_tier_factor:
                 tier, classification = "weg", "road"
-            elif traffic >= self.TIER_MIN_TRAFFIC:
+            elif traffic >= self.TIER_MIN_TRAFFIC * self.plot_tier_factor:
                 tier, classification = "pfad", "path"
             else:
                 tier, classification = "none", "none"
@@ -2862,7 +2921,8 @@ class PlotPhysicsSystem:
             edges[edge_id] = PlotEdge(
                 edge_id=edge_id, node_a=pid_i, node_b=pid_j, length=length,
                 height_cost=float(cost - length), movement_cost=float(cost),
-                traffic=float(traffic), classification=classification)
+                traffic=float(traffic), classification=classification,
+                traffic_avg=float(avg_traffic))
             edge_id += 1
 
         self.plot_edges = edges
@@ -2941,16 +3001,44 @@ class SettlementGenerator:
         self.settlements = 3
         self.landmarks = 3
         self.roadsites = 3
-        self.plotnodes = 1000
+        self.plotnodes = 200
         self.civ_influence_decay = 0.8
         self.terrain_factor_villages = 1.0
         self.road_slope_to_distance_ratio = 1.5
         self.landmark_wilderness = 0.3
-        self.city_reach_factor = 4.0
-        self.civ_influence_range = 0.30
-        self.plot_base_spacing = 10.0
-        self.plot_civ_spacing_factor = 3.0
-        self.plot_height_cost_factor = 2.0
+        self.city_size = 0.5
+        self.city_reach_factor = 1.0 + 0.5 * 6.0
+        self.civ_influence_range = 0.15 + 0.5 * 0.30
+        self.plot_intercity_traffic = 10.0 + 0.5 * 40.0
+        self.plot_base_spacing = 20.0
+        self.plot_civ_spacing_factor = 8.0
+        self.plot_height_cost_factor = 3.0
+
+        # Plot Physics - Advanced (siehe [[project-settlement-physics-lab-parity]]),
+        # 1:1 aus PlotPhysicsSystem's Basiswerten uebernommen.
+        self.core_plotnode_spring_stiffness = 1.2
+        self.plotnode_plotnode_spring_stiffness = 1.0
+        self.pressure_strength = 0.8
+        self.core_mass = 1.0
+        self.plot_node_mass = 1.0
+        self.plot_node_repulsion_strength = 4.0
+        self.plot_gravity_strength = 0.01
+        self.plot_city_repulsion_strength = 0.5
+        self.potential_strength = 1.0
+        self.damping = 0.80
+        self.plot_tier_factor = 1.0
+
+        # Kraft-Schalter (Production-Default: alle an, siehe
+        # PlotPhysicsSystem.__init__-Docstring fuer die Begruendung, warum
+        # das vom Lab-Debug-Default "alle aus" abweicht).
+        self.enable_core_plotnode_spring = True
+        self.enable_plotnode_plotnode_spring = True
+        self.enable_pressure = True
+        self.enable_plot_node_repulsion = True
+        self.enable_field_cores = True
+        self.enable_field_plotnodes = True
+        self.enable_core_cell_containment = True
+        self.enable_wilderness_containment = True
 
     def set_active_parameters(self, parameters):
         """
@@ -2974,11 +3062,56 @@ class SettlementGenerator:
         self.terrain_factor_villages = parameters['terrain_factor_villages']
         self.road_slope_to_distance_ratio = parameters['road_slope_to_distance_ratio']
         self.landmark_wilderness = parameters['landmark_wilderness']
-        self.city_reach_factor = parameters['city_reach_factor']
-        self.civ_influence_range = parameters['civ_influence_range']
+
+        # City Size (an tools/biome_lab/scene.py's _recompute_background()
+        # angelehnte Ableitung, siehe [[project-settlement-physics-lab-parity]]):
+        # ein Regler leitet city_reach_factor/civ_influence_range/
+        # plot_intercity_traffic gemeinsam ab, statt sie einzeln zu slidern.
+        #
+        # WICHTIG - Basiswerte bewusst NICHT 1:1 vom Lab übernommen: die
+        # Lab-Formel (city_reach_factor = 4.0 + city_size*6.0) war für die
+        # dortige, deutlich größere Referenz-Karte kalibriert. settlement.radius
+        # (siehe compute_city_boundaries()) ist ein FIXER, map-größen-
+        # unabhängiger Pixelwert (~3-13px) - bei Productions typischer
+        # map_size=128 ließ reach_factor=7.0 (Lab-Wert bei city_size=0.5)
+        # die Stadtfläche gegenüber dem vorherigen, bereits gut kalibrierten
+        # Production-Default (reach_factor=4.0) fast verdreifachen (5.7% ->
+        # 17.0% der Kartenfläche, empirisch verifiziert). Basis hier auf 1.0
+        # verschoben, damit der Default city_size=0.5 wieder exakt den alten,
+        # funktionierenden Wert reproduziert; civ_influence_range brauchte
+        # keine Anpassung (Lab-Formel liefert bei 0.5 bereits exakt den alten
+        # Default 0.30).
+        self.city_size = parameters['city_size']
+        self.city_reach_factor = 1.0 + self.city_size * 6.0
+        self.civ_influence_range = 0.15 + self.city_size * 0.30
+        self.plot_intercity_traffic = 10.0 + self.city_size * 40.0
+
         self.plot_base_spacing = parameters['plot_base_spacing']
         self.plot_civ_spacing_factor = parameters['plot_civ_spacing_factor']
         self.plot_height_cost_factor = parameters['plot_height_cost_factor']
+
+        # Plot Physics - Advanced (siehe [[project-settlement-physics-lab-parity]])
+        self.core_plotnode_spring_stiffness = parameters['core_plotnode_spring_stiffness']
+        self.plotnode_plotnode_spring_stiffness = parameters['plotnode_plotnode_spring_stiffness']
+        self.pressure_strength = parameters['pressure_strength']
+        self.core_mass = parameters['core_mass']
+        self.plot_node_mass = parameters['plot_node_mass']
+        self.plot_node_repulsion_strength = parameters['plot_node_repulsion_strength']
+        self.plot_gravity_strength = parameters['plot_gravity_strength']
+        self.plot_city_repulsion_strength = parameters['plot_city_repulsion_strength']
+        self.potential_strength = parameters['potential_strength']
+        self.damping = parameters['damping']
+        self.plot_tier_factor = parameters['plot_tier_factor']
+
+        # Kraft-Schalter
+        self.enable_core_plotnode_spring = parameters['enable_core_plotnode_spring']
+        self.enable_plotnode_plotnode_spring = parameters['enable_plotnode_plotnode_spring']
+        self.enable_pressure = parameters['enable_pressure']
+        self.enable_plot_node_repulsion = parameters['enable_plot_node_repulsion']
+        self.enable_field_cores = parameters['enable_field_cores']
+        self.enable_field_plotnodes = parameters['enable_field_plotnodes']
+        self.enable_core_cell_containment = parameters['enable_core_cell_containment']
+        self.enable_wilderness_containment = parameters['enable_wilderness_containment']
 
     def _ensure_data_lod_manager(self):
         """Lazy-Fallback für Standalone-Nutzung (Tests, _execute_generation() ohne
@@ -3006,11 +3139,38 @@ class SettlementGenerator:
             'terrain_factor_villages': SETTLEMENT.TERRAIN_FACTOR_VILLAGES["default"],
             'road_slope_to_distance_ratio': SETTLEMENT.ROAD_SLOPE_TO_DISTANCE_RATIO["default"],
             'landmark_wilderness': SETTLEMENT.LANDMARK_WILDERNESS["default"],
+            # city_size ersetzt city_reach_factor/civ_influence_range als
+            # Slider (beide werden jetzt in set_active_parameters() daraus
+            # abgeleitet) - die beiden Konstanten bleiben als Config-Eintraege
+            # bestehen (z.B. fuer Legacy-Leser dieses dicts), werden aber
+            # nicht mehr fuer die Instanz-Attribute genutzt.
+            'city_size': SETTLEMENT.CITY_SIZE["default"],
             'city_reach_factor': SETTLEMENT.CITY_REACH_FACTOR["default"],
             'civ_influence_range': SETTLEMENT.CIV_INFLUENCE_RANGE["default"],
             'plot_base_spacing': SETTLEMENT.PLOT_BASE_SPACING["default"],
             'plot_civ_spacing_factor': SETTLEMENT.PLOT_CIV_SPACING_FACTOR["default"],
-            'plot_height_cost_factor': SETTLEMENT.PLOT_HEIGHT_COST_FACTOR["default"]
+            'plot_height_cost_factor': SETTLEMENT.PLOT_HEIGHT_COST_FACTOR["default"],
+            # Plot Physics - Advanced (siehe [[project-settlement-physics-lab-parity]])
+            'core_plotnode_spring_stiffness': SETTLEMENT.CORE_PLOTNODE_SPRING_STIFFNESS["default"],
+            'plotnode_plotnode_spring_stiffness': SETTLEMENT.PLOTNODE_PLOTNODE_SPRING_STIFFNESS["default"],
+            'pressure_strength': SETTLEMENT.PRESSURE_STRENGTH["default"],
+            'core_mass': SETTLEMENT.CORE_MASS["default"],
+            'plot_node_mass': SETTLEMENT.PLOT_NODE_MASS["default"],
+            'plot_node_repulsion_strength': SETTLEMENT.PLOT_NODE_REPULSION_STRENGTH["default"],
+            'plot_gravity_strength': SETTLEMENT.PLOT_GRAVITY_STRENGTH["default"],
+            'plot_city_repulsion_strength': SETTLEMENT.PLOT_CITY_REPULSION_STRENGTH["default"],
+            'potential_strength': SETTLEMENT.POTENTIAL_STRENGTH["default"],
+            'damping': SETTLEMENT.DAMPING["default"],
+            'plot_tier_factor': SETTLEMENT.PLOT_TIER_FACTOR["default"],
+            # Kraft-Schalter (reine Booleans, kein ParameterSlider/Config-Slot)
+            'enable_core_plotnode_spring': True,
+            'enable_plotnode_plotnode_spring': True,
+            'enable_pressure': True,
+            'enable_plot_node_repulsion': True,
+            'enable_field_cores': True,
+            'enable_field_plotnodes': True,
+            'enable_core_cell_containment': True,
+            'enable_wilderness_containment': True,
         }
 
     def _get_dependencies(self, data_manager, lod_level=None):
@@ -3209,6 +3369,13 @@ class SettlementGenerator:
         plots = self.data_lod_manager.get_calculator_output("settlement.plot_nodes", "plots", lod_level)
         plot_map = self.data_lod_manager.get_calculator_output("settlement.plot_nodes", "plot_map", lod_level)
         plot_edges = self.data_lod_manager.get_calculator_output("settlement.plot_nodes", "plot_edges", lod_level)
+        potential_field = self.data_lod_manager.get_calculator_output(
+            "settlement.plot_nodes", "potential_field", lod_level)
+        plot_cores = self.data_lod_manager.get_calculator_output("settlement.plot_nodes", "plot_cores", lod_level)
+        wilderness_polygons = self.data_lod_manager.get_calculator_output(
+            "settlement.plot_nodes", "wilderness_polygons", lod_level)
+        plot_node_positions = self.data_lod_manager.get_calculator_output(
+            "settlement.plot_nodes", "plot_node_positions", lod_level)
 
         if combined_suitability_map is None or settlement_list is None or civ_map is None:
             raise ValueError(f"assemble_settlement_data: fehlende Calculator-Outputs für LOD {lod_level}")
@@ -3233,6 +3400,10 @@ class SettlementGenerator:
         settlement_data.plots = plots if plots is not None else []
         settlement_data.plot_map = plot_map
         settlement_data.plot_edges = plot_edges if plot_edges is not None else {}
+        settlement_data.potential_field = potential_field
+        settlement_data.plot_cores = plot_cores if plot_cores is not None else []
+        settlement_data.wilderness_polygons = wilderness_polygons if wilderness_polygons is not None else []
+        settlement_data.plot_node_positions = plot_node_positions if plot_node_positions is not None else []
 
         settlement_data.terrain_suitability_valid = True
         settlement_data.settlements_valid = True
@@ -3414,11 +3585,32 @@ class SettlementGenerator:
         settlement.plot_nodes ab (siehe calculator_graph.py), es entsteht also
         keine echte Wartezeit für irgendetwas anderes.
         """
-        is_final_lod = lod_level >= self.data_lod_manager.get_max_lod_for_map_size()
+        # DataLODManager.get_max_lod_for_map_size() fällt IMMER auf den
+        # hartkodierten Default 7 zurück (self.lod_hub.lod_config wird nirgends
+        # in der Live-App via set_lod_config() gesetzt - geprüft, kein einziger
+        # Aufruf existiert außerhalb von data_lod_manager.py selbst). Für jede
+        # Kartengröße mit "echtem" Max-LOD < 7 (z.B. 128px -> 3) wurde dieser
+        # Knoten dadurch NIE als final erkannt und produzierte für immer nur
+        # das leere Platzhalter-Ergebnis - Ursache für "keine Plotnodes/
+        # -kerne/Voronoi sichtbar" trotz abgeschlossener Pipeline, siehe
+        # [[project-settlement-physics-lab-parity]]. Fix: die tatsächliche
+        # Ziel-Kartengröße stattdessen aus der bereits vollständig
+        # generierten Terrain-Heightmap ablesen (terrain.redistribution ist
+        # eine Abhängigkeit dieses Knotens und läuft immer deutlich schneller
+        # durch seine eigene LOD-Progression als die teure Plot-Physik hier),
+        # statt der nie befüllten lod_config zu vertrauen.
+        from gui.OldManagers.data_lod_manager import calculate_max_lod_for_size
+        full_heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+        if full_heightmap is not None:
+            true_max_lod = calculate_max_lod_for_size(full_heightmap.shape[0])
+        else:
+            true_max_lod = self.data_lod_manager.get_max_lod_for_map_size()
+        is_final_lod = lod_level >= true_max_lod
         if not is_final_lod:
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {
                 "plot_nodes": [], "plots": [], "plot_map": None, "plot_edges": {},
                 "plot_node_positions": [], "plot_cores": [], "wilderness_polygons": [],
+                "potential_field": None,
             })
             return
 
@@ -3435,9 +3627,28 @@ class SettlementGenerator:
         plot_system = PlotPhysicsSystem(
             map_size=height, plot_nodes_count=self.plotnodes, plot_base_spacing=self.plot_base_spacing,
             plot_civ_spacing_factor=self.plot_civ_spacing_factor,
-            plot_height_cost_factor=self.plot_height_cost_factor, shader_manager=self.shader_manager,
+            plot_height_cost_factor=self.plot_height_cost_factor,
+            core_plotnode_spring_stiffness=self.core_plotnode_spring_stiffness,
+            plotnode_plotnode_spring_stiffness=self.plotnode_plotnode_spring_stiffness,
+            pressure_strength=self.pressure_strength, core_mass=self.core_mass,
+            plot_node_mass=self.plot_node_mass,
+            plot_node_repulsion_strength=self.plot_node_repulsion_strength,
+            plot_gravity_strength=self.plot_gravity_strength,
+            plot_city_repulsion_strength=self.plot_city_repulsion_strength,
+            potential_strength=self.potential_strength, damping=self.damping,
+            plot_tier_factor=self.plot_tier_factor,
+            enable_core_plotnode_spring=self.enable_core_plotnode_spring,
+            enable_plotnode_plotnode_spring=self.enable_plotnode_plotnode_spring,
+            enable_pressure=self.enable_pressure,
+            enable_plot_node_repulsion=self.enable_plot_node_repulsion,
+            enable_field_cores=self.enable_field_cores,
+            enable_field_plotnodes=self.enable_field_plotnodes,
+            enable_core_cell_containment=self.enable_core_cell_containment,
+            enable_wilderness_containment=self.enable_wilderness_containment,
+            shader_manager=self.shader_manager,
             progress_callback=self._update_progress, map_seed=self.map_seed,
             live_state_callback=self.live_plot_callback)
+        plot_system.plot_intercity_traffic = self.plot_intercity_traffic
         ok = plot_system.generate(inputs["heightmap"], inputs["slopemap"], civ_map, city_mask, settlement_list)
 
         if not ok:
@@ -3445,6 +3656,7 @@ class SettlementGenerator:
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {
                 "plot_nodes": [], "plots": [], "plot_map": None, "plot_edges": {},
                 "plot_node_positions": [], "plot_cores": [], "wilderness_polygons": [],
+                "potential_field": None,
             })
             return
 
@@ -3464,7 +3676,11 @@ class SettlementGenerator:
             calculator_id, lod_level,
             {"plot_nodes": plot_system.plot_nodes, "plots": [], "plot_map": plot_map,
              "plot_edges": plot_system.plot_edges, "plot_node_positions": relative_positions,
-             "plot_cores": plot_system.nodes, "wilderness_polygons": wilderness_polygons})
+             "plot_cores": plot_system.nodes, "wilderness_polygons": wilderness_polygons,
+             # Fuer die neue Potenzialfeld-Anzeige (Checkbox in settlement_tab.py,
+             # siehe [[project-settlement-physics-lab-parity]]) - vorher nie nach
+             # aussen exportiert, wurde nach generate() intern verworfen.
+             "potential_field": plot_system.potential_field})
 
     def calculate_terrain_suitability(self, heightmap, slopemap, water_map, lod):
         """

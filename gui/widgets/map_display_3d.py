@@ -73,8 +73,9 @@ Kommunikationskanäle:
 
 import numpy as np
 import matplotlib.pyplot as plt
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QSlider, QLabel, QOpenGLWidget
-from PyQt5.QtCore import pyqtSignal, Qt, QTimer
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QSlider, QLabel
+from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 import OpenGL.GL as gl
 import OpenGL.arrays.vbo as glvbo
 from OpenGL.GL import shaders
@@ -1415,19 +1416,115 @@ class MapDisplay3D(QOpenGLWidget):
         finally:
             gl.glDeleteTextures(1, [texture_id])
 
+    def _sample_field_bilinear(self, field: np.ndarray, xs: np.ndarray, ys: np.ndarray,
+                                width: int, height: int) -> np.ndarray:
+        """
+        Bilineares Sampling eines (H,W)- oder (H,W,C)-Feldes an beliebigen
+        (nicht ganzzahligen) Pixelkoordinaten - für die Stromlinien-Integration
+        in _render_wind_streamline_segments() gebraucht (Wind UND Heightmap an
+        denselben Zwischenpositionen). Eigene Implementierung statt
+        scipy.ndimage.map_coordinates, da dieses Modul scipy bisher nicht
+        importiert und für diesen einen Zweck keine neue Abhängigkeit
+        eingeführt werden soll.
+        """
+        x0 = np.clip(np.floor(xs).astype(np.int64), 0, width - 2)
+        y0 = np.clip(np.floor(ys).astype(np.int64), 0, height - 2)
+        fx = xs - x0
+        fy = ys - y0
+        f00 = field[y0, x0]
+        f10 = field[y0, x0 + 1]
+        f01 = field[y0 + 1, x0]
+        f11 = field[y0 + 1, x0 + 1]
+        if field.ndim == 3:
+            fx = fx[:, None]
+            fy = fy[:, None]
+        top = f00 * (1 - fx) + f10 * fx
+        bot = f01 * (1 - fx) + f11 * fx
+        return top * (1 - fy) + bot * fy
+
+    def _compute_wind_streamline_segments(self, wind_data: np.ndarray, width: int, height: int,
+                                           global_max_mag: float):
+        """
+        Verfolgt Wind-Stromlinien per CPU-Vektorintegration (Euler, feste
+        Schrittzahl, über alle Seeds gleichzeitig vektorisiert) - das 3D-
+        Äquivalent zu map_display_2d.py's matplotlib streamplot in
+        _render_wind_map() (siehe [[project-wind-3d-streamlines]]). Zeigt den
+        tatsächlichen Strömungsverlauf/Wirbel, was diskrete Pfeile an
+        einzelnen Punkten nicht leisten. Fester RNG-Seed für die Start-
+        punkte, damit die Linien zwischen Frames nicht "springen" (nur
+        Kamerabewegung ändert sich, nicht die zugrundeliegenden Daten).
+
+        Rückgabe: (positions, colors) je (n_lines, n_steps, 2, 3) - direkt
+        mit den Pfeil-Segmenten aus _render_wind_vectors() konkatenierbar
+        (gleiches Vertex-Format: Position + Farbe, GL_LINES).
+        """
+        n_lines = 42
+        n_steps = 22
+        step_len = max(width, height) / 90.0
+
+        rng = np.random.default_rng(1234)
+        x = rng.uniform(1.0, width - 2.0, n_lines).astype(np.float64)
+        y = rng.uniform(1.0, height - 2.0, n_lines).astype(np.float64)
+
+        path_x = np.zeros((n_steps + 1, n_lines), dtype=np.float64)
+        path_y = np.zeros((n_steps + 1, n_lines), dtype=np.float64)
+        path_mag = np.zeros((n_steps + 1, n_lines), dtype=np.float32)
+        path_x[0], path_y[0] = x, y
+        uv0 = self._sample_field_bilinear(wind_data, x, y, width, height)
+        path_mag[0] = np.hypot(uv0[:, 0], uv0[:, 1])
+
+        cur_x, cur_y = x.copy(), y.copy()
+        for step in range(1, n_steps + 1):
+            uv = self._sample_field_bilinear(wind_data, cur_x, cur_y, width, height)
+            mag = np.hypot(uv[:, 0], uv[:, 1])
+            safe_mag = np.where(mag > 1e-6, mag, 1.0)
+            cur_x = np.clip(cur_x + (uv[:, 0] / safe_mag) * step_len, 0, width - 1)
+            cur_y = np.clip(cur_y + (uv[:, 1] / safe_mag) * step_len, 0, height - 1)
+            path_x[step], path_y[step] = cur_x, cur_y
+            path_mag[step] = mag
+
+        terrain_h = self._sample_field_bilinear(
+            self.heightmap, path_x.ravel(), path_y.ravel(), width, height
+        ).reshape(path_x.shape).astype(np.float32)
+
+        pos_x = (path_x.astype(np.float32) / (width - 1) - 0.5) * width * self.terrain_scale_factor
+        pos_z = (path_y.astype(np.float32) / (height - 1) - 0.5) * height * self.terrain_scale_factor
+        hover = 0.05
+        pos_y = terrain_h * self.terrain_height_scale + hover
+
+        safe_global_max = max(global_max_mag, 1e-6)
+        t = np.clip(path_mag / safe_global_max, 0.0, 1.0)[..., None]
+        calm_color = np.array([0.9, 0.9, 0.9], dtype=np.float32)
+        strong_color = np.array([1.0, 0.25, 0.05], dtype=np.float32)
+        vertex_color = calm_color * (1 - t) + strong_color * t  # (n_steps+1, n_lines, 3)
+
+        a_pos = np.stack([pos_x[:-1], pos_y[:-1], pos_z[:-1]], axis=-1)  # (n_steps, n_lines, 3)
+        b_pos = np.stack([pos_x[1:], pos_y[1:], pos_z[1:]], axis=-1)
+        a_color = vertex_color[:-1]
+        b_color = vertex_color[1:]
+
+        positions = np.stack([a_pos, b_pos], axis=-2)  # (n_steps, n_lines, 2, 3)
+        colors = np.stack([a_color, b_color], axis=-2)
+        return positions, colors
+
     def _render_wind_vectors(self):
         """
-        Funktionsweise: Zeichnet Windrichtungs-Pfeile als GL_LINES über dem
-        Terrain-Mesh (analog zu map_display_2d.py's matplotlib-Quiver in
-        _render_wind_map()) - die reine Magnitude-Heatmap aus _render_overlay()
-        zeigt nur Windstärke, keine Richtung, und blendet auf dem Terrain kaum
-        sichtbar ein (User-Report: "nichts zu erkennen").
-        Aufgabe: Sampled ein grobes Raster aus overlay_data["weather"]["wind"]
+        Funktionsweise: Zeichnet Windrichtungs-Pfeile UND Stromlinien als
+        GL_LINES über dem Terrain-Mesh (analog zu map_display_2d.py's
+        matplotlib-Quiver+Streamplot in _render_wind_map()) - die reine
+        Magnitude-Heatmap aus _render_overlay() zeigt nur Windstärke, keine
+        Richtung/Verwirbelung, und blendet auf dem Terrain kaum sichtbar ein
+        (User-Report: "nichts zu erkennen").
+        Aufgabe: Sampled ein Raster aus overlay_data["weather"]["wind"]
         ((H,W,2) u/v m/s in Spalten-/Zeilen-Richtung, siehe _generate_terrain_
         mesh's pos_x/pos_z-Konvention: u->X/Ost-West, v->Z/Süd-Nord), platziert
         an jedem Sample-Punkt einen kleinen Pfeil (Schaft + zwei Widerhaken)
-        knapp über der Terrain-Oberfläche. Länge/Farbe skalieren mit der
-        lokalen Windstärke (weiß=schwach, orange-rot=stark).
+        knapp über der Terrain-Oberfläche, und ergänzt per
+        _compute_wind_streamline_segments() verfolgte Stromlinien, die dem
+        tatsächlichen Strömungsverlauf folgen (siehe
+        [[project-wind-3d-streamlines]]). Länge/Farbe skalieren mit der
+        lokalen Windstärke (weiß=schwach, orange-rot=stark), auf derselben
+        globalen Skala für Pfeile UND Stromlinien.
         """
         if not self.wind_shader_program or self.heightmap is None:
             return
@@ -1441,7 +1538,16 @@ class MapDisplay3D(QOpenGLWidget):
         if wind_data.ndim != 3 or wind_data.shape[2] != 2 or wind_data.shape[:2] != (height, width):
             return  # Shape-Mismatch (z.B. während eines LOD-Übergangs) - nächster Frame passt wieder
 
-        grid = 14
+        # Globale Windstärke-Skala (ganzes Feld, nicht nur das Pfeil-Raster) -
+        # gemeinsame Farbnormierung für Pfeile UND Stromlinien, stabil
+        # zwischen Frames statt sich mit dem groben Pfeil-Sample-Raster
+        # mitzuverschieben.
+        full_magnitude = np.hypot(wind_data[:, :, 0], wind_data[:, :, 1])
+        global_max_mag = float(full_magnitude.max())
+        if global_max_mag < 1e-6:
+            return
+
+        grid = 20  # dichter als zuvor (14) - Nutzer-Wunsch "kleinteiliger"
         y_idx = np.linspace(0, height - 1, min(grid, height)).astype(int)
         x_idx = np.linspace(0, width - 1, min(grid, width)).astype(int)
         yy, xx = np.meshgrid(y_idx, x_idx, indexing='ij')
@@ -1449,9 +1555,6 @@ class MapDisplay3D(QOpenGLWidget):
         u = wind_data[yy, xx, 0].astype(np.float32)
         v = wind_data[yy, xx, 1].astype(np.float32)
         magnitude = np.sqrt(u ** 2 + v ** 2)
-        max_mag = float(magnitude.max())
-        if max_mag < 1e-6:
-            return
 
         pos_x = (xx.astype(np.float32) / (width - 1) - 0.5) * width * self.terrain_scale_factor
         pos_z = (yy.astype(np.float32) / (height - 1) - 0.5) * height * self.terrain_scale_factor
@@ -1459,15 +1562,15 @@ class MapDisplay3D(QOpenGLWidget):
         hover = 0.05  # etwas über der Oberfläche schweben, gegen Z-Fighting mit dem Mesh
         pos_y = terrain_h * self.terrain_height_scale + hover
 
-        # Pfeillänge proportional zur lokalen Windstärke (relativ zum stärksten
-        # Sample im aktuellen Raster), gedeckelt auf einen Bruchteil des
+        # Pfeillänge proportional zur lokalen Windstärke (relativ zur
+        # globalen Windstärke-Skala), gedeckelt auf einen Bruchteil des
         # Rasterabstands, damit sich benachbarte Pfeile nicht überlappen.
         cell_span = self.terrain_scale_factor * max(width, height) / grid
         max_arrow_len = cell_span * 0.8
         safe_mag = np.where(magnitude > 1e-6, magnitude, 1.0)
         unit_x = u / safe_mag
         unit_z = v / safe_mag
-        arrow_len = (magnitude / max_mag) * max_arrow_len
+        arrow_len = np.clip(magnitude / global_max_mag, 0.0, 1.0) * max_arrow_len
         dir_x = unit_x * arrow_len
         dir_z = unit_z * arrow_len
 
@@ -1482,8 +1585,8 @@ class MapDisplay3D(QOpenGLWidget):
 
         tip_x, tip_z = pos_x + dir_x, pos_z + dir_z
 
-        # Farbe: weiß (schwach) -> orange-rot (stark), linear nach Magnitude.
-        t = (magnitude / max_mag)[..., None]
+        # Farbe: weiß (schwach) -> orange-rot (stark), linear nach globaler Windstärke-Skala.
+        t = np.clip(magnitude / global_max_mag, 0.0, 1.0)[..., None]
         calm_color = np.array([0.9, 0.9, 0.9], dtype=np.float32)
         strong_color = np.array([1.0, 0.25, 0.05], dtype=np.float32)
         color = calm_color * (1 - t) + strong_color * t
@@ -1497,10 +1600,17 @@ class MapDisplay3D(QOpenGLWidget):
         barb1_a, barb1_b = _seg(tip_x, pos_y, tip_z, tip_x + barb1_x * barb_len, pos_y, tip_z + barb1_z * barb_len)
         barb2_a, barb2_b = _seg(tip_x, pos_y, tip_z, tip_x + barb2_x * barb_len, pos_y, tip_z + barb2_z * barb_len)
 
-        positions = np.stack([shaft_a, shaft_b, barb1_a, barb1_b, barb2_a, barb2_b], axis=-2)  # (grid,grid,6,3)
-        colors = np.broadcast_to(color[:, :, None, :], positions.shape)
+        arrow_positions = np.stack(
+            [shaft_a, shaft_b, barb1_a, barb1_b, barb2_a, barb2_b], axis=-2)  # (grid,grid,6,3)
+        arrow_colors = np.broadcast_to(color[:, :, None, :], arrow_positions.shape)
 
-        vertex_data = np.concatenate([positions, colors], axis=-1).reshape(-1, 6).astype(np.float32)
+        stream_positions, stream_colors = self._compute_wind_streamline_segments(
+            wind_data, width, height, global_max_mag)
+
+        vertex_data = np.concatenate([
+            np.concatenate([arrow_positions, arrow_colors], axis=-1).reshape(-1, 6),
+            np.concatenate([stream_positions, stream_colors], axis=-1).reshape(-1, 6),
+        ], axis=0).astype(np.float32)
         vertex_data = np.ascontiguousarray(vertex_data)
 
         vao = gl.glGenVertexArrays(1)
@@ -1650,7 +1760,7 @@ class MapDisplay3D(QOpenGLWidget):
 
         dx = event.x() - self.last_mouse_pos.x()
 
-        if event.buttons() & Qt.LeftButton:
+        if event.buttons() & Qt.MouseButton.LeftButton:
             # Nur Azimuth-Rotation (um Z-Achse)
             self.camera_azimuth += dx * self.mouse_sensitivity
 

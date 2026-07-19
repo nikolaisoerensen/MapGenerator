@@ -7,8 +7,8 @@ Navigation Mixin für einheitliche Tab-Navigation
 Eliminiert Code-Duplikation bei Navigation-Logik
 """
 
-from PyQt5.QtWidgets import QApplication, QVBoxLayout, QHBoxLayout, QWidget, QPushButton
-from PyQt5.QtCore import QRect, Qt
+from PyQt6.QtWidgets import QApplication, QVBoxLayout, QHBoxLayout, QWidget, QPushButton
+from PyQt6.QtCore import QRect, Qt
 
 
 class NavigationMixin:
@@ -261,5 +261,5 @@ class TabNavigationHelper:
             import traceback
             traceback.print_exc()
             # Fallback: App beenden
-            from PyQt5.QtWidgets import QApplication
+            from PyQt6.QtWidgets import QApplication
             QApplication.quit()

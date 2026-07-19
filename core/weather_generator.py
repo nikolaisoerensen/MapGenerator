@@ -89,6 +89,16 @@ _BIOME_ROUGHNESS_DAMPING = np.array([
 # Startwert wie die übrigen internen Skalierungskonstanten dieser Datei.
 _RIDGE_SPEEDUP_STRENGTH = 0.35
 
+# Stärke der Lee-Turbulenz-Heuristik (siehe [[project-wind-lee-turbulence]]) -
+# maximale zusätzliche Vorticity-Confinement-Verstärkung (Faktor, nicht
+# absolut) auf der windabgewandten Seite steiler Hänge, bei extremem
+# (3-Sigma-)Lee-Signal. Keine echte Strömungsablösung (dafür bräuchte es
+# einen RANS-Solver wie WindNinjas NinjaFOAM) - eine stilisierte
+# Verstärkung der bereits bestehenden Vorticity-Confinement-Technik, durch
+# deren FORCE_CAP (siehe _apply_vorticity_confinement) ohnehin
+# stabilitätsgekappt.
+_LEE_TURBULENCE_BOOST = 1.5
+
 
 class WeatherData:
     """
@@ -793,6 +803,11 @@ class WeatherSystemGenerator:
         # auf MID, keine auf HIGH (Bodenreibung wirkt per Definition nur nahe
         # der Oberfläche) - siehe [[project-wind-roughness]].
         ROUGHNESS_LAYER_SCALE = (1.0, 0.3, 0.0)
+        # Lee-Turbulenz: Rotoren/Verwirbelungen im Lee eines Grats bilden sich
+        # nahe der Oberfläche, deshalb wie Terrain-/Rauigkeits-Terme voll auf
+        # GROUND, gedämpft auf MID, keine auf HIGH - siehe
+        # [[project-wind-lee-turbulence]].
+        LEE_LAYER_SCALE = (1.0, 0.4, 0.0)
 
         y_idx, x_idx = np.mgrid[0:height, 0:width].astype(np.float64)
         slopemap = self._calculate_slopes_vectorized(heightmap)
@@ -982,6 +997,27 @@ class WeatherSystemGenerator:
                 if turbulence_strength > 0.0:
                     vorticity_strength_i = (
                         turbulence_strength * VORTICITY_LAYER_SCALE[i] * vorticity_edge_boost)
+                    if LEE_LAYER_SCALE[i] > 0.0:
+                        # Lee-Turbulenz-Heuristik (siehe [[project-wind-lee-turbulence]]):
+                        # "Lee-Signal" = wie stark das Gelände gerade IN
+                        # aktueller Windrichtung abfällt (gerichtete
+                        # Ableitung der Höhe entlang des lokalen, bereits
+                        # diffundierten Windvektors) - positiv nur dort, wo
+                        # Wind über einen Grat/Kamm hinweg bergab fließt.
+                        # Robust auf [0,1] normiert (3-Sigma-Clip, wie
+                        # curvature_norm oben), boostet lokal die ohnehin
+                        # bestehende Vorticity-Confinement-Stärke statt einen
+                        # neuen Kraft-Mechanismus einzuführen.
+                        speed_i = np.sqrt(wind_field_i[:, :, 0] ** 2 + wind_field_i[:, :, 1] ** 2)
+                        safe_speed_i = np.maximum(speed_i, 1e-6)
+                        slope_along_wind = (
+                            slopemap[:, :, 0] * wind_field_i[:, :, 0] +
+                            slopemap[:, :, 1] * wind_field_i[:, :, 1]) / safe_speed_i
+                        lee_signal = np.maximum(0.0, -slope_along_wind)
+                        lee_scale = float(np.std(lee_signal)) + 1e-9
+                        lee_norm = np.clip(lee_signal / (3.0 * lee_scale), 0.0, 1.0)
+                        vorticity_strength_i = vorticity_strength_i * (
+                            1.0 + _LEE_TURBULENCE_BOOST * lee_norm * LEE_LAYER_SCALE[i])
                     self._apply_vorticity_confinement(wind_field_i, vorticity_strength_i)
                 self._apply_continuity_correction(wind_field_i, vertical_flux_term=vertical_flux_terms[i])
                 u[i], v[i] = wind_field_i[:, :, 0], wind_field_i[:, :, 1]

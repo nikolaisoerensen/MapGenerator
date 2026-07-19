@@ -12,7 +12,7 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                              QVBoxLayout, QLabel, QPushButton,
                              QFrame, QSpacerItem, QSizePolicy,
                              QCheckBox, QGroupBox, QTextEdit)

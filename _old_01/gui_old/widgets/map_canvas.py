@@ -12,8 +12,8 @@ REFACTORED Map Canvas - Sauber, vollständig funktionell, ohne Overengineering
 
 import numpy as np
 import matplotlib.pyplot as plt
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
+from PyQt6.QtCore import Qt, pyqtSignal
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
@@ -22,7 +22,7 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 class BaseMapCanvas(QWidget):
     """
     Funktionsweise: Gemeinsame Basis für alle Canvas-Typen
-    - Matplotlib/PyQt5 Integration
+    - Matplotlib/PyQt6 Integration
     - Standard Signal-System
     - Gemeinsame Rendering-Funktionen
     - Einheitliches Error-Handling

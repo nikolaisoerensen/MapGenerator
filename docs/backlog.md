@@ -308,7 +308,7 @@ Kanban-Board zu verschieben.
      - Alle bestehenden Smoke-Tests laufen unverändert durch (Traffic
        akkumuliert weiterhin nicht über Aufrufe, Gummiband-Effekt weiterhin
        nachweisbar, Performance unverändert schnell).
-   - **Neues Test-Tool:** `tools/plot_physics_lab.py` - interaktives PyQt5+
+   - **Neues Test-Tool:** `tools/plot_physics_lab.py` - interaktives PyQt6+
      matplotlib-Programm zum Live-Ausprobieren der PlotNode-Physik (einfache
      Terrain-Heightmap nach Default-Parametern, 3 Settlements, Landschafts-
      Voronoi als echte Vektorgrafik statt Bitmap, Live-Loop mit Slidern für

@@ -29,7 +29,7 @@ import threading
 from collections import defaultdict, deque
 from typing import Dict, Any, Optional, List, Tuple, Callable, Set
 from dataclasses import dataclass, field
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
 from abc import abstractmethod
 from enum import Enum
 import queue
@@ -247,10 +247,18 @@ DATA_DEPENDENCY_MATRIX = {
 
 # NEUE KONFIGURATION: Auto-Generation für Data-Keys
 AUTO_GENERATION_DATA_KEYS = {
-    # Terrain-Chain: heightmap → heightmap_combined → slopemap, shadowmap
-    "heightmap_combined": {"auto": True, "priority": GenerationPriority.HIGH},
-    "slopemap": {"auto": True, "priority": GenerationPriority.NORMAL},
-    "shadowmap": {"auto": True, "priority": GenerationPriority.NORMAL},
+    # Terrain-Chain: heightmap → heightmap_combined → slopemap, shadowmap - auf
+    # "auto": False, da NIE ein Generator für diese Keys registriert wird
+    # (register_generator() wird für die Terrain-Chain nirgends aufgerufen -
+    # sie werden direkt per set_terrain_data_complete_lod()/set_terrain_data_lod()
+    # geschrieben). Mit "auto": True versuchte _check_dependent_items() trotzdem,
+    # einen (nie existierenden) Generator für 'heightmap_combined' aus der Registry
+    # zu holen ("No generator registered for auto-generation of 'heightmap_combined'"
+    # bei jedem vollen Pipeline-Lauf) - reiner Log-Rauschen-Bug, siehe
+    # [[project-terrain-chain-auto-generation-warning-fix]].
+    "heightmap_combined": {"auto": False, "priority": GenerationPriority.HIGH},
+    "slopemap": {"auto": False, "priority": GenerationPriority.NORMAL},
+    "shadowmap": {"auto": False, "priority": GenerationPriority.NORMAL},
 
     # Geology-Chain: heightmap_combined → rock_map → hardness_map
     "rock_map": {"auto": True, "priority": GenerationPriority.NORMAL},
@@ -2037,8 +2045,12 @@ class LODCommunicationHub(QObject):
 
         status = self.datakey_statuses[data_key]
 
-        # PUNKT 6: Verfeinerte Status-Transitions
-        if status.lod_status not in ["idle", "failure"]:
+        # PUNKT 6: Verfeinerte Status-Transitions - "success" ist ein gültiger
+        # Vorzustand (erneute Generierung nach vorherigem Erfolg, z.B. nächste
+        # LOD-Runde oder Neugenerierung derselben LOD), keine Anomalie. Vorher
+        # loggte das hier fälschlich eine Warnung bei jeder zweiten
+        # Pipeline-Ausführung (siehe [[project-terrain-chain-auto-generation-warning-fix]]).
+        if status.lod_status not in ["idle", "failure", "success"]:
             self.logger.warning(f"Invalid status transition for '{data_key}': {status.lod_status} → pending")
 
         # Status aktualisieren
@@ -3122,7 +3134,14 @@ class DataLODManager(QObject):
         self.data_updated.emit("terrain", data_key)
         self.lod_data_stored.emit("terrain", lod_level, [data_key])
 
-        # LOD Hub benachrichtigen
+        # LOD Hub benachrichtigen - erst "started" (idle/success -> pending),
+        # dann "completed" (pending -> success), statt direkt zu "completed" zu
+        # springen. Diese Methode schrieb bisher direkt fertige Arrays ohne den
+        # Zwischenschritt, wodurch on_data_lod_completed() den Status nie in
+        # "pending" vorfand und fälschlich "Unexpected completion" loggte -
+        # siehe [[project-terrain-chain-auto-generation-warning-fix]].
+        lod_size = data.shape[0] if isinstance(data, np.ndarray) and data.ndim >= 1 else lod_level
+        self.lod_hub.on_data_lod_started(data_key, lod_level, lod_size)
         self.lod_hub.on_data_lod_completed(data_key, lod_level, True)
 
         self.logger.debug(f"Terrain data '{data_key}' updated for LOD {lod_level}, shape: {data.shape}")
@@ -3421,15 +3440,21 @@ class DataLODManager(QObject):
         # exakt derselbe Bug-Typ wie zuvor bei plot_map/civ_map (siehe
         # docs/generation_pipeline_dependencies.md, Punkt 9 der Bugliste).
         for key in ("plot_map", "civ_map", "combined_suitability_map",
-                    "city_mask", "voronoi_cell_map", "street_mask", "house_parcel_map"):
+                    "city_mask", "voronoi_cell_map", "street_mask", "house_parcel_map",
+                    "potential_field"):
             value = getattr(settlement_data, key, None)
             if value is not None:
                 self._set_data_lod("settlement", self._settlement_data, key, value, lod_level, parameters)
                 data_keys.append(key)
 
         # Nicht-Array-Produkte: Location-Listen und Straßen/Plot-Strukturen
+        # (plot_cores/wilderness_polygons/plot_node_positions ergänzt - vorher
+        # fehlten diese drei hier, obwohl settlement_tab.py sie schon länger
+        # über get_settlement_data() abfragte, siehe SettlementData.__init__-
+        # Kommentar und [[project-settlement-physics-lab-parity]]).
         for key in ("settlement_list", "landmark_list", "roadsite_list", "roads", "plots", "plot_nodes",
-                    "landmark_roads", "outer_roads", "plot_edges"):
+                    "landmark_roads", "outer_roads", "plot_edges",
+                    "plot_cores", "wilderness_polygons", "plot_node_positions"):
             value = getattr(settlement_data, key, None)
             if value:
                 self._set_data_lod("settlement", self._settlement_data, key, value, lod_level,

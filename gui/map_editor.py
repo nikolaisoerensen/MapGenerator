@@ -27,9 +27,10 @@ Architecture:
 # TODO: Exit aus Map Editor muss sauber gemacht werden mit Cleanup.
 # TODO: Exit aus Map Editor vorher Signal jetzt direkt: was ist besser? Ich habe schließlich laufende Berechnungen.
 
-from PyQt5.QtWidgets import QMainWindow, QApplication, QTabWidget, QTabBar, QStackedWidget, QMenu, QAction, QLabel, \
+from PyQt6.QtWidgets import QMainWindow, QApplication, QTabWidget, QTabBar, QStackedWidget, QMenu, QLabel, \
     QComboBox, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QFileDialog, QSplitter
-from PyQt5.QtCore import QTimer, Qt, pyqtSlot
+from PyQt6.QtGui import QAction
+from PyQt6.QtCore import QTimer, Qt, pyqtSlot
 import logging
 from typing import Optional
 
@@ -219,7 +220,7 @@ class MapEditorWindow(QMainWindow):
 
     def _center_window(self):
         """Center window on primary display"""
-        screen_geometry = QApplication.desktop().screenGeometry()
+        screen_geometry = QApplication.primaryScreen().geometry()
         window_geometry = self.geometry()
         center_x = (screen_geometry.width() - window_geometry.width()) // 2
         center_y = (screen_geometry.height() - window_geometry.height()) // 2
@@ -239,7 +240,7 @@ class MapEditorWindow(QMainWindow):
         # synchron zum main_tab_bar umgeschaltet werden. So bleibt Spalte 1
         # (Pipeline-Status) unabhängig vom Haupt-Tab sichtbar.
         self.main_tab_bar = QTabBar()
-        self.main_tab_bar.setShape(QTabBar.RoundedNorth)
+        self.main_tab_bar.setShape(QTabBar.Shape.RoundedNorth)
         self.main_tab_bar.setExpanding(False)
 
         # Spalte 1 (fix): globaler Pipeline-Status, bleibt über alle Haupt-Tabs
@@ -284,7 +285,7 @@ class MapEditorWindow(QMainWindow):
         self.side_tab_widget.setMinimumWidth(380)
         self.side_tab_widget.setMaximumWidth(380)
 
-        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.addWidget(self.pipeline_status_panel)
         self.main_splitter.addWidget(self.center_widget)
         self.main_splitter.addWidget(self.side_tab_widget)
@@ -329,21 +330,50 @@ class MapEditorWindow(QMainWindow):
         return footer
 
     def _refresh_footer_progress(self):
-        """Aktualisiert den gewichteten Ladebalken aus tab_generation_status."""
+        """
+        Aktualisiert den Ladebalken direkt aus dem CalculatorDispatcher's
+        completed_lod/target_lod (ein Eintrag pro Calculator-Knoten über ALLE
+        6 Generatoren, siehe [[project-pipeline-progress-bar-calibration]]).
+
+        Ersetzt die vorherige WeightedProgressCalculator/tab_generation_status-
+        Kombination, die strukturell nie 100% erreichen konnte: deren Zähler
+        (tab_generation_status) wurde nur EINMAL pro Generator beim finalen
+        Ziel-LOD gesetzt (nie für Zwischen-LODs 1..target_lod-1), während der
+        Nenner (progress_calculator.total_cost) alle LOD-Stufen gewichtet
+        aufsummierte - selbst wenn alle 6 Generatoren fertig waren, blieb der
+        Balken bei ~50% stehen. Zusätzlich las der Code ein nie existierendes
+        self.toolbar_lod_combo (immer AttributeError->Fallback auf einen
+        hartkodierten Default), unabhängig vom tatsächlichen Ziel-LOD der
+        laufenden Anfrage.
+
+        Der CalculatorDispatcher (gui/OldManagers/calculator_graph.py) führt
+        bereits pro Knoten (Terrain/Geology/Weather/Water/Biome/Settlement,
+        alle 34 Knoten) completed_lod/target_lod - ein einfaches Verhältnis
+        über alle Knoten hinweg ist exakt "wie viele LOD-Runden von allen
+        insgesamt nötigen sind fertig", erreicht 100% erst wenn wirklich JEDER
+        Knoten (inkl. Settlement, das als letztes läuft) sein Ziel-LOD
+        vollständig erreicht hat, und aktualisiert sich live pro Knoten statt
+        nur einmal pro Generator (siehe _on_calculator_status_changed).
+        """
         if not self.footer_progress_bar:
             return
 
-        target_lod_text = self.toolbar_lod_combo.currentText() if hasattr(self, 'toolbar_lod_combo') else None
-        try:
-            target_lod = int(target_lod_text)
-        except (TypeError, ValueError):
-            target_lod = self.progress_calculator.max_lod
+        dispatcher = getattr(self.generation_orchestrator, "calculator_dispatcher", None)
+        if dispatcher is None:
+            return
 
-        percent, done, total = self.progress_calculator.progress_percent(
-            self.tab_generation_status, target_lod
+        total = sum(dispatcher.target_lod.values())
+        if total <= 0:
+            self.footer_progress_bar.set_progress(0, "Pipeline: 0%", "0 / 0 LOD-Runden")
+            return
+
+        done = sum(
+            min(dispatcher.completed_lod.get(cid, 0), target)
+            for cid, target in dispatcher.target_lod.items()
         )
+        percent = int(round(done / total * 100))
         self.footer_progress_bar.set_progress(
-            percent, f"Pipeline: {percent}%", f"{done:.1f} / {total:.1f} gewichtete Kosten"
+            percent, f"Pipeline: {percent}%", f"{done} / {total} LOD-Runden (alle Calculator-Knoten)"
         )
 
     def _setup_managers(self):
@@ -656,9 +686,9 @@ class MapEditorWindow(QMainWindow):
         """Kleiner Platzhalter für Spalte 3, wenn ein Tab nicht geladen werden konnte."""
         widget = QWidget()
         layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label = QLabel(text)
-        label.setAlignment(Qt.AlignCenter)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setStyleSheet("color: #7f8c8d; padding: 20px;")
         layout.addWidget(label)
         widget.setLayout(layout)
@@ -678,7 +708,7 @@ class MapEditorWindow(QMainWindow):
         """
         error_widget = QWidget()
         layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Error-specific messaging
         if error_type == "import_failed":
@@ -707,13 +737,13 @@ class MapEditorWindow(QMainWindow):
 
         # Title with icon
         title_label = QLabel(f"{icon} {title}")
-        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color}; margin: 20px;")
         layout.addWidget(title_label)
 
         # Error message
         message_label = QLabel(message)
-        message_label.setAlignment(Qt.AlignCenter)
+        message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         message_label.setWordWrap(True)
         message_label.setStyleSheet("font-size: 14px; color: #7f8c8d; line-height: 1.6; margin: 20px;")
         layout.addWidget(message_label)
@@ -977,6 +1007,7 @@ class MapEditorWindow(QMainWindow):
         """
         if self.pipeline_status_panel:
             self.pipeline_status_panel.apply_snapshot(snapshot)
+        self._refresh_footer_progress()
 
     @pyqtSlot(bool, str)
     def _on_batch_generation_completed(self, success: bool, summary_message: str):
@@ -1049,11 +1080,11 @@ class MapEditorWindow(QMainWindow):
         reply = QMessageBox.question(
             self, "New World",
             "This will clear all current data and reset all generators. Continue?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
         )
 
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             try:
                 # Clear data manager
                 if self.data_lod_manager:
@@ -1243,11 +1274,11 @@ class MapEditorWindow(QMainWindow):
         reply = QMessageBox.question(
             self, "Generate All Maps",
             "This will regenerate all maps in sequence. This may take several minutes. Continue?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
         )
 
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             try:
                 self._regenerate_all_generators()
             except Exception as e:
@@ -1338,7 +1369,7 @@ class MapEditorWindow(QMainWindow):
             self, "About MapGenerator",
             "MapGenerator Professional v1.0\n\n"
             "Advanced Terrain & World Generation Suite\n"
-            "Built with PyQt5 and optimized algorithms\n\n"
+            "Built with PyQt6 and optimized algorithms\n\n"
             "Features:\n"
             "• Multi-LOD terrain generation\n"
             "• Integrated geology and climate modeling\n"

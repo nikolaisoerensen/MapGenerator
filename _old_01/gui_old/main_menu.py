@@ -6,11 +6,11 @@ Vereinfachte Version die direkt mit terrain_tab.py arbeitet
 
 import sys
 import subprocess
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QPushButton, QSpacerItem,
                              QSizePolicy, QFrame)
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QPalette, QColor
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont, QPalette, QColor
 
 
 class MainMenuWindow(QMainWindow):
@@ -335,7 +335,7 @@ class MainMenuWindow(QMainWindow):
 
     def show_error_details(self, error):
         """Zeigt detaillierte Fehler-Information"""
-        from PyQt5.QtWidgets import QMessageBox
+        from PyQt6.QtWidgets import QMessageBox
 
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Critical)
@@ -347,7 +347,7 @@ Fehler: {str(error)}
 Mögliche Lösungen:
 1. Stelle sicher, dass alle Dependencies installiert sind:
    - opensimplex: pip install opensimplex
-   - PyQt5: pip install PyQt5
+   - PyQt6: pip install PyQt6
    - matplotlib: pip install matplotlib
    - numpy: pip install numpy
    - scipy: pip install scipy

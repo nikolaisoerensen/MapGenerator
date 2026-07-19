@@ -14,11 +14,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.patches import Circle
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                              QVBoxLayout, QLabel, QPushButton,
                              QFrame, QSpacerItem, QSizePolicy,
                              QCheckBox, QGroupBox)
-from PyQt5.QtCore import Qt
+from PyQt6.QtCore import Qt
 
 from gui_old.widgets.parameter_slider import ParameterSlider
 from gui_old.widgets.navigation_mixin import NavigationMixin, TabNavigationHelper

@@ -6,8 +6,8 @@ REPARIERTE VERSION - Alle Crash-Bugs behoben
 
 import sys
 import numpy as np
-from PyQt5.QtCore import QTimer, pyqtSignal
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QTimer, pyqtSignal
+from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QSpacerItem, QSizePolicy,
     QCheckBox, QGroupBox, QProgressBar, QMainWindow, QFrame
@@ -578,7 +578,7 @@ class GeologyWindow(QMainWindow):
 # Test-Funktion
 if __name__ == "__main__":
     import sys
-    from PyQt5.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication
 
     print("🧪 Teste Geology Tab...")
     app = QApplication(sys.argv)

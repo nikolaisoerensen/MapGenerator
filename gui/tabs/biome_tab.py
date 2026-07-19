@@ -10,9 +10,9 @@ Funktionsweise: Finale Biome-Klassifizierung mit vollständiger Core-Integration
 - Gauß-basierte Klassifikation mit konfigurierbaren Gewichtungen
 """
 
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
+from PyQt6.QtWidgets import *
+from PyQt6.QtCore import *
+from PyQt6.QtGui import *
 import numpy as np
 import logging
 
@@ -133,6 +133,17 @@ class BiomeTab(BaseMapTab):
             self.generation_in_progress = False
             self.handle_generation_error(e)
             raise
+
+    def create_parameter_controls(self):
+        """
+        No-Op-Override: BiomeTab baut sein Parameter-Panel über
+        setup_biome_ui()/create_biome_parameter_panel() statt über diesen
+        Basisklassen-Hook (architektonische Abweichung, kein fehlendes
+        Feature) - unterdrückt die sonst bei jedem Tab-Start geloggte
+        "should implement create_parameter_controls()"-Warnung aus
+        BaseMapTab.
+        """
+        pass
 
     def setup_biome_ui(self):
         """
@@ -541,7 +552,7 @@ class BiomeTab(BaseMapTab):
         Aufgabe: Übersichtliche Darstellung aller Base- und Super-Biomes
         """
         legend_dialog = BiomeLegendDialog(self)
-        legend_dialog.exec_()
+        legend_dialog.exec()
 
     def get_all_parameters(self, generator_type: str) -> dict:
         """
