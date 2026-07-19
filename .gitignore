@@ -21,7 +21,7 @@ dist/
 *.egg-info/
 .eggs/
 
-# IDE and OS files
+# Local IDE and OS files
 .idea/
 .vscode/
 *.swp
@@ -31,10 +31,11 @@ Desktop.ini
 
 # Runtime, profiling, and generated output
 *.log
+logs/
 mprofile_*.dat
-world_export/
-exports/
 
-# Generated map/data output directories
-generated/
-output/
+# Repository-root export/output directories
+/world_export/
+/exports/
+/generated/
+/output/

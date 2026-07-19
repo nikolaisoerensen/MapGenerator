@@ -232,8 +232,8 @@ class ParameterSlider(QWidget):
         self.info_button.setMaximumHeight(20)
         self.info_button.setStyleSheet("font-size: 10px; color: #3498db;")
         self.info_button.setToolTip(self.description or "Keine Beschreibung verfügbar")
-        self.info_button.setCursor(Qt.WhatsThisCursor)
-        self.info_button.setFocusPolicy(Qt.NoFocus)
+        self.info_button.setCursor(Qt.CursorShape.WhatsThisCursor)
+        self.info_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         slider_layout.addWidget(self.slider)
         slider_layout.addWidget(self.input_field)
@@ -348,7 +348,10 @@ class StatusIndicator(QWidget):
         # Status Text
         self.status_text = QLabel(self.label_text)
         self.status_text.setFixedWidth(self._STATUS_TEXT_WIDTH)
-        self.status_text.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.status_text.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred
+        )
 
         layout.addWidget(self.status_icon)
         layout.addWidget(self.status_text)
@@ -362,7 +365,11 @@ class StatusIndicator(QWidget):
     def _set_status_text(self, full_text: str):
         """Setzt den Status-Text elidiert auf die feste Breite, volle Nachricht per Tooltip."""
         metrics = QFontMetrics(self.status_text.font())
-        elided = metrics.elidedText(full_text, Qt.ElideRight, self._STATUS_TEXT_WIDTH)
+        elided = metrics.elidedText(
+            full_text,
+            Qt.TextElideMode.ElideRight,
+            self._STATUS_TEXT_WIDTH
+        )
         self.status_text.setText(elided)
 
     def set_success(self, message: str = ""):

@@ -1125,7 +1125,7 @@ class GPUWorker(threading.Thread):
         try:
             surface_format = QSurfaceFormat()
             surface_format.setVersion(4, 3)
-            surface_format.setProfile(QSurfaceFormat.CoreProfile)
+            surface_format.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
 
             self._surface = QOffscreenSurface()
             self._surface.setFormat(surface_format)

@@ -12,7 +12,11 @@ dependencies = [
     "Pillow>=10.0",
     "matplotlib>=3.8",
     "pandas>=2.0",
+    "scikit-image>=0.25",
     "memory-profiler>=0.61",
+    "shapely>=2.1",
+    "psutil>=7.0",
+    "colorlog>=6.10",
 ]
 
 [build-system]
