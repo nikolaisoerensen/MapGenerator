@@ -162,7 +162,11 @@ class SETTLEMENT:
         "min": 50, "max": 5000, "default": 200, "step": 10,
         "description": "Anzahl der Kandidaten-Punkte für die Grundstücks-/"
                         "Bebauungsplanung - mehr Punkte erlauben feinere "
-                        "Parzellierung, kosten aber Rechenzeit."
+                        "Parzellierung, kosten aber Rechenzeit. Wird NICHT "
+                        "mit der Kartengröße mitskaliert (Plot Base Spacing "
+                        "übernimmt das bereits) - dieselbe Anzahl ergibt bei "
+                        "größerer Karte automatisch größere, aber gleich "
+                        "dichte Parzellen."
     }
     CITY_SIZE = {
         "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.05,

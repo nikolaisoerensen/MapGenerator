@@ -1062,8 +1062,20 @@ class PlotPhysicsSystem:
                  shader_manager=None, progress_callback=None, map_seed=None,
                  live_state_callback=None):
         self.map_size = int(map_size)
+        # Skalierungs-Faktoren fuer Map-Groessen-Unabhaengigkeit (siehe
+        # [[project-settlement-scale-invariance]]): 128px ist die Referenz-
+        # Groesse, fuer die alle folgenden Distanz-/Flaechen-Konstanten
+        # urspruenglich kalibriert wurden (Production-Default, siehe
+        # gui/config/value_default.py TERRAIN.MAPSIZE). scale_factor skaliert
+        # Distanzen linear mit map_size, area_scale_factor skaliert Flaechen
+        # quadratisch - ohne das blieb z.B. eine Stadt bei 1024px ~64x so
+        # gross (relativ zur Kartenflaeche) wie bei 128px, da radius/Flaechen-
+        # Schwellen vorher absolute Pixelwerte waren.
+        self.scale_factor = self.map_size / 128.0
+        self.area_scale_factor = self.scale_factor ** 2
+
         self.plot_nodes_count = int(plot_nodes_count)
-        self.plot_base_spacing = float(plot_base_spacing)
+        self.plot_base_spacing = float(plot_base_spacing) * self.scale_factor
         self.plot_civ_spacing_factor = float(plot_civ_spacing_factor)
         self.plot_height_cost_factor = float(plot_height_cost_factor)
         self.shader_manager = shader_manager  # aktuell ungenutzt (Teil G, GPU-Shader, ist nachgelagert)
@@ -1122,6 +1134,39 @@ class PlotPhysicsSystem:
         self.traffic_weight_wilderness = 1.0
         self.traffic_weight_city_core = 6.0
         self.plot_intercity_traffic = 30.0
+        # Traffic-Tier-Schwellen (TIER_STRASSE_THRESHOLD etc.) sind Verkehrs-
+        # WERT-Schwellen (akkumuliertes Rang-Distanz-Gewicht ueber den Plot-
+        # Graphen), keine Raumdistanzen - bleiben bewusst unskaliert, bereits
+        # ueber plot_tier_factor unabhaengig vom map_size einstellbar.
+
+        # Klassen-Konstanten, die urspruenglich absolute Pixel-/Flaechenwerte
+        # waren, hier per Instanz-Attribut (gleicher Name, ueberschattet die
+        # Klassen-Konstante) auf die tatsaechliche Kartengroesse skaliert -
+        # siehe [[project-settlement-scale-invariance]]. Alle bestehenden
+        # Zugriffe (self.WILDERNESS_MIN_AREA etc.) bleiben unveraendert.
+        self.WILDERNESS_MIN_AREA = self.WILDERNESS_MIN_AREA * self.area_scale_factor
+        self.CITY_MIN_AREA = self.CITY_MIN_AREA * self.area_scale_factor
+        self.SOFTENING = self.SOFTENING * self.scale_factor
+        self.MAX_DISPLACEMENT_PER_TICK = self.MAX_DISPLACEMENT_PER_TICK * self.scale_factor
+        self.PLOT_CORE_EDGE_MARGIN = self.PLOT_CORE_EDGE_MARGIN * self.scale_factor
+        self.SEED_RELAX_MARGIN = self.SEED_RELAX_MARGIN * self.scale_factor
+
+        # Vorher lokale Variablen/Inline-Konstanten an einzelnen Call-Sites -
+        # zu skalierten Instanz-Attributen befoerdert, damit sie hier zentral
+        # skaliert werden koennen (siehe jeweilige Nutzungsstelle).
+        self.min_buffer_to_city_px = 10.0 * self.scale_factor        # _gen_step_2_plot_cores
+        self.MIN_SEP_FLOOR = 3.0 * self.scale_factor                 # Kern-Node-Abstoßungs-Untergrenze
+        self.MIN_REST_LENGTH = 2.0 * self.scale_factor               # Feder-Ruhelaengen-Untergrenze
+        self.wall_spacing = 5.0 * self.scale_factor                  # Stadtmauer-Abstoßung
+        self.wild_scale = 25.0 * self.scale_factor                   # Wildnisgrenzen-Abklingdistanz
+        self.border_margin = 25.0 * self.scale_factor                # Kartenrand-Abstoßung
+        self.hill_saturation_dist = 40.0 * self.scale_factor         # Hoehen-Gradient-Saettigungsdistanz
+        # Siedlungs-"Gravitation" im Potentialfeld (weight = coeff/sqrt(dist)):
+        # damit dieselbe RELATIVE Position (z.B. "10% der Kartendiagonale von
+        # der Stadt entfernt") bei jeder Kartengroesse dieselbe Kraft erfaehrt,
+        # muss der Koeffizient mit sqrt(scale_factor) skalieren, nicht linear -
+        # siehe [[project-settlement-scale-invariance]] fuer die Herleitung.
+        self.gravity_coeff = 140.0 * float(np.sqrt(self.scale_factor))
 
         # Laufzeit-Zustand (1:1 Struktur wie tools/biome_lab/app.py's __init__)
         self.next_node_id = 0
@@ -1428,7 +1473,6 @@ class PlotPhysicsSystem:
         wird hier NICHT mehr zufaellig gesetzt (siehe _assign_traffic_weights,
         laeuft nach der finalen node_type-Klassifikation)."""
 
-        min_buffer_to_city_px = 10.0
         city_inside = self.city_mask >= 0
         dist_to_city = distance_transform_edt(~city_inside)
 
@@ -1440,7 +1484,7 @@ class PlotPhysicsSystem:
             map_edge_mask[:, :edge_margin_px] = False
             map_edge_mask[:, -edge_margin_px:] = False
 
-        valid_mask = (~city_inside) & (dist_to_city >= min_buffer_to_city_px) & map_edge_mask
+        valid_mask = (~city_inside) & (dist_to_city >= self.min_buffer_to_city_px) & map_edge_mask
         effective_civ_map = np.maximum(self.civ_map, 0.30)
 
         positions = self._best_candidate_sample(
@@ -2190,7 +2234,7 @@ class PlotPhysicsSystem:
     def _rest_length_core_plotnode_batch(self, positions):
         civ_here = self._civ_at_continuous_batch(positions)
         civ_factor = np.maximum(1.0 - self.CIV_RESTLENGTH_STEEPNESS * civ_here, 0.25)
-        return np.maximum(self.plot_base_spacing * civ_factor, 2.0)
+        return np.maximum(self.plot_base_spacing * civ_factor, self.MIN_REST_LENGTH)
 
     def _rest_length_plotnode_plotnode_batch(self, pos_a_arr, pos_b_arr, traffic_values):
         mids = 0.5 * (np.asarray(pos_a_arr, dtype=float) + np.asarray(pos_b_arr, dtype=float))
@@ -2200,7 +2244,7 @@ class PlotPhysicsSystem:
         shrink = 1.0 - np.minimum(np.asarray(traffic_values, dtype=float) * self.spring_traffic_shrink,
                                    1.0 - self.spring_min_shrink_fraction)
         shrink = np.maximum(shrink, self.spring_min_shrink_fraction)
-        return np.maximum(base * shrink, 2.0)
+        return np.maximum(base * shrink, self.MIN_REST_LENGTH)
 
     def _edge_key(self, i, j):
         return tuple(sorted((int(i), int(j))))
@@ -2321,7 +2365,7 @@ class PlotPhysicsSystem:
                         np.add.at(plot_force_arr, idx_arr, forces)
 
                 if repulsion_strength > 1e-9:
-                    min_sep = max(ideal_radius * 0.6, 3.0)
+                    min_sep = max(ideal_radius * 0.6, self.MIN_SEP_FLOOR)
                     n = len(ids_present)
                     for a_idx in range(n):
                         for b_idx in range(a_idx + 1, n):
@@ -2584,7 +2628,7 @@ class PlotPhysicsSystem:
                 dx = xx - sx
                 dy = yy - sy
                 dist = np.maximum(np.hypot(dx, dy), eps)
-                weight = 140.0 / np.sqrt(dist)
+                weight = self.gravity_coeff / np.sqrt(dist)
                 field_arr[:, :, 0] -= (dx / dist) * weight * self.plot_gravity_strength
                 field_arr[:, :, 1] -= (dy / dist) * weight * self.plot_gravity_strength
 
@@ -2592,8 +2636,8 @@ class PlotPhysicsSystem:
         field_arr[:, :, 0] += hill_fx
         field_arr[:, :, 1] += hill_fy
 
-        PUSH_CAP = 3.0
-        wall_spacing = 5.0
+        PUSH_CAP = 3.0  # Kraft-Betrag-Kappung, keine Distanz - bewusst unskaliert
+        wall_spacing = self.wall_spacing
         for settlement in self.settlements:
             sx, sy = settlement.x, settlement.y
             dx = xx - sx
@@ -2608,21 +2652,21 @@ class PlotPhysicsSystem:
         dist_out = distance_transform_edt(~civ_mask)
         dist_in = distance_transform_edt(civ_mask)
         signed_dist = np.where(civ_mask, dist_in, -dist_out)
-        gy_s, gx_s = np.gradient(gaussian_filter(signed_dist, sigma=3.0))
+        gy_s, gx_s = np.gradient(gaussian_filter(signed_dist, sigma=3.0 * self.scale_factor))
         norm_s = np.sqrt(gx_s ** 2 + gy_s ** 2)
         mask_s = norm_s > 1e-10
         wgx = np.zeros_like(gx_s)
         wgy = np.zeros_like(gy_s)
         wgx[mask_s] = gx_s[mask_s] / norm_s[mask_s]
         wgy[mask_s] = gy_s[mask_s] / norm_s[mask_s]
-        wild_scale = 25.0
+        wild_scale = self.wild_scale
         push_strength = np.where(
             signed_dist < 0, 1.0 - np.exp(-np.abs(signed_dist) / wild_scale),
             np.exp(-np.maximum(signed_dist, 0) / wild_scale))
         field_arr[:, :, 0] += wgx * push_strength * 0.6
         field_arr[:, :, 1] += wgy * push_strength * 0.6
 
-        BORDER_MARGIN = 25.0
+        BORDER_MARGIN = self.border_margin
         BORDER_STRENGTH = 0.4
 
         def _edge_push(dist_to_edge):
@@ -2639,12 +2683,12 @@ class PlotPhysicsSystem:
         civ_mask_hill = self.civ_map >= self.WILDERNESS_CIV_THRESHOLD
         dist_out = distance_transform_edt(~civ_mask_hill)
 
-        HILL_SATURATION_DIST = 40.0
+        HILL_SATURATION_DIST = self.hill_saturation_dist
         HILL_MAX_STRENGTH = 0.5
         monotonic_strength = HILL_MAX_STRENGTH * (1.0 - np.exp(-dist_out / HILL_SATURATION_DIST))
         monotonic_strength = np.where(civ_mask_hill, 0.0, monotonic_strength)
 
-        hgy, hgx = np.gradient(gaussian_filter(self.heightmap, sigma=4.0))
+        hgy, hgx = np.gradient(gaussian_filter(self.heightmap, sigma=4.0 * self.scale_factor))
         hnorm = np.sqrt(hgx ** 2 + hgy ** 2)
         hmask = hnorm > 1e-10
         hgx_dir = np.zeros_like(hgx)
@@ -2981,6 +3025,15 @@ class SettlementGenerator:
         self.shader_manager = shader_manager
         self.data_lod_manager = data_lod_manager
 
+        # Map-Groessen-Skalierungsfaktoren (siehe
+        # [[project-settlement-scale-invariance]]) - sicherer Default 1.0
+        # (kein Effekt) fuer den Fall, dass ein Location-Objekt vor dem
+        # ersten _get_prepared_settlement_inputs()-Aufruf erzeugt wird
+        # (sollte in der echten Pipeline nie vorkommen); echte Werte werden
+        # dort aus der tatsaechlichen Kartengroesse gesetzt.
+        self.scale_factor = 1.0
+        self.area_scale_factor = 1.0
+
         # Progress-Callback (step_name, progress_percent, detail_message) -> None.
         # War nie initialisiert - _execute_generation() ruft self._update_progress()
         # an mehreren Stellen unbedingt auf (kein "if self._update_progress:"-Guard),
@@ -3007,7 +3060,7 @@ class SettlementGenerator:
         self.road_slope_to_distance_ratio = 1.5
         self.landmark_wilderness = 0.3
         self.city_size = 0.5
-        self.city_reach_factor = 1.0 + 0.5 * 6.0
+        self.city_reach_factor = 0.6 + 0.5 * 3.4
         self.civ_influence_range = 0.15 + 0.5 * 0.30
         self.plot_intercity_traffic = 10.0 + 0.5 * 40.0
         self.plot_base_spacing = 20.0
@@ -3068,21 +3121,22 @@ class SettlementGenerator:
         # ein Regler leitet city_reach_factor/civ_influence_range/
         # plot_intercity_traffic gemeinsam ab, statt sie einzeln zu slidern.
         #
-        # WICHTIG - Basiswerte bewusst NICHT 1:1 vom Lab übernommen: die
-        # Lab-Formel (city_reach_factor = 4.0 + city_size*6.0) war für die
-        # dortige, deutlich größere Referenz-Karte kalibriert. settlement.radius
-        # (siehe compute_city_boundaries()) ist ein FIXER, map-größen-
-        # unabhängiger Pixelwert (~3-13px) - bei Productions typischer
-        # map_size=128 ließ reach_factor=7.0 (Lab-Wert bei city_size=0.5)
-        # die Stadtfläche gegenüber dem vorherigen, bereits gut kalibrierten
-        # Production-Default (reach_factor=4.0) fast verdreifachen (5.7% ->
-        # 17.0% der Kartenfläche, empirisch verifiziert). Basis hier auf 1.0
-        # verschoben, damit der Default city_size=0.5 wieder exakt den alten,
-        # funktionierenden Wert reproduziert; civ_influence_range brauchte
-        # keine Anpassung (Lab-Formel liefert bei 0.5 bereits exakt den alten
-        # Default 0.30).
+        # WICHTIG - Basiswerte bewusst NICHT 1:1 vom Lab übernommen (siehe
+        # [[project-settlement-scale-invariance]] für die volle Historie):
+        # die Lab-Formel (city_reach_factor = 4.0 + city_size*6.0) war für
+        # eine deutlich größere Referenz-Karte kalibriert und ließ Städte bei
+        # Productions map_size=128 fast verdreifachen (5.7% -> 17.0% der
+        # Kartenfläche). Erste Korrektur (Basis 1.0 statt 4.0, city_size=0.5
+        # -> 4.0) reproduzierte zwar den alten Production-Default, war laut
+        # Live-Test des Nutzers aber SELBST noch ~3x zu groß (Zielgröße:
+        # Stadt ~0.5-1.5% der Kartenfläche). Fläche skaliert ungefähr mit
+        # reach_factor^2 (empirisch bestätigt: 4.0->5.7%, 7.0->17.0%,
+        # Verhältnis 17/5.7=2.98 ≈ (7/4)^2=3.06), daher Basis nochmal durch
+        # sqrt(3)≈1.73 geteilt (city_size=0.5 -> 2.3 statt 4.0). Reine
+        # Kalibrierungsanpassung, keine strukturelle Änderung - bei Bedarf
+        # anhand von Live-Tests weiter nachjustierbar.
         self.city_size = parameters['city_size']
-        self.city_reach_factor = 1.0 + self.city_size * 6.0
+        self.city_reach_factor = 0.6 + self.city_size * 3.4
         self.civ_influence_range = 0.15 + self.city_size * 0.30
         self.plot_intercity_traffic = 10.0 + self.city_size * 40.0
 
@@ -3415,6 +3469,37 @@ class SettlementGenerator:
 
         return settlement_data
 
+    def _is_final_lod(self, lod_level: int) -> bool:
+        """
+        Prüft, ob lod_level die letzte/finale Runde für die aktuelle Kartengröße
+        ist - gemeinsame Grundlage für ALLE 10 Settlement-Calculator-Knoten
+        (siehe [[project-settlement-scale-invariance]]), nicht nur
+        settlement.plot_nodes wie zuvor. WICHTIG: alle 10 Knoten MÜSSEN
+        dasselbe Kriterium nutzen (dieselbe true_max_lod-Quelle) - sonst könnte
+        ein nachgelagerter Knoten in einer Runde "final" sein, in der ein
+        vorgelagerter Knoten (dessen Output er liest) es noch nicht ist, und
+        ein leeres Platzhalter-Ergebnis als echte Daten lesen.
+
+        DataLODManager.get_max_lod_for_map_size() fällt IMMER auf den
+        hartkodierten Default 7 zurück (self.lod_hub.lod_config wird nirgends
+        in der Live-App via set_lod_config() gesetzt - geprüft, kein einziger
+        Aufruf existiert außerhalb von data_lod_manager.py selbst). Für jede
+        Kartengröße mit "echtem" Max-LOD < 7 (z.B. 128px -> 3) würde das ohne
+        diesen Workaround NIE als final erkannt - Ursache des ursprünglichen
+        "keine Plotnodes/-kerne/Voronoi sichtbar"-Bugs, siehe
+        [[project-settlement-physics-lab-parity]]. Fix: die tatsächliche
+        Ziel-Kartengröße stattdessen aus der bereits vollständig generierten
+        Terrain-Heightmap ablesen (terrain.redistribution läuft immer deutlich
+        schneller durch seine eigene LOD-Progression als Settlement).
+        """
+        from gui.OldManagers.data_lod_manager import calculate_max_lod_for_size
+        full_heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+        if full_heightmap is not None:
+            true_max_lod = calculate_max_lod_for_size(full_heightmap.shape[0])
+        else:
+            true_max_lod = self.data_lod_manager.get_max_lod_for_map_size()
+        return lod_level >= true_max_lod
+
     def _get_prepared_settlement_inputs(self, lod_level: int) -> Dict[str, Any]:
         """
         Holt alle Settlement-Dependencies (Terrain/Water-Outputs) für dieses LOD.
@@ -3425,6 +3510,20 @@ class SettlementGenerator:
         TerrainSuitabilityAnalyzer.calculate_water_proximity() (prüft nur
         `water_map > 0`), aber verfügbar sobald DIESER EINE Water-Knoten fertig
         ist, ohne auf die vollständige Water-Generator-Assemblierung zu warten.
+
+        Setzt außerdem self.scale_factor/self.area_scale_factor aus der
+        tatsächlichen finalen Heightmap-Größe (siehe
+        [[project-settlement-scale-invariance]]) - alle Methoden, die danach im
+        selben Calculator-Durchlauf aufgerufen werden (calculate_settlements/
+        calculate_roadsites/calculate_landmarks/calculate_civilization_mapping),
+        nutzen dieses Ambient-State für map-größen-unabhängige Radien. Diese
+        Methode wird von 8 der 9 gegateten Calculator-Knoten selbst aufgerufen;
+        _calc_roadsites ist die einzige Ausnahme (holt nur "roads"), bekommt
+        self.scale_factor aber transitiv gesetzt, weil settlement.roadsites im
+        CALCULATOR_GRAPH von settlement.pathfinding->settlement.settlements->
+        settlement.suitability abhängt und _calc_suitability in derselben
+        Runde IMMER zuerst läuft (siehe calculator_graph.py) - falls sich diese
+        Reihenfolge je ändert, muss das hier erneut geprüft werden.
         """
         heightmap = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
         slopemap = self.data_lod_manager.get_calculator_output("terrain.slope", "slopemap", lod_level)
@@ -3437,10 +3536,25 @@ class SettlementGenerator:
         if missing:
             raise ValueError(f"Settlement: fehlende Dependencies für LOD {lod_level}: {', '.join(missing)}")
 
+        self.scale_factor = heightmap.shape[0] / 128.0
+        self.area_scale_factor = self.scale_factor ** 2
+
         return {"heightmap": heightmap, "slopemap": slopemap, "water_map": water_map}
 
     def _calc_suitability(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'settlement.suitability' (#28)"""
+        """
+        Calculator-Node 'settlement.suitability' (#28) - läuft NUR am finalen
+        LOD (siehe _is_final_lod(), [[project-settlement-scale-invariance]]) -
+        vorher wurde die gesamte Settlement-Kette bei JEDER LOD-Runde komplett
+        neu berechnet (auf der jeweils kleineren Zwischenauflösung), sichtbar
+        als "wächst in Stufen" während der Generierung. Kein anderer
+        Calculator-Knoten außerhalb von settlement.* hängt von hier ab, es
+        entsteht also keine Wartezeit für irgendetwas anderes.
+        """
+        if not self._is_final_lod(lod_level):
+            self.data_lod_manager.set_calculator_output(
+                calculator_id, lod_level, {"combined_suitability_map": None})
+            return
         self._update_progress("Terrain Analysis", 5, "Analyzing terrain suitability for settlements...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
         suitability_map = self.calculate_terrain_suitability(
@@ -3449,7 +3563,10 @@ class SettlementGenerator:
             calculator_id, lod_level, {"combined_suitability_map": suitability_map})
 
     def _calc_settlements(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'settlement.settlements' (#29)"""
+        """Calculator-Node 'settlement.settlements' (#29) - siehe _is_final_lod()."""
+        if not self._is_final_lod(lod_level):
+            self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"settlement_list": []})
+            return
         self._update_progress("Settlement Placement", 15, "Placing settlements based on suitability...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
         suitability_map = self.data_lod_manager.get_calculator_output(
@@ -3463,7 +3580,11 @@ class SettlementGenerator:
     def _calc_city_boundary(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.city_boundary' (NEU) - terrain-cost-gewichtete
         Stadtgrenze je Settlement, Grundlage fuer die Trennung Stadt-Innen (spaeteres
-        Block-System) vs. Landschaft (LandscapeVoronoiSystem)."""
+        Block-System) vs. Landschaft (LandscapeVoronoiSystem). Siehe _is_final_lod()."""
+        if not self._is_final_lod(lod_level):
+            self.data_lod_manager.set_calculator_output(
+                calculator_id, lod_level, {"city_mask": None, "city_cost_map": None})
+            return
         self._update_progress("City Boundary", 20, "Computing city boundaries...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
         settlement_list = self.data_lod_manager.get_calculator_output(
@@ -3490,7 +3611,11 @@ class SettlementGenerator:
         voronoi_cell_map (früher aus settlement.landscape_voronoi, jetzt
         entfernt) entfällt ersatzlos - calculate_road_network() fällt dafür
         bereits dokumentiert auf reines Slope-Cost-Pathfinding zurück.
+        Siehe _is_final_lod().
         """
+        if not self._is_final_lod(lod_level):
+            self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roads": []})
+            return
         self._update_progress("Road Building", 25, "Creating road networks between settlements...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
         settlement_list = self.data_lod_manager.get_calculator_output(
@@ -3502,7 +3627,10 @@ class SettlementGenerator:
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roads": roads})
 
     def _calc_roadsites(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'settlement.roadsites' (#31)"""
+        """Calculator-Node 'settlement.roadsites' (#31) - siehe _is_final_lod()."""
+        if not self._is_final_lod(lod_level):
+            self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roadsite_list": []})
+            return
         self._update_progress("Roadsite Placement", 40, "Placing roadsites along roads...")
         roads = self.data_lod_manager.get_calculator_output("settlement.pathfinding", "roads", lod_level)
         if roads is None:
@@ -3512,7 +3640,10 @@ class SettlementGenerator:
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roadsite_list": roadsite_list})
 
     def _calc_civ_influence(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'settlement.civ_influence' (#32)"""
+        """Calculator-Node 'settlement.civ_influence' (#32) - siehe _is_final_lod()."""
+        if not self._is_final_lod(lod_level):
+            self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"civ_map": None})
+            return
         self._update_progress("Civilization Mapping", 50, "Creating civilization influence map...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
         settlement_list = self.data_lod_manager.get_calculator_output(
@@ -3528,7 +3659,10 @@ class SettlementGenerator:
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"civ_map": civ_map})
 
     def _calc_landmarks(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'settlement.landmarks' (#33)"""
+        """Calculator-Node 'settlement.landmarks' (#33) - siehe _is_final_lod()."""
+        if not self._is_final_lod(lod_level):
+            self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"landmark_list": []})
+            return
         self._update_progress("Landmark Placement", 65, "Placing landmarks in wilderness areas...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
         civ_map = self.data_lod_manager.get_calculator_output("settlement.civ_influence", "civ_map", lod_level)
@@ -3542,7 +3676,10 @@ class SettlementGenerator:
         """Calculator-Node 'settlement.landmark_roads' (NEU) - deterministische
         Dijkstra-Anbindung jedes Landmarks an den nächstgelegenen Punkt des
         Hauptstraßennetzes (Nutzer-Vorgabe: kein Zufallsmechanismus in Phase 1,
-        das dekorative Zusatz-Wegenetz kommt erst in Phase 2)."""
+        das dekorative Zusatz-Wegenetz kommt erst in Phase 2). Siehe _is_final_lod()."""
+        if not self._is_final_lod(lod_level):
+            self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"landmark_roads": []})
+            return
         self._update_progress("Landmark Roads", 68, "Connecting landmarks to road network...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
         landmark_list = self.data_lod_manager.get_calculator_output(
@@ -3557,7 +3694,10 @@ class SettlementGenerator:
     def _calc_outer_roads(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.outer_roads' (NEU) - 2-3 Außenverbindungen
         von Siedlungen zur Kartengrenze an plausiblen Positionen (nicht
-        Bergspitze/Meer, siehe calculate_outer_connections())."""
+        Bergspitze/Meer, siehe calculate_outer_connections()). Siehe _is_final_lod()."""
+        if not self._is_final_lod(lod_level):
+            self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"outer_roads": []})
+            return
         self._update_progress("Outer Roads", 27, "Connecting settlements to map border...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
         settlement_list = self.data_lod_manager.get_calculator_output(
@@ -3583,30 +3723,10 @@ class SettlementGenerator:
         geschrieben, damit nichts (z.B. eine GUI-Statusabfrage) auf fehlende
         Daten trifft - kein anderer Calculator-Knoten hängt von
         settlement.plot_nodes ab (siehe calculator_graph.py), es entsteht also
-        keine echte Wartezeit für irgendetwas anderes.
+        keine echte Wartezeit für irgendetwas anderes. Siehe _is_final_lod()
+        (jetzt von allen 10 Settlement-Knoten geteilt, nicht mehr nur diesem).
         """
-        # DataLODManager.get_max_lod_for_map_size() fällt IMMER auf den
-        # hartkodierten Default 7 zurück (self.lod_hub.lod_config wird nirgends
-        # in der Live-App via set_lod_config() gesetzt - geprüft, kein einziger
-        # Aufruf existiert außerhalb von data_lod_manager.py selbst). Für jede
-        # Kartengröße mit "echtem" Max-LOD < 7 (z.B. 128px -> 3) wurde dieser
-        # Knoten dadurch NIE als final erkannt und produzierte für immer nur
-        # das leere Platzhalter-Ergebnis - Ursache für "keine Plotnodes/
-        # -kerne/Voronoi sichtbar" trotz abgeschlossener Pipeline, siehe
-        # [[project-settlement-physics-lab-parity]]. Fix: die tatsächliche
-        # Ziel-Kartengröße stattdessen aus der bereits vollständig
-        # generierten Terrain-Heightmap ablesen (terrain.redistribution ist
-        # eine Abhängigkeit dieses Knotens und läuft immer deutlich schneller
-        # durch seine eigene LOD-Progression als die teure Plot-Physik hier),
-        # statt der nie befüllten lod_config zu vertrauen.
-        from gui.OldManagers.data_lod_manager import calculate_max_lod_for_size
-        full_heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-        if full_heightmap is not None:
-            true_max_lod = calculate_max_lod_for_size(full_heightmap.shape[0])
-        else:
-            true_max_lod = self.data_lod_manager.get_max_lod_for_map_size()
-        is_final_lod = lod_level >= true_max_lod
-        if not is_final_lod:
+        if not self._is_final_lod(lod_level):
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {
                 "plot_nodes": [], "plots": [], "plot_map": None, "plot_edges": {},
                 "plot_node_positions": [], "plot_cores": [], "wilderness_polygons": [],
@@ -3624,6 +3744,22 @@ class SettlementGenerator:
             raise ValueError(f"settlement.plot_nodes: fehlende Inputs für LOD {lod_level}")
 
         height, width = inputs["heightmap"].shape
+
+        # plot_nodes_count BEWUSST NICHT zusaetzlich mit area_scale_factor
+        # hochskaliert (frueherer Versuch, per Messung als echter Bug
+        # verworfen, siehe [[project-settlement-scale-invariance]]):
+        # plot_base_spacing skaliert bereits linear mit der Kartengroesse
+        # (siehe PlotPhysicsSystem.__init__), wodurch dieselbe Node-ANZAHL
+        # bei groesserer Karte automatisch proportional groessere Zellen mit
+        # derselben relativen Dichte ergibt - EIN Skalierungs-Hebel reicht.
+        # Eine ZUSAETZLICHE quadratische Vervierfachung der Node-Anzahl (bei
+        # map_size=256 z.B. 210->840) ueberfuellte den verfuegbaren Platz so
+        # stark, dass die Feder-/Abstossungsphysik selbst mit deutlich mehr
+        # Iterationen (400 statt 100, getestet) nicht mehr konvergierte -
+        # Naechster-Nachbar-Abstand kollabierte auf ~7% des Ziel-Abstands
+        # statt der ueblichen ~30% (leicht unterkonvergiert ist normal, siehe
+        # Baseline-Messung bei 128px/200 Nodes) - sichtbar als chaotisches,
+        # ueberfuelltes Wegenetz ("komplett zerschossen").
         plot_system = PlotPhysicsSystem(
             map_size=height, plot_nodes_count=self.plotnodes, plot_base_spacing=self.plot_base_spacing,
             plot_civ_spacing_factor=self.plot_civ_spacing_factor,
@@ -3728,7 +3864,11 @@ class SettlementGenerator:
 
             # Settlement erstellen
             settlement_size = random.uniform(0.5, 1.5)  # Variiert Stadtgröße
-            radius = 3 + settlement_size * 2
+            # (3 + settlement_size*2) war ein absoluter Pixelwert (~4-6px,
+            # unabhaengig von map_size) - mit self.scale_factor multipliziert
+            # fuer Map-Groessen-Unabhaengigkeit, siehe
+            # [[project-settlement-scale-invariance]].
+            radius = (3 + settlement_size * 2) * self.scale_factor
             civ_influence = 0.8
 
             settlement = Location(
@@ -3871,7 +4011,7 @@ class SettlementGenerator:
                     x=float(x),
                     y=float(y),
                     location_type='roadsite',
-                    radius=1.5,
+                    radius=1.5 * self.scale_factor,
                     civ_influence=0.4,
                     properties={'roadsite_type': roadsite_type}
                 )
@@ -3975,7 +4115,7 @@ class SettlementGenerator:
                 x=float(x),
                 y=float(y),
                 location_type='landmark',
-                radius=2.0,
+                radius=2.0 * self.scale_factor,
                 civ_influence=0.4,
                 properties={'landmark_type': landmark_type}
             )

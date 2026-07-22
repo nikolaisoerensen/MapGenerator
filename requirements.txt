@@ -1,0 +1,11 @@
+PyQt6==6.11.0
+numpy==2.3.2
+scipy==1.16.1
+matplotlib==3.10.5
+opensimplex==0.4.5.1
+PyOpenGL==3.1.9
+shapely==2.1.2
+scikit-image==0.26.0
+pillow==11.3.0
+psutil==7.2.2
+colorlog==6.9.0
