@@ -7,12 +7,12 @@ und direkter Anbindung an den TerrainGenerator aus core/terrain_generator.py. Al
 ohne Dependencies liefert er heightmap, slopemap und shadowmap für alle nachgelagerten Systeme.
 """
 
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
     QButtonGroup, QLabel
 )
-from PyQt5.QtCore import pyqtSlot
-from PyQt5.QtGui import QFont
+from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtGui import QFont
 import logging
 import numpy as np
 from typing import Dict, Any, Optional
@@ -100,7 +100,7 @@ class TerrainTab(BaseMapTab):
     def _create_terrain_parameters(self):
         """Erstellt Terrain Parameter Controls"""
         terrain_group = QGroupBox("Terrain Parameters")
-        terrain_group.setFont(QFont("Arial", 10, QFont.Bold))
+        terrain_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         terrain_layout = QVBoxLayout()
 
         # Parameter-Definitionen aus value_default.TERRAIN
@@ -182,7 +182,7 @@ class TerrainTab(BaseMapTab):
         [GENERIEREN]-Button und die Pipeline-Status-Spalte im Shell-Layout.
         """
         stats_group = QGroupBox("Terrain Statistics")
-        stats_group.setFont(QFont("Arial", 10, QFont.Bold))
+        stats_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         stats_layout = QVBoxLayout()
 
         # Statistics Labels

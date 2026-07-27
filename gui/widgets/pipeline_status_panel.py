@@ -9,8 +9,8 @@ slopemap, flow_accumulation, ...) gerade läuft, statt nur des groben
 6-Zeilen-Generator-Status.
 """
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QScrollArea
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QScrollArea
 
 from gui.widgets.widgets import StatusIndicator
 from gui.OldManagers.calculator_graph import CALCULATOR_GRAPH
@@ -45,13 +45,13 @@ class PipelineStatusPanel(QWidget):
         outer_layout.addWidget(title)
 
         separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShape(QFrame.Shape.HLine)
         outer_layout.addWidget(separator)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)

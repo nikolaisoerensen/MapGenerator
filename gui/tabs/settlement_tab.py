@@ -9,9 +9,9 @@ Funktionsweise: Settlement-Editor mit terrain_tab-ähnlicher UI-Struktur und vol
 - Live Settlement-Preview und 3D-Visualization mit Terrain-Integration
 """
 
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
+from PyQt6.QtWidgets import *
+from PyQt6.QtCore import *
+from PyQt6.QtGui import *
 import numpy as np
 import logging
 

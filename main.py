@@ -40,8 +40,8 @@ faulthandler.enable()
 
 from pathlib import Path # moderne Art mit Suchpfaden zu arbeiten
 
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import QObject, QTimer
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QObject, QTimer
 
 # Add project directory to Python path
 project_root = Path(__file__).parent
@@ -262,7 +262,7 @@ def main():
         # heartbeat.start(250)
 
         # Enter event loop
-        return app.exec_()
+        return app.exec()
 
     except Exception as e:
         print(f"Critical startup error: {e}")

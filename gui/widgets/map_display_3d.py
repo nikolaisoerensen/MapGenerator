@@ -73,8 +73,9 @@ Kommunikationskanäle:
 
 import numpy as np
 import matplotlib.pyplot as plt
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QSlider, QLabel, QOpenGLWidget
-from PyQt5.QtCore import pyqtSignal, Qt, QTimer
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QSlider, QLabel
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
+from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 import OpenGL.GL as gl
 import OpenGL.arrays.vbo as glvbo
 from OpenGL.GL import shaders
@@ -1650,7 +1651,7 @@ class MapDisplay3D(QOpenGLWidget):
 
         dx = event.x() - self.last_mouse_pos.x()
 
-        if event.buttons() & Qt.LeftButton:
+        if event.buttons() & Qt.MouseButton.LeftButton:
             # Nur Azimuth-Rotation (um Z-Achse)
             self.camera_azimuth += dx * self.mouse_sensitivity
 

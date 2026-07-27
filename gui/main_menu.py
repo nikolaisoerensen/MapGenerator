@@ -6,7 +6,7 @@ Funktionsweise: Einfaches Hauptmenü mit 4 Buttons für Signal-Navigation
 - Backward-Compatibility für direkten MainMenu-Start
 """
 
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QMainWindow,
     QApplication,
     QVBoxLayout,
@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QHBoxLayout,
     QMessageBox)
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt6.QtCore import pyqtSignal, Qt
 import logging
 
 from gui.widgets.widgets import BaseButton, GradientBackgroundWidget
@@ -87,7 +87,11 @@ class MainMenuWindow(QMainWindow):
         self.center_window()
 
         # Window Flags
-        self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowCloseButtonHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+        )
 
     def setup_ui(self):
         """
@@ -122,10 +126,11 @@ class MainMenuWindow(QMainWindow):
         Funktionsweise: Zentriert Fenster auf dem Bildschirm
         Aufgabe: Berechnet Bildschirmmitte und positioniert Fenster dort
         """
-        screen = QApplication.desktop().screenGeometry()
+        screen = QApplication.primaryScreen()
+        screen_geometry = screen.availableGeometry() if screen else self.screen().availableGeometry()
         window = self.geometry()
-        x = (screen.width() - window.width()) // 2
-        y = (screen.height() - window.height()) // 2
+        x = (screen_geometry.width() - window.width()) // 2
+        y = (screen_geometry.height() - window.height()) // 2
         self.move(x, y)
 
     def create_title_section(self) -> QWidget:
@@ -135,11 +140,11 @@ class MainMenuWindow(QMainWindow):
         """
         section = QWidget()
         layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Application Title
         title_label = QLabel("MAP GENERATOR")
-        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_label.setStyleSheet("""
             QLabel {
                 font-size: 48px;
@@ -152,7 +157,7 @@ class MainMenuWindow(QMainWindow):
 
         # Subtitle
         subtitle_label = QLabel("World Generation Suite")
-        subtitle_label.setAlignment(Qt.AlignCenter)
+        subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle_label.setStyleSheet("""
             QLabel {
                 font-size: 18px;
@@ -172,7 +177,7 @@ class MainMenuWindow(QMainWindow):
         """
         section = QWidget()
         layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.setSpacing(LayoutSettings.PADDING)
 
         # Button Container für maximale Breite
@@ -254,11 +259,11 @@ class MainMenuWindow(QMainWindow):
         Aufgabe: Einheitliche Error-Darstellung
         """
         msg_box = QMessageBox(self)
-        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.setIcon(QMessageBox.Icon.Critical)
         msg_box.setWindowTitle(title)
         msg_box.setText(message)
-        msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.exec_()
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.exec()
 
     def show_placeholder_message(self):
         """
@@ -269,7 +274,7 @@ class MainMenuWindow(QMainWindow):
         button_text = sender.text() if sender else "Feature"
 
         msg_box = QMessageBox(self)
-        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setIcon(QMessageBox.Icon.Information)
         msg_box.setWindowTitle(f"{button_text} - In Development")
         msg_box.setText(f"{button_text} ist noch nicht implementiert.")
 
@@ -282,8 +287,8 @@ class MainMenuWindow(QMainWindow):
                                      "Diese Funktion wird in einer zukünftigen Version verfügbar sein.")
         msg_box.setInformativeText(info_text)
 
-        msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.exec_()
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.exec()
 
         self.logger.info(f"Placeholder message shown for '{button_text}'")
 

@@ -29,7 +29,7 @@ import threading
 from collections import defaultdict, deque
 from typing import Dict, Any, Optional, List, Tuple, Callable, Set
 from dataclasses import dataclass, field
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
 from abc import abstractmethod
 from enum import Enum
 import queue

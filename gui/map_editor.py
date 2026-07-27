@@ -27,9 +27,10 @@ Architecture:
 # TODO: Exit aus Map Editor muss sauber gemacht werden mit Cleanup.
 # TODO: Exit aus Map Editor vorher Signal jetzt direkt: was ist besser? Ich habe schließlich laufende Berechnungen.
 
-from PyQt5.QtWidgets import QMainWindow, QApplication, QTabWidget, QTabBar, QStackedWidget, QMenu, QAction, QLabel, \
+from PyQt6.QtWidgets import QMainWindow, QApplication, QTabWidget, QTabBar, QStackedWidget, QMenu, QLabel, \
     QComboBox, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QFileDialog, QSplitter
-from PyQt5.QtCore import QTimer, Qt, pyqtSlot
+from PyQt6.QtCore import QTimer, Qt, pyqtSlot
+from PyQt6.QtGui import QAction
 import logging
 from typing import Optional
 
@@ -219,7 +220,8 @@ class MapEditorWindow(QMainWindow):
 
     def _center_window(self):
         """Center window on primary display"""
-        screen_geometry = QApplication.desktop().screenGeometry()
+        screen = QApplication.primaryScreen()
+        screen_geometry = screen.availableGeometry() if screen else self.screen().availableGeometry()
         window_geometry = self.geometry()
         center_x = (screen_geometry.width() - window_geometry.width()) // 2
         center_y = (screen_geometry.height() - window_geometry.height()) // 2
@@ -239,7 +241,7 @@ class MapEditorWindow(QMainWindow):
         # synchron zum main_tab_bar umgeschaltet werden. So bleibt Spalte 1
         # (Pipeline-Status) unabhängig vom Haupt-Tab sichtbar.
         self.main_tab_bar = QTabBar()
-        self.main_tab_bar.setShape(QTabBar.RoundedNorth)
+        self.main_tab_bar.setShape(QTabBar.Shape.RoundedNorth)
         self.main_tab_bar.setExpanding(False)
 
         # Spalte 1 (fix): globaler Pipeline-Status, bleibt über alle Haupt-Tabs
@@ -284,7 +286,7 @@ class MapEditorWindow(QMainWindow):
         self.side_tab_widget.setMinimumWidth(380)
         self.side_tab_widget.setMaximumWidth(380)
 
-        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.addWidget(self.pipeline_status_panel)
         self.main_splitter.addWidget(self.center_widget)
         self.main_splitter.addWidget(self.side_tab_widget)
@@ -656,9 +658,9 @@ class MapEditorWindow(QMainWindow):
         """Kleiner Platzhalter für Spalte 3, wenn ein Tab nicht geladen werden konnte."""
         widget = QWidget()
         layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label = QLabel(text)
-        label.setAlignment(Qt.AlignCenter)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setStyleSheet("color: #7f8c8d; padding: 20px;")
         layout.addWidget(label)
         widget.setLayout(layout)
@@ -678,7 +680,7 @@ class MapEditorWindow(QMainWindow):
         """
         error_widget = QWidget()
         layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Error-specific messaging
         if error_type == "import_failed":
@@ -707,13 +709,13 @@ class MapEditorWindow(QMainWindow):
 
         # Title with icon
         title_label = QLabel(f"{icon} {title}")
-        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color}; margin: 20px;")
         layout.addWidget(title_label)
 
         # Error message
         message_label = QLabel(message)
-        message_label.setAlignment(Qt.AlignCenter)
+        message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         message_label.setWordWrap(True)
         message_label.setStyleSheet("font-size: 14px; color: #7f8c8d; line-height: 1.6; margin: 20px;")
         layout.addWidget(message_label)
@@ -1049,11 +1051,11 @@ class MapEditorWindow(QMainWindow):
         reply = QMessageBox.question(
             self, "New World",
             "This will clear all current data and reset all generators. Continue?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
         )
 
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             try:
                 # Clear data manager
                 if self.data_lod_manager:
@@ -1243,11 +1245,11 @@ class MapEditorWindow(QMainWindow):
         reply = QMessageBox.question(
             self, "Generate All Maps",
             "This will regenerate all maps in sequence. This may take several minutes. Continue?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
         )
 
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             try:
                 self._regenerate_all_generators()
             except Exception as e:
@@ -1338,7 +1340,7 @@ class MapEditorWindow(QMainWindow):
             self, "About MapGenerator",
             "MapGenerator Professional v1.0\n\n"
             "Advanced Terrain & World Generation Suite\n"
-            "Built with PyQt5 and optimized algorithms\n\n"
+            "Built with PyQt6 and optimized algorithms\n\n"
             "Features:\n"
             "• Multi-LOD terrain generation\n"
             "• Integrated geology and climate modeling\n"
