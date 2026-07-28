@@ -267,7 +267,25 @@ class HydraulicFieldSimulator:
     # HANG (von Massenbewegung geformt - hier die Boeschungserosion) und
     # GERINNE (von fliessendem Wasser geformt). Sie wird abgezogen statt hart
     # abgeschnitten, damit es keinen Sprung im Kartenbild gibt.
-    EROSION_THRESHOLD_DISCHARGE = 0.6  # m²/s
+    #
+    # NACHKALIBRIERT 2026-07-28 von 0.6 auf 0.4 (scratch_erosion_lab.py, Sweep
+    # "schwelle", 512 px, uebrige Werte auf dem neuen Stand). Gemessen ueber
+    # beta, den Exponenten der Hangneigung-ueber-Einzugsgebiet-Beziehung - je
+    # negativer, desto klarer fluvial geformt:
+    #
+    #     Schwelle 0.6   beta -0.464   hypso 0.670
+    #     Schwelle 0.4   beta -0.477   hypso 0.670   <- dichtestes Netz
+    #     Schwelle 0.2   beta -0.419   hypso 0.702
+    #     Schwelle 0.1   beta -0.370   hypso 0.549   Becken laufen wieder voll
+    #
+    # Zwei Vermutungen von mir haben sich dabei als falsch erwiesen, beide
+    # widerlegt statt uebernommen:
+    #   - "die Schwelle muss mit der Aufloesung skalieren": nein. Der
+    #     Durchfluss-Median ist bei 128/256/512 px praktisch identisch
+    #     (11.73 / 11.91 / 11.79 m^2/s).
+    #   - "kleiner ist besser, dann entstehen mehr Seitenaeste": nein, unter
+    #     0.2 nagen die Haenge wieder flaechig und die Becken fluten zu.
+    EROSION_THRESHOLD_DISCHARGE = 0.4  # m²/s
 
     # Untergrenze für den Hangfaktor in der Kapazitätsformel. Direkt aus dem
     # Vorbild übernommen (dort max(0.1, |sin(theta)|)).
@@ -321,6 +339,10 @@ class HydraulicFieldSimulator:
     # core/water_generator.py); deshalb ein klarer Fehler statt einer
     # Wartezeit ohne Ende. Der GPU-Pfad hat diese Grenze nicht.
     MAX_CPU_RESOLUTION = 256
+
+    # Entfernung zu einem diagonalen Nachbarn in Vielfachen der Zellbreite.
+    # Erklaerung und Messung siehe _pass_thermal().
+    DIAGONAL_DISTANCE = float(np.sqrt(2.0))
 
     # Fixed-Point-Aufloesung fuer den einzigen atomaren Zaehler des GPU-Pfads
     # (ueber den Kartenrand exportierte Fracht, siehe
@@ -485,11 +507,18 @@ class HydraulicFieldSimulator:
         Den ganzen Lauf auf der GPU rechnen (shaders/erosion/*.comp, Dispatch
         in shader_manager._dispatch_hydraulic_field).
 
-        Der GESAMTE Lauf geht in EINEN Dispatch-Aufruf: bei mehreren tausend
-        Schritten waere ein Aufruf pro Schritt reine Latenz. Der Zustand bleibt
-        deshalb ueber den Lauf hinweg in den Texturen; zurueckgelesen wird nur
-        alle CONVERGENCE_CHECK_INTERVAL Schritte eine Hoehenkarte, die zugleich
-        das Konvergenzkriterium und die Live-Vorschau bedient.
+        Der Lauf wird in ABSCHNITTE von PROGRESS_REPORT_INTERVAL Schritten
+        zerlegt; zwischen den Abschnitten prueft dieser Code die Konvergenz und
+        meldet Fortschritt. Grund: GPUWorker.submit() bricht eine Operation nach
+        30 s ab, und ein vollstaendiger Lauf reisst das in jedem Fall (gemessen
+        bei 256 px: "GPU-Operation erosion/hydraulicField nach 30.0s nicht
+        abgeschlossen", danach Rueckfall auf CPU). Ausserdem blockiert ein
+        minutenlanger Aufruf die gemeinsame Worker-Queue fuer jeden anderen
+        Generator.
+
+        Der Zustand wandert dabei durch (`state` im Request): Hoehe, Wasser,
+        Fracht, Fluss, Boeschungs-Akkumulator und Export-Karte. Ohne ihn wuerde
+        jeder Abschnitt mit trockener Karte neu anfangen.
 
         Das Ergebnis wird in denselben `state` geschrieben, den auch der
         CPU-Pfad fuehrt - _collect_results() sieht danach keinen Unterschied
@@ -500,20 +529,12 @@ class HydraulicFieldSimulator:
         diesem Modul und faengt eine ERWARTETE Umgebungsbedingung ab (keine
         GPU, Treiberfehler), keinen Programmfehler.
         """
-        try:
-            result = self.shader_manager.request_shader_operation(
-                self.GPU_OPERATION[0], self.GPU_OPERATION[1],
-                {
+        constant_inputs = {
                     "heightmap": state["terrain"],
                     "erodibility": state["erodibility"],
                     "tan_repose": state["tan_repose"],
                     "dt": dt,
                     "meters_per_pixel": meters_per_pixel,
-                    "max_steps": cfg["max_steps"],
-                    "check_interval": self.CONVERGENCE_CHECK_INTERVAL,
-                    "convergence_threshold": cfg["convergence_threshold"],
-                    "relief": state["relief"],
-                    "progress_callback": progress_callback,
                     "pipe_area": self.PIPE_CROSS_SECTION_AREA,
                     "gravity": GRAVITY,
                     "rain_per_step": cfg["rain_rate"] * self.RAIN_RATE_TO_DEPTH_M_PER_S * dt,
@@ -530,21 +551,64 @@ class HydraulicFieldSimulator:
                     "thermal_strength": cfg["thermal_strength"],
                     "gather_cap": max(ThermalErosionSystem.CAP_MIN_M,
                                       ThermalErosionSystem.CAP_RELIEF_FRACTION * state["relief"]),
+                    "diagonal_distance": self.DIAGONAL_DISTANCE,
                     "thermal_variant": 1 if cfg["thermal_variant"] == "flux" else 0,
                     "evaporation_factor": max(0.0, 1.0 - cfg["evaporation"] * dt),
                     "smoothing_threshold": cfg["smoothing"] * state["smoothing_scale"],
-                    "fixed_point_scale": self.FIXED_POINT_SCALE,
-                },
-                {})
-        except Exception as error:
-            self.logger.warning("GPU-Erosion fehlgeschlagen (%s) - CPU-Pfad", error)
-            return None
+        }
 
-        if not result.get("success"):
-            self.logger.warning("GPU-Erosion nicht verfuegbar (%s) - CPU-Pfad",
-                                result.get("reason", "unbekannt"))
-            return None
+        target_rate = cfg["convergence_threshold"] * state["relief"]
+        chunk = self.PROGRESS_REPORT_INTERVAL
+        reference = state["terrain"].copy()
+        carried_state = None
+        initial_rate = None
+        progress = 0.0
+        steps_taken = 0
+        converged = False
 
+        while steps_taken < cfg["max_steps"]:
+            steps = min(chunk, cfg["max_steps"] - steps_taken)
+            request = dict(constant_inputs)
+            request["chunk_steps"] = steps
+            request["state"] = carried_state
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    self.GPU_OPERATION[0], self.GPU_OPERATION[1], request, {})
+            except Exception as error:
+                self.logger.warning("GPU-Erosion fehlgeschlagen (%s) - CPU-Pfad", error)
+                return None
+            if not result.get("success"):
+                self.logger.warning("GPU-Erosion nicht verfuegbar (%s) - CPU-Pfad",
+                                    result.get("reason", "unbekannt"))
+                return None
+
+            carried_state = result["state"]
+            steps_taken += steps
+            self._apply_gpu_result(state, result)
+
+            rate = self.change_rate(state["terrain"], reference, steps, dt)
+            if initial_rate is None:
+                initial_rate = rate
+            progress = max(progress, self.convergence_progress(
+                initial_rate, rate, target_rate))
+            reference = state["terrain"].copy()
+
+            if rate < target_rate:
+                converged = True
+                self._report(progress_callback, steps_taken, cfg["max_steps"],
+                             state, 1.0, rate)
+                break
+            self._report(progress_callback, steps_taken, cfg["max_steps"],
+                         state, progress, rate)
+
+        return {"steps_taken": steps_taken, "converged": converged}
+
+    @staticmethod
+    def _apply_gpu_result(state, result):
+        """Das Ergebnis eines GPU-Abschnitts in denselben `state` schreiben, den
+        auch der CPU-Pfad fuehrt - danach sieht _collect_results() keinen
+        Unterschied mehr, und beide Pfade teilen sich Buchhaltung und
+        Massenbilanz."""
         state["terrain"] = result["height"].astype(np.float64)
         state["sediment"] = result["sediment"].astype(np.float64)
         state["water"] = result["water"].astype(np.float64)
@@ -553,7 +617,6 @@ class HydraulicFieldSimulator:
         state["thermal_erosion"] = result["thermal_erosion"].astype(np.float64)
         state["thermal_deposition"] = result["thermal_deposition"].astype(np.float64)
         state["sediment_exported"] = float(result["sediment_exported"])
-        return result
 
     # ==================================================================
     # Parameter und Anfangszustand
@@ -1066,29 +1129,53 @@ class HydraulicFieldSimulator:
         tan_pad = np.pad(state["tan_repose"], 1, mode='edge')
         tan_here = tan_pad[1:-1, 1:-1]
 
+        # ACHT Nachbarn, jeder mit seiner TATSAECHLICHEN Entfernung.
+        #
+        # Mit nur vier Nachbarn kann Material ausschliesslich entlang der
+        # Gitterachsen wandern. Ein Haufen relaxiert dann nicht zu einem Kegel,
+        # sondern zu einer RAUTE - in der Diagonalen ist der wirksame
+        # Boeschungswinkel um Faktor sqrt(2) steiler, weil dort dieselbe
+        # Hoehendifferenz auf eine laengere Strecke faellt.
+        #
+        # Im alten Water-Pfad (ThermalErosionSystem) fiel das nie auf, weil er
+        # nur rund 40 Iterationen je LOD lief. Hier laeuft derselbe Pass
+        # mehrere tausend Mal, und das Ergebnis war ein Gelaende aus lauter
+        # 45-Grad-Pyramiden - gerendert sofort sichtbar, in keiner Kennzahl.
+        # Gegenprobe mit thermal_strength=0: Rauten vollstaendig weg.
+        #
+        # Die Diagonalen bekommen deshalb `mpp * sqrt(2)` als Bezugslaenge -
+        # damit ist der Boeschungswinkel in alle acht Richtungen derselbe
+        # WINKEL, und ein Haufen wird wieder rund.
+        neighbours = (
+            (h_pad[1:-1, 0:-2], tan_pad[1:-1, 0:-2], 1.0),
+            (h_pad[1:-1, 2:], tan_pad[1:-1, 2:], 1.0),
+            (h_pad[0:-2, 1:-1], tan_pad[0:-2, 1:-1], 1.0),
+            (h_pad[2:, 1:-1], tan_pad[2:, 1:-1], 1.0),
+            (h_pad[0:-2, 0:-2], tan_pad[0:-2, 0:-2], self.DIAGONAL_DISTANCE),
+            (h_pad[0:-2, 2:], tan_pad[0:-2, 2:], self.DIAGONAL_DISTANCE),
+            (h_pad[2:, 0:-2], tan_pad[2:, 0:-2], self.DIAGONAL_DISTANCE),
+            (h_pad[2:, 2:], tan_pad[2:, 2:], self.DIAGONAL_DISTANCE),
+        )
+
         # Geschlossener Rand für Material: Geisterzelle = eigene Höhe, also
         # kein Gefälle über den Kartenrand. Anders als beim Wasser soll hier
         # nichts von der Karte rutschen.
         diffs = []
-        for h_neighbor, tan_neighbor in (
-                (h_pad[1:-1, 0:-2], tan_pad[1:-1, 0:-2]),
-                (h_pad[1:-1, 2:], tan_pad[1:-1, 2:]),
-                (h_pad[0:-2, 1:-1], tan_pad[0:-2, 1:-1]),
-                (h_pad[2:, 1:-1], tan_pad[2:, 1:-1])):
-            threshold = mpp * 0.5 * (tan_here + tan_neighbor)
-            diffs.append(np.maximum(0.0, (terrain - h_neighbor) - threshold))
+        for h_neighbor, tan_neighbor, distance in neighbours:
+            threshold = mpp * distance * 0.5 * (tan_here + tan_neighbor)
+            # Auch der Transport wird mit der Entfernung gewichtet: ueber die
+            # laengere Diagonale rutscht in derselben Zeit weniger.
+            diffs.append(np.maximum(0.0, (terrain - h_neighbor) - threshold) / distance)
 
         raw = [d * ThermalErosionSystem.TRANSFER_RATE * cfg["thermal_strength"] for d in diffs]
-        total_raw = raw[0] + raw[1] + raw[2] + raw[3]
+        total_raw = sum(raw)
 
         if cfg["thermal_variant"] == "flux":
             # Vorbild: Deckel ist die verfügbare Höhe über dem tiefsten
             # Nachbarn - mehr kann eine Zelle in einem Schritt nicht abgeben,
             # ohne unter ihre eigene Umgebung zu fallen.
-            available = np.maximum(0.0, terrain - np.minimum(
-                np.minimum(h_pad[1:-1, 0:-2], h_pad[1:-1, 2:]),
-                np.minimum(h_pad[0:-2, 1:-1], h_pad[2:, 1:-1])))
-            cap = available
+            cap = np.maximum(0.0, terrain - np.minimum.reduce(
+                [n[0] for n in neighbours]))
         else:
             # Gather-Verfahren: relief-relativer Deckel pro Schritt, exakt der
             # Wert, der in ThermalErosionSystem gegen "Thermal zerfrisst die
@@ -1099,10 +1186,15 @@ class HydraulicFieldSimulator:
         k = np.minimum(1.0, cap / np.maximum(total_raw, 1e-12))
         out = [r * k for r in raw]
 
+        # Zufluss = der jeweils ENTGEGENGESETZTE Ausfluss der Nachbarn.
+        # Reihenfolge oben: L, R, O, U, OL, OR, UL, UR - die Gegenrichtung ist
+        # also jeweils der Partner im Paar.
         out_pads = [np.pad(o, 1, mode='constant', constant_values=0.0) for o in out]
         incoming = (out_pads[1][1:-1, 0:-2] + out_pads[0][1:-1, 2:] +
-                    out_pads[3][0:-2, 1:-1] + out_pads[2][2:, 1:-1])
-        outgoing = out[0] + out[1] + out[2] + out[3]
+                    out_pads[3][0:-2, 1:-1] + out_pads[2][2:, 1:-1] +
+                    out_pads[7][0:-2, 0:-2] + out_pads[6][0:-2, 2:] +
+                    out_pads[5][2:, 0:-2] + out_pads[4][2:, 2:])
+        outgoing = sum(out)
 
         state["terrain"] = terrain + incoming - outgoing
         state["thermal_erosion"] += outgoing

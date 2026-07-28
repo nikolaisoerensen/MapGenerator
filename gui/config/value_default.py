@@ -552,9 +552,40 @@ class EROSION:
     einmal-durchlaufendes Verfahren gegenüber einer endlos interaktiven
     Anwendung zusätzlich braucht (Abbruch, Auflösung, Varianten).
 
-    ALLE Startwerte sind vorläufig und noch nicht gegen das visuelle Ergebnis
-    kalibriert - die gemessene Ausgangslage steht als Tabelle bei
-    HydraulicFieldSimulator.REFERENCE_SPECIFIC_DISCHARGE.
+    KALIBRIERUNG 2026-07-28 gegen das Zielbild des Nutzers (dichte verästelte
+    Entwässerung, scharfe Kämme, helle Talböden). Werkzeug:
+    scratch_erosion_lab.py - es rechnet Varianten auf der GPU, misst vier
+    Formkennzahlen und schreibt einen Kontaktabzug, der nebeneinander
+    vergleichbar ist.
+
+    Fünf Sweeps, gemessen bei 512 px auf demselben Gelände (Seed 424242,
+    Relief 2611 m). Die entscheidende Zeile ist die letzte:
+
+        Variante                       Aniso  Drainage    beta   hypso
+        (unerodiert)                   0.053     0.128   -0.148  0.549
+        alte Defaults                  0.580     0.430   -0.270  0.433
+        ohne Böschung                  0.224     0.265   -0.283  0.400
+        ohne Glättung                  0.598     0.432   -0.283  0.434
+        OHNE BEIDES                    0.454     0.177   -0.419  0.702
+
+    `beta` ist der Exponent der Hangneigung-über-Einzugsgebiet-Beziehung, in
+    echten Landschaften rund -0.5, bei reinem Rauschen rund 0. Er ist die
+    einzige der vier Kennzahlen, die die Siegervariante erkannt hat - die
+    Drainage-Dichte hat sie sogar als schlechteste eingestuft (0.177). Der
+    Kontaktabzug war eindeutig: nur ohne Böschung UND ohne Glättung entsteht
+    das feine verzweigte Netz über die ganze Karte.
+
+    WARUM die beiden Passes hier schaden, obwohl das Vorbild sie hat: sie
+    arbeiten auf einer festen Längenskala. Die Böschungsschwelle ist
+    `Zellbreite * tan(Winkel)` = 20 m * tan(30°) ~ 11 m; eine frisch
+    eingeschnittene Rinne ist tiefer und rutscht deshalb im nächsten Schritt
+    wieder zu. Gegenprobe mit doppeltem Winkel (Talus Angle Scale 2.0): auch
+    bei Stärke 0.05 bleibt beta bei -0.298 statt -0.419, die Rinnen
+    verschwinden trotzdem. Das Vorbild rechnet auf einem Einheitsgitter ohne
+    Meter, dort stellt sich dieses Verhältnis nicht ein.
+
+    Beide Regler bleiben vollständig erhalten und wirksam - nur ihr Startwert
+    ist jetzt 0. Wer weichere, gerundete Formen will, dreht sie auf.
     """
 
     EROSION_CAPACITY = {
@@ -572,13 +603,18 @@ class EROSION:
                         "die fluviale Erosion vollständig ab."
     }
     DEPOSITION_RATE = {
-        "min": 0.0, "max": 2.0, "default": 0.5, "step": 0.05,
+        "min": 0.0, "max": 2.0, "default": 0.05, "step": 0.05,
         "description": "Wie schnell übersättigtes Wasser seine Fracht wieder "
                         "abgibt (Kd). Hohe Werte erzeugen ausgeprägte Ebenen "
-                        "und Schwemmfächer dort, wo das Wasser langsamer wird."
+                        "und Schwemmfächer dort, wo das Wasser langsamer wird. "
+                        "NIEDRIG kalibriert (0.05 statt 0.5): die Fracht bleibt "
+                        "dann lange in Schwebe und verlässt die Karte, statt "
+                        "das Nachbartal zuzuschütten. Mit 0.5 flachte der Lauf "
+                        "das Gelände ein (hypsometrisch 0.249 -> 0.485), statt "
+                        "es zu zertalen."
     }
     RAINFALL = {
-        "min": 0.0, "max": 5.0, "default": 2.0, "step": 0.1,
+        "min": 0.0, "max": 5.0, "default": 5.0, "step": 0.1,
         "description": "Gleichmäßiger Regen über die gesamte Karte. Bewusst "
                         "unabhängig vom Weather-Niederschlag: die Erosion "
                         "modelliert geologische Zeit, nicht das heutige "
@@ -613,9 +649,13 @@ class EROSION:
                         "begrenzt (siehe Statistik-Anzeige)."
     }
     THERMAL_STRENGTH = {
-        "min": 0.0, "max": 2.0, "default": 0.3, "step": 0.05,
+        "min": 0.0, "max": 2.0, "default": 0.0, "step": 0.05,
         "description": "Stärke der Böschungswinkel-Erosion: wie schnell zu "
-                        "steile Hänge nachrutschen. 0 schaltet sie ab."
+                        "steile Hänge nachrutschen. Startwert 0 - siehe "
+                        "Klassen-Docstring: die Schwelle liegt bei rund 11 m "
+                        "pro Zelle und schüttet frisch eingeschnittene Rinnen "
+                        "sofort wieder zu. Aufdrehen ergibt weichere, "
+                        "gerundete Hänge auf Kosten der Verästelung."
     }
     TALUS_ANGLE_SCALE = {
         "min": 0.5, "max": 2.0, "default": 1.0, "step": 0.05,
@@ -632,10 +672,13 @@ class EROSION:
                         "und hält steilere Wände."
     }
     SMOOTHING = {
-        "min": 0.0, "max": 1.0, "default": 0.3, "step": 0.05,
+        "min": 0.0, "max": 1.0, "default": 0.0, "step": 0.05,
         "description": "Glättet gezielt Ein-Pixel-Grate und -Rinnen, also "
                         "Gitterartefakte - echte Hänge bleiben unangetastet. "
-                        "0 schaltet den Pass ab."
+                        "Startwert 0: gemessen kostet der Pass mehr echte "
+                        "Rinnen als er Artefakte entfernt (beta -0.419 -> "
+                        "-0.243 schon bei 0.1). Aufdrehen, wenn einzelne "
+                        "Pixelgrate stören."
     }
     THERMAL_VARIANT = {
         "min": 0, "max": 1, "default": 0, "step": 1,

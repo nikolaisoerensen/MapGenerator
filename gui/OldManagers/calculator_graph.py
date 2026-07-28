@@ -305,7 +305,21 @@ _CALCULATOR_SPECS = [
     # LandscapeVoronoiSystem) entfernt - vollständig durch settlement.plot_nodes
     # (PlotPhysicsSystem) ersetzt, siehe [[project-settlement-plot-physics-rebuild]].
     CalculatorSpec("settlement.pathfinding", "settlement",
-                   ["settlement.settlements", "terrain.slope"], ["roads"]),
+                   # biome.integrate_layers ergaenzt 2026-07-28: der Pfadfinder
+                   # liest biome_map fuer seine MoveCost-Berechnung
+                   # (core/settlement_generator.py:3278), hat das aber nie
+                   # deklariert. Ohne die Kante durfte Settlement in derselben
+                   # Runde wie Biome laufen und je nach Thread-Timing die
+                   # hoehenbasierte Notfall-Ersatzkarte
+                   # (_create_fallback_biome_map) statt der echten Biome
+                   # benutzen - reproduzierbar war das Ergebnis so nicht.
+                   #
+                   # Aufgefallen ist es erst, als der Dependency-Tree des
+                   # Orchestrators aus diesem Graph ABGELEITET wurde statt von
+                   # Hand gepflegt: die Handtabelle fuehrte biome bei
+                   # settlement, der Graph nicht. Die Handtabelle hatte recht.
+                   ["settlement.settlements", "terrain.slope",
+                    "biome.integrate_layers"], ["roads"]),
     CalculatorSpec("settlement.outer_roads", "settlement",
                    ["settlement.settlements", "settlement.suitability", "terrain.slope"], ["outer_roads"]),
     CalculatorSpec("settlement.roadsites", "settlement", ["settlement.pathfinding"], ["roadsite_list"]),

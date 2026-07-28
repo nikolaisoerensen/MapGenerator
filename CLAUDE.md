@@ -49,6 +49,37 @@ if missing on a given branch, building a minimal `FakeScheduler`, driving
 `BaseTerrainGenerator` → `WeatherSystemGenerator` → `HydrologySystemGenerator`
 → `BiomeClassificationSystem` end-to-end with real default parameters from
 `gui/config/value_default.py`). This validates the actual computation but
-**not** the Qt/OpenGL rendering — GUI-facing changes (matplotlib colormaps,
-GLSL shaders, Qt widget behavior) still need the user to confirm visually
+**not** the Qt/OpenGL *rendering* — GUI-facing changes (matplotlib colormaps,
+Qt widget behavior, the 3D mesh) still need the user to confirm visually
 against the live app, per the worktree note above.
+
+### Compute shaders CAN be run headlessly — this was wrong before
+
+The sentence above used to say GLSL shaders needed the live app. That is
+**false for compute shaders**, and believing it cost three debugging rounds
+(a reserved word as an identifier, an `int` uniform set with `glUniform1f`,
+and a fixed-point counter overflowing) — each found only after the user ran
+the program.
+
+`GPUWorker` in `gui/OldManagers/shader_manager.py` is deliberately built as an
+*offscreen* worker: its own `QOffscreenSurface`, its own `QOpenGLContext`, no
+window. All it needs is a `QGuiApplication`, which a script can create:
+
+```python
+from PyQt6.QtGui import QGuiApplication
+app = QGuiApplication([])                    # no window appears
+from gui.OldManagers.shader_manager import ShaderManager
+manager = ShaderManager()
+worker = manager._ensure_worker()
+assert worker.gpu_available                  # verified True on this machine
+result = manager.request_shader_operation("erosion", "hydraulicField", inputs, {})
+```
+
+Working example: `smoke_test_erosion_gpu_parity.py` — it runs the full GPU
+erosion path and compares it against the CPU reference, single-step (tight
+tolerance) and over a long run (mass balance). Any new compute shader should
+get the same treatment; the static contract check
+(`smoke_test_erosion_gpu_contract.py`) catches naming and type mismatches, but
+only an actual run catches wrong *results*.
+
+What still needs the live app: anything drawn into a visible widget.

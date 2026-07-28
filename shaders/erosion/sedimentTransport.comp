@@ -19,19 +19,27 @@
 // geht dorthin, wohin das Wasser geht.
 //
 // Einziger Verlustpfad ist der Kartenrand, und der ist gewollt: Fluesse tragen
-// ihre Fracht aus dem Gebiet hinaus. Er wird fixed-point-atomar mitgezaehlt
-// (exportAccum), damit die Massenbilanz vollstaendig aufgeht statt nur
-// ungefaehr - dieselbe Technik wie in shaders/water/dropletErosionStep.comp,
-// weil GLSL keine Float-Atomics auf Images kennt.
+// ihre Fracht aus dem Gebiet hinaus. Er wird in exportAccum mitgezaehlt, damit
+// die Massenbilanz vollstaendig aufgeht statt nur ungefaehr.
+//
+// PRO ZELLE, nicht in einem gemeinsamen Zaehler. Zuerst stand hier ein
+// einzelnes r32i-Texel mit imageAtomicAdd und Fixed-Point-Kodierung (wie in
+// shaders/water/dropletErosionStep.comp). Das lief bei laengeren Simulationen
+// UEBER: int32 fasst bei einer Skala von 1e6 nur 2147 m Gesamtexport, und
+// gemessen wurden nach 2000 Schritten 7529 m - der Zaehler kippte ins Negative
+// und die Massenbilanz meldete -7.0% statt 0.07%.
+//
+// Jede Zelle schreibt jetzt in ihr EIGENES Texel. Damit gibt es weder einen
+// Wettlauf (kein Atomic noetig) noch einen gemeinsamen Wertebereich, der
+// ueberlaufen koennte - aufsummiert wird erst beim Zurücklesen.
 layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(r32f, binding = 0) uniform readonly image2D sedimentIn;
 layout(rgba32f, binding = 1) uniform readonly image2D outflowFraction;
 layout(r32f, binding = 2) uniform writeonly image2D sedimentOut;
-layout(r32i, binding = 3) uniform iimage2D exportAccum;   // 1x1, Fixed-Point
+layout(r32f, binding = 3) uniform image2D exportAccum;    // pro Zelle, kumuliert
 
 uniform int u_size;
-uniform float u_fixed_point_scale;
 
 bool inside(ivec2 coord) {
     return coord.x >= 0 && coord.x < u_size && coord.y >= 0 && coord.y < u_size;
@@ -67,14 +75,14 @@ void main() {
     imageStore(sedimentOut, coord, vec4(max(0.0, sediment - outgoing + incoming), 0.0, 0.0, 0.0));
 
     // Was ueber den Kartenrand hinausgeht, verlaesst das Gebiet. Nur die
-    // aeusserste Zellreihe traegt bei, deshalb der Zweig - der atomare
-    // Schreibzugriff laeuft damit auf 4*u_size statt auf u_size^2 Threads.
+    // aeusserste Zellreihe traegt bei; alle anderen schreiben ihren
+    // unveraenderten Stand zurueck, damit die Textur ueber die Runden hinweg
+    // kumuliert.
     float exported = 0.0;
     if (coord.x == 0)          exported += outL;
     if (coord.x == u_size - 1) exported += outR;
     if (coord.y == 0)          exported += outT;
     if (coord.y == u_size - 1) exported += outB;
-    if (exported > 0.0) {
-        imageAtomicAdd(exportAccum, ivec2(0, 0), int(round(exported * u_fixed_point_scale)));
-    }
+    imageStore(exportAccum, coord,
+               vec4(imageLoad(exportAccum, coord).r + exported, 0.0, 0.0, 0.0));
 }

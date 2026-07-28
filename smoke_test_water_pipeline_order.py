@@ -195,6 +195,58 @@ def run_every_generator_is_reachable():
     return ok
 
 
+def run_dependency_tree_matches_graph():
+    """
+    Der Dependency-Tree des Orchestrators muss aus CALCULATOR_GRAPH abgeleitet
+    sein - und zwar so, dass er JEDEN Generator kennt.
+
+    Der Anlass (2026-07-28, in der laufenden App): die Tabelle stand als
+    Literal im Konstruktor und kannte den Erosion-Generator nicht. Eine
+    Terrain-Aenderung invalidierte water/weather/settlement/biome/geology, aber
+    NICHT erosion. Terrain rechnete auf das neue Ziel-LOD hoch, Erosion blieb
+    auf ihrem alten Stand, und alles hinter ihr wartete auf eine Runde, die nie
+    kam. Im Log fuenf gleichzeitige "Generation ... timed out" - und davor
+    keine einzige Fehlermeldung.
+
+    Beim Ableiten fiel ausserdem eine FEHLENDE Graph-Kante auf: Settlement
+    liest biome_map (core/settlement_generator.py:3278), deklarierte aber
+    keinen Biome-Knoten. Der Graph hatte unrecht, die alte Handtabelle recht.
+    Beides ist behoben; dieser Test haelt beide Seiten zusammen.
+    """
+    from gui.OldManagers.generation_orchestrator import (
+        GenerationOrchestrator, GeneratorType)
+
+    tree = GenerationOrchestrator._derive_dependency_tree()
+
+    ok = check("der Dependency-Tree kennt jeden GeneratorType "
+               "({} Eintraege)".format(len(tree)),
+               set(tree) == set(GeneratorType))
+
+    # Erosion formt das Gelaende - Weather und Water MUESSEN dahinter haengen,
+    # sonst rechnen sie auf dem unerodierten Gelaende.
+    for downstream in (GeneratorType.WEATHER, GeneratorType.WATER):
+        ok &= check("{} haengt von erosion ab".format(downstream.value),
+                    GeneratorType.EROSION in tree[downstream])
+
+    # Gegenprobe: jede Kante im Baum muss eine ECHTE Knotenkante im Graph
+    # haben. Ein Baum, der einfach alles mit allem verbindet, wuerde die
+    # Pruefungen oben ebenfalls bestehen - und jede Parameteraenderung die
+    # halbe Pipeline neu rechnen lassen.
+    edges = {(spec.generator, CALCULATOR_GRAPH[dep].generator)
+             for spec in CALCULATOR_GRAPH.values()
+             for dep in spec.depends_on if dep in CALCULATOR_GRAPH}
+    spurious = [(gen.value, up.value) for gen, ups in tree.items()
+                for up in ups if (gen.value, up.value) not in edges]
+    ok &= check("keine erfundenen Kanten im Baum "
+                "(gefunden: {})".format(spurious or "keine"), not spurious)
+
+    # Settlement liest biome_map - die Kante muss im GRAPH stehen, damit die
+    # Reihenfolge erzwungen ist, nicht nur die Invalidierung.
+    ok &= check("settlement haengt im Graph von biome ab",
+                GeneratorType.BIOME in tree[GeneratorType.SETTLEMENT])
+    return ok
+
+
 def run_terrain_forming_generators_refresh_all_tabs():
     """
     Jeder Generator, dessen Ergebnis in die KOMBINIERTE Heightmap einfliesst,
@@ -517,6 +569,7 @@ if __name__ == "__main__":
     results = {
         "execution_order_and_rain_decoupling": run_execution_order_and_rain_decoupling(),
         "every_generator_is_reachable": run_every_generator_is_reachable(),
+        "dependency_tree_matches_graph": run_dependency_tree_matches_graph(),
         "terrain_forming_generators_refresh_all_tabs":
             run_terrain_forming_generators_refresh_all_tabs(),
         "reset_restores_identical_result": run_reset_restores_identical_result(),

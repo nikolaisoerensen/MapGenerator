@@ -7,15 +7,30 @@
 // braucht - dieselbe Trennung wie shaders/water/thermalErosionFlux.comp +
 // thermalErosionApply.comp.
 //
+// ACHT NACHBARN, jeder mit seiner tatsaechlichen Entfernung.
+//
+// Mit nur vier Nachbarn kann Material ausschliesslich entlang der Gitterachsen
+// wandern. Ein Haufen relaxiert dann nicht zu einem Kegel, sondern zu einer
+// RAUTE: in der Diagonalen ist der wirksame Boeschungswinkel um sqrt(2)
+// steiler, weil dieselbe Hoehendifferenz dort auf eine laengere Strecke faellt.
+// Im alten Water-Pfad lief dieser Pass nur rund 40 Iterationen je LOD und das
+// fiel nie auf; hier laeuft er mehrere tausend Mal, und das Ergebnis war ein
+// Gelaende aus lauter 45-Grad-Pyramiden - im gerenderten Bild sofort sichtbar,
+// in keiner einzigen Kennzahl. Gegenprobe mit thermal_strength=0: Rauten weg.
+//
+// Deshalb bekommen die Diagonalen `u_pipe_length * sqrt(2)` als Bezugslaenge
+// und ihr Transport wird durch dieselbe Entfernung geteilt. Damit ist der
+// Boeschungswinkel in alle acht Richtungen derselbe WINKEL.
+//
+// Acht Richtungen passen nicht in einen vec4, deshalb zwei Ausgabe-Texturen:
+// outflowAxes  = (links, rechts, oben, unten)
+// outflowDiags = (oben-links, oben-rechts, unten-links, unten-rechts)
+//
 // Zwei umschaltbare Verfahren, siehe u_variant:
 //   0 = Gather - das in diesem Projekt gewachsene Verfahren
-//       (ThermalErosionSystem): relief-relativer Deckel pro Schritt,
-//       massenexakt.
+//       (ThermalErosionSystem): relief-relativer Deckel pro Schritt.
 //   1 = Flux - die Variante des Vorbilds: Deckel ist die verfuegbare Hoehe
 //       ueber dem tiefsten Nachbarn.
-// Beide teilen sich denselben haerteabhaengigen Boeschungswinkel aus
-// tanReposeMap, damit der Vergleich wirklich die VERFAHREN zeigt und nicht
-// unterschiedliche Winkel.
 //
 // Kartenrand = GESCHLOSSENE Grenze (anders als beim Wasser): Geisterzelle hat
 // dieselbe Hoehe wie die Randzelle, also kein Gefaelle. Material soll nicht
@@ -24,13 +39,15 @@ layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(r32f, binding = 0) uniform readonly image2D heightIn;
 layout(r32f, binding = 1) uniform readonly image2D tanReposeMap;
-layout(rgba32f, binding = 2) uniform writeonly image2D outflowOut;
+layout(rgba32f, binding = 2) uniform writeonly image2D outflowAxes;
+layout(rgba32f, binding = 3) uniform writeonly image2D outflowDiags;
 
 uniform int u_size;
 uniform float u_pipe_length;
 uniform float u_transfer_rate;      // ThermalErosionSystem.TRANSFER_RATE
 uniform float u_thermal_strength;
 uniform float u_gather_cap;         // relief-relativer Deckel (Variante 0)
+uniform float u_diagonal_distance;  // sqrt(2), siehe Header
 uniform int u_variant;              // 0 = Gather, 1 = Flux
 
 float heightAt(ivec2 coord) {
@@ -48,20 +65,26 @@ void main() {
     float height = heightAt(coord);
     float tanHere = tanReposeAt(coord);
 
-    ivec2 offsets[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
-    float raw[4];
+    // Reihenfolge identisch zum CPU-Pfad: erst die vier Achsen, dann die vier
+    // Diagonalen.
+    ivec2 offsets[8] = ivec2[8](
+        ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
+        ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1));
+
+    float raw[8];
     float totalRaw = 0.0;
     float lowestNeighbour = height;
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 8; i++) {
         ivec2 neighbour = coord + offsets[i];
         float neighbourHeight = heightAt(neighbour);
-        // Der Schwellwert ist die Zellbreite mal dem MITTLEREN Tangens beider
-        // Zellen - eine geometrisch exakte Beziehung, die genau deshalb auf
-        // Map Distance reagiert (siehe den Hinweis zur MapDistance-
-        // Abhaengigkeit im ThermalErosionSystem-Docstring).
-        float threshold = u_pipe_length * 0.5 * (tanHere + tanReposeAt(neighbour));
-        raw[i] = max(0.0, (height - neighbourHeight) - threshold) * u_transfer_rate * u_thermal_strength;
+        float distance = (i < 4) ? 1.0 : u_diagonal_distance;
+        // Der Schwellwert ist die tatsaechliche Entfernung mal dem MITTLEREN
+        // Tangens beider Zellen - eine geometrisch exakte Beziehung, die genau
+        // deshalb auf Map Distance reagiert.
+        float threshold = u_pipe_length * distance * 0.5 * (tanHere + tanReposeAt(neighbour));
+        raw[i] = max(0.0, (height - neighbourHeight) - threshold) / distance
+                 * u_transfer_rate * u_thermal_strength;
         totalRaw += raw[i];
         lowestNeighbour = min(lowestNeighbour, neighbourHeight);
     }
@@ -69,5 +92,6 @@ void main() {
     float cap = (u_variant == 1) ? max(0.0, height - lowestNeighbour) : u_gather_cap;
     float k = min(1.0, cap / max(totalRaw, 1e-12));
 
-    imageStore(outflowOut, coord, vec4(raw[0], raw[1], raw[2], raw[3]) * k);
+    imageStore(outflowAxes, coord, vec4(raw[0], raw[1], raw[2], raw[3]) * k);
+    imageStore(outflowDiags, coord, vec4(raw[4], raw[5], raw[6], raw[7]) * k);
 }

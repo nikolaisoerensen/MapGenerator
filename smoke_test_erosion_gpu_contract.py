@@ -280,7 +280,14 @@ def run_constants_match_cpu():
     simulator_source = read(os.path.join(PROJECT, "core", "erosion_generator.py"))
     method_start = simulator_source.index("    def _simulate_gpu(")
     method_end = simulator_source.index("\n    def ", method_start + 10)
-    provided = set(re.findall(r'"(\w+)":', simulator_source[method_start:method_end]))
+    method_body = simulator_source[method_start:method_end]
+    # Zwei Schreibweisen zaehlen als "geliefert": als Schluessel im
+    # Dict-Literal (`"name": wert`) und als nachtraegliche Zuweisung
+    # (`request["name"] = wert`). Die zweite braucht es fuer alles, was sich
+    # von Abschnitt zu Abschnitt aendert - chunk_steps und der durchgereichte
+    # Zustand.
+    provided = set(re.findall(r'"(\w+)":', method_body))
+    provided |= set(re.findall(r'\[\s*"(\w+)"\s*\]\s*=', method_body))
     missing = required - provided
     ok &= check("der Simulator liefert jeden vom Dispatcher gelesenen Wert "
                 "(fehlen: {})".format(sorted(missing)), not missing)

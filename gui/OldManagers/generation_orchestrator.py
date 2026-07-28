@@ -343,15 +343,23 @@ class GenerationOrchestrator(QObject):
         self.shader_manager = shader_manager if shader_manager is not None else ShaderManager()
         self.logger = logging.getLogger(__name__)
 
-        # Dependency-Tree Definition (basierend auf Core-Generator Requirements)
-        self.dependency_tree = {
-            GeneratorType.TERRAIN: set(),  # Keine Dependencies
-            GeneratorType.GEOLOGY: {GeneratorType.TERRAIN},
-            GeneratorType.WEATHER: {GeneratorType.TERRAIN},
-            GeneratorType.WATER: {GeneratorType.TERRAIN, GeneratorType.GEOLOGY, GeneratorType.WEATHER},
-            GeneratorType.BIOME: {GeneratorType.TERRAIN, GeneratorType.WEATHER, GeneratorType.WATER},
-            GeneratorType.SETTLEMENT: {GeneratorType.TERRAIN, GeneratorType.WATER, GeneratorType.BIOME}
-        }
+        # Dependency-Tree: ABGELEITET aus CALCULATOR_GRAPH, nicht von Hand
+        # gepflegt.
+        #
+        # Diese Tabelle stand bis 2026-07-28 als Literal hier - und kannte den
+        # Erosion-Generator nicht, obwohl er im Graph längst zwischen Geology
+        # und Weather hing. Folge in der laufenden App: eine Terrain-Änderung
+        # invalidierte water/weather/settlement/biome/geology, aber NICHT
+        # erosion. Terrain rechnete auf das neue Ziel-LOD hoch, Erosion blieb
+        # auf ihrem alten Stand stehen, und alles hinter ihr wartete auf eine
+        # Runde, die nie kam - im Log fünf gleichzeitige "timed out" ohne
+        # jede Fehlermeldung davor.
+        #
+        # Das ist derselbe Fehlertyp wie die sechs fest verdrahteten
+        # Generator-Listen, die bereits abgeleitet wurden. Eine handgepflegte
+        # Kopie der Graph-Struktur driftet zwangsläufig, sobald jemand einen
+        # Generator ergänzt.
+        self.dependency_tree = self._derive_dependency_tree()
 
         # Parameter-Impact-Matrix (welche Parameter-Änderungen invalidieren nachgelagerte Generatoren)
         self.impact_matrix = {
@@ -371,6 +379,29 @@ class GenerationOrchestrator(QObject):
                 "medium_impact": ["fold_detail", "fault_detail", "fault_edge_softness",
                                    "intrusion_density", "intrusion_size"],
                 "low_impact": ["intrusion_detail", "metamorphic_overprint_intensity", "foliation_detail"]
+            },
+            GeneratorType.EROSION: {
+                # ALLE Erosions-Parameter sind high_impact - anders als bei den
+                # übrigen Generatoren gibt es hier keine sinnvolle Abstufung.
+                # Der Erosion-Generator formt das GELÄNDE um, und auf dieses
+                # Gelände setzen Weather, Water, Biome und Settlement
+                # vollständig auf. Jeder Regler, der die Höhenkarte auch nur
+                # geringfügig ändert, macht damit jedes nachgelagerte Ergebnis
+                # ungültig - eine "low_impact"-Kategorie wäre hier schlicht
+                # falsch.
+                #
+                # Ergänzt 2026-07-28: dieser Eintrag fehlte ganz. Im Log der
+                # laufenden App sichtbar als "Dependencies invalidated:
+                # erosion -> ['erosion']" - eine Änderung an einem
+                # Erosions-Regler zog nichts hinter sich her, Weather und
+                # Water rechneten weiter auf dem alten Gelände.
+                "high_impact": ["erosion_capacity", "erosion_strength", "deposition_rate",
+                                "rainfall", "evaporation_rate", "convergence_threshold",
+                                "max_steps", "simulation_resolution", "thermal_strength",
+                                "thermal_variant", "talus_angle_scale", "hardness_influence",
+                                "smoothing"],
+                "medium_impact": [],
+                "low_impact": []
             },
             GeneratorType.WEATHER: {
                 "high_impact": ["air_temp_entry", "ground_temp_offset", "altitude_cooling"],
@@ -779,6 +810,39 @@ class GenerationOrchestrator(QObject):
     def _calculator_ids_for(self, generator_name: str) -> List[str]:
         """Alle Calculator-Knoten-IDs, die zu diesem Generator gehören."""
         return [cid for cid, spec in CALCULATOR_GRAPH.items() if spec.generator == generator_name]
+
+    @staticmethod
+    def _derive_dependency_tree() -> Dict['GeneratorType', Set['GeneratorType']]:
+        """
+        Funktionsweise: Baut die Generator-Ebene der Abhängigkeiten aus den
+            Knoten-Abhängigkeiten in CALCULATOR_GRAPH auf.
+        Return: {GeneratorType: Set[GeneratorType]}, Eigenbezüge entfernt
+
+        Ein Generator A hängt von B ab, sobald IRGENDEIN Knoten von A einen
+        Knoten von B als `depends_on` führt. Die transitive Hülle bildet
+        get_downstream_generators() selbst - hier stehen nur die direkten
+        Kanten, genau wie in der früheren Handtabelle.
+
+        Ein Knoten, dessen Generator nicht in GeneratorType steht, wird
+        übersprungen: der Graph darf Hilfsknoten enthalten, ohne dass hier
+        eine Ausnahme fliegt.
+        """
+        by_name = {member.value: member for member in GeneratorType}
+        tree = {member: set() for member in GeneratorType}
+
+        for spec in CALCULATOR_GRAPH.values():
+            owner = by_name.get(spec.generator)
+            if owner is None:
+                continue
+            for dependency_id in spec.depends_on:
+                upstream_spec = CALCULATOR_GRAPH.get(dependency_id)
+                if upstream_spec is None:
+                    continue
+                upstream = by_name.get(upstream_spec.generator)
+                if upstream is not None and upstream is not owner:
+                    tree[owner].add(upstream)
+
+        return tree
 
     def _sync_state_tracker_from_dispatcher(self):
         """

@@ -1412,18 +1412,28 @@ def _dispatch_hydraulic_field(worker: "GPUWorker", inputs: dict, parameters: dic
         thermalApply     Boeschungs-Ausfluss anwenden und akkumulieren
         smooth           Verdunstung + bedingte Glaettung
 
-    WARUM DIE GANZE SCHLEIFE HIER LAEUFT und nicht Schritt fuer Schritt vom
-    Aufrufer getrieben wird: ein Lauf besteht aus mehreren tausend Schritten.
-    Jeder einzelne ueber die Worker-Queue zu schicken hiesse, pro Schritt zu
-    synchronisieren - der gesamte Gewinn der GPU ginge in der Latenz verloren.
-    Der Zustand bleibt deshalb ueber den ganzen Lauf in den Texturen.
+    EIN AUFRUF RECHNET EINEN ABSCHNITT, nicht den ganzen Lauf. Der Aufrufer
+    (HydraulicFieldSimulator._simulate_gpu) ruft wiederholt auf und reicht den
+    Zustand jedes Mal durch.
 
-    Zurueckgelesen wird nur alle `check_interval` Schritte, und zwar genau eine
-    Hoehenkarte: sie traegt sowohl das Konvergenzkriterium (mittlere Aenderung
-    pro Schritt, relativ zum Relief) als auch die Live-Vorschau. Bei 512 px
-    sind das 1 MB je Pruefung - gegenueber der Rechenzeit vernachlaessigbar,
-    und es haelt das Abbruchkriterium bit-fuer-bit identisch zum CPU-Pfad,
-    statt es auf der GPU ein zweites Mal zu implementieren.
+    Zuerst lief die vollstaendige Schleife hier drin - das war aus zwei
+    Gruenden falsch:
+
+      * GPUWorker.submit() bricht eine Operation nach 30 s ab. Ein Lauf ueber
+        mehrere tausend Schritte reisst das in jedem Fall, faellt auf CPU
+        zurueck und wird dort noch langsamer. Gemessen bei 256 px:
+        "GPU-Operation erosion/hydraulicField nach 30.0s nicht abgeschlossen".
+      * Ein zehnminuetiger Aufruf blockiert die Worker-Queue fuer JEDEN anderen
+        Generator - die Queue ist eine gemeinsame Ressource.
+
+    Ein Abschnitt braucht Sekunden statt Minuten, laesst die Queue zwischendurch
+    frei, liefert einen natuerlichen Punkt fuer Konvergenzpruefung und
+    Fortschrittsmeldung, und der Zustands-Transfer faellt kaum ins Gewicht:
+    sieben float32-Karten bei 512 px sind 7 MB je Abschnittsgrenze, gegenueber
+    Hunderten von Shader-Dispatches dazwischen.
+
+    Das Konvergenzkriterium liegt damit vollstaendig beim Aufrufer - CPU- und
+    GPU-Pfad benutzen dieselbe Funktion, statt es zweimal zu implementieren.
     """
     heightmap = inputs["heightmap"]
     erodibility = inputs["erodibility"]
@@ -1432,13 +1442,9 @@ def _dispatch_hydraulic_field(worker: "GPUWorker", inputs: dict, parameters: dic
 
     dt = float(inputs["dt"])
     meters_per_pixel = float(inputs["meters_per_pixel"])
-    max_steps = max(1, int(inputs["max_steps"]))
-    check_interval = max(1, int(inputs["check_interval"]))
-    convergence_threshold = float(inputs["convergence_threshold"])
-    relief = float(inputs["relief"])
-    progress = inputs.get("progress_callback")
-
-    fixed_point_scale = float(inputs["fixed_point_scale"])
+    chunk_steps = max(1, int(inputs["chunk_steps"]))
+    # Zustand des vorherigen Abschnitts; beim ersten Aufruf None.
+    state_in = inputs.get("state")
 
     # WICHTIG: alle Texturen, die im ERSTEN Schritt GELESEN werden, muessen
     # explizit mit Nullen hochgeladen werden. _create_texture_2d() allokiert
@@ -1449,24 +1455,35 @@ def _dispatch_hydraulic_field(worker: "GPUWorker", inputs: dict, parameters: dic
     # Derselbe Grund, aus dem _dispatch_pipe_flow_network seine depth0/flux0
     # hochlaedt statt sie zu allokieren.
     zeros = np.zeros((size, size), dtype=np.float32)
-    height_a = _upload_texture_2d(heightmap.astype(np.float32), gl.GL_R32F)
+    start = state_in or {}
+    height_a = _upload_texture_2d(
+        start.get("height", heightmap).astype(np.float32), gl.GL_R32F)
     height_b = _create_texture_2d(size, size, gl.GL_R32F)
-    water_a = _upload_texture_2d(zeros, gl.GL_R32F)
+    water_a = _upload_texture_2d(start.get("water", zeros).astype(np.float32), gl.GL_R32F)
     water_b = _create_texture_2d(size, size, gl.GL_R32F)
-    sediment_a = _upload_texture_2d(zeros, gl.GL_R32F)
+    sediment_a = _upload_texture_2d(start.get("sediment", zeros).astype(np.float32), gl.GL_R32F)
     sediment_b = _create_texture_2d(size, size, gl.GL_R32F)
-    flux_a = _upload_texture_2d_rgba(np.zeros((size, size, 4), dtype=np.float32), gl.GL_RGBA32F)
+    flux_a = _upload_texture_2d_rgba(
+        start.get("flux", np.zeros((size, size, 4), dtype=np.float32)).astype(np.float32),
+        gl.GL_RGBA32F)
     flux_b = _create_texture_2d(size, size, gl.GL_RGBA32F)
-    thermal_a = _upload_texture_2d_rg(np.zeros((size, size, 2), dtype=np.float32), gl.GL_RG32F)
+    thermal_a = _upload_texture_2d_rg(
+        start.get("thermal", np.zeros((size, size, 2), dtype=np.float32)).astype(np.float32),
+        gl.GL_RG32F)
     thermal_b = _create_texture_2d(size, size, gl.GL_RG32F)
 
     velocity_tex = _create_texture_2d(size, size, gl.GL_RG32F)
     discharge_tex = _create_texture_2d(size, size, gl.GL_R32F)
     fractions_tex = _create_texture_2d(size, size, gl.GL_RGBA32F)
-    outflow_tex = _create_texture_2d(size, size, gl.GL_RGBA32F)
+    # Acht Boeschungs-Richtungen passen nicht in einen vec4 - siehe
+    # thermalFlux.comp.
+    outflow_axes_tex = _create_texture_2d(size, size, gl.GL_RGBA32F)
+    outflow_diags_tex = _create_texture_2d(size, size, gl.GL_RGBA32F)
     erodibility_tex = _upload_texture_2d(erodibility.astype(np.float32), gl.GL_R32F)
     tan_repose_tex = _upload_texture_2d(tan_repose.astype(np.float32), gl.GL_R32F)
-    export_tex = _create_texture_2d_int(1, 1)
+    # Pro-Zelle-Akkumulator statt eines gemeinsamen Fixed-Point-Zaehlers -
+    # siehe sedimentTransport.comp fuer die Begruendung (der alte lief ueber).
+    export_tex = _upload_texture_2d(start.get("export", zeros).astype(np.float32), gl.GL_R32F)
 
     flux_program = worker.get_program("erosion", "pipeFlux")
     depth_program = worker.get_program("erosion", "pipeDepth")
@@ -1486,19 +1503,7 @@ def _dispatch_hydraulic_field(worker: "GPUWorker", inputs: dict, parameters: dic
     flux_read, flux_write = flux_a, flux_b
     thermal_read, thermal_write = thermal_a, thermal_b
 
-    reference = heightmap.astype(np.float64).copy()
-    converged = False
-    steps_taken = 0
-    # Fortschritts-Buchhaltung - identisch zum CPU-Pfad, damit der Nutzer auf
-    # beiden Wegen dieselbe Zahl sieht (siehe
-    # HydraulicFieldSimulator.convergence_progress).
-    from core.erosion_generator import HydraulicFieldSimulator
-    target_rate = convergence_threshold * relief
-    initial_rate = None
-    progress_fraction = 0.0
-    report_interval = HydraulicFieldSimulator.PROGRESS_REPORT_INTERVAL
-
-    for step in range(1, max_steps + 1):
+    for step in range(1, chunk_steps + 1):
         # --- Pass 1: Regen + Fluss --------------------------------------
         gl.glBindImageTexture(0, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
         gl.glBindImageTexture(1, water_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
@@ -1561,11 +1566,9 @@ def _dispatch_hydraulic_field(worker: "GPUWorker", inputs: dict, parameters: dic
         gl.glBindImageTexture(0, sediment_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
         gl.glBindImageTexture(1, fractions_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RGBA32F)
         gl.glBindImageTexture(2, sediment_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
-        gl.glBindImageTexture(3, export_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_WRITE, gl.GL_R32I)
+        gl.glBindImageTexture(3, export_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_WRITE, gl.GL_R32F)
         gl.glUseProgram(transport_program)
-        _set_uniforms(transport_program, {
-            "u_size": size, "u_fixed_point_scale": fixed_point_scale,
-        })
+        _set_uniforms(transport_program, {"u_size": size})
         gl.glDispatchCompute(groups, groups, 1)
         barrier()
         sediment_read, sediment_write = sediment_write, sediment_read
@@ -1574,23 +1577,26 @@ def _dispatch_hydraulic_field(worker: "GPUWorker", inputs: dict, parameters: dic
         if float(inputs["thermal_strength"]) > 0.0:
             gl.glBindImageTexture(0, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
             gl.glBindImageTexture(1, tan_repose_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-            gl.glBindImageTexture(2, outflow_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RGBA32F)
+            gl.glBindImageTexture(2, outflow_axes_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RGBA32F)
+            gl.glBindImageTexture(3, outflow_diags_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RGBA32F)
             gl.glUseProgram(thermal_flux_program)
             _set_uniforms(thermal_flux_program, {
                 "u_size": size, "u_pipe_length": meters_per_pixel,
                 "u_transfer_rate": float(inputs["transfer_rate"]),
                 "u_thermal_strength": float(inputs["thermal_strength"]),
                 "u_gather_cap": float(inputs["gather_cap"]),
+                "u_diagonal_distance": float(inputs["diagonal_distance"]),
                 "u_variant": int(inputs["thermal_variant"]),
             })
             gl.glDispatchCompute(groups, groups, 1)
             barrier()
 
             gl.glBindImageTexture(0, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-            gl.glBindImageTexture(1, outflow_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RGBA32F)
-            gl.glBindImageTexture(2, thermal_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RG32F)
-            gl.glBindImageTexture(3, height_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
-            gl.glBindImageTexture(4, thermal_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RG32F)
+            gl.glBindImageTexture(1, outflow_axes_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RGBA32F)
+            gl.glBindImageTexture(2, outflow_diags_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RGBA32F)
+            gl.glBindImageTexture(3, thermal_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RG32F)
+            gl.glBindImageTexture(4, height_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+            gl.glBindImageTexture(5, thermal_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RG32F)
             gl.glUseProgram(thermal_apply_program)
             _set_uniforms(thermal_apply_program, {"u_size": size})
             gl.glDispatchCompute(groups, groups, 1)
@@ -1614,40 +1620,18 @@ def _dispatch_hydraulic_field(worker: "GPUWorker", inputs: dict, parameters: dic
         height_read, height_write = height_write, height_read
         water_read, water_write = water_write, water_read
 
-        steps_taken = step
-
-        if step % check_interval == 0:
-            current = _read_texture_data(height_read, size, size).astype(np.float64)
-            # Dasselbe Kriterium wie der CPU-Pfad - importiert statt nachgebaut,
-            # damit beide nicht auseinanderlaufen koennen.
-            rate = HydraulicFieldSimulator.change_rate(
-                current, reference, check_interval, dt)
-            if initial_rate is None:
-                initial_rate = rate
-            # Monoton wie im CPU-Pfad - siehe dortige Begruendung.
-            progress_fraction = max(progress_fraction,
-                                    HydraulicFieldSimulator.convergence_progress(
-                                        initial_rate, rate, target_rate))
-
-            if rate < target_rate:
-                converged = True
-                if progress is not None:
-                    progress(step, max_steps, current.copy(), 1.0)
-                break
-            if step % report_interval == 0 and progress is not None:
-                progress(step, max_steps, current.copy(), progress_fraction)
-            reference = current
-
     final_height = _read_texture_data(height_read, size, size)
     sediment = _read_texture_data(sediment_read, size, size)
     water = _read_texture_data(water_read, size, size)
     velocity = _read_texture_data_rg(velocity_tex, size, size)
     thermal = _read_texture_data_rg(thermal_read, size, size)
 
-    gl.glBindTexture(gl.GL_TEXTURE_2D, export_tex)
-    raw_export = gl.glGetTexImage(gl.GL_TEXTURE_2D, 0, gl.GL_RED_INTEGER, gl.GL_INT)
-    exported = float(np.frombuffer(raw_export, dtype=np.int32)[0]) / fixed_point_scale
+    export_map = _read_texture_data(export_tex, size, size)
+    flux = _read_texture_data_rgba(flux_read, size, size)
 
+    # `state` ist alles, was der naechste Abschnitt braucht, um EXAKT dort
+    # weiterzumachen - sonst faengt er mit trockener Karte und ohne Fracht neu
+    # an und die Simulation macht bei jeder Abschnittsgrenze einen Sprung.
     return {
         "success": True,
         "height": final_height,
@@ -1656,9 +1640,16 @@ def _dispatch_hydraulic_field(worker: "GPUWorker", inputs: dict, parameters: dic
         "velocity": velocity,
         "thermal_erosion": thermal[:, :, 0].copy(),
         "thermal_deposition": thermal[:, :, 1].copy(),
-        "steps_taken": steps_taken,
-        "converged": converged,
-        "sediment_exported": exported,
+        "steps_taken": chunk_steps,
+        "sediment_exported": float(export_map.sum()),
+        "state": {
+            "height": final_height,
+            "water": water,
+            "sediment": sediment,
+            "flux": flux,
+            "thermal": thermal,
+            "export": export_map,
+        },
     }
 
 

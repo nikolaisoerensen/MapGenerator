@@ -185,11 +185,33 @@ def run_scale_consistency():
     print("    144 px: {:5d} Schritte, Ebenen {:.1f}%, Top-5% {:.3f}".format(
         fine["steps"], fine["plains"], fine["top5"]))
 
-    ok = check("beide Aufloesungen konvergieren",
-               coarse["converged"] and fine["converged"])
+    # NICHT mehr geprueft: "beide Aufloesungen konvergieren". Seit der
+    # Kalibrierung vom 2026-07-28 (Regen 5.0, ohne Boeschung, ohne Glaettung)
+    # laeuft ein Lauf regulaer in die Schrittgrenze statt ins
+    # Konvergenzkriterium. Das ist gemessenes Verhalten, kein Defekt: die
+    # Aenderungsrate faellt wie ~1/t und braucht dafuer laenger als das
+    # Schritt-Budget.
+    #
+    #     Schritte          144 px            512 px      (Rate / Relief)
+    #        500          4.04e-06          7.27e-06
+    #       8000          1.01e-06          2.34e-06      <- Schrittgrenze
+    #      18000          5.07e-07          1.24e-06
+    #
+    # Eine Landschaft unter Dauerregen ohne Hebung kommt nie ganz zum
+    # Stillstand; die Schwelle sagt "es lohnt nicht mehr", nicht "fertig".
+    # Massgeblich ist deshalb Max Steps, und 8000 ist genau der Stand, der
+    # gegen das Zielbild abgenommen wurde. Die Schwelle bleibt als Notbremse
+    # fuer den Fall, dass ein Lauf frueher zur Ruhe kommt.
+    #
+    # Was hier stattdessen zaehlt, steht unten: dieselbe LANDSCHAFT bei
+    # anderer Aufloesung - Ebenenanteil und Reifegrad, nicht die Schrittzahl.
+    ok = True
     ratio = max(coarse["steps"], fine["steps"]) / max(min(coarse["steps"], fine["steps"]), 1)
-    ok &= check("die Schrittzahl bis zur Konvergenz bleibt vergleichbar "
+    ok &= check("die Schrittzahl bleibt vergleichbar "
                 "(Faktor {:.2f}, erlaubt < 3.0)".format(ratio), ratio < 3.0)
+    ok &= check("die Top-5%-Konzentration bleibt vergleichbar "
+                "({:.3f} gegen {:.3f})".format(coarse["top5"], fine["top5"]),
+                abs(coarse["top5"] - fine["top5"]) < 0.10)
     ok &= check("der Ebenenanteil bleibt vergleichbar "
                 "({:.1f}% gegen {:.1f}%)".format(coarse["plains"], fine["plains"]),
                 abs(coarse["plains"] - fine["plains"]) < 15.0)
