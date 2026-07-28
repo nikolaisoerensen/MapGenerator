@@ -1,0 +1,83 @@
+#version 430
+// Zweiter Pass PRO Runde der Droplet-Erosion (nach dropletErosionStep.comp,
+// mit glMemoryBarrier dazwischen - siehe _dispatch_droplet_erosion in
+// gui/OldManagers/shader_manager.py). Ein Thread pro Gitterzelle (identisches
+// Dispatch-Muster wie jeder andere Grid-Shader dieser Codebase, z.B.
+// thermalErosionApply.comp).
+//
+// Loest die fixed-point-atomar akkumulierten Erosions-/Ablagerungs-Deltas
+// dieser Runde (erosionAccumFixed/depositAccumFixed, r32i, siehe
+// dropletErosionStep.comp-Header fuer die Begruendung des Fixed-Point-
+// Ansatzes) in die Hoehen-Textur der NAECHSTEN Runde auf, akkumuliert
+// gleichzeitig die laufenden Output-Karten (erosion_map/sedimentation_map
+// ueber ALLE Runden) und setzt die Fixed-Point-Akkumulatoren fuer die
+// naechste Runde zurueck auf 0 (spart einen separaten glClearTexImage-Aufruf).
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D heightIn;
+layout(r32i, binding = 1) uniform iimage2D erosionAccumFixed;
+layout(r32i, binding = 2) uniform iimage2D depositAccumFixed;
+layout(rg32f, binding = 3) uniform readonly image2D outputAccumIn;
+layout(r32f, binding = 4) uniform writeonly image2D heightOut;
+layout(rg32f, binding = 5) uniform writeonly image2D outputAccumOut;
+
+uniform int u_size;
+uniform float u_fixed_point_scale;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    int erosionFixed = imageLoad(erosionAccumFixed, coord).r;
+    int depositFixed = imageLoad(depositAccumFixed, coord).r;
+    float erosionDelta = float(erosionFixed) / u_fixed_point_scale;
+    float depositDelta = float(depositFixed) / u_fixed_point_scale;
+
+    float heightValue = imageLoad(heightIn, coord).r;
+
+    // AUFNAHMEFAEHIGKEIT DER ZELLE IN DIESER RUNDE - identisch zum CPU-Pfad,
+    // siehe core/water_generator.py DropletErosionSystem._deposit_headroom()
+    // fuer die vollstaendige Begruendung und die Messwerte.
+    //
+    // Kurz: alle Partikel einer Runde lesen denselben eingefrorenen
+    // Hoehenstand und ihre Beitraege werden per imageAtomicAdd VERLUSTFREI
+    // aufsummiert. Die Pro-Partikel-Regel "hoechstens bis zur Hoehe der
+    // naechsten Zelle auffuellen" wird damit von K Partikeln gleichzeitig
+    // gegen denselben Stand ausgewertet - die Zelle bekommt das K-fache
+    // (gemessen bei 512 px: bis zu 541 Partikel auf einer Zelle in einer
+    // Runde). Auf Zellebene lautet dieselbe Regel: eine Zelle kann in einer
+    // Runde hoechstens bis zur Hoehe ihres hoechsten Nachbarn steigen. Die
+    // Grenze steht vollstaendig in heightIn - es braucht keinen Uniform und
+    // keinen kalibrierten Wert.
+    //
+    // NUR auf der Ablagerungsseite: die spiegelbildliche Regel fuer den
+    // Abtrag traefe die Rinnensohlen und kostete gemessen das halbe
+    // Kanalnetz (CPU: 210 -> 56 px).
+    //
+    // Anders als der CPU-Pfad (der die Beitraege anteilig herunterskaliert)
+    // wird hier NACHTRAEGLICH geklemmt - die Partikel haben sich ihre Fracht
+    // im Step-Shader bereits gutgeschrieben. Das Gelaende ist damit
+    // identisch, die Sediment-Bilanz der Partikel nur naeherungsweise. Das
+    // ist vertretbar, weil dieses Modell exakte Massenerhaltung ohnehin
+    // bewusst nicht erzwingt (siehe dropletErosionStep.comp-Header).
+    // Start bei der eigenen Hoehe statt bei -inf: das Ergebnis ist identisch
+    // (liegen alle Nachbarn tiefer, ist die Grenze ohnehin 0) und vermeidet
+    // ein Division-durch-Null-Literal, das nicht jeder Treiber faltet.
+    float highest = heightValue;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 n = clamp(coord + ivec2(dx, dy), ivec2(0), ivec2(u_size - 1));
+            highest = max(highest, imageLoad(heightIn, n).r);
+        }
+    }
+    depositDelta = min(depositDelta, max(highest - heightValue, 0.0));
+
+    imageStore(heightOut, coord, vec4(heightValue - erosionDelta + depositDelta, 0.0, 0.0, 0.0));
+
+    vec2 accum = imageLoad(outputAccumIn, coord).rg;
+    imageStore(outputAccumOut, coord, vec4(accum.x + erosionDelta, accum.y + depositDelta, 0.0, 0.0));
+
+    imageStore(erosionAccumFixed, coord, ivec4(0));
+    imageStore(depositAccumFixed, coord, ivec4(0));
+}

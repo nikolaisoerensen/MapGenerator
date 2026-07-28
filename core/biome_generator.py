@@ -124,7 +124,7 @@ class BiomeClassificationSystem:
             self.super_biome_override_system = SuperBiomeOverrideSystem(
                 self.sea_level, self.bank_width, self.edge_softness,
                 self.alpine_level, self.snow_level, self.cliff_slope,
-                shader_manager=self.shader_manager)
+                shader_manager=self.shader_manager, data_lod_manager=self.data_lod_manager)
         if not self.supersampling_manager:
             self.supersampling_manager = SupersamplingManager(
                 self.biome_seed, self.supersampling_quality, shader_manager=self.shader_manager)
@@ -367,8 +367,11 @@ class BiomeClassificationSystem:
                 "weather.precipitation", lod_level, {"precip_map": input_data['precip_map']})
             self.data_lod_manager.set_calculator_output(
                 "water.soil_moisture", lod_level, {"soil_moist_map": input_data['soil_moist_map']})
+            # water.manning_flow (GEMALTE Klassifikation), nicht
+            # water.flow_network (Zentrallinie) - siehe
+            # core/water_generator.py._calc_manning_flow().
             self.data_lod_manager.set_calculator_output(
-                "water.flow_network", lod_level, {"water_biomes_map": input_data['water_biomes_map']})
+                "water.manning_flow", lod_level, {"water_biomes_map": input_data['water_biomes_map']})
 
             for calculator_id in (
                 "biome.base_classification", "biome.super_override", "biome.integrate_layers",
@@ -432,7 +435,7 @@ class BiomeClassificationSystem:
         _calc_*-Methode exakt deren echte CALCULATOR_GRAPH-Abhängigkeiten
         widerspiegeln - sonst würde z.B. biome.climate_classification (haengt
         laut Graph NUR von weather.temperature/weather.precipitation ab)
-        fälschlich auch auf water.soil_moisture/water.flow_network warten,
+        fälschlich auch auf water.soil_moisture/water.manning_flow warten,
         obwohl der Dispatcher diesen Knoten längst für bereit hält.
         """
         if needed is None:
@@ -446,8 +449,12 @@ class BiomeClassificationSystem:
                 "weather.precipitation", "precip_map", lod_level),
             "soil_moist_map": lambda: self.data_lod_manager.get_calculator_output(
                 "water.soil_moisture", "soil_moist_map", lod_level),
+            # GEMALTE Wasser-Klassifikation (water.manning_flow), nicht die ein
+            # Pixel breite Zentrallinie aus water.flow_network - Biome sollen
+            # den Fluss in seiner tatsaechlichen Breite sehen. Siehe
+            # core/water_generator.py._calc_manning_flow().
             "water_biomes_map": lambda: self.data_lod_manager.get_calculator_output(
-                "water.flow_network", "water_biomes_map", lod_level),
+                "water.manning_flow", "water_biomes_map", lod_level),
         }
 
         values = {key: fetchers[key]() for key in needed}
@@ -456,6 +463,62 @@ class BiomeClassificationSystem:
             raise ValueError(f"Biome: fehlende Dependencies für LOD {lod_level}: {', '.join(missing)}")
 
         return values
+
+    def _calc_preseed_hint(self, calculator_id: str, lod_level: int) -> None:
+        """
+        Calculator-Node 'biome.preseed_hint' - billiger Vorab-Biome-Schätzwert
+        NUR aus Slope (Süd-/Nordhang) + Breitengrad, OHNE jede Wetter-/Wasser-
+        Abhängigkeit (siehe calculator_graph.py: hängt nur von terrain.redistribution/
+        terrain.slope ab). Löst das Henne-Ei-Problem für water.soil_moisture in
+        der allerersten LOD-Runde (Biome-Preseed-Plan Punkt B) - ab der zweiten
+        LOD-Stufe nutzt water.soil_moisture stattdessen die ECHTE biome_map der
+        Vorstufe, dieser Knoten ist dann nur noch fürs allererste LOD relevant.
+        Bewusst grobe Regel-Heuristik statt Gauß-Fitness wie bei der echten
+        Klassifikation - dient nur als Kapazitäts-/Verdunstungs-Hinweis, nicht
+        als sichtbare Anzeige.
+        """
+        slopemap = self.data_lod_manager.get_calculator_output("terrain.slope", "slopemap", lod_level)
+        if slopemap is None:
+            raise ValueError(f"biome.preseed_hint: slopemap für LOD {lod_level} nicht verfügbar")
+
+        latitude = self.data_lod_manager.get_map_latitude()
+        height, width = slopemap.shape[:2]
+
+        # Nord/Süd-Hangausrichtung: dz/drow > 0 heißt bergauf Richtung Norden
+        # (Zeile height-1 = Norden, siehe core/terrain_generator.py.
+        # _calculate_cpu_slopes()s np.gradient-Konvention) = Südhang (trockener,
+        # mehr Sonne - siehe die in dieser Session umgesetzte Hangausrichtungs-
+        # Solar-Kopplung in weather_generator.py). south_facing in [-1,1]:
+        # +1 = voll Südhang, -1 = voll Nordhang, 0 = eben/Ost-West-Hang.
+        dz_dx = slopemap[:, :, 0]
+        dz_dy = slopemap[:, :, 1]
+        slope_magnitude = np.sqrt(dz_dx ** 2 + dz_dy ** 2)
+        south_facing = np.divide(dz_dy, slope_magnitude, out=np.zeros_like(dz_dy),
+                                  where=slope_magnitude > 1e-6)
+
+        # Feuchte-Score: negativ=trockener, positiv=feuchter - Südhang senkt
+        # den Score, Nordhang hebt ihn, stärker gewichtet je steiler der Hang.
+        moisture_score = -south_facing * np.clip(slope_magnitude, 0.0, 1.0) * 0.6
+
+        # Grobe Breitengrad-Basis-Zuordnung (Index in
+        # BaseBiomeClassifier.biome_definitions) - kein Gauß-Fit, reine
+        # Fallunterscheidung: Äquator-, gemäßigte und polare Zone, jeweils mit
+        # einem trockeneren/feuchteren Nachbar-Biom für den Hangausrichtungs-
+        # Ausschlag.
+        lat_norm = min(abs(latitude) / 90.0, 1.0)
+        if lat_norm < 0.35:
+            base_id, dry_id, wet_id = 9, 10, 8    # tropical_seasonal, savanna, tropical_rainforest
+        elif lat_norm < 0.7:
+            base_id, dry_id, wet_id = 3, 7, 4     # grassland, semi_arid, temperate_forest
+        else:
+            base_id, dry_id, wet_id = 1, 0, 2     # tundra, ice_cap, taiga
+
+        preseed_biome_map = np.full((height, width), base_id, dtype=np.uint8)
+        preseed_biome_map[moisture_score < -0.15] = dry_id
+        preseed_biome_map[moisture_score > 0.15] = wet_id
+
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"preseed_biome_map": preseed_biome_map})
 
     def _calc_base_classification(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'biome.base_classification' (#23) - Sibling zu super_override"""
@@ -648,9 +711,15 @@ class BiomeClassificationSystem:
         return self._create_climate_classification_cpu(temp_map, precip_map)
 
     def _create_climate_classification_cpu(self, temp_map, precip_map):
-        """CPU-Implementierung der Whittaker-Klimazone-Zuordnung"""
+        """CPU-Implementierung der Whittaker-Klimazone-Zuordnung.
+        Precip-Schwellen 2026-07-24 auf precip_maps aktuelle Größenordnung
+        herunterskaliert (Faktor 50/4000, siehe _rescale_precip_moisture_
+        ranges() - precip_map ist keine Jahresmenge mehr, ~50 ist der
+        typische Maximalwert, siehe PRECIP_ANNUAL_SCALE_FACTOR in
+        core/weather_generator.py)."""
         height, width = temp_map.shape
         climate_map = np.zeros((height, width), dtype=np.uint8)
+        precip_scale = 50.0 / 4000.0
 
         for y in range(height):
             for x in range(width):
@@ -661,14 +730,14 @@ class BiomeClassificationSystem:
                 if temp < -10:
                     climate_map[y, x] = 0  # Arctic
                 elif temp < 20:
-                    if precip < 200:
+                    if precip < 200 * precip_scale:
                         climate_map[y, x] = 4  # Arid
-                    elif precip < 1000:
+                    elif precip < 1000 * precip_scale:
                         climate_map[y, x] = 1  # Boreal/Temperate
                     else:
                         climate_map[y, x] = 2  # Temperate
                 else:
-                    if precip < 600:
+                    if precip < 600 * precip_scale:
                         climate_map[y, x] = 4  # Arid
                     else:
                         climate_map[y, x] = 3  # Tropical
@@ -856,45 +925,63 @@ class BaseBiomeClassifier:
         # Jahres-mm (0-4000) bzw. einer Jahres-Feuchte-Skala (0-1500) - siehe
         # _rescale_precip_moisture_ranges() für die tatsächlich verwendeten,
         # auf dieses Projekt skalierten Werte.
+        # moisture_capacity (0-100, gleiche Skala wie soil_moist_map): oberes
+        # Limit, das die Bodenfeuchte für dieses Biom nie überschreitet (siehe
+        # WaterSystemGenerator._calc_soil_moisture() - Biome-Preseed-Plan).
+        # evaporation_factor (1.0=neutral): wie schnell dieses Biom bei Wärme
+        # austrocknet, skaliert den Trocknungs-Term dort. Grobe Startwerte,
+        # tendenziell (aber nicht streng) invers zueinander kalibriert - wer
+        # wenig Wasser halten kann, verdunstet meist auch schneller,
+        # empirisch nachjustierbar.
         self.biome_definitions = {
-            0: {'name': 'ice_cap', 'temp': (-40, -5), 'precip': (0, 300), 'elevation': (0, 8000), 'moisture': (0, 200)},
-            1: {'name': 'tundra', 'temp': (-15, 5), 'precip': (100, 600), 'elevation': (0, 2000), 'moisture': (100, 400)},
-            2: {'name': 'taiga', 'temp': (-10, 15), 'precip': (300, 1200), 'elevation': (50, 2500), 'moisture': (300, 800)},
-            3: {'name': 'grassland', 'temp': (0, 25), 'precip': (200, 800), 'elevation': (10, 1500), 'moisture': (200, 600)},
-            4: {'name': 'temperate_forest', 'temp': (5, 25), 'precip': (600, 2000), 'elevation': (0, 2000), 'moisture': (400, 1000)},
-            5: {'name': 'mediterranean', 'temp': (8, 30), 'precip': (300, 900), 'elevation': (0, 1200), 'moisture': (200, 600)},
-            6: {'name': 'desert', 'temp': (10, 50), 'precip': (0, 250), 'elevation': (0, 2000), 'moisture': (0, 100)},
-            7: {'name': 'semi_arid', 'temp': (5, 35), 'precip': (200, 600), 'elevation': (0, 1800), 'moisture': (100, 400)},
-            8: {'name': 'tropical_rainforest', 'temp': (20, 35), 'precip': (1500, 4000), 'elevation': (0, 1500), 'moisture': (800, 1500)},
-            9: {'name': 'tropical_seasonal', 'temp': (18, 35), 'precip': (800, 2000), 'elevation': (0, 1200), 'moisture': (400, 1000)},
-            10: {'name': 'savanna', 'temp': (15, 35), 'precip': (400, 1200), 'elevation': (0, 1800), 'moisture': (200, 600)},
-            11: {'name': 'montane_forest', 'temp': (0, 20), 'precip': (800, 3000), 'elevation': (800, 3500), 'moisture': (600, 1200)},
-            12: {'name': 'swamp', 'temp': (5, 35), 'precip': (800, 3000), 'elevation': (0, 200), 'moisture': (800, 1500)},
-            13: {'name': 'coastal_dunes', 'temp': (5, 35), 'precip': (300, 1500), 'elevation': (0, 100), 'moisture': (200, 800)},
-            14: {'name': 'badlands', 'temp': (-5, 45), 'precip': (0, 400), 'elevation': (200, 2500), 'moisture': (0, 200)}
+            0: {'name': 'ice_cap', 'temp': (-40, -5), 'precip': (0, 300), 'elevation': (0, 8000), 'moisture': (0, 200),
+                'moisture_capacity': 40.0, 'evaporation_factor': 0.2},
+            1: {'name': 'tundra', 'temp': (-15, 5), 'precip': (100, 600), 'elevation': (0, 2000), 'moisture': (100, 400),
+                'moisture_capacity': 45.0, 'evaporation_factor': 0.5},
+            2: {'name': 'taiga', 'temp': (-10, 15), 'precip': (300, 1200), 'elevation': (50, 2500), 'moisture': (300, 800),
+                'moisture_capacity': 60.0, 'evaporation_factor': 0.6},
+            3: {'name': 'grassland', 'temp': (0, 25), 'precip': (200, 800), 'elevation': (10, 1500), 'moisture': (200, 600),
+                'moisture_capacity': 55.0, 'evaporation_factor': 1.0},
+            4: {'name': 'temperate_forest', 'temp': (5, 25), 'precip': (600, 2000), 'elevation': (0, 2000), 'moisture': (400, 1000),
+                'moisture_capacity': 75.0, 'evaporation_factor': 0.6},
+            5: {'name': 'mediterranean', 'temp': (8, 30), 'precip': (300, 900), 'elevation': (0, 1200), 'moisture': (200, 600),
+                'moisture_capacity': 40.0, 'evaporation_factor': 1.3},
+            6: {'name': 'desert', 'temp': (10, 50), 'precip': (0, 250), 'elevation': (0, 2000), 'moisture': (0, 100),
+                'moisture_capacity': 20.0, 'evaporation_factor': 1.8},
+            7: {'name': 'semi_arid', 'temp': (5, 35), 'precip': (200, 600), 'elevation': (0, 1800), 'moisture': (100, 400),
+                'moisture_capacity': 30.0, 'evaporation_factor': 1.4},
+            8: {'name': 'tropical_rainforest', 'temp': (20, 35), 'precip': (1500, 4000), 'elevation': (0, 1500), 'moisture': (800, 1500),
+                'moisture_capacity': 95.0, 'evaporation_factor': 0.5},
+            9: {'name': 'tropical_seasonal', 'temp': (18, 35), 'precip': (800, 2000), 'elevation': (0, 1200), 'moisture': (400, 1000),
+                'moisture_capacity': 70.0, 'evaporation_factor': 0.8},
+            10: {'name': 'savanna', 'temp': (15, 35), 'precip': (400, 1200), 'elevation': (0, 1800), 'moisture': (200, 600),
+                 'moisture_capacity': 50.0, 'evaporation_factor': 1.1},
+            11: {'name': 'montane_forest', 'temp': (0, 20), 'precip': (800, 3000), 'elevation': (800, 3500), 'moisture': (600, 1200),
+                 'moisture_capacity': 70.0, 'evaporation_factor': 0.6},
+            12: {'name': 'swamp', 'temp': (5, 35), 'precip': (800, 3000), 'elevation': (0, 200), 'moisture': (800, 1500),
+                 'moisture_capacity': 100.0, 'evaporation_factor': 0.3},
+            13: {'name': 'coastal_dunes', 'temp': (5, 35), 'precip': (300, 1500), 'elevation': (0, 100), 'moisture': (200, 800),
+                 'moisture_capacity': 35.0, 'evaporation_factor': 1.3},
+            14: {'name': 'badlands', 'temp': (-5, 45), 'precip': (0, 400), 'elevation': (200, 2500), 'moisture': (0, 200),
+                 'moisture_capacity': 15.0, 'evaporation_factor': 1.7}
         }
         self._rescale_precip_moisture_ranges()
 
     def _rescale_precip_moisture_ranges(self):
         """
-        Skaliert 'precip'- und 'moisture'-Bereiche von klassischen Jahres-Whittaker-
-        Werten auf die tatsächliche Größenordnung von precip_map/soil_moist_map in
-        diesem Projekt herunter.
+        Skaliert 'precip'- und 'moisture'-Bereiche von den klassischen
+        Jahres-Whittaker-Werten auf die tatsächliche Größenordnung von
+        precip_map/soil_moist_map in diesem Projekt herunter.
 
-        precip_map (core/weather_generator.py) ist eine einzelne Tages-Momentaufnahme
-        in gH2O/m² (kein Jahres-Niederschlag) und erreicht empirisch selbst bei
-        extremen Wetter-Parametern (hohe Temperatur/Wind/Terrain-Faktoren) nur
-        Werte bis ~50 (Default-Parameter: ~0-3) - nie annähernd die klassischen
-        0-4000mm/Jahr. soil_moist_map (core/water_generator.py) ist hart auf 0-100
-        (Prozent) begrenzt, nie die klassischen 0-1500. Ohne diese Reskalierung lag
-        JEDER real erreichbare precip_map/soil_moist_map-Wert weit unterhalb des
-        Minimums fast aller Biome-Bereiche (nur die trockensten Biome wie Desert/
-        Badlands/Ice-Cap haben ein Minimum nahe 0) - die Gauß-Fitness dieser Achsen
-        wurde dadurch für praktisch jedes feuchtere Biom systematisch mit dem
-        "outside_range"-Faktor 0.1 bestraft, unabhängig von der tatsächlichen
-        Feuchte vor Ort. Precipitation-Skala 4000->50 (Faktor 80), Moisture-Skala
-        1500->100 (Faktor 15) - beide behalten die relative Whittaker-Struktur
-        zwischen den 15 Biomen bei, nur die absolute Größenordnung ändert sich.
+        Revision 2026-07-24 (nach Nutzer-Korrektur der Kalibrierung vom
+        2026-07-23): precip_map ist KEIN Jahreswert mehr, sondern eine
+        Akkumulation über eine simulierte saisonale Periode, kalibriert auf
+        ~50mm als typischen Maximalwert (PRECIP_ANNUAL_SCALE_FACTOR=0.5 in
+        core/weather_generator.py, seltene Ausreißer erlaubt) - die
+        precip-Bereiche unten müssen deshalb WIEDER (wie vor der
+        Zwischenrevision) auf diese kleine Größenordnung herunterskaliert
+        werden, sonst läge jeder real erreichbare precip_map-Wert weit
+        unterhalb des Minimums fast aller Biome-Bereiche.
         """
         precip_scale = 50.0 / 4000.0
         moisture_scale = 100.0 / 1500.0
@@ -965,7 +1052,7 @@ class SuperBiomeOverrideSystem:
 
     def __init__(self, sea_level=10.0, bank_width=3.0, edge_softness=1.0,
                  alpine_level=1500.0, snow_level=2000.0, cliff_slope=60.0,
-                 shader_manager=None):
+                 shader_manager=None, data_lod_manager=None):
         """
         Initialisiert Super-Biome-Override-System mit Unified-Edge-Softness-Control
         """
@@ -976,6 +1063,10 @@ class SuperBiomeOverrideSystem:
         self.snow_level = snow_level
         self.cliff_slope = cliff_slope
         self.shader_manager = shader_manager
+        # Für _calculate_cliff_probabilities()'s live map_distance_km-Wert
+        # (siehe [[project-terrain-review]] 4f) - optional, da diese Klasse
+        # auch standalone/in Tests ohne echten Manager instanziiert wird.
+        self.data_lod_manager = data_lod_manager
 
         # Super-Biome-Offset (nach 15 Base-Biomes)
         self.super_biome_offset = 15
@@ -1095,11 +1186,17 @@ class SuperBiomeOverrideSystem:
         """
         # Gradient berechnen - ohne spacing rechnet np.gradient() mit 1 Pixel = 1m
         # Horizontal-Abstand, obwohl ein Pixel real ~50-300m abdeckt (siehe
-        # TERRAIN.WORLD_SIZE_KM und core/terrain_generator.py SlopeCalculator für
-        # denselben Bug an anderer Stelle) - das ließ praktisch die gesamte Karte
-        # als Steilhang (>80°) erscheinen, unabhängig vom cliff_slope-Parameter.
-        from gui.config.value_default import TERRAIN
-        spacing = (TERRAIN.WORLD_SIZE_KM * 1000.0) / heightmap.shape[0]
+        # core/terrain_generator.py SlopeCalculator für denselben Bug an anderer
+        # Stelle) - das ließ praktisch die gesamte Karte als Steilhang (>80°)
+        # erscheinen, unabhängig vom cliff_slope-Parameter. map_distance_km kommt
+        # live von Terrains "Map Distance"-Slider statt der vorherigen statischen
+        # TERRAIN.WORLD_SIZE_KM-Konstante (siehe [[project-terrain-review]] 4f).
+        if self.data_lod_manager is not None:
+            map_distance_km = self.data_lod_manager.get_map_distance_km()
+        else:
+            from gui.config.value_default import TERRAIN
+            map_distance_km = TERRAIN.WORLD_SIZE_KM
+        spacing = (map_distance_km * 1000.0) / heightmap.shape[0]
         grad_y, grad_x = np.gradient(heightmap, spacing)
         slope_magnitude = np.sqrt(grad_x**2 + grad_y**2)
         slope_degrees = np.degrees(np.arctan(slope_magnitude))

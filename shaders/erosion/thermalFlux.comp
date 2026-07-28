@@ -1,0 +1,73 @@
+#version 430
+// Pass 6a des Feld-Erosionsmodells: Boeschungswinkel-Erosion, Ausfluss je Zelle.
+//
+// Formelgleich zum ersten Teil von core/erosion_generator.py
+// HydraulicFieldSimulator._pass_thermal(). In zwei Passes getrennt (Ausfluss
+// berechnen, dann anwenden), weil das Anwenden den Ausfluss ALLER Nachbarn
+// braucht - dieselbe Trennung wie shaders/water/thermalErosionFlux.comp +
+// thermalErosionApply.comp.
+//
+// Zwei umschaltbare Verfahren, siehe u_variant:
+//   0 = Gather - das in diesem Projekt gewachsene Verfahren
+//       (ThermalErosionSystem): relief-relativer Deckel pro Schritt,
+//       massenexakt.
+//   1 = Flux - die Variante des Vorbilds: Deckel ist die verfuegbare Hoehe
+//       ueber dem tiefsten Nachbarn.
+// Beide teilen sich denselben haerteabhaengigen Boeschungswinkel aus
+// tanReposeMap, damit der Vergleich wirklich die VERFAHREN zeigt und nicht
+// unterschiedliche Winkel.
+//
+// Kartenrand = GESCHLOSSENE Grenze (anders als beim Wasser): Geisterzelle hat
+// dieselbe Hoehe wie die Randzelle, also kein Gefaelle. Material soll nicht
+// von der Karte rutschen.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D heightIn;
+layout(r32f, binding = 1) uniform readonly image2D tanReposeMap;
+layout(rgba32f, binding = 2) uniform writeonly image2D outflowOut;
+
+uniform int u_size;
+uniform float u_pipe_length;
+uniform float u_transfer_rate;      // ThermalErosionSystem.TRANSFER_RATE
+uniform float u_thermal_strength;
+uniform float u_gather_cap;         // relief-relativer Deckel (Variante 0)
+uniform int u_variant;              // 0 = Gather, 1 = Flux
+
+float heightAt(ivec2 coord) {
+    return imageLoad(heightIn, clamp(coord, ivec2(0), ivec2(u_size - 1))).r;
+}
+
+float tanReposeAt(ivec2 coord) {
+    return imageLoad(tanReposeMap, clamp(coord, ivec2(0), ivec2(u_size - 1))).r;
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float height = heightAt(coord);
+    float tanHere = tanReposeAt(coord);
+
+    ivec2 offsets[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+    float raw[4];
+    float totalRaw = 0.0;
+    float lowestNeighbour = height;
+
+    for (int i = 0; i < 4; i++) {
+        ivec2 neighbour = coord + offsets[i];
+        float neighbourHeight = heightAt(neighbour);
+        // Der Schwellwert ist die Zellbreite mal dem MITTLEREN Tangens beider
+        // Zellen - eine geometrisch exakte Beziehung, die genau deshalb auf
+        // Map Distance reagiert (siehe den Hinweis zur MapDistance-
+        // Abhaengigkeit im ThermalErosionSystem-Docstring).
+        float threshold = u_pipe_length * 0.5 * (tanHere + tanReposeAt(neighbour));
+        raw[i] = max(0.0, (height - neighbourHeight) - threshold) * u_transfer_rate * u_thermal_strength;
+        totalRaw += raw[i];
+        lowestNeighbour = min(lowestNeighbour, neighbourHeight);
+    }
+
+    float cap = (u_variant == 1) ? max(0.0, height - lowestNeighbour) : u_gather_cap;
+    float k = min(1.0, cap / max(totalRaw, 1e-12));
+
+    imageStore(outflowOut, coord, vec4(raw[0], raw[1], raw[2], raw[3]) * k);
+}

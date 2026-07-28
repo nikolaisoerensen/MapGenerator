@@ -253,6 +253,8 @@ class MapGeneratorErrorHandler:
         # Generator-spezifische Kontextinformationen
         if generator_type == "terrain":
             error_msg += self._get_terrain_context(kwargs)
+        elif generator_type == "erosion":
+            error_msg += self._get_erosion_context(kwargs)
         elif generator_type == "water":
             error_msg += self._get_water_context(kwargs)
         elif generator_type == "settlement":
@@ -536,6 +538,24 @@ class MapGeneratorErrorHandler:
             context += f"\nMap Size: {kwargs['map_size']}"
         if "amplitude" in kwargs:
             context += f"\nAmplitude: {kwargs['amplitude']}"
+        return context
+
+    def _get_erosion_context(self, kwargs: dict) -> str:
+        """
+        Erosion-spezifische Kontextinformationen.
+
+        Bewusst die drei Groessen, die einen Erosions-Fehlschlag erklaeren: die
+        Simulationsaufloesung (sie entscheidet, ob der GPU-Pfad gebraucht wird -
+        siehe HydraulicFieldSimulator.MAX_CPU_RESOLUTION) und die beiden Regler,
+        mit denen sich ein Lauf am ehesten in eine unbrauchbare Groessenordnung
+        treiben laesst.
+        """
+        context = ""
+        for key, label in (("simulation_resolution", "Simulation Resolution"),
+                           ("max_steps", "Max Steps"),
+                           ("erosion_strength", "Erosion Strength")):
+            if key in kwargs:
+                context += f"\n{label}: {kwargs[key]}"
         return context
 
     def _get_water_context(self, kwargs: dict) -> str:

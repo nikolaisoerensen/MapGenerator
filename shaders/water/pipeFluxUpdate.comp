@@ -1,0 +1,64 @@
+#version 430
+// Pass 1 des virtuellen-Rohre-Hydraulikmodells (Mei/Decaudin/Lefebvre 2007,
+// siehe core/water_generator.py PipeFlowSimulator fuer die volle Herleitung/
+// identische Formeln). Braucht Nachbarn AKTUELLE Tiefe (depthIn) - Pass 2
+// (pipeDepthUpdate.comp) braucht dagegen den GERADE hier berechneten Fluss,
+// kann daher nicht mit diesem Pass fusioniert werden.
+//
+// Kartenrand = offene Grenze: Geisterzelle mit derselben Gelaendehoehe wie
+// die Randzelle selbst, aber Wassertiefe 0 (surfaceAt() unten) - Wasser am
+// Kartenrand entwaessert dadurch mit einem Gefaelle, das exakt der eigenen
+// Wassertiefe entspricht, kein Sonderfall noetig.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D heightMap;
+layout(r32f, binding = 1) uniform readonly image2D depthIn;
+layout(r32f, binding = 2) uniform readonly image2D rainMap;
+layout(rgba32f, binding = 3) uniform readonly image2D fluxIn;
+layout(rgba32f, binding = 4) uniform writeonly image2D fluxOut;
+
+uniform int u_size;
+uniform float u_dt;
+uniform float u_pipe_area;
+uniform float u_gravity;
+uniform float u_pipe_length;
+
+float surfaceAt(ivec2 coord) {
+    ivec2 clamped = clamp(coord, ivec2(0), ivec2(u_size - 1));
+    float b = imageLoad(heightMap, clamped).r;
+    bool outside = coord.x < 0 || coord.x >= u_size || coord.y < 0 || coord.y >= u_size;
+    if (outside) {
+        return b;
+    }
+    float d1 = imageLoad(depthIn, clamped).r + imageLoad(rainMap, clamped).r;
+    return b + d1;
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float surface = surfaceAt(coord);
+    float surfaceL = surfaceAt(coord + ivec2(-1, 0));
+    float surfaceR = surfaceAt(coord + ivec2(1, 0));
+    float surfaceT = surfaceAt(coord + ivec2(0, -1));
+    float surfaceB = surfaceAt(coord + ivec2(0, 1));
+
+    vec4 fPrev = imageLoad(fluxIn, coord);
+    float accel = u_dt * u_pipe_area * u_gravity / u_pipe_length;
+
+    float fL = max(0.0, fPrev.x + accel * (surface - surfaceL));
+    float fR = max(0.0, fPrev.y + accel * (surface - surfaceR));
+    float fT = max(0.0, fPrev.z + accel * (surface - surfaceT));
+    float fB = max(0.0, fPrev.w + accel * (surface - surfaceB));
+
+    // Massenerhaltungs-Skalierung K, JEDEN Schritt neu berechnet - eine
+    // Zelle kann nie mehr Wasser abgeben als sie hat (macht das System
+    // unconditionally stable, kein CFL-Zeitschritt-Check noetig).
+    float d1 = imageLoad(depthIn, coord).r + imageLoad(rainMap, coord).r;
+    float cellArea = u_pipe_length * u_pipe_length;
+    float totalOut = fL + fR + fT + fB;
+    float k = min(1.0, (d1 * cellArea) / max(u_dt * totalOut, 1e-12));
+
+    imageStore(fluxOut, coord, vec4(fL * k, fR * k, fT * k, fB * k));
+}

@@ -28,7 +28,8 @@ Architecture:
 # TODO: Exit aus Map Editor vorher Signal jetzt direkt: was ist besser? Ich habe schließlich laufende Berechnungen.
 
 from PyQt6.QtWidgets import QMainWindow, QApplication, QTabWidget, QTabBar, QStackedWidget, QMenu, QLabel, \
-    QComboBox, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QFileDialog, QSplitter
+    QComboBox, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QFileDialog, QSplitter, \
+    QRadioButton, QButtonGroup
 from PyQt6.QtGui import QAction
 from PyQt6.QtCore import QTimer, Qt, pyqtSlot
 import logging
@@ -36,8 +37,9 @@ from typing import Optional
 
 from gui.config.gui_default import WindowSettings, EditorConstants
 from gui.OldManagers.data_lod_manager import DataLODManager
-from gui.OldManagers.generation_orchestrator import GenerationOrchestrator
+from gui.OldManagers.generation_orchestrator import GenerationOrchestrator, GeneratorType
 from gui.OldManagers.navigation_manager import NavigationManager
+from gui.widgets.widgets import ParameterSlider
 from gui.OldManagers.parameter_manager import ParameterManager
 from gui.OldManagers.shader_manager import ShaderManager
 from gui.widgets.widgets import BaseButton, StatusIndicator, ProgressBar
@@ -91,6 +93,7 @@ def _import_tab_safely(module_path: str, class_name: str) -> tuple[bool, Optiona
 # Import available tabs
 TERRAIN_AVAILABLE, TerrainTab, terrain_error = _import_tab_safely("gui.tabs.terrain_tab", "TerrainTab")
 GEOLOGY_AVAILABLE, GeologyTab, geology_error = _import_tab_safely("gui.tabs.geology_tab", "GeologyTab")
+EROSION_AVAILABLE, ErosionTab, erosion_error = _import_tab_safely("gui.tabs.erosion_tab", "ErosionTab")
 WEATHER_AVAILABLE, WeatherTab, weather_error = _import_tab_safely("gui.tabs.weather_tab", "WeatherTab")
 WATER_AVAILABLE, WaterTab, water_error = _import_tab_safely("gui.tabs.water_tab", "WaterTab")
 BIOME_AVAILABLE, BiomeTab, biome_error = _import_tab_safely("gui.tabs.biome_tab", "BiomeTab")
@@ -250,21 +253,61 @@ class MapEditorWindow(QMainWindow):
         self.pipeline_status_panel.setMaximumWidth(190)
 
         # Spalte 2 (flexibel): Viewport der Tabs, per BaseMapTab.viewport_widget befüllt,
-        # darunter die zwei permanenten globalen Checkboxen (Contour Lines/Shadows),
-        # die unabhängig vom Haupt-Tab immer sichtbar sind.
+        # darunter die permanente globale Checkbox-Zeile (Contour Lines), die
+        # unabhängig vom Haupt-Tab immer sichtbar ist, plus die Geology-Cross-
+        # Section-Regler (nur sichtbar, wenn der Geology-Tab aktiv ist - siehe
+        # _on_tab_changed()). Die frühere "Shadows (Shading)"-Checkbox wurde
+        # auf Nutzer-Wunsch entfernt (UI-Aufräumung Teil 2) - shadows_enabled
+        # bleibt in MapDisplay3D dauerhaft bei seinem Default True.
         self.viewport_stack = QStackedWidget()
 
         self.contour_checkbox = QCheckBox("Contour Lines (Höhenlinien)")
-        self.shadow_checkbox = QCheckBox("Shadows (Shading)")
+        # Nutzer-Vorgabe 2026-07-24: Default AN (vorher unchecked) - gilt nur
+        # für den Start-Zustand, kein automatisches Wiederanschalten, falls
+        # der Nutzer es manuell ausschaltet (reiner Default-Wert, keine
+        # erzwungene Rückstellung an anderer Stelle).
+        self.contour_checkbox.setChecked(True)
         self.contour_checkbox.toggled.connect(self._on_global_contour_toggled)
-        self.shadow_checkbox.toggled.connect(self._on_global_shadow_toggled)
+
+        # Cross-Section-Regler (Achse + Position) - nur für den Geology-Tab
+        # relevant, direkt neben Contour Lines platziert (Nutzer-Vorgabe:
+        # "unterhalb der Hauptgrafik, direkt neben die Option Contour Lines").
+        self.cross_section_x_radio = QRadioButton("Cut along X")
+        self.cross_section_x_radio.setChecked(True)
+        self.cross_section_y_radio = QRadioButton("Cut along Y")
+        self.cross_section_axis_group = QButtonGroup(self)
+        self.cross_section_axis_group.addButton(self.cross_section_x_radio, 0)
+        self.cross_section_axis_group.addButton(self.cross_section_y_radio, 1)
+        self.cross_section_x_radio.toggled.connect(
+            lambda checked: self._on_global_cross_section_axis_changed("x", checked))
+        self.cross_section_y_radio.toggled.connect(
+            lambda checked: self._on_global_cross_section_axis_changed("y", checked))
+
+        self.cross_section_position_slider = ParameterSlider(
+            label="Cross-Section Position", min_val=0.0, max_val=1.0, default_val=0.5, step=0.01,
+            description="Position des geologischen Schnitts entlang der jeweils "
+                         "anderen Achse (0=Rand, 1=gegenüberliegender Rand)."
+        )
+        self.cross_section_position_slider.valueChanged.connect(self._on_global_cross_section_position_changed)
+
+        self.cross_section_widgets = [
+            self.cross_section_x_radio, self.cross_section_y_radio, self.cross_section_position_slider,
+        ]
 
         global_overlay_row = QWidget()
         global_overlay_layout = QHBoxLayout(global_overlay_row)
         global_overlay_layout.setContentsMargins(10, 4, 10, 4)
         global_overlay_layout.addWidget(self.contour_checkbox)
-        global_overlay_layout.addWidget(self.shadow_checkbox)
+        global_overlay_layout.addWidget(self.cross_section_x_radio)
+        global_overlay_layout.addWidget(self.cross_section_y_radio)
+        global_overlay_layout.addWidget(self.cross_section_position_slider)
         global_overlay_layout.addStretch()
+
+        # Standardmäßig ausgeblendet, bis der Geology-Tab aktiv wird (siehe
+        # _on_tab_changed()) - beim allerersten Tab (Terrain) ist noch kein
+        # currentChanged-Signal gefeuert worden.
+        for widget in self.cross_section_widgets:
+            widget.setVisible(False)
 
         self.center_widget = QWidget()
         center_layout = QVBoxLayout(self.center_widget)
@@ -559,6 +602,9 @@ class MapEditorWindow(QMainWindow):
         tab_configs = [
             ("Terrain", TerrainTab, TERRAIN_AVAILABLE, terrain_error),
             ("Geology", GeologyTab, GEOLOGY_AVAILABLE, geology_error),
+            # Erosion zwischen Geology und Weather - die Tab-Reihenfolge
+            # entspricht der Pipeline-Reihenfolge (siehe CALCULATOR_GRAPH).
+            ("Erosion", ErosionTab, EROSION_AVAILABLE, erosion_error),
             ("Weather", WeatherTab, WEATHER_AVAILABLE, weather_error),
             ("Water", WaterTab, WATER_AVAILABLE, water_error),
             ("Biome", BiomeTab, BIOME_AVAILABLE, biome_error),
@@ -859,9 +905,12 @@ class MapEditorWindow(QMainWindow):
 
             tab_instance = self.tabs.get(tab_name_lower)
 
-            # Globale Contour/Shadow-Checkboxen gelten tab-übergreifend - beim
-            # Wechsel auf den neu aktiven Tab anwenden, damit dessen Display
-            # den aktuellen globalen Zustand übernimmt.
+            self._update_cross_section_visibility(tab_name_lower)
+
+            # Globale Contour-Checkbox/Cross-Section-Regler gelten tab-
+            # übergreifend deklariert - beim Wechsel auf den neu aktiven Tab
+            # anwenden, damit dessen Display den aktuellen globalen Zustand
+            # übernimmt.
             self._apply_global_overlays_to_active_tab()
 
             # Globale 2D/3D-Präferenz auf den neu aktiven Tab anwenden, falls er
@@ -874,8 +923,19 @@ class MapEditorWindow(QMainWindow):
             # Ohne das bleibt der Viewport leer, bis der Nutzer den Modus manuell
             # umschaltet - der Default-Radio (z.B. "Height") feuert beim Erstellen
             # kein toggled-Signal, weil setChecked(True) vor dem connect() passiert.
+            # Per QTimer.singleShot(0, ...) statt synchron aufgerufen (Nutzer-
+            # Beobachtung: im 3D-Modus zeigt ein Tab-Wechsel weiterhin die alten
+            # Daten, bis man zusätzlich manuell ein Anzeige-Radio anklickt) -
+            # setCurrentIndex()/switch_view() direkt darüber ändern den sichtbaren
+            # Widget-Stack bzw. bauen ggf. den 3D-Viewport neu auf; ein SOFORT im
+            # selben Slot-Durchlauf folgender update_heightmap()/makeCurrent()-
+            # Aufruf kann auf einem OpenGL-Widget landen, dessen Sichtbarkeits-/
+            # Kontext-Wechsel durch Qt noch nicht vollständig verarbeitet wurde.
+            # Ein Event-Loop-Tick Verzögerung (0ms) reicht, damit das zuverlässig
+            # nach dem tatsächlichen Umschalten läuft - gleiches Muster wie
+            # QTimer.singleShot(0, self._auto_start_generation) oben.
             if tab_instance and hasattr(tab_instance, 'update_display_mode'):
-                tab_instance.update_display_mode()
+                QTimer.singleShot(0, tab_instance.update_display_mode)
 
             self.logger.debug(f"Tab changed to: {tab_text}")
 
@@ -888,6 +948,35 @@ class MapEditorWindow(QMainWindow):
         wendet global_view_mode dann auf den jeweils neu aktivierten Tab an.
         """
         self.global_view_mode = view_type
+        index = self.main_tab_bar.currentIndex()
+        if 0 <= index < len(self.tab_order):
+            self._update_cross_section_visibility(self.tab_order[index])
+
+    def _update_cross_section_visibility(self, tab_name_lower: str):
+        """
+        Cross-Section-Regler (Shell-Zeile Achse/Position + Geology-Tabs
+        eigenes "Cross-Section"-Radio) sind nur im 2D-Modus des Geology-Tabs
+        sinnvoll - ein Schnitt lässt sich im 3D-Modus nicht darstellen (Nutzer-
+        Vorgabe). Deckt sowohl Tab-Wechsel (_on_tab_changed) als auch
+        manuelles 2D/3D-Umschalten innerhalb des bereits aktiven Geology-Tabs
+        (_on_tab_view_switched) ab.
+        """
+        is_geology = tab_name_lower == "geology"
+        visible = is_geology and self.global_view_mode == "2d"
+        for widget in self.cross_section_widgets:
+            widget.setVisible(visible)
+
+        geology_tab = self.tabs.get("geology")
+        if geology_tab and hasattr(geology_tab, "cross_section_mode_radio"):
+            geology_tab.cross_section_mode_radio.setVisible(visible)
+            # Cross-Section kann im 3D-Modus nicht dargestellt werden - beim
+            # Wechsel dorthin automatisch auf "Height" zurückfallen, statt
+            # eine tote Auswahl (Radio unsichtbar, aber weiterhin aktiv) zu
+            # hinterlassen.
+            if not visible and getattr(geology_tab, "current_display_mode", None) == "cross_section":
+                height_button = geology_tab.display_mode_group.button(0)
+                if height_button:
+                    height_button.setChecked(True)
 
     def _get_active_tab_instance(self):
         """Liefert die BaseMapTab-Instanz des aktuell im main_tab_bar aktiven Tabs."""
@@ -897,14 +986,16 @@ class MapEditorWindow(QMainWindow):
         return None
 
     def _apply_global_overlays_to_active_tab(self):
-        """Wendet den aktuellen Zustand der globalen Checkboxen auf den aktiven Tab an."""
+        """Wendet den aktuellen Zustand der globalen Checkboxen/Regler auf den aktiven Tab an."""
         tab_instance = self._get_active_tab_instance()
         if not tab_instance:
             return
         if hasattr(tab_instance, 'set_contour_overlay'):
             tab_instance.set_contour_overlay(self.contour_checkbox.isChecked())
-        if hasattr(tab_instance, 'set_shadow_overlay'):
-            tab_instance.set_shadow_overlay(self.shadow_checkbox.isChecked())
+        if hasattr(tab_instance, 'set_cross_section_axis'):
+            tab_instance.set_cross_section_axis("x" if self.cross_section_x_radio.isChecked() else "y")
+        if hasattr(tab_instance, 'set_cross_section_position'):
+            tab_instance.set_cross_section_position(self.cross_section_position_slider.getValue())
 
     @pyqtSlot(bool)
     def _on_global_contour_toggled(self, checked: bool):
@@ -913,12 +1004,22 @@ class MapEditorWindow(QMainWindow):
         if tab_instance and hasattr(tab_instance, 'set_contour_overlay'):
             tab_instance.set_contour_overlay(checked)
 
-    @pyqtSlot(bool)
-    def _on_global_shadow_toggled(self, checked: bool):
-        """Globales Shadows-Toggle (Spalte 2) - wirkt auf den aktiven Tab."""
+    def _on_global_cross_section_axis_changed(self, axis: str, checked: bool):
+        """Cross-Section-Achsen-Radio (Spalte 2, nur bei aktivem Geology-Tab
+        sichtbar) - wirkt auf den aktiven Tab (immer Geology, siehe
+        _on_tab_changed())."""
+        if not checked:
+            return
         tab_instance = self._get_active_tab_instance()
-        if tab_instance and hasattr(tab_instance, 'set_shadow_overlay'):
-            tab_instance.set_shadow_overlay(checked)
+        if tab_instance and hasattr(tab_instance, 'set_cross_section_axis'):
+            tab_instance.set_cross_section_axis(axis)
+
+    def _on_global_cross_section_position_changed(self, value: float):
+        """Cross-Section-Positions-Slider (Spalte 2, nur bei aktivem Geology-
+        Tab sichtbar) - wirkt auf den aktiven Tab."""
+        tab_instance = self._get_active_tab_instance()
+        if tab_instance and hasattr(tab_instance, 'set_cross_section_position'):
+            tab_instance.set_cross_section_position(value)
 
     @pyqtSlot(str, str)
     def _on_navigation_requested(self, from_tab: str, to_tab: str):
@@ -1086,9 +1187,12 @@ class MapEditorWindow(QMainWindow):
 
         if reply == QMessageBox.StandardButton.Yes:
             try:
-                # Clear data manager
-                if self.data_lod_manager:
-                    self.data_lod_manager.clear_all_data()
+                # Clear data + Orchestrator-LOD-Fortschritt fuer einen echten
+                # Neustart (siehe _clear_and_reset_all_generators()-Docstring -
+                # bisher fehlte hier reset_lod_status(), wodurch die naechste
+                # Generierung mit unveraenderten Parametern faelschlich auf
+                # dem ALTEN, eigentlich geloeschten LOD-Stand aufbaute).
+                self._clear_and_reset_all_generators()
 
                 # Reset all tabs
                 for tab_name, tab_instance in self.tabs.items():
@@ -1176,9 +1280,9 @@ class MapEditorWindow(QMainWindow):
 
     def _return_to_main_menu(self):
         try:
-            # Clear data manager
-            if self.data_lod_manager:
-                self.data_lod_manager.clear_all_data()
+            # Clear data + Orchestrator-LOD-Fortschritt (siehe
+            # _clear_and_reset_all_generators()-Docstring).
+            self._clear_and_reset_all_generators()
 
             # Reset all tabs
             for tab_name, tab_instance in self.tabs.items():
@@ -1224,7 +1328,17 @@ class MapEditorWindow(QMainWindow):
         if not self.generation_orchestrator:
             return
 
-        for generator_type in ("terrain", "geology", "weather", "water", "biome", "settlement"):
+        # Liste AUS GeneratorType abgeleitet, nicht fest verdrahtet.
+        #
+        # Sie war es bis 2026-07-28, und der neue Erosion-Generator fehlte
+        # darin. Folge: erosion.hydraulic blieb auf Ziel-LOD 0 und wurde nie
+        # ausgefuehrt - und weil weather.temperature seit dem Umbau darauf
+        # wartet, stand die GESAMTE Pipeline nach Terrain und Geology still
+        # (beobachtet als "13 / 111 LOD-Runden, 12%, haengt"). Ein fehlender
+        # Eintrag in einer handgepflegten Liste darf keinen Deadlock
+        # erzeugen koennen.
+        for generator_enum in GeneratorType:
+            generator_type = generator_enum.value
             tab_instance = self.tabs.get(generator_type)
             if not tab_instance or not hasattr(tab_instance, 'get_current_parameters'):
                 continue
@@ -1242,7 +1356,8 @@ class MapEditorWindow(QMainWindow):
                 source_tab="auto_start",
             )
 
-        self.logger.info("Auto-Start: alle 6 Generatoren mit Default-Parametern angefragt")
+        self.logger.info("Auto-Start: alle %d Generatoren mit Default-Parametern angefragt",
+                         len(GeneratorType))
 
     def _generate_current_tab(self):
         """Generate content for currently active tab"""
@@ -1284,21 +1399,50 @@ class MapEditorWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Generation Error", f"Failed to start generation sequence: {str(e)}")
 
+    def _clear_and_reset_all_generators(self):
+        """
+        Loescht Calculator-/Domain-Storage (data_lod_manager.clear_all_data())
+        UND setzt den Orchestrator-seitigen LOD-Fortschritt fuer ALLE 6
+        Generatoren zurueck (generation_orchestrator.reset_lod_status()) -
+        Bug-Report 2026-07-25 ("nach Reset haeuft sich Erosion/Sedimentation
+        immer weiter an"): clear_all_data() allein loescht nur die Daten,
+        laesst aber CalculatorDispatcher.completed_lod/target_lod (siehe
+        calculator_graph.py) unberuehrt. Klickt der Nutzer danach mit
+        UNVERAENDERTEN Parametern auf Generieren, wertet der self_changed-
+        Vergleich in request_generation() das als "nichts geaendert" und
+        ueberspringt reset_lod_status() erneut - der Dispatcher haelt
+        laengst geloeschte Knoten (z.B. water.erosion_sedimentation) faelsch-
+        lich fuer bereits fertig auf dem ALTEN LOD-Stand.
+
+        Gemeinsamer Helfer statt Duplikat: dieselbe Luecke wurde zuerst in
+        _regenerate_all_generators() gefunden/gefixt, dann UNABHAENGIG davon
+        erneut in _new_world()/_return_to_main_menu() entdeckt (beide
+        riefen clear_all_data() aber nie reset_lod_status() auf) - ein
+        gemeinsamer Helfer verhindert eine vierte Kopie derselben Luecke."""
+        if self.data_lod_manager:
+            self.data_lod_manager.clear_all_data()
+        if self.generation_orchestrator:
+            # Wie beim Auto-Start aus GeneratorType abgeleitet - ein
+            # vergessener Generator wuerde hier seinen LOD-Fortschritt
+            # behalten und beim naechsten Lauf gar nicht mehr rechnen.
+            for generator_enum in GeneratorType:
+                self.generation_orchestrator.reset_lod_status(generator_enum)
+
     def _regenerate_all_generators(self):
         """Regenerate all generators in proper dependency order"""
         if not self.generation_orchestrator:
             return
 
         try:
-            # Clear all data for fresh start
-            if self.data_lod_manager:
-                self.data_lod_manager.clear_all_data()
+            # Clear all data + Orchestrator-LOD-Fortschritt fuer einen
+            # echten Neustart (siehe _clear_and_reset_all_generators()).
+            self._clear_and_reset_all_generators()
 
             # Get generation sequence from navigation manager
             if self.navigation_manager and hasattr(self.navigation_manager, 'tab_order'):
                 generator_sequence = [tab for tab in self.navigation_manager.tab_order[2:] if tab in self.tabs]
             else:
-                generator_sequence = ["terrain", "geology", "weather", "water", "biome", "settlement"]
+                generator_sequence = [g.value for g in GeneratorType]
 
             target_lod = self.toolbar_lod_combo.currentText() if hasattr(self, 'toolbar_lod_combo') else "FINAL"
 

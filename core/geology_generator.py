@@ -1,745 +1,740 @@
 """
 Path: core/geology_generator.py
-Date Changed: 01.09.2025
+Date Changed: 22.07.2026
 
-Funktionsweise: Erweiterte geologische Schichten und Gesteinstypen mit DataLODManager-Integration und 3-stufigem Fallback-System
-- GeologySystemGenerator koordiniert geologische Simulation mit numerischem LOD-System
-- Rock-Type Klassifizierung (sedimentary, metamorphic, igneous) basierend auf geologischer Simulation
-- Mass-Conservation-System (R+G+B=255) für Erosions-/Sedimentations-Kompatibilität
-- Hardness-Map-Generation für Water-Generator und nachfolgende Systeme
+Funktionsweise: 3D-Gesteinsstapel-Modell, terrain-gekoppelte Fassung (Teil-2-
+Rework, siehe Umsetzungsplan "Geology-Rework Teil 2"). Ersetzt das frühere
+2D-RGB-Mischverhältnis durch einen festen, geordneten Schichtstapel
+(core/geology_layers.py), der jetzt dem Terrain folgt statt unabhängig
+davon zu sein:
+- Schichtdicken kombinieren räumliches Rauschen (budget-renormiert auf die
+  nominale Gesamttiefe) MIT einer Slope-getriebenen Verdünnung (steile
+  Hänge = dünnere Schichten, verstärkt das Relief - siehe
+  `LayerThicknessBuilder.build()`).
+- ZWEI getrennte Felder statt einem gemeinsamen Δz:
+  - `stack_deformation` (intern, NIE additiv in `height_delta`): Terrain-Hub
+    (regional geglättete Terrainhöhe, zieht den ganzen Stapel mit an,
+    siehe `_build_terrain_hub()`) + Tilt + Fold + Fault-Throw. Verschiebt
+    ausschließlich die Schichtgrenzen für die Ausbiss-Berechnung.
+  - `height_delta`: IMMER Null - weder Tilt/Fold/Fault/Terrain-Hub NOCH
+    Intrusion wirken auf die sichtbare Terrainhöhe (Nutzer-Vorgabe:
+    "Störungen greifen nicht in das Terrain ein", später auf Intrusionen
+    erweitert - die frühere gekappte Dom-Hebung erzeugte eine Höhenänderung,
+    die nicht gewollt war). Intrusionen sind rein ein "Durchbruch durch die
+    Schichten" (siehe `_apply_intrusions_to_layer_id()`), in der
+    Cross-Section vom realen Terrain abgeschnitten.
+- Ausbiss-Berechnung: vergleicht die REALE, ungeglättete Terrain-Höhe gegen
+  die deformierten Schicht-Obergrenzen - vollständig vektorisiert über
+  N_LAYERS Vergleichsmasken, kein Pixel-Loop. WICHTIG: weil `stack_
+  deformation` eine GEGLÄTTETE (nicht die reale) Version der Terrainhöhe
+  enthält, kürzt sich der Terrain-Hub beim Vergleich NICHT algebraisch
+  heraus (siehe `_compute_outcrop()`-Docstring) - lokale Gipfel/Täler
+  weichen von ihrem eigenen geglätteten Mittel ab und schneiden dadurch
+  tatsächlich durch den (an Steilhängen ohnehin dünneren) Stapel. Der
+  Schicht-Index wird dabei gespiegelt (`N_LAYERS - 1 - Anzahl der
+  überschrittenen Grenzen`), damit höheres Terrain zu ÄLTEREM Gestein
+  führt (Kristallin an Gipfeln) statt umgekehrt - siehe
+  `_compute_outcrop()`-Docstring, Punkt 2.
+- Intrusionen (Basalt-Blobs), Sediment-Überlagerung (rein Gesteinstyp,
+  KEIN Höhenbeitrag - vermeidet Doppelzählung mit Waters Erosion/
+  Sedimentation) und metamorpher Overprint (Störungs-/Intrusionsnähe)
+  ergänzen den Ausbiss.
+- Alle Rausch-/Distanz-Komponenten sind auf `map_distance_km` (siehe
+  DataLODManager.get_map_distance_km()) statt auf reine Pixel-UV-Koordinaten
+  bezogen, mit Nyquist-Fade für feine Detail-Komponenten - macht das
+  Ergebnis unabhängig von Auflösung UND von der Anzahl durchlaufener
+  LOD-Zwischenstufen (siehe `_resolvability_fade`).
 
-Parameter Input:
-- sedimentary_hardness, igneous_hardness, metamorphic_hardness [0-100]
-- ridge_warping, bevel_warping, metamorphic_foliation, metamorphic_folding, igneous_flowing [0.0-1.0]
+Parameter Input (siehe gui/config/value_default.py GEOLOGY):
+- sedimentary_hardness, igneous_hardness, metamorphic_hardness [1-100]
+- tilt_intensity [m/km], tilt_direction [Grad] - wirkt nur auf den
+  Gesteinsstapel/Ausbiss, nicht auf die Geländehöhe
+- fold_intensity [m], fold_detail [0-1] - dito
+- fault_intensity [m], fault_detail [0-1], fault_edge_softness [km] - dito
+- intrusion_density [0-1], intrusion_size [km], intrusion_detail [0-1]
+- metamorphic_overprint_intensity [0-1], foliation_detail [0-1]
 
 Dependencies (über DataLODManager):
-- heightmap_combined (von terrain_generator)
-- slopemap (von terrain_generator)
+- heightmap (terrain.redistribution) - siehe Kommentar in _compute_outcrop()
+  zur bewussten Verwendung der ROHEN statt der kombinierten Heightmap.
+- slopemap (terrain.slope) - steuert jetzt die Slope-Verdünnung der
+  Schichtdicke (siehe `LayerThicknessBuilder.build()`).
 
 Output:
-- GeologyData-Objekt mit rock_map, hardness_map, validity_state und LOD-Metadaten
-- DataLODManager-Storage für nachfolgende Generatoren (water, biome, settlement)
+- GeologyData-Objekt mit rock_map, hardness_map, layer_id_map,
+  height_delta, sowie Diagnose-Feldern (fault_distance_map,
+  intrusion_distance_map, metamorphic_grade_map, layer_boundaries,
+  delta_components) für die neuen Diagnose-Anzeigemodi/Cross-Section-View.
 """
+
+import math
+import hashlib
+import logging
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from opensimplex import OpenSimplex
-from scipy.ndimage import gaussian_filter, zoom
-import logging
-from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Any
+from scipy.ndimage import gaussian_filter
+
+from core.geology_layers import (
+    ALL_ROCK_TYPES,
+    TOP_REFERENCE_HEIGHT_M,
+    N_LAYERS,
+    NOMINAL_TOTAL_DEPTH_M,
+    ROCK_LAYERS,
+)
+
+# Slope-Normierung: gleiche "maximale Steigung ~2.0"-Konvention wie das
+# Vorgänger-Modell (RockTypeClassifier.apply_slope_hardening), damit die
+# Slope-Verdünnung der Schichtdicke (siehe LayerThicknessBuilder.build())
+# auf denselben Wertebereich reagiert, den slopemap tatsächlich liefert.
+SLOPE_REFERENCE_MAGNITUDE = 2.0
+
+# Minimaler Restanteil der Schichtdicke an sehr steilen Hängen - verhindert,
+# dass Schichten an Steilhängen komplett auf 0 zusammenschrumpfen (was den
+# Ausbiss-Vergleich degenerieren ließe), während der Effekt trotzdem deutlich
+# sichtbar bleibt.
+MIN_THICKNESS_FRACTION_AT_MAX_SLOPE = 0.15
+
+# Glättungsbreite des Terrain-Hubs in km - groß genug, dass einzelne Gipfel/
+# Täler sich sichtbar von ihrem eigenen regionalen Mittel abheben (siehe
+# TectonicDisplacementField._build_terrain_hub()). Als fester Bruchteil von
+# map_distance_km parametrisiert, kein eigener Slider (Design-Entscheidung,
+# analog zur Sediment-Overlay-Glättungsbreite in _apply_sediment_overlay()).
+REGIONAL_HUB_SIGMA_FRACTION = 0.2
+
+# layer_id_map-Wert für Intrusionen - kein Stapel-Glied, daher außerhalb von
+# [0, N_LAYERS - 1] (dem Index-Bereich von ROCK_LAYERS) angesiedelt.
+BASALT_LAYER_ID = N_LAYERS
+
+# Kappung der lokalen Dom-Hebung durch Intrusionen, als Anteil der aktuellen
+# Heightmap-Spannweite - gleiche Größenordnung wie die frühere
+# Igneous-Flowing-Kappung (3%) im Vorgänger-Modell.
+INTRUSION_UPLIFT_CAP_FRACTION = 0.03
+
+
+def _smoothstep(t):
+    """Kubische Smoothstep-Rampe, geklemmt auf [0, 1]."""
+    t = np.clip(t, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _resolvability_fade(px_per_cycle, low: float = 2.0, high: float = 8.0):
+    """
+    Weiche Ein-/Ausblendung feiner Rausch-Komponenten anhand der tatsächlich
+    verfügbaren Pixel pro Wellenlänge (Nyquist-Kriterium: <2 px/Zyklus =
+    Aliasing statt Detail). Reine Funktion von (Auflösung, Wellenlänge,
+    map_distance_km) - KEINE LOD-Nummer, KEINE Historie. Ersetzt das frühere
+    `lod_detail_factor = lod_level/5.0`-Hack: ein direkter Sprung auf die
+    Zielauflösung ergibt dasselbe Ergebnis wie das schrittweise Durchlaufen
+    aller Zwischen-LODs, weil beide Male exakt derselbe px_per_cycle-Wert
+    an derselben Weltkoordinate herauskommt.
+    """
+    return _smoothstep((px_per_cycle - low) / (high - low))
 
 
 @dataclass
 class GeologyData:
-    """
-    Container für alle Geology-Daten mit Validity-System und Cache-Management
-    """
-    rock_map: np.ndarray  # 3D array (H,W,3) RGB für Sedimentary/Igneous/Metamorphic
-    hardness_map: np.ndarray  # 2D array, Gesteinshärte [0-100]
+    """Container für alle Geology-Daten mit Validity-System und Cache-Management."""
+    rock_map: np.ndarray  # (H,W,3) uint8 RGB - Farbe der ausbeißenden Schicht/Intrusion je Pixel
+    hardness_map: np.ndarray  # (H,W) float, Gesteinshärte [1-100]
+    layer_id_map: np.ndarray  # (H,W) int16, Index in ALL_ROCK_TYPES (0..N_LAYERS = Basalt-Intrusion)
     lod_level: int
     actual_size: Tuple[int, int]
     validity_state: Dict[str, bool]
     parameter_hash: str
     parameters: Dict[str, Any]
-    # 2D array, kumulative Höhenänderung in Metern aus tektonischer Deformation
-    # (ridge_warping/bevel_warping/metamorph_foliation+folding/igneous_flowing),
-    # akkumuliert über LOD-Durchläufe wie WaterData.erosion_map/sedimentation_map.
-    # Fließt additiv in DataLODManager.get_terrain_data_combined() ein.
+    # 2D array, Höhenbeitrag zur Karte in Metern - IMMER Null (Nutzer-Korrektur:
+    # die frühere gekappte Intrusions-Dom-Hebung erzeugte eine tatsächliche
+    # Terrain-Erhebung, die nicht gewollt war). Tilt/Fold/Fault/Terrain-Hub/
+    # Intrusion wirken ALLE nur auf den Gesteinsstapel/Ausbiss (siehe
+    # delta_components unten), Geology trägt keinen Höhenbeitrag mehr zur
+    # Karte bei. Feld bleibt aus API-Kompatibilität erhalten (DataLODManager.
+    # get_terrain_data_combined() addiert es weiterhin, ist aber strukturell
+    # ein No-Op) - siehe DataLODManager.get_geology_height_delta().
     height_delta: Optional[np.ndarray] = None
+    fault_distance_map: Optional[np.ndarray] = None  # (H,W) km, Abstand zur nächsten Störung
+    intrusion_distance_map: Optional[np.ndarray] = None  # (H,W) km, signiert (<0 = innerhalb einer Intrusion)
+    metamorphic_grade_map: Optional[np.ndarray] = None  # (H,W) [0-1]
+    layer_boundaries: Optional[np.ndarray] = None  # (N_LAYERS,H,W) m, deformierte Schicht-Obergrenzen - Basis für Cross-Section-View
+    # {"terrain_hub":.., "tilt":.., "fold":.., "fault":.., "intrusion":..},
+    # je (H,W) - für die isolierten Diagnose-Anzeigemodi in geology_tab.py.
+    # Reine Gesteinsstapel-Diagnosen, KEINE davon wirkt auf die Kartenhöhe
+    # (auch "intrusion" nicht mehr, siehe height_delta oben).
+    delta_components: Optional[Dict[str, np.ndarray]] = None
 
     def is_valid(self) -> bool:
-        """Prüft ob alle Geology-Daten gültig sind"""
         return all(self.validity_state.values())
 
     def invalidate(self):
-        """Invalidiert alle Geology-Daten"""
         self.validity_state = {key: False for key in self.validity_state.keys()}
 
     def validate_against_parameters(self, new_parameters: Dict[str, Any]) -> bool:
-        """Validiert gegen neue Parameter"""
-        critical_params = ['sedimentary_hardness', 'igneous_hardness', 'metamorphic_hardness',
-                          'ridge_warping', 'bevel_warping']
-
+        critical_params = [
+            'sedimentary_hardness', 'igneous_hardness', 'metamorphic_hardness',
+            'tilt_intensity', 'tilt_direction', 'fold_intensity', 'fold_detail',
+            'fault_intensity', 'fault_detail', 'fault_edge_softness',
+            'intrusion_density', 'intrusion_size', 'intrusion_detail',
+            'metamorphic_overprint_intensity', 'foliation_detail',
+        ]
         for param in critical_params:
             if abs(self.parameters.get(param, 0) - new_parameters.get(param, 0)) > 0.01:
                 return False
         return True
 
     def get_validity_summary(self) -> Dict[str, str]:
-        """Gibt Validity-Status-Zusammenfassung zurück"""
         return {
             'overall_valid': str(self.is_valid()),
-            'mass_conservation': str(self.validity_state.get('mass_conservation', False)),
             'hardness_range': str(self.validity_state.get('hardness_range', False)),
-            'rock_distribution': str(self.validity_state.get('rock_distribution', False))
+            'layer_assignment': str(self.validity_state.get('layer_assignment', False)),
         }
 
 
-class HardnessCalculator:
+# =============================================================================
+# SCHICHTDICKEN (Plan Punkt 2)
+# =============================================================================
+
+class LayerThicknessBuilder:
     """
-    Spezialisierte Klasse für Hardness-Map-Berechnung aus Rock-Map und Hardness-Parametern
-    """
-
-    # Stufen-Multiplikatoren für die Härte-Tier-Maske (soft/medium/hard) - siehe
-    # RockTypeClassifier.calculate_hardness_tier_mask(). Bewusst gestuft statt
-    # kontinuierlich, damit benachbarte "Nieren" sich in klaren Sprüngen statt
-    # beliebig fein unterscheiden.
-    HARDNESS_TIER_FACTORS = (0.7, 1.0, 1.3)  # soft, medium, hard
-
-    @staticmethod
-    def calculate_hardness_map(rock_map: np.ndarray, sedimentary_hardness: float,
-                             igneous_hardness: float, metamorphic_hardness: float,
-                             heightmap_combined: Optional[np.ndarray] = None,
-                             hardness_tier_mask: Optional[np.ndarray] = None) -> np.ndarray:
-        """
-        Berechnet Hardness-Map aus Rock-Map und Hardness-Parametern
-
-        Args:
-            rock_map: RGB array mit Gesteinsverteilung
-            sedimentary_hardness: Härte für Sedimentgestein [0-100]
-            igneous_hardness: Härte für Eruptivgestein [0-100]
-            metamorphic_hardness: Härte für Metamorphgestein [0-100]
-            heightmap_combined: Optional - wenn gesetzt, wird eine milde Höhen-Tendenz
-                angewendet (siehe unten). Ohne Heightmap bleibt das Verhalten unverändert
-                (reine Gesteinstyp-Gewichtung).
-            hardness_tier_mask: Optional - int-array mit Werten 0/1/2 (soft/medium/hard)
-                aus RockTypeClassifier.calculate_hardness_tier_mask(). Ergibt zusammen mit
-                den 3 Gesteinstypen 9 Härte-Kombinationen (z.B. igneous soft/medium/hard)
-                in großen, gestuften Flächen statt einer stufenlosen Gesteinstyp-Härte.
-
-        Returns:
-            2D array mit gewichteten Härte-Werten
-        """
-        # Härte-Array für Gewichtung
-        hardness_values = np.array([sedimentary_hardness, igneous_hardness, metamorphic_hardness])
-
-        # Vectorized calculation für Performance
-        rock_ratios = rock_map.astype(np.float32) / 255.0
-        hardness_map = np.sum(rock_ratios * hardness_values.reshape(1, 1, 3), axis=2)
-
-        # 9-Stufen-System: Härte-Tier-Maske multipliziert die Gesteinstyp-Härte gestuft
-        if hardness_tier_mask is not None:
-            tier_factors = np.array(HardnessCalculator.HARDNESS_TIER_FACTORS, dtype=np.float32)
-            hardness_map = hardness_map * tier_factors[hardness_tier_mask]
-
-        # Milde Höhen-Tendenz: Gestein in tieferen Lagen (näher an Meereshöhe) etwas
-        # weicher, höher gelegenes Gestein unverändert - gedeckelt auf max. 15%
-        # Reduktion, keine dominante Regel sondern ein sanfter Trend on top der
-        # eigentlichen Gesteinstyp-Härte.
-        if heightmap_combined is not None:
-            h_min = float(np.min(heightmap_combined))
-            h_max = float(np.max(heightmap_combined))
-            h_range = h_max - h_min if h_max > h_min else 1.0
-            norm_height = np.clip((heightmap_combined - h_min) / h_range, 0.0, 1.0)
-            elevation_factor = 0.85 + 0.15 * norm_height
-            hardness_map = hardness_map * elevation_factor
-
-        return np.clip(hardness_map, 0.0, 100.0)
-
-    @staticmethod
-    def validate_hardness_ranges(hardness_map: np.ndarray) -> bool:
-        """
-        Validiert Hardness-Map auf gültige Werte-Bereiche
-
-        Args:
-            hardness_map: Zu validierende Hardness-Map
-
-        Returns:
-            True wenn alle Werte in [0-100] liegen
-        """
-        return np.all((hardness_map >= 0) & (hardness_map <= 100)) and not np.any(np.isnan(hardness_map))
-
-
-class TectonicDeformationProcessor:
-    """
-    Spezialisierte Klasse für tektonische Verformung auf geologische Verteilung
+    Baut die räumlich variierende, aber budget-begrenzte Schichtdicke jeder
+    ROCK_LAYERS-Formation, kombiniert aus zwei Effekten (Teil-2-Rework,
+    Klärungsrunde: "Rauschen UND Slope zusammen"):
+    1. Milde, niederfrequente Rausch-Variation pro Schicht (Noise,
+       UV-normiert - Schichtdicke selbst ist kein tektonischer Effekt, für
+       den eine km-Wellenlänge nötig wäre), anschließend proportionale
+       Reskalierung ALLER Schichten auf die nominale Gesamttiefe
+       (NOMINAL_TOTAL_DEPTH_M) - dasselbe Prinzip wie die frühere
+       rock_map-Mass-Conservation (R+G+B=255), jetzt auf Schichtdicken
+       angewendet.
+    2. Slope-Verdünnung: an steilen Hängen werden ALLE Schichten an diesem
+       Punkt gleichermaßen dünner gezeichnet (stärkere Erosion), was das
+       Relief optisch verstärkt. Wirkt NACH der Budget-Reskalierung, wird
+       NICHT erneut renormiert - die Verdünnung ist gewollt, kein
+       Rauschen, das korrigiert werden müsste.
+    Vollständig vektorisiert.
     """
 
-    def __init__(self, map_seed: int = 42):
-        """
-        Initialisiert Deformation-Processor mit separaten Noise-Generatoren
-
-        Args:
-            map_seed: Seed für reproduzierbare Deformation-Patterns
-        """
-        self.ridge_noise = OpenSimplex(seed=map_seed + 3000)
-        self.bevel_noise = OpenSimplex(seed=map_seed + 4000)
-        self.foliation_noise = OpenSimplex(seed=map_seed + 5000)
-        self.flowing_noise = OpenSimplex(seed=map_seed + 6000)
-
-    def apply_ridge_warping(self, rock_map: np.ndarray, ridge_warping: float,
-                           height_range: float) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Wendet Ridge-Warping auf geologische Verteilung UND Heightmap an: Ridge-Zonen
-        bekommen mehr Igneous/Metamorphic-Anteil UND werden angehoben (echte, sichtbare
-        Grate statt nur eine Gesteinsfarben-Verschiebung).
-
-        Args:
-            rock_map: Aktuelle Gesteinsverteilung [0.0-1.0]
-            ridge_warping: Stärke der Ridge-Verformung [0.0-2.0]
-            height_range: Spannweite (max-min) der aktuellen Heightmap, als Skala für
-                         die Höhen-Anhebung
-
-        Returns:
-            (Verformte Rock-Map, Höhen-Delta in Metern)
-        """
-        height, width = rock_map.shape[:2]
-        height_delta = np.zeros((height, width), dtype=np.float32)
-
-        if ridge_warping <= 0.0:
-            return rock_map, height_delta
-
-        norm_x = np.arange(width, dtype=np.float64) / width
-        norm_y = np.arange(height, dtype=np.float64) / height
-        ridge_field = self.ridge_noise.noise2array(norm_x * 6, norm_y * 6)
-        ridge_factor = (ridge_field + 1) * 0.5 * ridge_warping  # (height, width)
-
-        mask = ridge_factor > 0.3  # Nur signifikante Ridge-Bereiche
-        deformed_map = rock_map.astype(np.float32).copy()
-
-        current_sed = deformed_map[:, :, 0]
-        reduction = np.where(mask, current_sed * ridge_factor * 0.4, 0.0)
-
-        deformed_map[:, :, 0] -= reduction
-        deformed_map[:, :, 1] += reduction * 0.6  # Mehr Igneous
-        deformed_map[:, :, 2] += reduction * 0.4  # Mehr Metamorphic
-
-        # Ridge-Zonen heben die Landschaft an - bis zu 15% der Heightmap-Spannweite,
-        # normiert auf den Bereich oberhalb der Signifikanz-Schwelle 0.3
-        normalized_ridge = np.where(mask, (ridge_factor - 0.3) / 0.7, 0.0)
-        height_delta = (normalized_ridge * height_range * 0.15).astype(np.float32)
-
-        return deformed_map, height_delta
-
-    def apply_bevel_warping(self, rock_map: np.ndarray, bevel_warping: float,
-                           heightmap_combined: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Wendet Bevel-Warping auf geologische Verteilung UND Heightmap an: Bevel-Zonen
-        bekommen eine ausgeglichenere Gesteinsverteilung UND werden lokal geglättet
-        (angeglichen an eine weichgezeichnete Version der Heightmap - "abgeschliffene"
-        Kanten statt nur Gesteinsfarben-Mittelung).
-
-        Args:
-            rock_map: Aktuelle Gesteinsverteilung [0.0-1.0]
-            bevel_warping: Stärke der Bevel-Verformung [0.0-2.0]
-            heightmap_combined: Aktuelle Heightmap, als Basis für die lokale Glättung
-
-        Returns:
-            (Verformte Rock-Map, Höhen-Delta in Metern)
-        """
-        height, width = rock_map.shape[:2]
-        height_delta = np.zeros((height, width), dtype=np.float32)
-
-        if bevel_warping <= 0.0:
-            return rock_map, height_delta
-
-        norm_x = np.arange(width, dtype=np.float64) / width
-        norm_y = np.arange(height, dtype=np.float64) / height
-        bevel_field = self.bevel_noise.noise2array(norm_x * 8, norm_y * 8)
-        bevel_factor = (bevel_field + 1) * 0.5 * bevel_warping  # (height, width)
-
-        mask = bevel_factor > 0.4  # Bevel-Bereiche
-        smoothing_factor = np.where(mask, bevel_factor * 0.2, 0.0)
-
-        current_values = rock_map.astype(np.float32)
-        # Tendenz zu ausgeglichenerer Verteilung, GLEICHE Skala wie current_values ([0,1])
-        target_distribution = np.array([1 / 3, 1 / 3, 1 / 3], dtype=np.float32)
-        deformed_map = (current_values * (1 - smoothing_factor[:, :, None]) +
-                       target_distribution * smoothing_factor[:, :, None])
-
-        # Bevel-Zonen glätten die Landschaft lokal: Höhe wandert Richtung eines
-        # weichgezeichneten Nachbarschafts-Mittels, proportional zur Bevel-Stärke
-        smoothed_heightmap = gaussian_filter(heightmap_combined.astype(np.float32), sigma=2.0)
-        height_delta = ((smoothed_heightmap - heightmap_combined) * smoothing_factor).astype(np.float32)
-
-        return deformed_map, height_delta
-
-    def process_metamorphic_effects(self, rock_map: np.ndarray, metamorphic_foliation: float,
-                                  metamorphic_folding: float, height_range: float) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Verarbeitet Metamorphic-Foliation und -Folding-Effekte auf Gesteinsverteilung UND
-        Heightmap: feine, wellenförmige Schichtungs-Textur (Foliation = lineare Streifen,
-        Folding = wellige Falten), nicht als eigenes Gebirge, sondern als Textur-Layer.
-
-        Args:
-            rock_map: Aktuelle Gesteinsverteilung [0.0-1.0]
-            metamorphic_foliation: Stärke der Foliation [0.0-1.0]
-            metamorphic_folding: Stärke der Folding [0.0-1.0]
-            height_range: Spannweite (max-min) der aktuellen Heightmap, als Skala für
-                         die Höhen-Textur
-
-        Returns:
-            (Rock-Map mit Metamorphic-Effekten, Höhen-Delta in Metern)
-        """
-        height, width = rock_map.shape[:2]
-        height_delta = np.zeros((height, width), dtype=np.float32)
-
-        if metamorphic_foliation <= 0.0 and metamorphic_folding <= 0.0:
-            return rock_map, height_delta
-
-        norm_x = (np.arange(width, dtype=np.float64) / width)[None, :]
-        norm_y = (np.arange(height, dtype=np.float64) / height)[:, None]
-
-        # Foliation - lineare Strukturen, Folding - wellenförmige Strukturen
-        foliation_detail = metamorphic_foliation * np.sin(norm_x * 20) * 0.1
-        folding_detail = metamorphic_folding * np.cos(norm_y * 15) * 0.1
-        foliation_detail, folding_detail = np.broadcast_arrays(foliation_detail, folding_detail)
-
-        total_metamorphic_influence = np.abs(foliation_detail) + np.abs(folding_detail)
-        mask = total_metamorphic_influence > 0.05
-
-        # Erhöhe Metamorphic-Anteil in signifikanten Zonen - Skala an das [0,1]-Format
-        # von rock_map angeglichen (vorher *30, sprengte den Wertebereich massiv)
-        enhancement = np.where(mask, total_metamorphic_influence * 0.6, 0.0)
-
-        enhanced_map = rock_map.astype(np.float32).copy()
-        enhanced_map[:, :, 0] -= enhancement * 0.5  # Reduziere Sedimentary
-        enhanced_map[:, :, 1] -= enhancement * 0.3  # Reduziere Igneous
-        enhanced_map[:, :, 2] += enhancement * 0.8  # Erhöhe Metamorphic
-
-        # Wellenförmige Höhen-Textur (signiert, keine Schwelle - Foliation/Folding
-        # sollen als durchgehende feine Schichtung wirken, nicht nur an Extrempunkten)
-        height_delta = ((foliation_detail + folding_detail) * height_range * 0.03).astype(np.float32)
-
-        return enhanced_map, height_delta
-
-    def process_igneous_flowing(self, rock_map: np.ndarray, igneous_flowing: float,
-                               height_range: float) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Verarbeitet Igneous-Flowing-Effekte auf Gesteinsverteilung UND Heightmap: feine
-        Strömungsmuster-Textur wie erstarrte Lavaflüsse.
-
-        Args:
-            rock_map: Aktuelle Gesteinsverteilung [0.0-1.0]
-            igneous_flowing: Stärke des Igneous-Flowing [0.0-1.0]
-            height_range: Spannweite (max-min) der aktuellen Heightmap, als Skala für
-                         die Höhen-Textur
-
-        Returns:
-            (Rock-Map mit Igneous-Flowing-Effekten, Höhen-Delta in Metern)
-        """
-        height, width = rock_map.shape[:2]
-        height_delta = np.zeros((height, width), dtype=np.float32)
-
-        if igneous_flowing <= 0.0:
-            return rock_map, height_delta
-
-        norm_x = (np.arange(width, dtype=np.float64) / width)[None, :]
-        norm_y = (np.arange(height, dtype=np.float64) / height)[:, None]
-
-        # Flow-Pattern - komplexe Strömungsmuster
-        flow_pattern = igneous_flowing * np.sin(norm_x * 12) * np.cos(norm_y * 8) * 0.1
-        flow_pattern = np.broadcast_to(flow_pattern, (height, width))
-
-        mask = np.abs(flow_pattern) > 0.03
-        # Skala an das [0,1]-Format von rock_map angeglichen (vorher *40)
-        flow_strength = np.where(mask, np.abs(flow_pattern) * 0.6, 0.0)
-
-        flowing_map = rock_map.astype(np.float32).copy()
-        flowing_map[:, :, 0] -= flow_strength * 0.4  # Reduziere Sedimentary
-        flowing_map[:, :, 1] += flow_strength * 0.7  # Erhöhe Igneous stark
-        flowing_map[:, :, 2] -= flow_strength * 0.3  # Reduziere Metamorphic
-
-        # Strömungsmuster als feine Höhen-Textur (signiert, keine Schwelle)
-        height_delta = (flow_pattern * height_range * 0.03).astype(np.float32)
-
-        return flowing_map, height_delta
-
-
-class RockTypeClassifier:
-    """
-    Erweiterte Klasse für Gesteinstyp-Klassifizierung mit drei separaten geologischen Zonen
-    """
-
-    def __init__(self, map_seed: int = 42):
-        """
-        Initialisiert Rock-Classifier mit separaten Noise-Generatoren für geologische Zonen
-
-        Args:
-            map_seed: Seed für reproduzierbare Gesteinsverteilung
-        """
-        # Drei unabhängige Simplex-Layers für geologische Zonen
-        self.sedimentary_noise = OpenSimplex(seed=map_seed)
-        self.metamorphic_noise = OpenSimplex(seed=map_seed + 1000)
-        self.igneous_noise = OpenSimplex(seed=map_seed + 2000)
-
-        # Deformation-Noise für Basis-Verteilung
-        self.height_distortion_noise = OpenSimplex(seed=map_seed + 7000)
-
-        # Niederfrequentes Noise für die Härte-Stufen-Maske (siehe calculate_hardness_tier_mask)
-        # - großräumige, "nierenförmige" Flächen, unabhängig vom Gesteinstyp
-        self.hardness_tier_noise = OpenSimplex(seed=map_seed + 9000)
-
-        # Domain-Warp-Noise für gezackte Gesteinsgrenzen (siehe apply_faceted_boundaries)
-        self.boundary_warp_noise_x = OpenSimplex(seed=map_seed + 8000)
-        self.boundary_warp_noise_y = OpenSimplex(seed=map_seed + 8001)
-
-    def classify_by_elevation(self, heightmap_combined: np.ndarray) -> np.ndarray:
-        """
-        Erste Klassifizierung basierend auf Höhen mit verzerrter Noise-Funktion
-
-        Args:
-            heightmap_combined: Höhendaten (eventuell post-erosion)
-
-        Returns:
-            3D array mit Basis-Gesteinsverteilung [0.0-1.0]
-        """
-        height, width = heightmap_combined.shape
-        rock_map = np.zeros((height, width, 3), dtype=np.float32)
-
-        # Höhen normalisieren
-        min_height = np.min(heightmap_combined)
-        max_height = np.max(heightmap_combined)
-        height_range = max_height - min_height if max_height != min_height else 1.0
-
-        for y in range(height):
-            for x in range(width):
-                # Normalisierte Höhe [0, 1]
-                norm_height = (heightmap_combined[y, x] - min_height) / height_range
-
-                # Koordinaten für Noise
-                noise_x = x / width * 4.0
-                noise_y = y / height * 4.0
-
-                # Verzerrte Noise-Funktion mit Höhe multipliziert
-                height_distortion = self.height_distortion_noise.noise2(noise_x * 0.5, noise_y * 0.5) * 0.3
-                distorted_height = np.clip(norm_height + height_distortion, 0.0, 1.0)
-
-                # Basis-Verteilung durch verzerrte Höhe
-                if distorted_height < 0.3:
-                    # Niedrige Bereiche: hauptsächlich sedimentary
-                    rock_map[y, x, 0] = 0.7  # Sedimentary (R)
-                    rock_map[y, x, 1] = 0.2  # Igneous (G)
-                    rock_map[y, x, 2] = 0.1  # Metamorphic (B)
-                elif distorted_height < 0.7:
-                    # Mittlere Bereiche: gemischt
-                    rock_map[y, x, 0] = 0.4  # Sedimentary (R)
-                    rock_map[y, x, 1] = 0.3  # Igneous (G)
-                    rock_map[y, x, 2] = 0.3  # Metamorphic (B)
-                else:
-                    # Hohe Bereiche: hauptsächlich igneous/metamorphic
-                    rock_map[y, x, 0] = 0.1  # Sedimentary (R)
-                    rock_map[y, x, 1] = 0.5  # Igneous (G)
-                    rock_map[y, x, 2] = 0.4  # Metamorphic (B)
-
-        return rock_map
-
-    def apply_slope_hardening(self, rock_map: np.ndarray, slopemap: np.ndarray) -> np.ndarray:
-        """
-        Mischt härtere Gesteine in steile Hänge ein
-
-        Args:
-            rock_map: Aktuelle Gesteinsverteilung
-            slopemap: Slope-Daten (dz/dx, dz/dy)
-
-        Returns:
-            Rock-Map mit Slope-Härtung
-        """
-        height, width = rock_map.shape[:2]
-
-        for y in range(height):
-            for x in range(width):
-                # Slope-Magnitude berechnen
-                dz_dx = slopemap[y, x, 0]
-                dz_dy = slopemap[y, x, 1]
-                slope_magnitude = np.sqrt(dz_dx**2 + dz_dy**2)
-
-                # Normalisierung der Slope (angenommen max slope ~2.0)
-                slope_factor = min(1.0, slope_magnitude / 2.0)
-
-                # Bei steilen Hängen: mehr igneous und metamorphic
-                if slope_factor > 0.5:
-                    hardening_factor = (slope_factor - 0.5) * 2.0  # [0, 1]
-
-                    # Sedimentary reduzieren, igneous/metamorphic erhöhen
-                    current_sed = rock_map[y, x, 0]
-                    reduction = current_sed * hardening_factor * 0.5
-
-                    rock_map[y, x, 0] -= reduction  # Sedimentary reduzieren
-                    rock_map[y, x, 1] += reduction * 0.6  # Igneous erhöhen
-                    rock_map[y, x, 2] += reduction * 0.4  # Metamorphic erhöhen
-
-        return rock_map
-
-    def blend_geological_zones(self, rock_map: np.ndarray) -> np.ndarray:
-        """
-        Addiert/subtrahiert geologische Zonen basierend auf drei unabhängigen Simplex-Funktionen
-
-        Geological-Zones: Drei Simplex-Funktionen für Sedimentary (>0.2), Metamorphic (>0.6), Igneous (>0.8)
-
-        Args:
-            rock_map: Aktuelle Gesteinsverteilung
-
-        Returns:
-            Rock-Map mit geologischen Zonen
-        """
-        height, width = rock_map.shape[:2]
-
-        for y in range(height):
-            for x in range(width):
-                # Normalisierte Koordinaten für Noise
-                norm_x = x / width
-                norm_y = y / height
-
-                # Drei unabhängige geologische Zonen-Noise [0, 1] normalisiert
-                sedimentary_zone = (self.sedimentary_noise.noise2(norm_x * 3, norm_y * 3) + 1) * 0.5
-                metamorphic_zone = (self.metamorphic_noise.noise2(norm_x * 2, norm_y * 2) + 1) * 0.5
-                igneous_zone = (self.igneous_noise.noise2(norm_x * 4, norm_y * 4) + 1) * 0.5
-
-                # Schwellwerte anwenden und Gewichtungen berechnen
-                sedimentary_influence = max(0, sedimentary_zone - 0.2) / 0.8 if sedimentary_zone > 0.2 else 0.0
-                metamorphic_influence = max(0, metamorphic_zone - 0.6) / 0.4 if metamorphic_zone > 0.6 else 0.0
-                igneous_influence = max(0, igneous_zone - 0.8) / 0.2 if igneous_zone > 0.8 else 0.0
-
-                # Aktuelle Gesteinsverteilung
-                current_sed = rock_map[y, x, 0]
-                current_ign = rock_map[y, x, 1]
-                current_met = rock_map[y, x, 2]
-
-                # Ziel-Verteilungen für geologische Zonen
-                target_sed_distribution = np.array([0.8, 0.1, 0.1])  # Sedimentary-dominiert
-                target_ign_distribution = np.array([0.1, 0.8, 0.1])  # Igneous-dominiert
-                target_met_distribution = np.array([0.1, 0.1, 0.8])  # Metamorphic-dominiert
-
-                # Basis-Gewichtung (behält aktuelle Verteilung bei)
-                total_influence = sedimentary_influence * 0.4 + metamorphic_influence * 0.4 + igneous_influence * 0.4
-                base_weight = max(0.3, 1.0 - total_influence)  # Mindestens 30% der ursprünglichen Verteilung
-
-                # Gewichtete Mischung der verschiedenen Einflüsse
-                current_distribution = np.array([current_sed, current_ign, current_met])
-
-                new_distribution = (current_distribution * base_weight +
-                                  target_sed_distribution * sedimentary_influence * 0.4 +
-                                  target_ign_distribution * igneous_influence * 0.4 +
-                                  target_met_distribution * metamorphic_influence * 0.4)
-
-                # Normalisierung auf Summe = 1.0 (Massenerhaltung)
-                total_new = np.sum(new_distribution)
-                if total_new > 0:
-                    rock_map[y, x, :] = new_distribution / total_new
-                else:
-                    # Fallback bei numerischen Problemen
-                    rock_map[y, x, :] = [0.33, 0.33, 0.34]
-
-        return rock_map
-
-    def apply_faceted_boundaries(self, rock_map: np.ndarray) -> np.ndarray:
-        """
-        Wandelt die weich geblendete Gesteinsverteilung in scharf abgegrenzte, gezackte
-        Flächen um - wie auf einer echten geologischen Karte (Referenzbild vom Nutzer),
-        statt eines glatten Farbverlaufs.
-
-        Vorgehen: pro Pixel wird die dominante Gesteinsart bestimmt (statt der bisherigen
-        fraktionalen Mischung aus classify_by_elevation()/blend_geological_zones()), und
-        die Sampling-Koordinate wird vorher mit zwei überlagerten Noise-Oktaven verzerrt
-        (Domain-Warping - eine grobe für große Buchten/Landzungen, eine feine für kleine
-        Zacken), damit die Grenzen wie Küstenlinien/Bruchkanten aussehen statt wie glatte
-        Höhenlinien. Läuft als letzter Formungsschritt vor der Mass-Conservation, damit
-        auch die tektonischen Effekte (Ridge/Bevel/Foliation/Folding/Flowing) mit
-        facettiert werden statt nur die Basis-Zonen.
-
-        Args:
-            rock_map: Weich geblendete Gesteinsverteilung [0.0-1.0] (H,W,3)
-
-        Returns:
-            Facettierte Gesteinsverteilung [0.0-1.0] (H,W,3)
-        """
-        height, width = rock_map.shape[:2]
-
+    def __init__(self, map_seed: int):
+        self.set_seed(map_seed)
+
+    def set_seed(self, map_seed: int):
+        """Erneuert alle Schicht-Rauschgeneratoren mit einem neuen Seed - nötig,
+        weil GeologySystemGenerator (und damit dieser Builder) vom
+        GenerationOrchestrator einmalig lazy instanziiert und für die
+        gesamte App-Session wiederverwendet wird (siehe GeologySystem
+        Generator.set_active_parameters()); ohne dies bliebe die
+        Schichtdicken-Verteilung permanent beim Konstruktions-Seed hängen,
+        unabhängig von späteren Map-Seed-Änderungen."""
+        self._noise = [OpenSimplex(seed=(map_seed + 100 + i) & 0xFFFFFFFF) for i in range(N_LAYERS)]
+
+    def build(self, shape: Tuple[int, int], map_distance_km: float, slopemap: np.ndarray) -> np.ndarray:
+        height, width = shape
         norm_x = np.arange(width, dtype=np.float64) / width
         norm_y = np.arange(height, dtype=np.float64) / height
 
-        # Zwei überlagerte Warp-Oktaven: grob (große Formen) + fein (Zacken)
-        warp_x = (self.boundary_warp_noise_x.noise2array(norm_x * 8, norm_y * 8) * 0.03 +
-                 self.boundary_warp_noise_x.noise2array(norm_x * 30, norm_y * 30) * 0.015)
-        warp_y = (self.boundary_warp_noise_y.noise2array(norm_x * 8, norm_y * 8) * 0.03 +
-                 self.boundary_warp_noise_y.noise2array(norm_x * 30, norm_y * 30) * 0.015)
+        thickness = np.empty((N_LAYERS, height, width), dtype=np.float64)
+        for i, layer in enumerate(ROCK_LAYERS):
+            field = np.clip(self._noise[i].noise2array(norm_x * 3.0, norm_y * 3.0), -1.0, 1.0)
+            # Asymmetrische Variation [-0.4, +0.6] um die Basis-Dicke (Plan Punkt 2)
+            variation = np.where(field >= 0, field * 0.6, field * 0.4)
+            thickness[i] = layer.base_thickness_m * (1.0 + variation)
 
-        x_grid, y_grid = np.meshgrid(np.arange(width), np.arange(height))
-        warped_x = np.clip(x_grid + warp_x * width, 0, width - 1).astype(np.int32)
-        warped_y = np.clip(y_grid + warp_y * height, 0, height - 1).astype(np.int32)
+        total = np.sum(thickness, axis=0)
+        total = np.where(total <= 1e-6, 1.0, total)
+        scale = NOMINAL_TOTAL_DEPTH_M / total
+        thickness *= scale[None, :, :]
 
-        warped_rock_map = rock_map[warped_y, warped_x]
-        dominant_channel = np.argmax(warped_rock_map, axis=2)  # (H,W), Werte 0/1/2
+        thin_factor = _compute_slope_thin_factor(slopemap)
+        thickness *= thin_factor[None, :, :]
+        return thickness.astype(np.float32)
 
-        # Dominante Gesteinsart stark hervorheben statt fraktional zu mischen - erzeugt
-        # satte, klar abgegrenzte Flächen statt eines Verlaufs. Keine reinen 100%-Flächen
-        # (sonst wirken Übergänge zwischen Facetten hart-kantig ohne jede Textur).
-        dominant_share = 0.85
-        remainder_share = (1.0 - dominant_share) / 2.0
 
-        faceted = np.full(rock_map.shape, remainder_share, dtype=np.float32)
-        for channel in range(3):
-            faceted[:, :, channel] = np.where(dominant_channel == channel, dominant_share, remainder_share)
+def _compute_slope_thin_factor(slopemap: np.ndarray) -> np.ndarray:
+    """
+    Slope-getriebene Verdünnung der Schichtdicke (Teil-2-Rework, Punkt A4):
+    an steilen Hängen dünner (stärkere Erosion), in flachen Bereichen volle
+    Mächtigkeit - verstärkt das Relief optisch. `slopemap` ist (H,W,2)
+    dz/dx,dz/dy (terrain.slope-Output); dieselbe "maximale Steigung ~2.0"-
+    Normierung wie im Vorgänger-Modell (RockTypeClassifier.
+    apply_slope_hardening).
+    """
+    slope_magnitude = np.hypot(slopemap[..., 0], slopemap[..., 1])
+    slope_norm = np.clip(slope_magnitude / SLOPE_REFERENCE_MAGNITUDE, 0.0, 1.0)
+    return 1.0 - slope_norm * (1.0 - MIN_THICKNESS_FRACTION_AT_MAX_SLOPE)
 
-        return faceted
 
-    def calculate_hardness_tier_mask(self, shape: Tuple[int, int]) -> np.ndarray:
+# =============================================================================
+# TEKTONIK-VERSCHIEBUNGSFELD Δz (Plan Punkt 3)
+# =============================================================================
+
+def _build_fault_field(shape: Tuple[int, int], map_distance_km: float, map_seed: int,
+                        fault_intensity: float, fault_detail: float,
+                        fault_edge_softness: float) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Störungsnetz: wenige Saatpunkte -> L-System-artige rekursive Verzweigung
+    (Rekursionstiefe = fault_detail) mit an den Astspitzen auslaufendem
+    Versatz -> pro Pixel nächstgelegenes Segment (vektorisierte
+    Punkt-zu-Segment-Distanz) bestimmt Vorzeichen-Seite und Versatzgröße.
+    fault_edge_softness (km) ersetzt das frühere bevel_warping als Breite der
+    weichen tanh-Übergangszone an der Bruchkante statt eines harten Sprungs.
+    Segmentwinkel werden bei jedem Verzweigungsschritt zufällig verzerrt -
+    ein leichtgewichtiger Ersatz für eine Perlin-Rauschverzerrung entlang der
+    Linie, ohne dass Liniengeometrie und Rauschfeld getrennt gepflegt werden
+    müssen.
+
+    Rückgabe: (fault_throw (H,W) m, fault_distance_map (H,W) km, unsigniert).
+    """
+    height, width = shape
+    if fault_intensity <= 0.0:
+        return (np.zeros(shape, dtype=np.float32),
+                np.full(shape, map_distance_km, dtype=np.float32))
+
+    x_km = (np.arange(width, dtype=np.float64) / width) * map_distance_km
+    y_km = (np.arange(height, dtype=np.float64) / height) * map_distance_km
+    X, Y = np.meshgrid(x_km, y_km)
+
+    rng = np.random.RandomState((map_seed + 5000) & 0xFFFFFFFF)
+    n_seeds = max(1, int(round(2 + fault_detail * 3)))
+    max_depth = max(1, int(round(1 + fault_detail * 3)))
+    segments: List[Tuple[float, float, float, float, float, float]] = []
+
+    def branch(x, y, angle_deg, length_km, depth, throw_scale):
+        if length_km <= 0.05 or depth < 0:
+            return
+        angle = angle_deg + rng.uniform(-18, 18)
+        x2 = x + length_km * math.cos(math.radians(angle))
+        y2 = y + length_km * math.sin(math.radians(angle))
+        throw_start = fault_intensity * throw_scale
+        # Tapering zur Astspitze hin auf 0 (Frage 7 - auslaufender Versatz)
+        throw_end = throw_start * (0.55 if depth > 0 else 0.0)
+        segments.append((x, y, x2, y2, throw_start, throw_end))
+        if depth <= 0:
+            return
+        n_children = 1 if rng.uniform() < 0.35 else 2
+        for i in range(n_children):
+            child_angle = angle + rng.uniform(15, 45) * (1 if i == 0 else -1)
+            branch(x2, y2, child_angle, length_km * 0.68, depth - 1, throw_scale * 0.68)
+
+    for _ in range(n_seeds):
+        sx = rng.uniform(0, map_distance_km)
+        sy = rng.uniform(0, map_distance_km)
+        a0 = rng.uniform(0, 360)
+        branch(sx, sy, a0, map_distance_km * 0.22, max_depth, 1.0)
+
+    min_abs_dist = np.full(shape, np.inf, dtype=np.float64)
+    best_signed_dist = np.zeros(shape, dtype=np.float64)
+    best_throw_mag = np.zeros(shape, dtype=np.float64)
+
+    for (x0, y0, x1, y1, t0, t1) in segments:
+        dx, dy = x1 - x0, y1 - y0
+        seg_len2 = dx * dx + dy * dy
+        if seg_len2 < 1e-9:
+            continue
+        t = ((X - x0) * dx + (Y - y0) * dy) / seg_len2
+        tc = np.clip(t, 0.0, 1.0)
+        proj_x = x0 + tc * dx
+        proj_y = y0 + tc * dy
+        dist = np.hypot(X - proj_x, Y - proj_y)
+        side = (X - x0) * dy - (Y - y0) * dx  # Vorzeichen = Seite der Linie
+        signed_dist = np.sign(side) * dist
+        throw_mag = t0 + (t1 - t0) * tc  # Tapering entlang des Segments
+        closer = dist < min_abs_dist
+        min_abs_dist = np.where(closer, dist, min_abs_dist)
+        best_signed_dist = np.where(closer, signed_dist, best_signed_dist)
+        best_throw_mag = np.where(closer, throw_mag, best_throw_mag)
+
+    edge_width_km = max(0.02, fault_edge_softness)
+    fault_throw = np.tanh(best_signed_dist / edge_width_km) * best_throw_mag
+    return fault_throw.astype(np.float32), min_abs_dist.astype(np.float32)
+
+
+def _build_terrain_hub(terrain_height: np.ndarray, map_distance_km: float) -> np.ndarray:
+    """
+    Terrain-Hub (Teil-2-Rework, Punkt A2): eine regional geglättete Version
+    der realen Terrainhöhe - zieht den ganzen Schichtstapel lokal mit an,
+    wo das Terrain großräumig höher liegt ("Berge heben die Schichtung mit
+    an"). Bewusst GEGLÄTTET statt der exakten Terrainhöhe: würde man den
+    Stapel um die exakte Terrainhöhe verschieben UND später mit derselben
+    exakten Terrainhöhe schneiden, würde sich die Verschiebung beim
+    Vergleich algebraisch herauskürzen (siehe _compute_outcrop()) - der
+    Effekt wäre unsichtbar. Die geglättete Version lässt lokale Gipfel/
+    Täler von ihrem eigenen regionalen Mittel abweichen, wodurch der
+    Ausbiss-Schnitt tatsächlich variiert.
+    """
+    height, width = terrain_height.shape
+    sigma_km = max(0.5, REGIONAL_HUB_SIGMA_FRACTION * map_distance_km)
+    sigma_px = max(1.0, sigma_km * (width / map_distance_km))
+    return gaussian_filter(terrain_height.astype(np.float64), sigma=sigma_px)
+
+
+class TectonicDisplacementField:
+    """
+    Baut `stack_deformation`(x,y) = terrain_hub + tilt + fold + fault_throw
+    (Teil-2-Rework) - verschiebt AUSSCHLIESSLICH den Schichtstapel für die
+    Ausbiss-Berechnung (siehe _compute_outcrop()), NIE additiv in
+    `height_delta` (Nutzer-Vorgabe: Störungen/Tektonik dürfen die
+    sichtbare Terrainhöhe nicht verändern - dasselbe gilt inzwischen auch
+    für Intrusionen, siehe GeologySystemGenerator._calc_intrusions()).
+    Ersetzt
+    die fünf früher unabhängigen Ridge/Bevel/Foliation/Folding/Igneous-
+    Flowing-Formeln des Vorgänger-Modells durch benannte Komponenten EINES
+    Felds.
+    """
+
+    def __init__(self, map_seed: int):
+        self.set_seed(map_seed)
+
+    def set_seed(self, map_seed: int):
+        """Erneuert Fold-Rauschgeneratoren + den intern für _build_fault_field()
+        verwendeten Seed - siehe LayerThicknessBuilder.set_seed()-Docstring
+        für den Grund (lazy-instanziierter, session-lang wiederverwendeter
+        Generator)."""
+        self.map_seed = map_seed
+        self._fold_broad_noise = OpenSimplex(seed=(map_seed + 6000) & 0xFFFFFFFF)
+        self._fold_fine_noise = OpenSimplex(seed=(map_seed + 6100) & 0xFFFFFFFF)
+
+    def build(self, terrain_height: np.ndarray, map_distance_km: float,
+              parameters: Dict[str, Any]) -> Dict[str, np.ndarray]:
+        shape = terrain_height.shape
+        terrain_hub = _build_terrain_hub(terrain_height, map_distance_km)
+        tilt = self._build_tilt(shape, map_distance_km, parameters)
+        fold = self._build_fold(shape, map_distance_km, parameters)
+        fault_throw, fault_distance_km = _build_fault_field(
+            shape, map_distance_km, self.map_seed,
+            parameters.get('fault_intensity', 0.0),
+            parameters.get('fault_detail', 0.0),
+            parameters.get('fault_edge_softness', 0.3))
+
+        stack_deformation = (terrain_hub + tilt + fold + fault_throw).astype(np.float32)
+        return {
+            "stack_deformation": stack_deformation,
+            "terrain_hub_delta": terrain_hub.astype(np.float32),
+            "tilt_delta": tilt.astype(np.float32),
+            "fold_delta": fold.astype(np.float32),
+            "fault_delta": fault_throw.astype(np.float32),
+            "fault_distance_map": fault_distance_km.astype(np.float32),
+        }
+
+    def _build_tilt(self, shape, map_distance_km, parameters) -> np.ndarray:
+        """Exakte Ebenen-Verkippung - geschlossene Form, praktisch kostenlos
+        (Frage 4: "so genau wie möglich, wenn's nichts kostet")."""
+        height, width = shape
+        intensity = parameters.get('tilt_intensity', 0.0)  # m pro km Gradient
+        if intensity <= 0.0:
+            return np.zeros(shape, dtype=np.float64)
+        direction_deg = parameters.get('tilt_direction', 0.0)
+        x_km = (np.arange(width, dtype=np.float64) / width) * map_distance_km
+        y_km = (np.arange(height, dtype=np.float64) / height) * map_distance_km
+        X, Y = np.meshgrid(x_km, y_km)
+        gx = intensity * math.cos(math.radians(direction_deg))
+        gy = intensity * math.sin(math.radians(direction_deg))
+        tilt = gx * X + gy * Y
+        return tilt - np.mean(tilt)  # reine Rotation um den Schwerpunkt, kein Netto-Hub
+
+    def _build_fold(self, shape, map_distance_km, parameters) -> np.ndarray:
         """
-        Berechnet eine großräumige, gestufte Härte-Maske (soft/medium/hard) unabhängig
-        vom Gesteinstyp - erzeugt zusammen mit den 3 Gesteinstypen die vom Nutzer
-        gewünschten 9 Härte-Kombinationen (z.B. igneous soft / igneous medium / igneous
-        hard). Niederfrequentes Noise statt der feinen Zonen-Noise aus
-        blend_geological_zones(), damit große, "nierenförmige" zusammenhängende
-        Flächen entstehen statt kleinteiliger Flecken - und in 3 diskrete Stufen
-        geschwellt statt eines glatten Verlaufs, damit benachbarte Härten sich in
-        klaren Sprüngen statt beliebig fein unterscheiden.
-
-        Args:
-            shape: (height, width) der Ziel-Maske
-
-        Returns:
-            2D int-array mit Werten 0 (soft), 1 (medium), 2 (hard)
+        EIN Fold-Effekt mit Intensity (Amplitude) + Detail (mischt eine
+        höherfrequente Rauheits-Komponente bei) - absorbiert sowohl
+        metamorph_folding als auch ridge_warping aus dem Vorgänger-Modell
+        (Frage 8: Ridge wird Teil von Folding). Wellenlänge ist ein fester
+        Bruchteil von map_distance_km -> Faltung sieht bei jeder Weltgröße
+        proportional gleich aus, die absolute km-Wellenlänge skaliert mit
+        der Weltgröße mit (Frage 13).
         """
         height, width = shape
+        intensity = parameters.get('fold_intensity', 0.0)
+        if intensity <= 0.0:
+            return np.zeros(shape, dtype=np.float64)
+        detail = parameters.get('fold_detail', 0.0)
 
         norm_x = np.arange(width, dtype=np.float64) / width
         norm_y = np.arange(height, dtype=np.float64) / height
+        broad_wavelength_km = max(1.0, map_distance_km * 0.45)
+        fine_wavelength_km = max(0.2, broad_wavelength_km / 6.0)
 
-        tier_field = (self.hardness_tier_noise.noise2array(norm_x * 2.5, norm_y * 2.5) + 1) * 0.5  # [0,1]
+        broad = self._fold_broad_noise.noise2array(
+            norm_x * (map_distance_km / broad_wavelength_km),
+            norm_y * (map_distance_km / broad_wavelength_km))
 
-        tier_mask = np.zeros((height, width), dtype=np.int32)
-        tier_mask[tier_field >= 1 / 3] = 1
-        tier_mask[tier_field >= 2 / 3] = 2
+        fine_px_per_cycle = (width / map_distance_km) * fine_wavelength_km
+        fine_fade = _resolvability_fade(fine_px_per_cycle)
+        fine = self._fold_fine_noise.noise2array(
+            norm_x * (map_distance_km / fine_wavelength_km),
+            norm_y * (map_distance_km / fine_wavelength_km))
 
-        return tier_mask
+        return intensity * (broad + 0.6 * detail * fine_fade * fine)
 
 
-class MassConservationManager:
+# =============================================================================
+# INTRUSIONEN (Plan Punkt 5)
+# =============================================================================
+
+def _build_intrusion_field(shape: Tuple[int, int], map_distance_km: float, map_seed: int,
+                            height_range: float, intrusion_density: float,
+                            intrusion_size: float, intrusion_detail: float
+                            ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Erweiterte Klasse für Mass-Conservation mit verbesserter Normalisierung und Validation
+    N lokal begrenzte Blob-Körper (Position, Radius, randverzerrt durch
+    zwei überlagerte Rausch-Oktaven statt perfektem Kreis - bis zu 90%
+    Radius-Auslenkung bei intrusion_detail=1.0 für deutlich amöbenhafte,
+    unförmige Konturen statt nur leichter Welligkeit) - überschreiben lokal
+    den Ausbiss mit Basalt (siehe _apply_intrusions_to_layer_id) und tragen
+    einen kleinen, gekappten Dom-Hebungs-Beitrag zu Δz bei.
+
+    Rückgabe: (intrusion_distance_map (H,W) km, signiert, <0 = innerhalb;
+    intrusion_delta (H,W) m).
     """
+    height, width = shape
+    rng = np.random.RandomState((map_seed + 7000) & 0xFFFFFFFF)
+    n_blobs = max(0, int(round(intrusion_density * 6)))
+    base_radius_km = max(0.2, intrusion_size)
 
-    @staticmethod
-    def normalize_rock_masses(rock_map: np.ndarray) -> np.ndarray:
-        """
-        Normalisiert RGB-Werte so dass R+G+B=255 für jeden Pixel
+    x_km = (np.arange(width, dtype=np.float64) / width) * map_distance_km
+    y_km = (np.arange(height, dtype=np.float64) / height) * map_distance_km
+    min_signed = np.full(shape, np.inf, dtype=np.float64)
 
-        Args:
-            rock_map: RGB-Array mit Gesteinsverteilung [0.0-1.0] oder [0-255]
+    if n_blobs > 0:
+        # Zwei überlagerte Rausch-Oktaven (grob+fein, wie beim Fold-Detail-
+        # Muster) statt einem einzigen glatten Oktav - ein Einzel-Oktav mit
+        # max. 30% Radius-Amplitude ergab nur leichte Welligkeit, keine
+        # echte Unförmigkeit (Nutzer-Feedback: "selbst auf 0.9 noch sehr
+        # rund"). Amplitude jetzt bis 90% des Radius bei intrusion_detail=1.0,
+        # mit einer moderaten Basis-Unregelmäßigkeit (25%) schon bei 0.
+        edge_noise_broad = OpenSimplex(seed=(map_seed + 7100) & 0xFFFFFFFF)
+        edge_noise_fine = OpenSimplex(seed=(map_seed + 7200) & 0xFFFFFFFF)
+        for _ in range(n_blobs):
+            cx = rng.uniform(0, map_distance_km)
+            cy = rng.uniform(0, map_distance_km)
+            radius = base_radius_km * rng.uniform(0.6, 1.4)
+            dx_1d = x_km - cx
+            dy_1d = y_km - cy
+            dist = np.hypot(dx_1d[None, :], dy_1d[:, None])
 
-        Returns:
-            Normalisierte RGB-Map mit garantierter Summe 255
-        """
-        # Sicherstellen dass Input im richtigen Format ist
-        if rock_map.dtype == np.float32 and np.max(rock_map) <= 1.0:
-            rock_map = (rock_map * 255).astype(np.uint8)
-        else:
-            rock_map = rock_map.astype(np.uint8)
+            wavelength_broad = max(0.1, radius * 0.6)
+            wavelength_fine = max(0.05, radius * 0.22)
+            fade_broad = _resolvability_fade((width / map_distance_km) * wavelength_broad)
+            fade_fine = _resolvability_fade((width / map_distance_km) * wavelength_fine)
+            field_broad = edge_noise_broad.noise2array(dx_1d / wavelength_broad, dy_1d / wavelength_broad)
+            field_fine = edge_noise_fine.noise2array(dx_1d / wavelength_fine, dy_1d / wavelength_fine)
+            wobble = 0.65 * fade_broad * field_broad + 0.35 * fade_fine * field_fine
+            wobble_amplitude = radius * (0.25 + 0.65 * intrusion_detail)
+            signed = dist - radius + wobble_amplitude * wobble
+            min_signed = np.minimum(min_signed, signed)
 
-        height, width, channels = rock_map.shape
-        normalized_map = np.zeros_like(rock_map, dtype=np.uint8)
+    transition_km = max(0.05, base_radius_km * 0.15)
+    inside_amount = _smoothstep(-min_signed / transition_km)
+    intrusion_delta = (INTRUSION_UPLIFT_CAP_FRACTION * height_range * inside_amount).astype(np.float32)
+    return min_signed.astype(np.float32), intrusion_delta
 
-        for y in range(height):
-            for x in range(width):
-                r, g, b = rock_map[y, x, :]
-                total = int(r) + int(g) + int(b)  # int für Präzision
 
-                if total > 0:
-                    # Proportionale Normalisierung auf 255
-                    norm_r = int((r / total) * 255)
-                    norm_g = int((g / total) * 255)
-                    norm_b = int((b / total) * 255)
+def _apply_intrusions_to_layer_id(layer_id_map: np.ndarray, intrusion_distance_map: np.ndarray) -> np.ndarray:
+    inside = intrusion_distance_map < 0
+    return np.where(inside, BASALT_LAYER_ID, layer_id_map).astype(np.int16)
 
-                    # Rundungsfehler korrigieren - Summe muss exakt 255 sein
-                    current_sum = norm_r + norm_g + norm_b
-                    diff = 255 - current_sum
 
-                    # Differenz auf größten Kanal verteilen
-                    if diff != 0:
-                        max_channel = np.argmax([norm_r, norm_g, norm_b])
-                        if max_channel == 0:
-                            norm_r = max(0, min(255, norm_r + diff))
-                        elif max_channel == 1:
-                            norm_g = max(0, min(255, norm_g + diff))
-                        else:
-                            norm_b = max(0, min(255, norm_b + diff))
+# =============================================================================
+# AUSBISS-BERECHNUNG (Plan Punkt 7)
+# =============================================================================
 
-                    normalized_map[y, x, :] = [norm_r, norm_g, norm_b]
-                else:
-                    # Gleichverteilung bei total=0
-                    normalized_map[y, x, :] = [85, 85, 85]  # 85*3 = 255
+def _compute_layer_boundaries_base(layer_thickness: np.ndarray) -> np.ndarray:
+    """
+    Unverformte Schicht-Obergrenzen, von OBEN verankert: die oberste/
+    jüngste Schicht (Holozän) sitzt bei TOP_REFERENCE_HEIGHT_M (ein
+    positiver Headroom-Wert relativ zum Terrain-Hub, siehe core/
+    geology_layers.py-Kommentar), ältere Schichten liegen darunter.
+    boundary_base[i] = TOP_REFERENCE_HEIGHT_M - sum(thickness[i+1:]) für
+    i<N-1, boundary_base[-1] = TOP_REFERENCE_HEIGHT_M.
+    """
+    cum_top_down = np.cumsum(layer_thickness[::-1], axis=0)[::-1]  # cum_top_down[i] = sum(thickness[i:])
+    return TOP_REFERENCE_HEIGHT_M - (cum_top_down - layer_thickness)
 
-        return normalized_map
 
-    @staticmethod
-    def validate_conservation(rock_map: np.ndarray) -> bool:
-        """
-        Validiert dass alle Pixel R+G+B=255 erfüllen
+def _compute_outcrop(terrain_height: np.ndarray, layer_thickness: np.ndarray,
+                      stack_deformation: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Vergleicht die REALE Terrain-Höhe (terrain.redistribution-Output) gegen
+    die deformierten Schichtgrenzen. Vollständig vektorisiert über N_LAYERS
+    Vergleichsmasken, kein Pixel-Loop.
 
-        Args:
-            rock_map: RGB-Array zum Validieren
+    WICHTIG - zwei Design-Punkte, beide notwendig, damit "höheres Terrain
+    zeigt älteres Gestein" tatsächlich funktioniert (Nutzer-Vorgabe:
+    Berge legen automatisch das tiefer liegende, harte Kristallin frei):
 
-        Returns:
-            True wenn alle Pixel R+G+B=255 erfüllen
-        """
-        if rock_map.dtype != np.uint8:
-            return False
+    1. terrain_height darf NICHT bereits stack_deformation enthalten -
+       sonst kürzt sich die Verschiebung beim Vergleich mit den (ebenfalls
+       verschobenen) Schichtgrenzen algebraisch heraus und hätte GAR KEINE
+       Wirkung auf den Ausbiss. Das gilt insbesondere für den Terrain-Hub-
+       Anteil von `stack_deformation` (_build_terrain_hub()): der ist zwar
+       aus der Terrainhöhe abgeleitet, aber bewusst GEGLÄTTET.
+       GeologySystemGenerator._calc_outcrop() liest deshalb bewusst den
+       rohen "terrain.redistribution"-Output, NICHT
+       get_calculator_combined_heightmap().
+    2. Die rohe Vergleichszählung (`sum(exceeded)`) wächst mit der
+       Terrainhöhe UND mit dem Schicht-Index (ROCK_LAYERS ist alt->jung
+       sortiert, jüngere Schichten liegen weiter oben) - unveränderte
+       Zählung würde also "höheres Terrain -> jüngere Schicht" ergeben,
+       das GEGENTEIL des gewünschten Verhaltens. Deshalb wird der Index
+       am Ende gespiegelt (`N_LAYERS - 1 - Zählung`): höheres Terrain
+       exceeded mehr Grenzen -> nach Spiegelung ein NIEDRIGERER Index ->
+       älteres Gestein.
+    """
+    boundaries_base = _compute_layer_boundaries_base(layer_thickness)  # (N_LAYERS,H,W)
+    boundaries_deformed = boundaries_base + stack_deformation[None, :, :]
+    exceeded_count = np.sum(terrain_height[None, :, :] >= boundaries_deformed, axis=0)
+    layer_id_map = np.clip(N_LAYERS - 1 - exceeded_count, 0, N_LAYERS - 1).astype(np.int16)
+    return layer_id_map, boundaries_deformed.astype(np.float32)
 
-        sums = np.sum(rock_map.astype(np.int32), axis=2)
-        return np.all(sums == 255)
 
-    @staticmethod
-    def get_conservation_statistics(rock_map: np.ndarray) -> Dict[str, Any]:
-        """
-        Gibt detaillierte Statistiken zur Mass-Conservation zurück
+def _apply_sediment_overlay(layer_id_map: np.ndarray, heightmap_combined: np.ndarray,
+                             map_distance_km: float) -> np.ndarray:
+    """
+    Rein Gesteinstyp-/Farb-Klassifikation in erkannten Senken/Tälern - trägt
+    ABSICHTLICH keinen Höhenbeitrag bei (Plan Punkt 8, nach Nutzer-Hinweis
+    korrigiert: Water berechnet Erosion/Sedimentation bereits als eigenes
+    Höhen-Delta; ein zusätzlicher Höhenbeitrag hier würde sich damit
+    verdoppeln). Erkennung über einen Relief-Proxy direkt aus der
+    Heightmap, km-skaliert statt fixem Pixel-Radius (Frage 13) - keine
+    neue Water-Abhängigkeit nötig.
+    """
+    height, width = heightmap_combined.shape
+    sigma_km = 2.0  # feste Glättungsbreite, kein eigener Slider (Design-Entscheidung)
+    sigma_px = max(1.0, sigma_km * (width / map_distance_km))
+    smoothed = gaussian_filter(heightmap_combined.astype(np.float64), sigma=sigma_px)
+    relief = heightmap_combined.astype(np.float64) - smoothed
+    span = float(np.max(heightmap_combined) - np.min(heightmap_combined))
+    threshold = -0.02 * (span if span > 1e-6 else 1.0)
+    is_valley = relief < threshold
+    holozaen_id = N_LAYERS - 1  # letzter (jüngster) Eintrag in ROCK_LAYERS
+    return np.where(is_valley, holozaen_id, layer_id_map).astype(np.int16)
 
-        Args:
-            rock_map: RGB-Array für Statistiken
 
-        Returns:
-            Dictionary mit Conservation-Statistiken
-        """
-        sums = np.sum(rock_map.astype(np.int32), axis=2)
+# =============================================================================
+# METAMORPHOSE (Plan Punkt 6, eigene Entscheidung zu Fragen 10/11)
+# =============================================================================
 
-        return {
-            'all_pixels_valid': bool(np.all(sums == 255)),
-            'min_sum': int(np.min(sums)),
-            'max_sum': int(np.max(sums)),
-            'mean_sum': float(np.mean(sums)),
-            'pixels_with_errors': int(np.sum(sums != 255)),
-            'total_pixels': int(sums.size),
-            'conservation_percentage': float(np.sum(sums == 255) / sums.size * 100)
-        }
+def _compute_metamorphic_grade(fault_distance_km: np.ndarray, intrusion_distance_km: np.ndarray,
+                                overprint_intensity: float) -> np.ndarray:
+    """
+    Metamorpher Grad [0-1] = Nähe zu Störungen (Regional-/Dynamometamorphose)
+    ODER Nähe zu Intrusionen (Kontaktmetamorphose), beide Ursachen kombiniert
+    (eigene Entscheidung zu Frage 10 - dient dem vom Nutzer gewünschten
+    Realismus für eine spätere Ressourcen-Ableitung).
+    """
+    if overprint_intensity <= 0.0:
+        return np.zeros_like(fault_distance_km, dtype=np.float32)
+    fault_scale_km = 1.0 + 4.0 * overprint_intensity
+    intrusion_scale_km = 0.5 + 2.0 * overprint_intensity
+    regional = np.exp(-np.maximum(fault_distance_km, 0.0) / fault_scale_km)
+    contact = np.exp(-np.maximum(intrusion_distance_km, 0.0) / intrusion_scale_km)
+    grade = np.clip(np.maximum(regional, contact) * overprint_intensity, 0.0, 1.0)
+    return grade.astype(np.float32)
 
+
+# =============================================================================
+# EINFÄRBUNG UND HÄRTE
+# =============================================================================
+
+def _build_rock_map(layer_id_map: np.ndarray, metamorphic_grade: np.ndarray, foliation_detail: float,
+                     map_distance_km: float, map_seed: int) -> np.ndarray:
+    """
+    Farbe der ausbeißenden Schicht/Intrusion je Pixel (Lookup, kein Blending
+    mehr - jeder Pixel ist genau EIN Gesteinstyp, "Mass Conservation" wie im
+    Vorgänger-Modell ist damit gegenstandslos). Foliation ist rein visuell/
+    texturell (Frage 11, eigene Entscheidung): feines Streifenmuster,
+    moduliert mit dem metamorphen Grad, OHNE jede Höhenwirkung.
+    """
+    height, width = layer_id_map.shape
+    colors = np.array([layer.color for layer in ALL_ROCK_TYPES], dtype=np.float32)  # (N_LAYERS+1, 3)
+    rock_map = colors[layer_id_map]  # Fancy-Indexing -> (H,W,3)
+
+    if foliation_detail > 0.0:
+        norm_x = np.arange(width, dtype=np.float64) / width
+        norm_y = np.arange(height, dtype=np.float64) / height
+        wavelength_km = max(0.05, 0.5 / (1.0 + foliation_detail * 9.0))
+        px_per_cycle = (width / map_distance_km) * wavelength_km
+        fade = _resolvability_fade(px_per_cycle)
+        noise = OpenSimplex(seed=(map_seed + 8000) & 0xFFFFFFFF)
+        stripe = noise.noise2array(
+            norm_x * (map_distance_km / wavelength_km),
+            norm_y * (map_distance_km / wavelength_km))
+        modulation = (1.0 + 0.15 * foliation_detail * fade * stripe * metamorphic_grade)[:, :, None]
+        rock_map = np.clip(rock_map * modulation, 0, 255)
+
+    return rock_map.astype(np.uint8)
+
+
+def _build_hardness_map(layer_id_map: np.ndarray, metamorphic_grade: np.ndarray, terrain_height: np.ndarray,
+                         sedimentary_hardness: float, igneous_hardness: float,
+                         metamorphic_hardness: float) -> np.ndarray:
+    """
+    Härte = Kategorie-Härte der ausbeißenden Schicht (Lookup über die feste
+    Kategorie-Zuordnung in ROCK_LAYERS, Frage 19: nur 3 Haupt-Regler) MAL
+    einem festen, geologisch motivierten Härte-Faktor je Einzelschicht
+    (RockLayer.hardness_factor, siehe core/geology_layers.py) - ohne diesen
+    Faktor hätten alle 11 sedimentären Schichten exakt dieselbe Härte
+    (Nutzer-Feedback: "zu unvariabel"). Die relativen Stufen zwischen den
+    Formationen (z.B. Muschelkalk härter als Keuper) bleiben dadurch immer
+    erhalten, während die 3 Slider weiterhin die GESAMTE Bandbreite je
+    Kategorie skalieren. Zum metamorphen Grad hin auf metamorphic_hardness
+    verschoben, plus milde Höhen-Tendenz wie im Vorgänger-Modell. Die
+    frühere, rein noise-basierte 9-Tier-Hardness-Maske entfällt weiterhin -
+    die Schicht-Identität liefert die reale räumliche Struktur, die die
+    Maske künstlich simulieren musste (Plan Punkt 9).
+    """
+    hardness_by_category = {
+        "sedimentary": sedimentary_hardness,
+        "igneous": igneous_hardness,
+        "metamorphic": metamorphic_hardness,
+    }
+    category_hardness_lut = np.array(
+        [hardness_by_category[layer.category] * layer.hardness_factor for layer in ALL_ROCK_TYPES],
+        dtype=np.float32)
+    base_hardness = category_hardness_lut[layer_id_map]
+
+    blended = base_hardness * (1.0 - metamorphic_grade) + metamorphic_hardness * metamorphic_grade
+
+    min_h, max_h = float(np.min(terrain_height)), float(np.max(terrain_height))
+    height_range = max_h - min_h if max_h > min_h else 1.0
+    norm_height = (terrain_height - min_h) / height_range
+    elevation_factor = 0.85 + 0.15 * norm_height
+
+    hardness_map = np.clip(blended * elevation_factor, 1.0, 100.0)
+    return hardness_map.astype(np.float32)
+
+
+# =============================================================================
+# ORCHESTRATOR
+# =============================================================================
 
 class GeologySystemGenerator:
     """
-    Hauptklasse für geologische Schichten und Gesteinstyp-Verteilung mit vollständiger LOD-Integration
+    Hauptklasse für den 3D-Gesteinsstapel mit vollständiger LOD-Integration.
     """
 
-    def __init__(self, map_seed: int = 42, data_lod_manager=None):
+    def __init__(self, map_seed: int = 42, data_lod_manager=None, shader_manager=None):
         """
-        Initialisiert Geology-System-Generator mit allen Sub-Komponenten
-
         Args:
             map_seed: Globaler Seed für reproduzierbare Geologie
             data_lod_manager: DataLODManager für feingranularen Calculator-Storage
-                (siehe set_calculator_output()/get_calculator_output()). Die echte
-                Pipeline injiziert immer eine Instanz über GenerationOrchestrator.
-                get_generator_instance(); bleibt sie None (Standalone/Tests), wird
-                beim ersten Bedarf lazy eine eigene erzeugt.
+            shader_manager: Slot für einen künftigen GPU-Compute-Pfad (siehe
+                Umsetzungsplan Punkt 11) - aktuell mit KEINEN echten
+                Shader-Operationen hinterlegt, jede _calc_*-Methode fällt
+                deshalb immer auf den CPU-Pfad zurück. Strukturell aber
+                bereits GPU-portabel (reine elementweise NumPy-Operationen
+                über wenige Schichten/Störungen/Intrusionen).
         """
         self.map_seed = map_seed
         self.logger = logging.getLogger(__name__)
+        self.shader_manager = shader_manager
 
-        # Sub-Komponenten initialisieren
-        self.rock_classifier = RockTypeClassifier(map_seed)
-        self.hardness_calculator = HardnessCalculator()
-        self.deformation_processor = TectonicDeformationProcessor(map_seed)
-        self.mass_manager = MassConservationManager()
+        self.thickness_builder = LayerThicknessBuilder(map_seed)
+        self.displacement_builder = TectonicDisplacementField(map_seed)
 
-        # Standard-Parameter
         self.default_parameters = self._load_default_parameters()
-
-        # Progress-Callback für UI-Integration
         self.progress_callback = None
 
         self.data_lod_manager = data_lod_manager
-        # Parameter der aktuell laufenden Generierungs-Anfrage (bereits mit
-        # default_parameters gemergt) - vom GenerationOrchestrator einmal pro
-        # frischer Anfrage über set_active_parameters() gesetzt, bleibt über alle
-        # LOD-Runden dieser Anfrage hinweg konstant.
         self._current_parameters: Dict[str, Any] = dict(self.default_parameters)
 
     def set_active_parameters(self, parameters: Dict[str, Any]):
@@ -747,67 +742,78 @@ class GeologySystemGenerator:
         bis zur nächsten frischen Anfrage verwenden."""
         self._current_parameters = {**self.default_parameters, **parameters}
 
+        # map_seed ist ein Terrain-Tab-Parameter, kein Geology-eigener (siehe
+        # _load_default_parameters() oben - taucht dort nicht auf) - über
+        # DataLODManager.get_map_seed() gespiegelt (analog zum map_latitude-
+        # Muster für Biome/Water). Ohne diesen Refresh bliebe self.map_seed
+        # (und die davon abgeleiteten, session-lang gecachten Noise-Builder)
+        # permanent beim Konstruktor-Default (42) hängen, unabhängig von
+        # tatsächlichen Map-Seed-Änderungen (Nutzer-Bug-Report: Intrusion/
+        # Fault-Lines/Tilt sahen bei jeder Map identisch aus).
+        if self.data_lod_manager is not None and hasattr(self.data_lod_manager, "get_map_seed"):
+            live_seed = int(self.data_lod_manager.get_map_seed())
+            if live_seed != self.map_seed:
+                self.map_seed = live_seed
+                self.thickness_builder.set_seed(live_seed)
+                self.displacement_builder.set_seed(live_seed)
+
     def _ensure_data_lod_manager(self):
-        """Lazy-Fallback für Standalone-Nutzung (Tests, calculate_geology() ohne
-        injizierten Manager) - die echte Pipeline injiziert immer einen über
-        GenerationOrchestrator.get_generator_instance()."""
         if self.data_lod_manager is None:
             from gui.OldManagers.data_lod_manager import DataLODManager
             self.data_lod_manager = DataLODManager()
         return self.data_lod_manager
 
-    def _load_default_parameters(self) -> Dict[str, Any]:
-        """
-        Lädt Standard-Parameter aus value_default.py
+    def _get_map_distance_km(self) -> float:
+        """Liest die reale Kartenausdehnung analog zum Terrain-4f-Pattern
+        (core/terrain_generator.py) - DataLODManager zuerst, sonst
+        TERRAIN.WORLD_SIZE_KM als Fallback für Standalone-/Test-Nutzung."""
+        try:
+            from gui.config.value_default import TERRAIN
+            default_km = TERRAIN.WORLD_SIZE_KM
+        except ImportError:
+            default_km = 10.0
+        if self.data_lod_manager is not None and hasattr(self.data_lod_manager, "get_map_distance_km"):
+            try:
+                return float(self.data_lod_manager.get_map_distance_km())
+            except Exception:
+                pass
+        return float(self._current_parameters.get('map_distance_km', default_km))
 
-        Returns:
-            Dictionary mit allen Standard-Parametern
-        """
+    def _load_default_parameters(self) -> Dict[str, Any]:
         try:
             from gui.config.value_default import GEOLOGY
-
             return {
                 'sedimentary_hardness': GEOLOGY.SEDIMENTARY_HARDNESS["default"],
                 'igneous_hardness': GEOLOGY.IGNEOUS_HARDNESS["default"],
                 'metamorphic_hardness': GEOLOGY.METAMORPHIC_HARDNESS["default"],
-                'ridge_warping': GEOLOGY.RIDGE_WARPING["default"],
-                'bevel_warping': GEOLOGY.BEVEL_WARPING["default"],
-                'metamorphic_foliation': GEOLOGY.METAMORPH_FOLIATION["default"],
-                'metamorphic_folding': GEOLOGY.METAMORPH_FOLDING["default"],
-                'igneous_flowing': GEOLOGY.IGNEOUS_FLOWING["default"]
+                'tilt_intensity': GEOLOGY.TILT_INTENSITY["default"],
+                'tilt_direction': GEOLOGY.TILT_DIRECTION["default"],
+                'fold_intensity': GEOLOGY.FOLD_INTENSITY["default"],
+                'fold_detail': GEOLOGY.FOLD_DETAIL["default"],
+                'fault_intensity': GEOLOGY.FAULT_INTENSITY["default"],
+                'fault_detail': GEOLOGY.FAULT_DETAIL["default"],
+                'fault_edge_softness': GEOLOGY.FAULT_EDGE_SOFTNESS["default"],
+                'intrusion_density': GEOLOGY.INTRUSION_DENSITY["default"],
+                'intrusion_size': GEOLOGY.INTRUSION_SIZE["default"],
+                'intrusion_detail': GEOLOGY.INTRUSION_DETAIL["default"],
+                'metamorphic_overprint_intensity': GEOLOGY.METAMORPHIC_OVERPRINT_INTENSITY["default"],
+                'foliation_detail': GEOLOGY.FOLIATION_DETAIL["default"],
             }
         except ImportError:
-            # Fallback-Parameter wenn value_default nicht verfügbar
             self.logger.warning("Could not load parameters from value_default.py, using fallback values")
             return {
-                'sedimentary_hardness': 30.0,
-                'igneous_hardness': 70.0,
-                'metamorphic_hardness': 60.0,
-                'ridge_warping': 0.3,
-                'bevel_warping': 0.2,
-                'metamorphic_foliation': 0.4,
-                'metamorphic_folding': 0.3,
-                'igneous_flowing': 0.5
+                'sedimentary_hardness': 30.0, 'igneous_hardness': 80.0, 'metamorphic_hardness': 65.0,
+                'tilt_intensity': 15.0, 'tilt_direction': 45.0,
+                'fold_intensity': 400.0, 'fold_detail': 0.4,
+                'fault_intensity': 100.0, 'fault_detail': 0.5, 'fault_edge_softness': 0.3,
+                'intrusion_density': 0.3, 'intrusion_size': 1.0, 'intrusion_detail': 0.5,
+                'metamorphic_overprint_intensity': 0.4, 'foliation_detail': 0.5,
             }
 
     def set_progress_callback(self, callback):
-        """
-        Setzt Progress-Callback für UI-Updates
-
-        Args:
-            callback: Funktion(phase, progress, message)
-        """
         self.progress_callback = callback
 
     def _update_progress(self, phase: str, progress: int, message: str):
-        """
-        Sendet Progress-Update an UI
-
-        Args:
-            phase: Aktuelle Generation-Phase
-            progress: Fortschritt in Prozent [0-100]
-            message: Status-Message für UI
-        """
         if self.progress_callback:
             try:
                 self.progress_callback(phase, progress, message)
@@ -815,23 +821,18 @@ class GeologySystemGenerator:
                 self.logger.warning(f"Progress callback failed: {e}")
 
     def calculate_geology(self, heightmap_combined: np.ndarray, slopemap: np.ndarray,
-                         parameters: Dict[str, Any], lod_level: int,
-                         previous_height_delta: Optional[np.ndarray] = None) -> GeologyData:
+                           parameters: Dict[str, Any], lod_level: int,
+                           previous_height_delta: Optional[np.ndarray] = None) -> GeologyData:
         """
-        Hauptmethode für Geology-Generierung mit vollständiger LOD-Integration
+        Hauptmethode für Geology-Generierung mit vollständiger LOD-Integration.
 
-        Args:
-            heightmap_combined: Post-Erosion Heightmap vom DataLODManager
-            slopemap: Slope-Daten (dz/dx, dz/dy) vom Terrain-Generator
-            parameters: Parameter-Dictionary mit allen Geology-Einstellungen
-            lod_level: Numerisches LOD-Level (1-7+)
-            previous_height_delta: Kumuliertes Tektonik-Höhen-Delta aus dem letzten
-                abgeschlossenen Geology-LOD (None beim allerersten Lauf) - die tektonische
-                Deformation dieser Passage kommt additiv dazu, analog zu
-                WaterData.erosion_map/sedimentation_map
-
-        Returns:
-            GeologyData-Objekt mit allen Geology-Outputs und Validity-State
+        Hinweis: previous_height_delta wird nicht mehr verwendet (Parameter
+        aus Aufruf-Kompatibilität erhalten) - das neue Δz-Feld wird pro
+        LOD-Aufruf vollständig frisch aus stetigen, weltkoordinaten-basierten
+        Funktionen berechnet statt wie zuvor über scipy.ndimage.zoom von der
+        letzten LOD-Stufe fortgeschrieben (siehe `_resolvability_fade`) -
+        macht das Ergebnis unabhängig davon, wie viele LOD-Zwischenstufen
+        durchlaufen wurden.
         """
         try:
             self.logger.info(f"Starting geology generation - LOD {lod_level}, Size: {heightmap_combined.shape}")
@@ -840,40 +841,24 @@ class GeologySystemGenerator:
             self.set_active_parameters(parameters)
             merged_params = self._current_parameters
 
-            # Input-Validation
             self._validate_inputs(heightmap_combined, slopemap, merged_params)
 
-            # Standalone-Convenience-Pfad (Legacy-Kompatibilität + Tests): heightmap_
-            # combined/slopemap kommen hier als direkte Parameter, nicht aus dem
-            # DataLODManager - für die _calc_*-Methoden (die jetzt IMMER aus dem
-            # feingranularen Calculator-Storage lesen, siehe get_calculator_combined_
-            # heightmap()) werden sie deshalb dort gespiegelt: heightmap als
-            # terrain.redistribution-Output (get_calculator_combined_heightmap()
-            # liefert ihn dann unverändert zurück, da in einem frischen Manager keine
-            # Geology-/Water-Anteile existieren), slopemap als terrain.slope-Output.
+            # Standalone-Convenience-Pfad (Legacy-Kompatibilität + Tests): siehe
+            # Docstring der Vorgänger-Version - heightmap_combined/slopemap
+            # werden hier gespiegelt, damit die _calc_*-Methoden (die immer aus
+            # dem feingranularen Calculator-Storage lesen) etwas vorfinden.
             self.data_lod_manager.set_calculator_output(
                 "terrain.redistribution", lod_level, {"heightmap": heightmap_combined})
             self.data_lod_manager.set_calculator_output(
                 "terrain.slope", lod_level, {"slopemap": slopemap})
-            if previous_height_delta is not None:
-                self.data_lod_manager.set_calculator_output(
-                    "geology.tectonic_deformation", lod_level - 1, {"height_delta": previous_height_delta})
 
-            # Läuft über die einzeln aufrufbaren _calc_*-Methoden (siehe
-            # gui/OldManagers/calculator_graph.py - Geology-Calculator-Knoten #5-#10
-            # + faceted_boundaries aus docs/generation_pipeline_dependencies.md).
-            # Die echte GUI-Pipeline (GenerationOrchestrator) ruft dieselben
-            # Methoden ab jetzt einzeln über den globalen CalculatorDispatcher auf
-            # (Tracker #16 LOD-Lockstep-Umbau) - der Effekt ist identisch, da beide
-            # Wege denselben Storage nutzen.
             for calculator_id in (
-                "geology.classify_elevation", "geology.slope_hardening", "geology.blend_zones",
-                "geology.tectonic_deformation", "geology.faceted_boundaries",
-                "geology.mass_conservation", "geology.hardness",
+                "geology.layer_thickness", "geology.tectonic_displacement", "geology.outcrop",
+                "geology.intrusions", "geology.sediment_overlay", "geology.metamorphic_overprint",
+                "geology.rock_color", "geology.hardness",
             ):
                 getattr(self, "_calc_" + calculator_id.split(".", 1)[1])(calculator_id, lod_level)
 
-            # GeologyData-Objekt erstellen
             geology_data = self.assemble_geology_data(lod_level, merged_params)
 
             self._update_progress("Generation Complete", 100, "Geology generation completed successfully")
@@ -883,636 +868,280 @@ class GeologySystemGenerator:
 
         except Exception as e:
             self.logger.error(f"Geology generation failed: {e}")
-            # Fallback zu Default-Rock-Distribution
             return self._create_fallback_geology_data(heightmap_combined, self._current_parameters, lod_level)
 
     def assemble_geology_data(self, lod_level: int, parameters: Dict[str, Any]) -> GeologyData:
         """
-        Funktionsweise: Baut das finale GeologyData-Objekt aus den einzeln
-        gespeicherten Calculator-Outputs zusammen
-        Aufgabe: Wird vom GenerationOrchestrator aufgerufen, sobald alle 7 Geology-
-            Calculator-Knoten ein LOD abgeschlossen haben (siehe Task 18 im
-            LOD-Lockstep-Umbau)
+        Baut das finale GeologyData-Objekt aus den einzeln gespeicherten
+        Calculator-Outputs zusammen, sobald alle 8 Geology-Calculator-Knoten
+        ein LOD abgeschlossen haben.
         """
-        rock_map = self.data_lod_manager.get_calculator_output("geology.mass_conservation", "rock_map", lod_level)
-        hardness_map = self.data_lod_manager.get_calculator_output("geology.hardness", "hardness_map", lod_level)
-        height_delta = self.data_lod_manager.get_calculator_output(
-            "geology.tectonic_deformation", "height_delta", lod_level)
+        dlm = self.data_lod_manager
+        rock_map = dlm.get_calculator_output("geology.rock_color", "rock_map", lod_level)
+        hardness_map = dlm.get_calculator_output("geology.hardness", "hardness_map", lod_level)
+        layer_id_map = dlm.get_calculator_output("geology.sediment_overlay", "layer_id_map", lod_level)
 
-        if rock_map is None or hardness_map is None:
+        if rock_map is None or hardness_map is None or layer_id_map is None:
             raise ValueError(f"assemble_geology_data: fehlende Calculator-Outputs für LOD {lod_level}")
 
-        return self._create_geology_data(rock_map, hardness_map, lod_level, parameters, height_delta)
+        height_delta = dlm.get_calculator_output("geology.intrusions", "height_delta", lod_level)
+        fault_distance_map = dlm.get_calculator_output(
+            "geology.tectonic_displacement", "fault_distance_map", lod_level)
+        intrusion_distance_map = dlm.get_calculator_output(
+            "geology.intrusions", "intrusion_distance_map", lod_level)
+        metamorphic_grade_map = dlm.get_calculator_output(
+            "geology.metamorphic_overprint", "metamorphic_grade_map", lod_level)
+        layer_boundaries = dlm.get_calculator_output("geology.outcrop", "layer_boundaries", lod_level)
+        # Diagnose-Komponenten: NUR "intrusion" ist auch Teil von height_delta
+        # (siehe oben) - terrain_hub/tilt/fold/fault wirken ausschließlich auf
+        # den Gesteinsstapel/Ausbiss, nie auf die sichtbare Kartenhöhe.
+        delta_components = {
+            "terrain_hub": dlm.get_calculator_output("geology.tectonic_displacement", "terrain_hub_delta", lod_level),
+            "tilt": dlm.get_calculator_output("geology.tectonic_displacement", "tilt_delta", lod_level),
+            "fold": dlm.get_calculator_output("geology.tectonic_displacement", "fold_delta", lod_level),
+            "fault": dlm.get_calculator_output("geology.tectonic_displacement", "fault_delta", lod_level),
+            "intrusion": dlm.get_calculator_output("geology.intrusions", "intrusion_delta", lod_level),
+        }
 
-    def _calc_classify_elevation(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'geology.classify_elevation' (#5)"""
-        self._update_progress("Rock Classification", 20, "Classifying rocks by elevation...")
-        heightmap_combined = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
-        if heightmap_combined is None:
-            raise ValueError(f"geology.classify_elevation: heightmap_combined für LOD {lod_level} nicht verfügbar")
+        return self._create_geology_data(
+            rock_map, hardness_map, layer_id_map, lod_level, parameters, height_delta,
+            fault_distance_map, intrusion_distance_map, metamorphic_grade_map,
+            layer_boundaries, delta_components)
 
-        rock_map = self.rock_classifier.classify_by_elevation(heightmap_combined)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"rock_map_raw": rock_map})
-
-    def _calc_slope_hardening(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'geology.slope_hardening' (#6)"""
-        self._update_progress("Rock Classification", 35, "Applying slope hardening...")
-        rock_map = self.data_lod_manager.get_calculator_output(
-            "geology.classify_elevation", "rock_map_raw", lod_level)
-        slopemap = self.data_lod_manager.get_calculator_output("terrain.slope", "slopemap", lod_level)
-        if rock_map is None or slopemap is None:
-            raise ValueError(f"geology.slope_hardening: fehlende Inputs für LOD {lod_level}")
-
-        rock_map = self.rock_classifier.apply_slope_hardening(rock_map, slopemap)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"rock_map_hardened": rock_map})
-
-    def _calc_blend_zones(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'geology.blend_zones' (#7)"""
-        self._update_progress("Geological Zones", 50, "Blending geological zones...")
-        rock_map = self.data_lod_manager.get_calculator_output(
-            "geology.slope_hardening", "rock_map_hardened", lod_level)
-        if rock_map is None:
-            raise ValueError(f"geology.blend_zones: rock_map_hardened für LOD {lod_level} nicht verfügbar")
-
-        rock_map = self.rock_classifier.blend_geological_zones(rock_map)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"rock_map_blended": rock_map})
-
-    def _calc_tectonic_deformation(self, calculator_id: str, lod_level: int) -> None:
-        """
-        Calculator-Node 'geology.tectonic_deformation' (#8) - inkl. Kumulation
-        über LOD-Durchläufe: liest sein EIGENES Ergebnis aus der vorherigen Runde
-        (lod_level - 1) als previous_height_delta, statt wie früher vom Aufrufer
-        übergeben zu bekommen.
-        """
-        self._update_progress("Tectonic Deformation", 65, "Applying tectonic deformation...")
-        rock_map = self.data_lod_manager.get_calculator_output(
-            "geology.blend_zones", "rock_map_blended", lod_level)
-        heightmap_combined = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
-        if rock_map is None or heightmap_combined is None:
-            raise ValueError(f"geology.tectonic_deformation: fehlende Inputs für LOD {lod_level}")
-
-        previous_height_delta = self.data_lod_manager.get_calculator_output(
-            calculator_id, "height_delta", lod_level - 1)
-
-        rock_map, height_delta = self._apply_tectonic_deformation(
-            rock_map, heightmap_combined, self._current_parameters, lod_level, previous_height_delta
+    def _create_geology_data(self, rock_map, hardness_map, layer_id_map, lod_level, parameters,
+                              height_delta, fault_distance_map, intrusion_distance_map,
+                              metamorphic_grade_map, layer_boundaries, delta_components=None) -> GeologyData:
+        validity_state = {
+            'hardness_range': bool(np.all((hardness_map >= 1.0) & (hardness_map <= 100.0))),
+            'layer_assignment': bool(np.all((layer_id_map >= 0) & (layer_id_map <= N_LAYERS))),
+        }
+        return GeologyData(
+            rock_map=rock_map, hardness_map=hardness_map, layer_id_map=layer_id_map,
+            lod_level=lod_level, actual_size=tuple(hardness_map.shape[:2]),
+            validity_state=validity_state, parameter_hash=self._calculate_parameter_hash(parameters),
+            parameters=dict(parameters), height_delta=height_delta,
+            fault_distance_map=fault_distance_map, intrusion_distance_map=intrusion_distance_map,
+            metamorphic_grade_map=metamorphic_grade_map, layer_boundaries=layer_boundaries,
+            delta_components=delta_components,
         )
+
+    @staticmethod
+    def _calculate_parameter_hash(parameters: Dict[str, Any]) -> str:
+        relevant = sorted((k, v) for k, v in parameters.items() if isinstance(v, (int, float, str)))
+        return hashlib.md5(str(relevant).encode()).hexdigest()[:12]
+
+    # -------------------------------------------------------------------
+    # Calculator-Knoten (siehe gui/OldManagers/calculator_graph.py)
+    # -------------------------------------------------------------------
+
+    def _calc_layer_thickness(self, calculator_id: str, lod_level: int) -> None:
+        self._update_progress("Layer Stack", 10, "Building rock layer thickness...")
+        heightmap = self.data_lod_manager.get_calculator_output("terrain.redistribution", "heightmap", lod_level)
+        slopemap = self.data_lod_manager.get_calculator_output("terrain.slope", "slopemap", lod_level)
+        if heightmap is None or slopemap is None:
+            raise ValueError(f"geology.layer_thickness: heightmap/slopemap für LOD {lod_level} nicht verfügbar")
+
+        map_distance_km = self._get_map_distance_km()
+        thickness = None
+        if self.shader_manager:
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    "geology", "layerThickness",
+                    {"shape": heightmap.shape, "map_distance_km": map_distance_km}, self._current_parameters)
+                if result.get("success"):
+                    thickness = result["layer_thickness"]
+            except Exception as e:
+                logging.warning(f"GPU layer thickness failed: {e}, falling back to CPU")
+        if thickness is None:
+            thickness = self.thickness_builder.build(heightmap.shape, map_distance_km, slopemap)
+
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"layer_thickness": thickness})
+
+    def _calc_tectonic_displacement(self, calculator_id: str, lod_level: int) -> None:
+        self._update_progress("Tectonics", 25, "Building tectonic displacement field...")
+        heightmap = self.data_lod_manager.get_calculator_output("terrain.redistribution", "heightmap", lod_level)
+        if heightmap is None:
+            raise ValueError(f"geology.tectonic_displacement: heightmap für LOD {lod_level} nicht verfügbar")
+
+        map_distance_km = self._get_map_distance_km()
+        parameters = self._current_parameters
+        components = None
+        if self.shader_manager:
+            try:
+                result = self.shader_manager.request_shader_operation(
+                    "geology", "tectonicDisplacement",
+                    {"shape": heightmap.shape, "map_distance_km": map_distance_km}, parameters)
+                if result.get("success"):
+                    components = result["components"]
+            except Exception as e:
+                logging.warning(f"GPU tectonic displacement failed: {e}, falling back to CPU")
+        if components is None:
+            components = self.displacement_builder.build(heightmap, map_distance_km, parameters)
+
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, components)
+
+    def _calc_outcrop(self, calculator_id: str, lod_level: int) -> None:
+        self._update_progress("Outcrop", 45, "Intersecting rock layers with terrain...")
+        terrain_height = self.data_lod_manager.get_calculator_output("terrain.redistribution", "heightmap", lod_level)
+        layer_thickness = self.data_lod_manager.get_calculator_output(
+            "geology.layer_thickness", "layer_thickness", lod_level)
+        stack_deformation = self.data_lod_manager.get_calculator_output(
+            "geology.tectonic_displacement", "stack_deformation", lod_level)
+        if terrain_height is None or layer_thickness is None or stack_deformation is None:
+            raise ValueError(f"geology.outcrop: fehlende Inputs für LOD {lod_level}")
+
+        layer_id_map, layer_boundaries = _compute_outcrop(terrain_height, layer_thickness, stack_deformation)
         self.data_lod_manager.set_calculator_output(
-            calculator_id, lod_level, {"rock_map_deformed": rock_map, "height_delta": height_delta})
+            calculator_id, lod_level, {"layer_id_map": layer_id_map, "layer_boundaries": layer_boundaries})
 
-    def _calc_faceted_boundaries(self, calculator_id: str, lod_level: int) -> None:
+    def _calc_intrusions(self, calculator_id: str, lod_level: int) -> None:
         """
-        Calculator-Node 'geology.faceted_boundaries' - scharfe, gezackte
-        Gesteinsgrenzen statt glattem Verlauf (wie auf einer echten geologischen
-        Karte); nicht in docs/generation_pipeline_dependencies.md erfasst.
+        Platziert Intrusionen - wirkt AUSSCHLIESSLICH auf den Gesteinsstapel/
+        Ausbiss (layer_id_map) und die Diagnose-Felder, NICHT auf die
+        sichtbare Kartenhöhe (Nutzer-Korrektur: die frühere gekappte
+        Intrusions-Dom-Hebung erzeugte eine tatsächliche Terrain-Erhebung,
+        die der Nutzer nicht wollte - Intrusionen sollen nur ein
+        "Durchbruch durch die Schichten" sein, in der Cross-Section vom
+        realen Terrain abgeschnitten, siehe map_display_2d.py
+        _render_cross_section() das den Basalt-"Wurzel"-Bereich bereits
+        gegen terrain_slice kappt). `height_delta` liefert deshalb jetzt
+        IMMER Nullen - Tilt/Fold/Fault/Terrain-Hub taten das schon vorher
+        (siehe TectonicDisplacementField-Docstring), Geology trägt damit gar
+        keinen Höhenbeitrag mehr zur kombinierten Heightmap bei.
+        `intrusion_delta` bleibt als reines Diagnose-Feld (Anzeigemodus
+        "Intrusion Δz", analog zu terrain_hub/tilt/fold/fault) erhalten -
+        zeigt weiterhin die (rein hypothetische) Dom-Stärke, ohne sie
+        anzuwenden.
         """
-        self._update_progress("Faceting", 72, "Sharpening rock boundaries...")
-        rock_map = self.data_lod_manager.get_calculator_output(
-            "geology.tectonic_deformation", "rock_map_deformed", lod_level)
-        if rock_map is None:
-            raise ValueError(f"geology.faceted_boundaries: rock_map_deformed für LOD {lod_level} nicht verfügbar")
+        self._update_progress("Intrusions", 60, "Placing igneous intrusions...")
+        layer_id_map = self.data_lod_manager.get_calculator_output("geology.outcrop", "layer_id_map", lod_level)
+        terrain_height = self.data_lod_manager.get_calculator_output("terrain.redistribution", "heightmap", lod_level)
+        if layer_id_map is None or terrain_height is None:
+            raise ValueError(f"geology.intrusions: fehlende Inputs für LOD {lod_level}")
 
-        rock_map = self.rock_classifier.apply_faceted_boundaries(rock_map)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"rock_map_faceted": rock_map})
+        map_distance_km = self._get_map_distance_km()
+        parameters = self._current_parameters
+        height_range = float(np.max(terrain_height) - np.min(terrain_height)) or 1.0
 
-    def _calc_mass_conservation(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'geology.mass_conservation' (#9)"""
-        self._update_progress("Mass Conservation", 80, "Normalizing rock masses...")
-        rock_map = self.data_lod_manager.get_calculator_output(
-            "geology.faceted_boundaries", "rock_map_faceted", lod_level)
-        if rock_map is None:
-            raise ValueError(f"geology.mass_conservation: rock_map_faceted für LOD {lod_level} nicht verfügbar")
+        intrusion_distance_map, intrusion_delta = _build_intrusion_field(
+            layer_id_map.shape, map_distance_km, self.map_seed, height_range,
+            parameters.get('intrusion_density', 0.0), parameters.get('intrusion_size', 1.0),
+            parameters.get('intrusion_detail', 0.0))
 
-        rock_map_uint8 = self._ensure_mass_conservation(rock_map)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"rock_map": rock_map_uint8})
+        updated_layer_id_map = _apply_intrusions_to_layer_id(layer_id_map, intrusion_distance_map)
+        height_delta = np.zeros_like(intrusion_delta, dtype=np.float32)
+
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {
+            "layer_id_map": updated_layer_id_map,
+            "intrusion_distance_map": intrusion_distance_map,
+            "intrusion_delta": intrusion_delta,
+            "height_delta": height_delta,
+        })
+
+    def _calc_sediment_overlay(self, calculator_id: str, lod_level: int) -> None:
+        self._update_progress("Sediment Overlay", 72, "Classifying valley sediments...")
+        layer_id_map = self.data_lod_manager.get_calculator_output("geology.intrusions", "layer_id_map", lod_level)
+        heightmap_combined = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
+        if layer_id_map is None or heightmap_combined is None:
+            raise ValueError(f"geology.sediment_overlay: fehlende Inputs für LOD {lod_level}")
+
+        map_distance_km = self._get_map_distance_km()
+        updated = _apply_sediment_overlay(layer_id_map, heightmap_combined, map_distance_km)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"layer_id_map": updated})
+
+    def _calc_metamorphic_overprint(self, calculator_id: str, lod_level: int) -> None:
+        self._update_progress("Metamorphism", 82, "Computing metamorphic overprint...")
+        fault_distance_map = self.data_lod_manager.get_calculator_output(
+            "geology.tectonic_displacement", "fault_distance_map", lod_level)
+        intrusion_distance_map = self.data_lod_manager.get_calculator_output(
+            "geology.intrusions", "intrusion_distance_map", lod_level)
+        if fault_distance_map is None or intrusion_distance_map is None:
+            raise ValueError(f"geology.metamorphic_overprint: fehlende Inputs für LOD {lod_level}")
+
+        overprint_intensity = self._current_parameters.get('metamorphic_overprint_intensity', 0.0)
+        grade = _compute_metamorphic_grade(fault_distance_map, intrusion_distance_map, overprint_intensity)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"metamorphic_grade_map": grade})
+
+    def _calc_rock_color(self, calculator_id: str, lod_level: int) -> None:
+        self._update_progress("Rock Coloring", 90, "Coloring rock outcrop...")
+        layer_id_map = self.data_lod_manager.get_calculator_output("geology.sediment_overlay", "layer_id_map", lod_level)
+        metamorphic_grade = self.data_lod_manager.get_calculator_output(
+            "geology.metamorphic_overprint", "metamorphic_grade_map", lod_level)
+        if layer_id_map is None or metamorphic_grade is None:
+            raise ValueError(f"geology.rock_color: fehlende Inputs für LOD {lod_level}")
+
+        map_distance_km = self._get_map_distance_km()
+        foliation_detail = self._current_parameters.get('foliation_detail', 0.0)
+        rock_map = _build_rock_map(layer_id_map, metamorphic_grade, foliation_detail, map_distance_km, self.map_seed)
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"rock_map": rock_map})
 
     def _calc_hardness(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'geology.hardness' (#10)"""
-        self._update_progress("Hardness Calculation", 95, "Calculating hardness map...")
-        rock_map_uint8 = self.data_lod_manager.get_calculator_output(
-            "geology.mass_conservation", "rock_map", lod_level)
-        heightmap_combined = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
-        if rock_map_uint8 is None or heightmap_combined is None:
+        self._update_progress("Hardness", 97, "Calculating hardness map...")
+        layer_id_map = self.data_lod_manager.get_calculator_output("geology.sediment_overlay", "layer_id_map", lod_level)
+        metamorphic_grade = self.data_lod_manager.get_calculator_output(
+            "geology.metamorphic_overprint", "metamorphic_grade_map", lod_level)
+        terrain_height = self.data_lod_manager.get_calculator_output("terrain.redistribution", "heightmap", lod_level)
+        if layer_id_map is None or metamorphic_grade is None or terrain_height is None:
             raise ValueError(f"geology.hardness: fehlende Inputs für LOD {lod_level}")
 
         parameters = self._current_parameters
-        hardness_tier_mask = self.rock_classifier.calculate_hardness_tier_mask(heightmap_combined.shape)
-        hardness_map = self.hardness_calculator.calculate_hardness_map(
-            rock_map_uint8,
-            parameters['sedimentary_hardness'],
-            parameters['igneous_hardness'],
-            parameters['metamorphic_hardness'],
-            heightmap_combined,
-            hardness_tier_mask
-        )
+        hardness_map = _build_hardness_map(
+            layer_id_map, metamorphic_grade, terrain_height,
+            parameters['sedimentary_hardness'], parameters['igneous_hardness'], parameters['metamorphic_hardness'])
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"hardness_map": hardness_map})
 
+    # -------------------------------------------------------------------
+    # Validierung / Fallback / Info
+    # -------------------------------------------------------------------
+
     def _validate_inputs(self, heightmap_combined: np.ndarray, slopemap: np.ndarray,
-                        parameters: Dict[str, Any]):
-        """
-        Validiert Input-Daten und Parameter
-
-        Args:
-            heightmap_combined: Heightmap zum Validieren
-            slopemap: Slopemap zum Validieren
-            parameters: Parameter zum Validieren
-
-        Raises:
-            ValueError: Bei ungültigen Inputs
-        """
-        # Heightmap-Validation
+                          parameters: Dict[str, Any]):
         if heightmap_combined is None or heightmap_combined.size == 0:
             raise ValueError("Invalid heightmap_combined - empty or None")
-
         if len(heightmap_combined.shape) != 2:
             raise ValueError("Heightmap must be 2D array")
-
-        if np.any(np.isnan(heightmap_combined)):
-            self.logger.warning("Heightmap contains NaN values, will be replaced with zeros")
-            heightmap_combined[np.isnan(heightmap_combined)] = 0.0
-
-        # Slopemap-Validation
         if slopemap is None or slopemap.size == 0:
             raise ValueError("Invalid slopemap - empty or None")
 
-        if slopemap.shape[:2] != heightmap_combined.shape:
-            raise ValueError("Slopemap and heightmap must have same dimensions")
+        for key in ('sedimentary_hardness', 'igneous_hardness', 'metamorphic_hardness'):
+            value = parameters.get(key)
+            if value is None or not (0.0 <= value <= 100.0):
+                raise ValueError(f"{key} out of range [0-100]: {value}")
 
-        if len(slopemap.shape) != 3 or slopemap.shape[2] != 2:
-            raise ValueError("Slopemap must be 3D array with 2 channels (dz/dx, dz/dy)")
-
-        # Parameter-Validation
-        required_params = ['sedimentary_hardness', 'igneous_hardness', 'metamorphic_hardness']
-        for param in required_params:
-            if param not in parameters:
-                raise ValueError(f"Missing required parameter: {param}")
-
-            value = parameters[param]
-            if not (0 <= value <= 100):
-                raise ValueError(f"Parameter {param} must be in range [0-100], got {value}")
-
-    def _apply_tectonic_deformation(self, rock_map: np.ndarray, heightmap_combined: np.ndarray,
-                                   parameters: Dict[str, Any], lod_level: int,
-                                   previous_height_delta: Optional[np.ndarray] = None
-                                   ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Wendet tektonische Deformation mit LOD-spezifischen Details auf Gesteinsverteilung
-        UND Heightmap an. Das Höhen-Delta akkumuliert über LOD-Durchläufe (wie
-        WaterData.erosion_map/sedimentation_map): previous_height_delta kommt vom letzten
-        abgeschlossenen Geology-LOD, die hier neu berechneten Deltas kommen addiert dazu.
-
-        Args:
-            rock_map: Aktuelle Gesteinsverteilung
-            heightmap_combined: Aktuelle Heightmap (Referenz-Skala + Basis für Bevel-Glättung)
-            parameters: Deformation-Parameter
-            lod_level: LOD-Level für Detail-Skalierung
-            previous_height_delta: Kumuliertes Höhen-Delta aus dem letzten Geology-LOD
-
-        Returns:
-            (Deformierte Rock-Map, kumuliertes Höhen-Delta in Metern)
-        """
-        # LOD-spezifische Deformation-Detail-Skalierung
-        lod_detail_factor = min(1.0, lod_level / 5.0)  # Volldetail ab LOD 5
-
-        height_range = float(np.max(heightmap_combined) - np.min(heightmap_combined))
-        height_range = height_range if height_range > 0 else 1.0
-
-        height_delta = np.zeros(heightmap_combined.shape, dtype=np.float32)
-
-        # Ridge-Warping
-        if parameters.get('ridge_warping', 0.0) > 0.0:
-            scaled_ridge = parameters['ridge_warping'] * lod_detail_factor
-            rock_map, ridge_delta = self.deformation_processor.apply_ridge_warping(
-                rock_map, scaled_ridge, height_range)
-            height_delta += ridge_delta
-
-        # Bevel-Warping
-        if parameters.get('bevel_warping', 0.0) > 0.0:
-            scaled_bevel = parameters['bevel_warping'] * lod_detail_factor
-            rock_map, bevel_delta = self.deformation_processor.apply_bevel_warping(
-                rock_map, scaled_bevel, heightmap_combined)
-            height_delta += bevel_delta
-
-        # Metamorphic-Effekte
-        metamorphic_foliation = parameters.get('metamorph_foliation', 0.0) * lod_detail_factor
-        metamorphic_folding = parameters.get('metamorph_folding', 0.0) * lod_detail_factor
-
-        if metamorphic_foliation > 0.0 or metamorphic_folding > 0.0:
-            rock_map, metamorphic_delta = self.deformation_processor.process_metamorphic_effects(
-                rock_map, metamorphic_foliation, metamorphic_folding, height_range
-            )
-            height_delta += metamorphic_delta
-
-        # Igneous-Flowing
-        if parameters.get('igneous_flowing', 0.0) > 0.0:
-            scaled_flowing = parameters['igneous_flowing'] * lod_detail_factor
-            rock_map, flowing_delta = self.deformation_processor.process_igneous_flowing(
-                rock_map, scaled_flowing, height_range)
-            height_delta += flowing_delta
-
-        # Kumulation über LOD-Durchläufe (auf Zielgröße gebracht falls nötig)
-        if previous_height_delta is not None:
-            if previous_height_delta.shape != height_delta.shape:
-                previous_height_delta = zoom(
-                    previous_height_delta,
-                    height_delta.shape[0] / previous_height_delta.shape[0],
-                    order=1
-                )
-            height_delta = height_delta + previous_height_delta
-
-        return rock_map, height_delta.astype(np.float32)
-
-    def _ensure_mass_conservation(self, rock_map: np.ndarray) -> np.ndarray:
-        """
-        Stellt Mass-Conservation sicher und validiert Ergebnis
-
-        Args:
-            rock_map: Gesteinsverteilung [0.0-1.0]
-
-        Returns:
-            Normalisierte Rock-Map mit R+G+B=255
-        """
-        # Zu uint8 konvertieren für Mass-Conservation
-        if rock_map.dtype == np.float32:
-            rock_map_uint8 = (rock_map * 255).astype(np.uint8)
+    def _create_fallback_geology_data(self, heightmap_combined: Optional[np.ndarray],
+                                       parameters: Dict[str, Any], lod_level: int) -> GeologyData:
+        self.logger.warning("Using fallback geology data due to generation error")
+        if heightmap_combined is not None and heightmap_combined.ndim >= 2:
+            height, width = heightmap_combined.shape[:2]
         else:
-            rock_map_uint8 = rock_map.astype(np.uint8)
+            height, width = 64, 64
 
-        # Mass-Conservation anwenden
-        normalized_map = self.mass_manager.normalize_rock_masses(rock_map_uint8)
-
-        # Validation
-        if not self.mass_manager.validate_conservation(normalized_map):
-            self.logger.warning("Mass conservation validation failed - applying correction")
-            # Sekundäre Normalisierung
-            normalized_map = self._force_mass_conservation(normalized_map)
-
-        return normalized_map
-
-    def _force_mass_conservation(self, rock_map: np.ndarray) -> np.ndarray:
-        """
-        Forciert Mass-Conservation als Fallback-Mechanismus
-
-        Args:
-            rock_map: Problematische Rock-Map
-
-        Returns:
-            Korrigierte Rock-Map mit garantierter Mass-Conservation
-        """
-        height, width = rock_map.shape[:2]
-        corrected_map = np.zeros_like(rock_map, dtype=np.uint8)
-
-        for y in range(height):
-            for x in range(width):
-                pixel_sum = int(np.sum(rock_map[y, x, :]))
-
-                if pixel_sum != 255:
-                    if pixel_sum > 0:
-                        # Proportionale Korrektur
-                        factor = 255.0 / pixel_sum
-                        corrected_map[y, x, :] = np.round(rock_map[y, x, :] * factor).astype(np.uint8)
-
-                        # Finale Summen-Korrektur
-                        final_sum = int(np.sum(corrected_map[y, x, :]))
-                        if final_sum != 255:
-                            diff = 255 - final_sum
-                            max_channel = np.argmax(corrected_map[y, x, :])
-                            corrected_map[y, x, max_channel] += diff
-                    else:
-                        # Gleichverteilung bei Null-Summe
-                        corrected_map[y, x, :] = [85, 85, 85]
-                else:
-                    corrected_map[y, x, :] = rock_map[y, x, :]
-
-        return corrected_map
-
-    def _create_geology_data(self, rock_map: np.ndarray, hardness_map: np.ndarray,
-                           lod_level: int, parameters: Dict[str, Any],
-                           height_delta: Optional[np.ndarray] = None) -> GeologyData:
-        """
-        Erstellt GeologyData-Objekt mit vollständiger Validation
-
-        Args:
-            rock_map: Finale Rock-Map
-            hardness_map: Finale Hardness-Map
-            lod_level: Aktuelles LOD-Level
-            parameters: Verwendete Parameter
-            height_delta: Kumuliertes Tektonik-Höhen-Delta aus _apply_tectonic_deformation
-
-        Returns:
-            Vollständig validiertes GeologyData-Objekt
-        """
-        # Validity-State berechnen
-        validity_state = {
-            'mass_conservation': self.mass_manager.validate_conservation(rock_map),
-            'hardness_range': self.hardness_calculator.validate_hardness_ranges(hardness_map),
-            'rock_distribution': self._validate_rock_distribution(rock_map),
-            'no_nan_values': not (np.any(np.isnan(rock_map)) or np.any(np.isnan(hardness_map))),
-            'correct_dimensions': rock_map.shape[:2] == hardness_map.shape
-        }
-
-        # Parameter-Hash für Cache-Invalidation
-        parameter_hash = self._calculate_parameter_hash(parameters)
+        layer_id_map = np.zeros((height, width), dtype=np.int16)  # überall Kristallin (Index 0)
+        rock_map = np.tile(np.array(ROCK_LAYERS[0].color, dtype=np.uint8), (height, width, 1))
+        hardness_map = np.full((height, width), 50.0, dtype=np.float32)
 
         return GeologyData(
-            rock_map=rock_map,
-            hardness_map=hardness_map,
-            lod_level=lod_level,
-            actual_size=rock_map.shape[:2],
-            validity_state=validity_state,
-            parameter_hash=parameter_hash,
-            parameters=parameters.copy(),
-            height_delta=height_delta
+            rock_map=rock_map, hardness_map=hardness_map, layer_id_map=layer_id_map,
+            lod_level=lod_level, actual_size=(height, width),
+            validity_state={'hardness_range': False, 'layer_assignment': False},
+            parameter_hash="fallback", parameters=dict(parameters),
+            height_delta=np.zeros((height, width), dtype=np.float32),
         )
-
-    def _validate_rock_distribution(self, rock_map: np.ndarray) -> bool:
-        """
-        Validiert Rock-Distribution auf realistische Werte
-
-        Args:
-            rock_map: Rock-Map zum Validieren
-
-        Returns:
-            True wenn Distribution realistisch ist
-        """
-        try:
-            # Durchschnittliche Verteilung berechnen
-            avg_distribution = np.mean(rock_map, axis=(0, 1)) / 255.0
-
-            # Realistische Grenzen prüfen (keine Gesteinsart sollte <5% oder >90% sein)
-            min_realistic = 0.05
-            max_realistic = 0.90
-
-            for i, avg_value in enumerate(avg_distribution):
-                if avg_value < min_realistic or avg_value > max_realistic:
-                    self.logger.warning(f"Unrealistic rock distribution: Type {i} = {avg_value:.3f}")
-                    return False
-
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Rock distribution validation failed: {e}")
-            return False
-
-    def _calculate_parameter_hash(self, parameters: Dict[str, Any]) -> str:
-        """
-        Berechnet Hash der Parameter für Cache-Invalidation
-
-        Args:
-            parameters: Parameter-Dictionary
-
-        Returns:
-            MD5-Hash der Parameter
-        """
-        import hashlib
-        import json
-
-        # Nur relevante Parameter für Hash verwenden
-        relevant_params = {
-            k: v for k, v in parameters.items()
-            if k in ['sedimentary_hardness', 'igneous_hardness', 'metamorphic_hardness',
-                    'ridge_warping', 'bevel_warping', 'metamorphic_foliation',
-                    'metamorphic_folding', 'igneous_flowing']
-        }
-
-        param_string = json.dumps(relevant_params, sort_keys=True)
-        return hashlib.md5(param_string.encode()).hexdigest()
-
-    def _create_fallback_geology_data(self, heightmap_combined: np.ndarray,
-                                     parameters: Dict[str, Any], lod_level: int) -> GeologyData:
-        """
-        Erstellt Fallback-Geology-Data bei kritischen Fehlern
-
-        Args:
-            heightmap_combined: Heightmap für Fallback-Generation
-            parameters: Parameter für Fallback
-            lod_level: Aktuelles LOD-Level
-
-        Returns:
-            Minimale aber funktionale GeologyData
-        """
-        self.logger.warning("Creating fallback geology data due to generation failure")
-
-        height, width = heightmap_combined.shape
-
-        # Einfache Height-basierte Rock-Distribution
-        rock_map = np.zeros((height, width, 3), dtype=np.uint8)
-
-        # Normalisierte Höhen
-        norm_heights = (heightmap_combined - np.min(heightmap_combined)) / \
-                      (np.max(heightmap_combined) - np.min(heightmap_combined) + 1e-6)
-
-        for y in range(height):
-            for x in range(width):
-                h = norm_heights[y, x]
-
-                if h < 0.3:
-                    rock_map[y, x, :] = [180, 50, 25]  # Sedimentary-dominiert
-                elif h < 0.7:
-                    rock_map[y, x, :] = [85, 85, 85]   # Gleichverteilung
-                else:
-                    rock_map[y, x, :] = [40, 140, 75]  # Igneous-dominiert
-
-        # Hardness-Map
-        hardness_map = np.full((height, width), 50.0, dtype=np.float32)  # Durchschnittshärte
-
-        # Validity-State (partial)
-        validity_state = {
-            'mass_conservation': True,  # Manuell sichergestellt
-            'hardness_range': True,
-            'rock_distribution': True,
-            'no_nan_values': True,
-            'correct_dimensions': True
-        }
-
-        return GeologyData(
-            rock_map=rock_map,
-            hardness_map=hardness_map,
-            lod_level=lod_level,
-            actual_size=(height, width),
-            validity_state=validity_state,
-            parameter_hash=self._calculate_parameter_hash(parameters),
-            parameters=parameters.copy()
-        )
-
-    def update_seed(self, new_seed: int):
-        """
-        Aktualisiert Seed für alle Geology-Komponenten
-
-        Args:
-            new_seed: Neuer Seed für reproduzierbare Generation
-        """
-        if new_seed != self.map_seed:
-            self.map_seed = new_seed
-
-            # Alle Sub-Komponenten mit neuem Seed re-initialisieren
-            self.rock_classifier = RockTypeClassifier(new_seed)
-            self.deformation_processor = TectonicDeformationProcessor(new_seed)
-
-            self.logger.info(f"Geology generator seed updated to {new_seed}")
 
     def get_generation_info(self) -> Dict[str, Any]:
         """
-        Gibt Informationen über den Generator zurück
-
-        Returns:
-            Dictionary mit Generator-Informationen
+        Status-Info für Debug/UI. Frühere Versionen behaupteten hier
+        fälschlich ein aktives 3-stufiges GPU/CPU/Simple-Fallback-System
+        (siehe docs/session_review_2026-07-22_geology.md) - korrigiert:
+        der shader_manager-Slot ist strukturell vorbereitet, aber aktuell
+        mit keinen echten GPU-Operationen hinterlegt, jede _calc_*-Methode
+        läuft deshalb faktisch immer CPU-only.
         """
         return {
-            'generator_type': 'geology',
-            'version': '2.0.0',
-            'map_seed': self.map_seed,
-            'supported_lod_levels': list(range(1, 8)),
-            'required_dependencies': ['heightmap_combined', 'slopemap'],
-            'output_data': ['rock_map', 'hardness_map'],
-            'fallback_levels': ['gpu', 'cpu', 'simple'],
-            'mass_conservation': True
+            'generator': 'GeologySystemGenerator',
+            'model': '3D-Gesteinsstapel (core/geology_layers.py, ROCK_LAYERS)',
+            'n_layers': N_LAYERS,
+            'shader_manager_configured': self.shader_manager is not None,
+            'gpu_operations_implemented': False,
+            'fallback_levels': ['cpu'],
         }
-
-    # ===== LEGACY-KOMPATIBILITÄT =====
-    # Alle alten Methoden für Rückwärts-Kompatibilität
-
-    def generate_rock_distribution(self, heightmap, slopemap, ridge_warping, bevel_warping,
-                                   metamorph_foliation, metamorph_folding, igneous_flowing):
-        """Legacy-Methode für Rock-Distribution"""
-        self.logger.warning("Using deprecated generate_rock_distribution method")
-
-        parameters = {
-            'ridge_warping': ridge_warping,
-            'bevel_warping': bevel_warping,
-            'metamorphic_foliation': metamorph_foliation,
-            'metamorphic_folding': metamorph_folding,
-            'igneous_flowing': igneous_flowing,
-            **self.default_parameters
-        }
-
-        geology_data = self.calculate_geology(heightmap, slopemap, parameters, lod_level=3)
-        return geology_data.rock_map
-
-    def calculate_hardness_map(self, rock_map, sedimentary_hardness, igneous_hardness, metamorphic_hardness):
-        """Legacy-Methode für Hardness-Calculation"""
-        return self.hardness_calculator.calculate_hardness_map(
-            rock_map, sedimentary_hardness, igneous_hardness, metamorphic_hardness
-        )
-
-    def apply_geological_zones(self, rock_map, zone_parameters):
-        """Legacy-Methode für geologische Zonen"""
-        return self.rock_classifier.blend_geological_zones(rock_map)
-
-    def generate_complete_geology(self, heightmap, slopemap, rock_types, hardness_values,
-                                  ridge_warping, bevel_warping, metamorph_foliation,
-                                  metamorph_folding, igneous_flowing):
-        """Legacy-Methode für komplette Geology-Generierung"""
-        self.logger.warning("Using deprecated generate_complete_geology method")
-
-        parameters = {
-            'sedimentary_hardness': hardness_values.get('sedimentary', 30.0),
-            'igneous_hardness': hardness_values.get('igneous', 70.0),
-            'metamorphic_hardness': hardness_values.get('metamorphic', 60.0),
-            'ridge_warping': ridge_warping,
-            'bevel_warping': bevel_warping,
-            'metamorphic_foliation': metamorph_foliation,
-            'metamorphic_folding': metamorph_folding,
-            'igneous_flowing': igneous_flowing
-        }
-
-        geology_data = self.calculate_geology(heightmap, slopemap, parameters, lod_level=3)
-        return geology_data.rock_map, geology_data.hardness_map
-
-    def validate_rock_map(self, rock_map):
-        """Legacy-Validierung mit erweiterten Statistiken"""
-        mass_stats = self.mass_manager.get_conservation_statistics(rock_map)
-
-        return {
-            'mass_conservation': mass_stats['all_pixels_valid'],
-            'value_range_valid': np.all((rock_map >= 0) & (rock_map <= 255)),
-            'no_zero_pixels': np.all(np.sum(rock_map, axis=2) > 0),
-            'average_distribution': np.mean(rock_map, axis=(0, 1)),
-            'conservation_stats': mass_stats
-        }
-
-
-# ===== FACTORY-FUNCTION FÜR EINFACHE INTEGRATION =====
-
-def create_geology_generator(map_seed: int = 42, progress_callback=None) -> GeologySystemGenerator:
-    """
-    Factory-Funktion für GeologySystemGenerator
-
-    Args:
-        map_seed: Seed für reproduzierbare Generation
-        progress_callback: Optional Callback für Progress-Updates
-
-    Returns:
-        Konfigurierter GeologySystemGenerator
-    """
-    generator = GeologySystemGenerator(map_seed)
-    if progress_callback:
-        generator.set_progress_callback(progress_callback)
-    return generator
-
-
-# ===== UTILITY-FUNKTIONEN FÜR EXTERNE INTEGRATION =====
-
-def validate_geology_parameters(parameters: Dict[str, Any]) -> Tuple[bool, str]:
-    """
-    Validiert Geology-Parameter extern
-
-    Args:
-        parameters: Parameter zum Validieren
-
-    Returns:
-        (is_valid, error_message)
-    """
-    try:
-        required_params = ['sedimentary_hardness', 'igneous_hardness', 'metamorphic_hardness']
-
-        for param in required_params:
-            if param not in parameters:
-                return False, f"Missing required parameter: {param}"
-
-            value = parameters[param]
-            if not isinstance(value, (int, float)):
-                return False, f"Parameter {param} must be numeric"
-
-            if not (0 <= value <= 100):
-                return False, f"Parameter {param} must be in range [0-100]"
-
-        optional_params = ['ridge_warping', 'bevel_warping', 'metamorphic_foliation',
-                          'metamorphic_folding', 'igneous_flowing']
-
-        for param in optional_params:
-            if param in parameters:
-                value = parameters[param]
-                if not isinstance(value, (int, float)):
-                    return False, f"Parameter {param} must be numeric"
-
-                if not (0.0 <= value <= 1.0):
-                    return False, f"Parameter {param} must be in range [0.0-1.0]"
-
-        return True, "All parameters valid"
-
-    except Exception as e:
-        return False, f"Parameter validation error: {e}"
-
-
-def get_geology_parameter_info() -> Dict[str, Dict[str, Any]]:
-    """
-    Gibt Informationen über alle Geology-Parameter zurück
-
-    Returns:
-        Dictionary mit Parameter-Informationen
-    """
-    return {
-        'hardness_parameters': {
-            'sedimentary_hardness': {'range': [0, 100], 'default': 30.0, 'unit': 'hardness'},
-            'igneous_hardness': {'range': [0, 100], 'default': 70.0, 'unit': 'hardness'},
-            'metamorphic_hardness': {'range': [0, 100], 'default': 60.0, 'unit': 'hardness'}
-        },
-        'deformation_parameters': {
-            'ridge_warping': {'range': [0.0, 1.0], 'default': 0.3, 'unit': 'factor'},
-            'bevel_warping': {'range': [0.0, 1.0], 'default': 0.2, 'unit': 'factor'},
-            'metamorphic_foliation': {'range': [0.0, 1.0], 'default': 0.4, 'unit': 'factor'},
-            'metamorphic_folding': {'range': [0.0, 1.0], 'default': 0.3, 'unit': 'factor'},
-            'igneous_flowing': {'range': [0.0, 1.0], 'default': 0.5, 'unit': 'factor'}
-        }
-    }

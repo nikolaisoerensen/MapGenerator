@@ -9,9 +9,9 @@ precip_map und humid_map für Water und alle nachgelagerten Systeme.
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
-    QButtonGroup, QLabel
+    QButtonGroup, QLabel, QCheckBox
 )
-from PyQt6.QtCore import pyqtSlot, QTimer
+from PyQt6.QtCore import pyqtSlot, QTimer, Qt
 from PyQt6.QtGui import QFont
 import logging
 import numpy as np
@@ -20,6 +20,7 @@ from typing import Dict, Any
 from gui.tabs.base_tab import BaseMapTab
 from gui.widgets.widgets import ParameterSlider, StatusIndicator
 from gui.config.value_default import get_parameter_config
+from core.weather_generator import WeatherSystemGenerator
 
 
 class WeatherTab(BaseMapTab):
@@ -39,11 +40,18 @@ class WeatherTab(BaseMapTab):
         # und create_visualization_controls während BaseMapTab.setup_ui() darauf
         # zugreifen und sie befüllen)
         self.parameter_sliders = {}
+        self.parameter_checkboxes = {}
         self.climate_stats = None
         self.dependency_status = None
         self.gpu_status = None
         self.display_mode_group = None
         self.current_display_mode = "height"
+        # Schicht-Diagnose (Boden/Mittel/Hoch, siehe AtmosphereLayers in
+        # core/weather_generator.py) - Nutzer-Wunsch aus der Weather-Rework-
+        # Diskussion: die Mittel-/Hochschicht-Daten werden bereits berechnet,
+        # hatten aber bisher KEINEN Konsumenten irgendwo im Code.
+        self.layer_group = None
+        self.current_layer_index = 0  # 0=GROUND, 1=MID, 2=HIGH
 
         # Saisonale Monats-Animation (siehe update_display_mode()) - Platzhalter
         # vor super().__init__(), da QTimer(self) einen bereits konstruierten
@@ -51,6 +59,16 @@ class WeatherTab(BaseMapTab):
         # QObject-Instanz).
         self._current_month_index = 0
         self._month_cycle_timer = None
+
+        # Live-Klimatologie-Vorschau (Nutzer-Wunsch 2026-07-24) - zeigt die
+        # tatsächlichen 6 saisonalen Temperatur-/Feuchte-Werte für den
+        # aktuellen Latitude/Offset-Slider-Stand, noch VOR jeder Generierung.
+        # Nutzt dieselbe _climate_baseline()-Formel wie die echte Simulation
+        # (core/weather_generator.py) - eine leichte, seedlose Instanz reicht,
+        # da _climate_baseline() nur die Klasse-Tabelle + Breitengrad/Monat
+        # braucht, keinen echten Generierungslauf.
+        self._climatology_preview_generator = WeatherSystemGenerator()
+        self.climatology_preview_label = None
 
         self.logger = logging.getLogger("WeatherTab")
 
@@ -120,7 +138,7 @@ class WeatherTab(BaseMapTab):
         temp_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         temp_layout = QVBoxLayout()
 
-        for param_key in ("air_temp_entry", "solar_power", "altitude_cooling"):
+        for param_key in ("ground_temp_offset", "sun_relevance_factor", "altitude_cooling"):
             config = get_parameter_config("weather", param_key)
 
             slider = ParameterSlider(
@@ -147,7 +165,8 @@ class WeatherTab(BaseMapTab):
         wind_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         wind_layout = QVBoxLayout()
 
-        for param_key in ("thermic_effect", "wind_speed_factor", "terrain_factor", "prevailing_wind_direction"):
+        for param_key in ("thermic_effect", "wind_speed_factor", "terrain_factor",
+                          "prevailing_wind_direction", "turbulence_strength"):
             config = get_parameter_config("weather", param_key)
 
             slider = ParameterSlider(
@@ -165,18 +184,42 @@ class WeatherTab(BaseMapTab):
             self.parameter_sliders[param_key] = slider
             wind_layout.addWidget(slider)
 
+        # Checkbox statt Slider (Weather-Rework Punkt A) - Toggle statt reinem
+        # Rewrite, damit sich der thermisch gekoppelte Druck-Pfad bei Bedarf
+        # ohne Code-Änderung wieder abschalten lässt (siehe
+        # WEATHER.THERMAL_PRESSURE_COUPLING-Beschreibung).
+        pressure_config = get_parameter_config("weather", "thermal_pressure_coupling")
+        pressure_checkbox = QCheckBox("Thermal Pressure Coupling (Experimental)")
+        pressure_checkbox.setChecked(bool(pressure_config.get("default", True)))
+        pressure_checkbox.setToolTip(pressure_config.get("description", ""))
+        pressure_checkbox.toggled.connect(
+            lambda checked: self._on_parameter_changed("thermal_pressure_coupling", checked)
+        )
+        self.parameter_checkboxes["thermal_pressure_coupling"] = pressure_checkbox
+        wind_layout.addWidget(pressure_checkbox)
+
         wind_group.setLayout(wind_layout)
         self.control_panel.layout().addWidget(wind_group)
 
     def _create_humidity_parameters(self):
-        """Erstellt Humidity/Location-System Parameter Controls (Eintrittsfeuchte,
-        geografische Breite/Länge - treibt die saisonale Sonnenstandsberechnung
-        für die Monats-Shadowmaps, siehe core/terrain_generator.py generate_seasonal_sun_angles())"""
-        humidity_group = QGroupBox("Humidity & Location")
+        """Erstellt Location/Climate-Offset Parameter Controls (Breitengrad,
+        Temperatur-/Feuchte-Eintritts-Offsets - Reihenfolge Latitude zuerst,
+        dann die beiden additiven Offset-Regler, Nutzer-Vorgabe 2026-07-24).
+        Longitude-Regler entfernt (Nutzer-Entscheidung: der Effekt ist real,
+        aber so schwach - nur Tageszeit-Feinverschiebung der Sonnenwinkel-
+        Samples, siehe core/terrain_generator.py calculate_solar_position() -
+        dass er keinen eigenen Slider braucht. map_longitude bleibt intern
+        als fester Konstante bestehen (WEATHER.MAP_LONGITUDE["default"]=15,
+        der "neutrale" Zeitzonen-Wert) - core/weather_generator.py und
+        gui/tabs/base_tab.py lesen den Parameter ohnehin über
+        `.get('map_longitude', WEATHER.MAP_LONGITUDE["default"])`, ein
+        fehlender Slider fällt also automatisch auf genau diese Konstante
+        zurück, ohne Code-Änderung an der Leseseite."""
+        humidity_group = QGroupBox("Location & Climate Offset")
         humidity_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         humidity_layout = QVBoxLayout()
 
-        for param_key in ("air_humidity_entry", "map_latitude", "map_longitude"):
+        for param_key in ("map_latitude", "air_temp_entry", "air_humidity_entry"):
             config = get_parameter_config("weather", param_key)
 
             slider = ParameterSlider(
@@ -194,8 +237,19 @@ class WeatherTab(BaseMapTab):
             self.parameter_sliders[param_key] = slider
             humidity_layout.addWidget(slider)
 
+        # Live-Klimatologie-Vorschau (Nutzer-Vorgabe 2026-07-24) - zeigt fuer
+        # den aktuellen Latitude-/Offset-Stand die 6 saisonalen Temperatur-/
+        # Feuchte-Werte (S1=Jan/Feb .. S6=Nov/Dez), aktualisiert sich live bei
+        # jeder Aenderung an einem der 3 Slider oben (siehe
+        # _on_parameter_changed()/_update_climatology_preview()).
+        self.climatology_preview_label = QLabel("")
+        self.climatology_preview_label.setWordWrap(True)
+        self.climatology_preview_label.setTextFormat(Qt.TextFormat.RichText)
+        humidity_layout.addWidget(self.climatology_preview_label)
+
         humidity_group.setLayout(humidity_layout)
         self.control_panel.layout().addWidget(humidity_group)
+        self._update_climatology_preview()
 
     def _create_dependency_status(self):
         """Erstellt Dependency-Status-Anzeige (Verfügbarkeit der Terrain-Inputs)"""
@@ -204,9 +258,14 @@ class WeatherTab(BaseMapTab):
 
     def _create_gpu_status(self):
         """
-        Erstellt GPU-Status-Anzeige. Weather-CFD-Simulation läuft aktuell durchgehend
-        über den CPU-Fallback (ShaderManager bietet keine Weather-spezifischen
-        GPU-Compute-Shader an) - die Anzeige spiegelt das ehrlich wider.
+        Erstellt GPU-Status-Anzeige. Korrektur (Weather-Review-Runde,
+        docs/session_review_2026-07-22_weather.md): der ShaderManager bietet
+        durchaus 4 Weather-GPU-Shader-Operationen an (Dispatch-Tabelle in
+        gui/OldManagers/shader_manager.py) - nur 3 davon werden im
+        Normalbetrieb praktisch nie erreicht, weil der gekoppelte 3-Schicht-
+        Loop (_run_coupled_atmosphere_simulation) sie nur im Exception-
+        Fallback-Pfad aufruft. Die Anzeige hier zeigt trotzdem ehrlich, ob
+        GPU-Beschleunigung grundsätzlich verfügbar ist.
         """
         self.gpu_status = StatusIndicator("GPU Status")
         if self.shader_manager and getattr(self.shader_manager, 'gpu_available', False):
@@ -234,6 +293,15 @@ class WeatherTab(BaseMapTab):
 
         display_mode_layout = self._create_display_mode_controls()
         controls_layout.addLayout(display_mode_layout)
+        controls_layout.addWidget(self._create_vertical_separator())
+        self.layer_controls_widget = QWidget()
+        self.layer_controls_widget.setLayout(self._create_layer_controls())
+        # "Height" ist der initial gewählte Modus (siehe _create_display_mode_controls()) -
+        # dessen toggled-Signal feuerte bereits VOR diesem Zeitpunkt (das Widget
+        # existierte damals noch nicht, siehe hasattr-Guard in
+        # _on_display_mode_changed()), deshalb hier explizit den Ausgangszustand setzen.
+        self.layer_controls_widget.setVisible(self.current_display_mode != "height")
+        controls_layout.addWidget(self.layer_controls_widget)
 
         controls_widget.setLayout(controls_layout)
         return controls_widget
@@ -262,6 +330,35 @@ class WeatherTab(BaseMapTab):
 
         return layout
 
+    def _create_layer_controls(self):
+        """
+        Schicht-Umschalter (Boden/Mittel/Hoch) für Temperature/Humidity/Wind -
+        macht die bisher ungenutzten Mittel-/Hochschicht-Daten der 3-Schicht-
+        Atmosphäre-Simulation sichtbar. Wirkt NICHT auf "Height" oder
+        "Precipitation" (Niederschlag ist eine über alle Schichten
+        akkumulierte Größe, keine Pro-Schicht-Größe).
+        """
+        layout = QHBoxLayout()
+        layout.addWidget(QLabel("Layer:"))
+
+        self.layer_group = QButtonGroup()
+        for index, label in enumerate(("Ground", "Mid", "High")):
+            radio = QRadioButton(label)
+            if index == 0:
+                radio.setChecked(True)
+            radio.toggled.connect(lambda checked, i=index: self._on_layer_changed(i, checked))
+            self.layer_group.addButton(radio, index)
+            layout.addWidget(radio)
+
+        return layout
+
+    def _create_vertical_separator(self):
+        """Erstellt vertikalen Separator für UI-Layout"""
+        separator = QWidget()
+        separator.setFixedWidth(1)
+        separator.setStyleSheet("background-color: #bdc3c7;")
+        return separator
+
     # =============================================================================
     # EVENT HANDLERS
     # =============================================================================
@@ -275,37 +372,118 @@ class WeatherTab(BaseMapTab):
             if self.climate_stats:
                 self.climate_stats.update_parameter_preview(self.get_current_parameters())
 
+            if param_name in ("map_latitude", "air_temp_entry", "air_humidity_entry"):
+                self._update_climatology_preview()
+
             self.logger.debug(f"Parameter changed: {param_name} = {value}")
 
         except Exception as e:
             self.logger.error(f"Parameter change handling failed: {e}")
 
+    # Nutzer-Vorgabe 2026-07-24: Temperatur-/Feuchte-Werte im Vorschau-Text
+    # farblich unterscheidbar machen - von der grauen Standardschrift aus
+    # leicht Richtung Rot (Temperatur) bzw. Richtung Blau (Feuchte) verschoben,
+    # kein knalliges Voll-Rot/Blau (soll dezent bleiben, kein Warn-Farbton).
+    _CLIMATOLOGY_TEMP_COLOR = "#c98a8a"
+    _CLIMATOLOGY_HUMID_COLOR = "#8a9ec9"
+    _CLIMATOLOGY_LABEL_COLOR = "#a0a0a0"
+
+    def _update_climatology_preview(self):
+        """
+        Live-Klimatologie-Vorschau (Nutzer-Vorgabe 2026-07-24): berechnet für
+        den aktuellen Latitude-/Offset-Slider-Stand die 6 saisonalen
+        Temperatur-/Feuchte-Basiswerte (S1=Jan/Feb .. S6=Nov/Dez) über
+        dieselbe _climate_baseline()-Formel wie die echte Simulation
+        (core/weather_generator.py) - garantiert identische Werte zur
+        tatsächlichen Generierung statt einer separat gepflegten Kopie der
+        Formel, die aus dem Tritt geraten könnte. air_temp_entry ist ein
+        additiver Offset (kein Limit über den Slider-Bereich hinaus nötig,
+        siehe WEATHER.AIR_TEMP_ENTRY), air_humidity_entry ebenso additiv,
+        aber IMMER auf 0-100% geklemmt (physikalisch sinnvoller Prozent-
+        Bereich, siehe derselbe Clip in _generate_seasonal_parameters()).
+        3 Werte pro Zeile (S1-S3 / S4-S6) statt aller 6 in einer Zeile, Werte
+        farblich abgesetzt (Rot=Temperatur, Blau=Feuchte) via Rich-Text/HTML.
+        """
+        if self.climatology_preview_label is None:
+            return
+        try:
+            latitude = self.parameter_sliders["map_latitude"].getValue()
+            temp_offset = self.parameter_sliders["air_temp_entry"].getValue()
+            humid_offset = self.parameter_sliders["air_humidity_entry"].getValue()
+
+            entries = []
+            for month_index in range(6):
+                base_temp, base_humid_frac = self._climatology_preview_generator._climate_baseline(
+                    latitude, month_index)
+                temp = base_temp + temp_offset
+                humid = max(0.0, min(100.0, base_humid_frac * 100.0 + humid_offset))
+                entries.append(
+                    f'<span style="color:{self._CLIMATOLOGY_LABEL_COLOR}">S{month_index + 1}: '
+                    f'<span style="color:{self._CLIMATOLOGY_TEMP_COLOR}">{temp:.0f}°C</span>/'
+                    f'<span style="color:{self._CLIMATOLOGY_HUMID_COLOR}">{humid:.0f}%</span></span>'
+                )
+
+            line1 = "&nbsp;&nbsp;".join(entries[0:3])
+            line2 = "&nbsp;&nbsp;".join(entries[3:6])
+            self.climatology_preview_label.setText(
+                f'<div style="font-size:10px;">{line1}<br>{line2}</div>')
+        except Exception as e:
+            self.logger.debug(f"Climatology preview update failed: {e}")
+
     def _on_display_mode_changed(self, mode: str, checked: bool):
         """Handler für Display Mode Changes"""
         if checked:
             self.current_display_mode = mode
+            # Layer-Umschalter (Ground/Mid/High) ergibt nur für Temperature/
+            # Humidity/Precipitation/Wind einen Sinn, nicht für Height (reine
+            # Geländeform, keine Atmosphären-Schicht) - siehe
+            # _create_layer_controls()-Docstring.
+            if hasattr(self, "layer_controls_widget"):
+                self.layer_controls_widget.setVisible(mode != "height")
             self.update_display_mode()
             self._update_month_cycle_timer_state()
             self.logger.debug(f"Display mode changed to: {mode}")
+
+    def _on_layer_changed(self, index: int, checked: bool):
+        """Handler für Schicht-Umschalter (Ground/Mid/High), siehe _create_layer_controls()."""
+        if checked:
+            self.current_layer_index = index
+            self.update_display_mode()
+            self._update_month_cycle_timer_state()
+            self.logger.debug(f"Layer changed to index: {index}")
 
     # =============================================================================
     # DISPLAY UPDATE SYSTEM
     # =============================================================================
 
+    def _current_monthly_key(self) -> str:
+        """
+        Monats-Listen-Schlüssel für den aktuellen Anzeige-/Schicht-Zustand -
+        Ground (current_layer_index==0) nutzt die bestehenden *_monthly-Listen
+        (H,W-Arrays), Mid/High nutzt die *_layers_monthly-Listen (3,H,W-Arrays
+        pro Monat, siehe DataLODManager.set_weather_data_complete_lod()).
+        precip_map hat KEINE Pro-Schicht-Aufschlüsselung (akkumulierte Größe
+        über alle Schichten, siehe update_display_mode()) und bleibt daher
+        unabhängig von current_layer_index bei der Ground-Monatsliste.
+        """
+        use_ground = self.current_layer_index == 0 or self.current_display_mode == "precip_map"
+        suffix = "_monthly" if use_ground else "_layers_monthly"
+        return f"{self.current_display_mode}{suffix}"
+
     def _update_month_cycle_timer_state(self):
         """
         Funktionsweise: Start/Stop-Gating für den Monats-Animations-Timer,
         analog zu map_display_3d.py's animation_timer-Muster - läuft nur,
-        solange die aktuell ausgewählte Karte tatsächlich saisonale
-        Monatsdaten hat (temp_map/precip_map/humid_map/wind_map, NIE
+        solange die aktuell ausgewählte Karte/Schicht tatsächlich saisonale
+        Monatsdaten hat (temp_map/humid_map/wind_map für alle 3 Schichten,
+        precip_map nur für Ground - siehe _current_monthly_key() - NIE
         "height"). Wird bei jedem Moduswechsel und nach erfolgreicher
         Generierung neu geprüft.
         """
-        monthly_key = f"{self.current_display_mode}_monthly"
         has_monthly_data = (
             self.current_display_mode in ("temp_map", "precip_map", "humid_map", "wind_map")
             and self.data_lod_manager is not None
-            and self.data_lod_manager.get_weather_data(monthly_key)
+            and self.data_lod_manager.get_weather_data(self._current_monthly_key())
         )
         if has_monthly_data and not self._month_cycle_timer.isActive():
             self._current_month_index = 0
@@ -316,7 +494,7 @@ class WeatherTab(BaseMapTab):
     def _on_month_cycle_tick(self):
         """Wird jede Sekunde vom _month_cycle_timer aufgerufen - schaltet auf
         die nächste der 6 saisonalen Monats-Karten um und stößt ein Redraw an."""
-        monthly_list = self.data_lod_manager.get_weather_data(f"{self.current_display_mode}_monthly")
+        monthly_list = self.data_lod_manager.get_weather_data(self._current_monthly_key())
         if not monthly_list:
             self._month_cycle_timer.stop()
             return
@@ -340,7 +518,30 @@ class WeatherTab(BaseMapTab):
                 # Kombiniert, nicht die unbearbeitete Terrain-Rohausgabe - siehe
                 # DataLODManager.get_terrain_data_combined()
                 data = self.data_lod_manager.get_terrain_data_combined("heightmap")
-                data_type = "heightmap"
+                data_type = "heightmap_combined"
+                display_data = data
+            elif (self.current_layer_index != 0
+                  and self.current_display_mode in ("temp_map", "humid_map", "wind_map")):
+                # Schicht-Diagnose (Mid/High statt Ground, siehe
+                # _create_layer_controls()) - Precipitation hat keine
+                # Pro-Schicht-Aufschlüsselung (akkumulierte Größe über alle
+                # Schichten) und bleibt daher außen vor. Animiert wie Ground
+                # über die 6 Monats-3-Schicht-Arrays (*_layers_monthly, siehe
+                # _on_month_cycle_tick()); ohne Monatsdaten (z.B. direkt nach
+                # der Generierung, bevor der Timer tickt, oder alte
+                # Cache-Einträge) Fallback auf den saisonalen Mittelwert
+                # (*_layers, je 3,H,W bzw. 3,H,W,2).
+                monthly_list = self.data_lod_manager.get_weather_data(self._current_monthly_key())
+                if monthly_list:
+                    month_layers = monthly_list[self._current_month_index % len(monthly_list)]
+                    data = month_layers[self.current_layer_index]
+                else:
+                    layers = self.data_lod_manager.get_weather_data(f"{self.current_display_mode}_layers")
+                    if layers is not None and layers.shape[0] > self.current_layer_index:
+                        data = layers[self.current_layer_index]
+                    else:
+                        data = self.data_lod_manager.get_weather_data(self.current_display_mode)
+                data_type = self.current_display_mode
                 display_data = data
             elif self.current_display_mode in ("temp_map", "precip_map", "humid_map", "wind_map"):
                 # Bei vorhandenen saisonalen Monatsdaten wird die aktuell
@@ -448,6 +649,8 @@ class WeatherTab(BaseMapTab):
         parameters = {}
         for param_name, slider in self.parameter_sliders.items():
             parameters[param_name] = slider.getValue()
+        for param_name, checkbox in self.parameter_checkboxes.items():
+            parameters[param_name] = checkbox.isChecked()
         return parameters
 
     def update_parameter_ui(self, param_name: str, value):
@@ -461,6 +664,19 @@ class WeatherTab(BaseMapTab):
                 slider.blockSignals(True)
                 slider.setValue(value)
                 slider.blockSignals(False)
+
+                # blockSignals unterdrückt valueChanged - _on_parameter_changed()
+                # (das die Vorschau normalerweise aktualisiert) läuft hier nicht,
+                # deshalb explizit nachziehen (Nutzer-Vorgabe 2026-07-24).
+                if param_name in ("map_latitude", "air_temp_entry", "air_humidity_entry"):
+                    self._update_climatology_preview()
+
+                self.logger.debug(f"Parameter UI updated: {param_name} = {value}")
+            elif param_name in self.parameter_checkboxes:
+                checkbox = self.parameter_checkboxes[param_name]
+                checkbox.blockSignals(True)
+                checkbox.setChecked(bool(value))
+                checkbox.blockSignals(False)
 
                 self.logger.debug(f"Parameter UI updated: {param_name} = {value}")
 
@@ -514,6 +730,7 @@ class WeatherTab(BaseMapTab):
                 self._month_cycle_timer.stop()
 
             self.parameter_sliders.clear()
+            self.parameter_checkboxes.clear()
 
             super().cleanup_resources()
 
@@ -539,12 +756,12 @@ class ClimateStatisticsWidget(QGroupBox):
         preview_layout = QVBoxLayout()
 
         self.base_temp_label = QLabel("Base Temperature: 15°C")
-        self.solar_power_label = QLabel("Solar Power: 20°C")
-        self.altitude_cooling_label = QLabel("Altitude Cooling: 6°C/100m")
+        self.ground_temp_offset_label = QLabel("Ground Temp Offset: 0°C")
+        self.altitude_cooling_label = QLabel("Altitude Cooling: 6°C/km")
         self.wind_factor_label = QLabel("Wind Factor: 1.0")
 
         preview_layout.addWidget(self.base_temp_label)
-        preview_layout.addWidget(self.solar_power_label)
+        preview_layout.addWidget(self.ground_temp_offset_label)
         preview_layout.addWidget(self.altitude_cooling_label)
         preview_layout.addWidget(self.wind_factor_label)
 
@@ -584,13 +801,13 @@ class ClimateStatisticsWidget(QGroupBox):
     def update_parameter_preview(self, parameters: dict):
         """Aktualisiert Parameter-Preview"""
         base_temp = parameters.get("air_temp_entry", 15)
-        solar = parameters.get("solar_power", 20)
+        ground_offset = parameters.get("ground_temp_offset", 0)
         altitude = parameters.get("altitude_cooling", 6)
         wind = parameters.get("wind_speed_factor", 1.0)
 
         self.base_temp_label.setText(f"Base Temperature: {base_temp}°C")
-        self.solar_power_label.setText(f"Solar Power: {solar}°C")
-        self.altitude_cooling_label.setText(f"Altitude Cooling: {altitude}°C/100m")
+        self.ground_temp_offset_label.setText(f"Ground Temp Offset: {ground_offset}°C")
+        self.altitude_cooling_label.setText(f"Altitude Cooling: {altitude}°C/km")
         self.wind_factor_label.setText(f"Wind Factor: {wind:.1f}")
 
     def update_generation_statistics(self, results: dict):

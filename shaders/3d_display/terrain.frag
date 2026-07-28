@@ -79,13 +79,18 @@ vec3 getTerrainColorBlended() {
 }
 
 vec3 getGeologyColor() {
-    // Geology-specific coloring would use overlay texture
+    // Geology-specific coloring - Overlay-Textur (Rock/Hardness/Delta-
+    // Diagnose-Modi) mischen, sonst normale Terrain-Höhenfärbung statt
+    // eines hartkodierten Grautons (Bug: "Height"-Modus zeigte bisher
+    // komplett grau statt der Geländeform, siehe Nutzer-Bugreport - alle
+    // anderen getXColor()-Funktionen fallen bereits korrekt auf
+    // getTerrainColor() zurück).
+    vec3 baseColor = getTerrainColor();
     if (useOverlay) {
         vec3 overlayColor = texture(overlayTexture, TexCoord).rgb;
-        vec3 baseColor = getTerrainColor();
         return mix(baseColor, overlayColor, overlayStrength);
     }
-    return vec3(0.6, 0.6, 0.6);  // Default gray
+    return baseColor;
 }
 
 vec3 getWeatherColor() {

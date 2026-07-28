@@ -1,0 +1,277 @@
+#version 430
+// EIN Lebenszeit-Schritt der Droplet-Erosion (siehe core/water_generator.py
+// DropletErosionSystem._walk_one_droplet() fuer die CPU-Referenzimplementierung,
+// Formeln 1:1 uebernommen) - Dispatch-seitig (gui/OldManagers/shader_manager.py
+// _dispatch_droplet_erosion) DROPLET_MAX_LIFETIME_STEPS mal aufgerufen, EIN
+// Thread pro Partikel (1D-Dispatch, siehe local_size_x unten).
+//
+// Lockstep-Architektur (Plan "Water: GPU-Shader fuer Droplet-Erosion",
+// 2026-07-25): alle Partikel gehen SYNCHRON denselben Schritt-Index. heightMap
+// ist READ-ONLY und fuer die gesamte Runde eingefroren (Stand nach der letzten
+// dropletErosionApply.comp-Aufloesung) - Erosions-/Ablagerungs-Beitraege dieser
+// Runde landen NICHT direkt in heightMap, sondern fixed-point-atomar in
+// erosionAccumFixed/depositAccumFixed (r32i, GLSL-430-Core-natives
+// imageAtomicAdd, da Float-Atomics auf Images nicht nativ verfuegbar sind).
+// dropletErosionApply.comp loest diese Deltas NACH der Runde (mit
+// glMemoryBarrier dazwischen) in die naechste heightMap-Runde auf.
+//
+// BEWUSSTE Abweichung vom CPU-Pfad: CPU verarbeitet Partikel strikt
+// sequentiell (Partikel N sieht in seinem Schritt 1 bereits den kompletten
+// Weg der Partikel 1..N-1). Hier sehen sich Partikel derselben Runde erst
+// NACH dem Runden-Barrier - volle Determinismus/Reproduzierbarkeit bleibt
+// trotzdem erhalten (Summation ist kommutativ, Thread-Reihenfolge ist egal).
+//
+// Massenerhaltung: bewusst NICHT exakt erzwungen (Nutzer-Vorgabe: "ich
+// brauche keine strikte Massenerhaltung, ich will das wie Sebastian Lague").
+// terminate() (Kartenrand/Max-Lebenszeit/Null-Richtung) VERWIRFT die
+// Restfracht einfach, identisch zur Referenz Erosion.cs - siehe
+// DropletErosionSystem-Klassen-Docstring (CPU) fuer die volle Begruendung.
+layout(local_size_x = 64) in;
+
+struct Particle {
+    float posX, posY, dirX, dirY, speed, water, sediment, alive;
+};
+
+layout(std430, binding = 0) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+layout(r32f, binding = 0) uniform readonly image2D heightMap;
+layout(r32f, binding = 1) uniform readonly image2D hardnessMap;
+layout(r32i, binding = 2) uniform iimage2D erosionAccumFixed;
+layout(r32i, binding = 3) uniform iimage2D depositAccumFixed;
+
+uniform int u_num_droplets;
+uniform int u_size;
+uniform float u_erosion_strength;
+uniform float u_capacity_factor;
+uniform float u_deposit_speed;
+uniform float u_cap_per_step;
+uniform float u_inertia;
+uniform float u_sediment_min_capacity;
+uniform float u_erode_speed;
+uniform float u_evaporate_speed;
+uniform float u_gravity;
+uniform float u_min_water;
+uniform float u_erode_radius;
+uniform float u_hardness_reference;
+uniform float u_hardness_min_factor;
+uniform float u_hardness_max_factor;
+uniform float u_hardness_exponent;
+uniform float u_fixed_point_scale;
+uniform int u_is_final_step;
+
+struct Corners {
+    ivec2 c00;
+    float fx;
+    float fy;
+};
+
+Corners bilinearCorners(vec2 pos) {
+    int x0 = clamp(int(floor(pos.x)), 0, u_size - 2);
+    int y0 = clamp(int(floor(pos.y)), 0, u_size - 2);
+    Corners c;
+    c.c00 = ivec2(x0, y0);
+    c.fx = pos.x - float(x0);
+    c.fy = pos.y - float(y0);
+    return c;
+}
+
+struct HeightGrad {
+    float height;
+    float gradX;
+    float gradY;
+};
+
+// Identische Ecken-/Gradienten-Formel wie DropletErosionSystem._height_and_gradient().
+HeightGrad heightAndGradient(vec2 pos) {
+    Corners c = bilinearCorners(pos);
+    float hNW = imageLoad(heightMap, c.c00).r;
+    float hNE = imageLoad(heightMap, c.c00 + ivec2(1, 0)).r;
+    float hSW = imageLoad(heightMap, c.c00 + ivec2(0, 1)).r;
+    float hSE = imageLoad(heightMap, c.c00 + ivec2(1, 1)).r;
+    HeightGrad hg;
+    hg.gradX = (hNE - hNW) * (1.0 - c.fy) + (hSE - hSW) * c.fy;
+    hg.gradY = (hSW - hNW) * (1.0 - c.fx) + (hSE - hNE) * c.fx;
+    hg.height = hNW * (1.0 - c.fx) * (1.0 - c.fy) + hNE * c.fx * (1.0 - c.fy)
+              + hSW * (1.0 - c.fx) * c.fy + hSE * c.fx * c.fy;
+    return hg;
+}
+
+float bilinearHardness(vec2 pos) {
+    Corners c = bilinearCorners(pos);
+    float hNW = imageLoad(hardnessMap, c.c00).r;
+    float hNE = imageLoad(hardnessMap, c.c00 + ivec2(1, 0)).r;
+    float hSW = imageLoad(hardnessMap, c.c00 + ivec2(0, 1)).r;
+    float hSE = imageLoad(hardnessMap, c.c00 + ivec2(1, 1)).r;
+    return hNW * (1.0 - c.fx) * (1.0 - c.fy) + hNE * c.fx * (1.0 - c.fy)
+         + hSW * (1.0 - c.fx) * c.fy + hSE * c.fx * c.fy;
+}
+
+// Identisch zu DropletErosionSystem._deposit_bilinear() (nur der
+// accumulator_map-Anteil - die direkte heightmap-Mutation passiert erst in
+// dropletErosionApply.comp NACH dem Runden-Barrier).
+void depositBilinear(vec2 pos, float amount) {
+    if (amount <= 0.0) return;
+    Corners c = bilinearCorners(pos);
+    float wNW = (1.0 - c.fx) * (1.0 - c.fy);
+    float wNE = c.fx * (1.0 - c.fy);
+    float wSW = (1.0 - c.fx) * c.fy;
+    float wSE = c.fx * c.fy;
+    // int() rundet in GLSL Richtung Null (Truncation) statt zum naechsten
+    // Wert - round() davor vermeidet eine systematische Negativ-Verzerrung
+    // ueber viele akkumulierte Schreibzugriffe hinweg (siehe
+    // _dispatch_droplet_erosion-Docstring, Fixed-Point-Rundungshinweis).
+    imageAtomicAdd(depositAccumFixed, c.c00, int(round(amount * wNW * u_fixed_point_scale)));
+    imageAtomicAdd(depositAccumFixed, c.c00 + ivec2(1, 0), int(round(amount * wNE * u_fixed_point_scale)));
+    imageAtomicAdd(depositAccumFixed, c.c00 + ivec2(0, 1), int(round(amount * wSW * u_fixed_point_scale)));
+    imageAtomicAdd(depositAccumFixed, c.c00 + ivec2(1, 1), int(round(amount * wSE * u_fixed_point_scale)));
+}
+
+// Identisch zu DropletErosionSystem._erode_brush(): kreisfoermiger Pinsel,
+// Gewicht 1-dist/radius, auf Summe 1 normiert, Rand-Zellen werden
+// uebersprungen statt umverteilt - Rueckgabe ist die TATSAECHLICH abgetragene
+// Menge (kann bei Rand-Ueberlappung kleiner als `amount` sein), damit die
+// Massenbilanz beim Aufrufer exakt bleibt.
+float erodeBrush(vec2 pos, float amount) {
+    if (amount <= 0.0) return 0.0;
+    int radiusCeil = int(ceil(u_erode_radius));
+    int cx = int(round(pos.x));
+    int cy = int(round(pos.y));
+
+    float totalWeight = 0.0;
+    for (int dy = -radiusCeil; dy <= radiusCeil; dy++) {
+        for (int dx = -radiusCeil; dx <= radiusCeil; dx++) {
+            float dist = sqrt(float(dx * dx + dy * dy));
+            if (dist <= u_erode_radius) {
+                totalWeight += max(0.0, 1.0 - dist / u_erode_radius);
+            }
+        }
+    }
+    if (totalWeight <= 0.0) return 0.0;
+
+    float totalEroded = 0.0;
+    for (int dy = -radiusCeil; dy <= radiusCeil; dy++) {
+        for (int dx = -radiusCeil; dx <= radiusCeil; dx++) {
+            float dist = sqrt(float(dx * dx + dy * dy));
+            if (dist <= u_erode_radius) {
+                float weight = max(0.0, 1.0 - dist / u_erode_radius) / totalWeight;
+                ivec2 target = ivec2(cx + dx, cy + dy);
+                if (target.x >= 0 && target.x < u_size && target.y >= 0 && target.y < u_size) {
+                    float delta = amount * weight;
+                    imageAtomicAdd(erosionAccumFixed, target, int(round(delta * u_fixed_point_scale)));
+                    totalEroded += delta;
+                }
+            }
+        }
+    }
+    return totalEroded;
+}
+
+// Terminierung: Restfracht wird VERWORFEN (identisch zur Referenz Erosion.cs
+// und zu DropletErosionSystem._walk_one_droplet() (CPU) - siehe Datei-Header
+// "Massenerhaltung"). Kein Deposit-Aufruf hier mehr.
+void terminate(vec2 pos, uint idx) {
+    particles[idx].posX = pos.x;
+    particles[idx].posY = pos.y;
+    particles[idx].alive = 0.0;
+    particles[idx].sediment = 0.0;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(u_num_droplets)) return;
+
+    Particle p = particles[idx];
+    if (p.alive < 0.5) return;
+
+    vec2 pos = vec2(p.posX, p.posY);
+    vec2 dir = vec2(p.dirX, p.dirY);
+    float speed = p.speed;
+    float water = p.water;
+    float sediment = p.sediment;
+
+    HeightGrad hg = heightAndGradient(pos);
+    dir = dir * u_inertia - vec2(hg.gradX, hg.gradY) * (1.0 - u_inertia);
+    float dirLen = length(dir);
+    if (dirLen < 1e-9) {
+        // Referenz-Verhalten: keine Zufalls-Neuausrichtung, Partikel endet
+        // (Restfracht wird verworfen, siehe terminate()).
+        terminate(pos, idx);
+        return;
+    }
+    dir /= dirLen;
+
+    vec2 newPos = pos + dir;
+    if (newPos.x < 0.0 || newPos.x >= float(u_size - 1) || newPos.y < 0.0 || newPos.y >= float(u_size - 1)) {
+        // Restfracht wird verworfen, siehe terminate().
+        terminate(pos, idx);
+        return;
+    }
+
+    HeightGrad hgNew = heightAndGradient(newPos);
+    float deltaHeight = hgNew.height - hg.height;
+
+    float hardnessHere = max(1.0, bilinearHardness(pos));
+    // ERODIERBARKEIT in (0,1] - siehe core/water_generator.py
+    // DropletErosionSystem.DROPLET_ERODE_CAP_HARDNESS_EXPONENT.
+    float hardnessFactor = clamp(pow(u_hardness_reference / hardnessHere, u_hardness_exponent),
+                                 u_hardness_min_factor, u_hardness_max_factor);
+
+    // erosion_strength wirkt auf die KAPAZITAET (wie viel der Tropfen tragen
+    // WILL), nicht als Nachmultiplikator auf den Abtrag - siehe unten.
+    float sedimentCapacity = max(
+        -deltaHeight * speed * water * u_capacity_factor * u_erosion_strength,
+        u_sediment_min_capacity);
+
+    if (sediment > sedimentCapacity || deltaHeight > 0.0) {
+        float amountToDeposit;
+        if (deltaHeight > 0.0) {
+            amountToDeposit = min(deltaHeight, sediment);
+        } else {
+            amountToDeposit = (sediment - sedimentCapacity) * u_deposit_speed;
+        }
+        amountToDeposit = min(amountToDeposit, u_cap_per_step);
+        sediment -= amountToDeposit;
+        depositBilinear(pos, amountToDeposit);
+    } else {
+        // Die -deltaHeight-KLEMME ist die zentrale Schutzzusage des
+        // Referenzalgorithmus: ein Tropfen traegt nie mehr ab als das Gefaelle
+        // zur naechsten Zelle und kann sich damit nicht unter seinen eigenen
+        // Abfluss graben. Bis 2026-07-27 wurde direkt danach mit
+        // erosion_strength (bis 5.0) und hardnessFactor (bis 3.0)
+        // multipliziert - das hob die Zusage auf und war die Ursache der
+        // Krater (gemessen auf dem CPU-Pfad: 66 -> 368 lokale Minima).
+        // hardnessFactor <= 1 kann die Klemme nicht aufheben.
+        float amountToErode = min((sedimentCapacity - sediment) * u_erode_speed, -deltaHeight)
+                              * hardnessFactor;
+        amountToErode = min(amountToErode, u_cap_per_step);
+        float actuallyEroded = erodeBrush(pos, amountToErode);
+        sediment += actuallyEroded;
+    }
+
+    speed = sqrt(max(0.0, speed * speed + deltaHeight * u_gravity));
+    water *= (1.0 - u_evaporate_speed);
+    pos = newPos;
+
+    if (water < u_min_water || isnan(speed) || isinf(speed)) {
+        terminate(pos, idx);
+        return;
+    }
+
+    if (u_is_final_step == 1) {
+        // Letzte Runde: kein weiterer Schritt folgt mehr - Restfracht wird
+        // verworfen, identisch zum CPU-Pfad nach Ablauf von
+        // DROPLET_MAX_LIFETIME_STEPS.
+        terminate(pos, idx);
+        return;
+    }
+
+    particles[idx].posX = pos.x;
+    particles[idx].posY = pos.y;
+    particles[idx].dirX = dir.x;
+    particles[idx].dirY = dir.y;
+    particles[idx].speed = speed;
+    particles[idx].water = water;
+    particles[idx].sediment = sediment;
+}

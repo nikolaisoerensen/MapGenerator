@@ -524,16 +524,17 @@ class BiomeTab(BaseMapTab):
     @pyqtSlot()
     def update_display_mode(self):
         """
-        Slot für Visualization-Mode Änderungen.
-        update_biome_display() ruft self.map_display auf, das nie zugewiesen
-        wird (die realen Render-Methoden display_base_biomes()/overlay_*()
-        existieren auch nicht auf MapDisplay2D) - Biome-2D/3D-Rendering ist
-        noch nicht implementiert. Bis dahin hier abfangen statt hart zu crashen.
+        Slot für Visualization-Mode Änderungen. Delegiert an update_biome_display(),
+        das (siehe dortiger Docstring) bereits über get_current_display()/
+        _push_data_to_current_display() korrekt 2D UND 3D bedient - die frühere
+        Fassung dieser Methode ist veraltet (referenzierte ein nie zugewiesenes
+        self.map_display), der try/except bleibt als reine Absicherung gegen noch
+        fehlende Daten (z.B. vor der ersten Generierung) bestehen.
         """
         try:
             self.update_biome_display()
         except AttributeError as e:
-            self.logger.debug(f"Biome display rendering not yet implemented: {e}")
+            self.logger.debug(f"Biome display update failed: {e}")
 
     @pyqtSlot(bool)
     def toggle_settlements_overlay(self, enabled: bool):

@@ -1,0 +1,80 @@
+#version 430
+// Pass 5 des Feld-Erosionsmodells: geloeste Fracht mit dem Wasser mitbewegen.
+//
+// Formelgleich zu core/erosion_generator.py
+// HydraulicFieldSimulator._pass_advect_sediment().
+//
+// BEWUSSTE ABWEICHUNG VOM VORBILD (LanLou123/Webgl-Erosion): dort wird das
+// Sedimentfeld semi-lagrangesch mit MacCormack-Korrektur advektiert. Diese
+// Wahl wurde hier zuerst 1:1 uebernommen und dann verworfen - semi-lagrangesche
+// Advektion ist grundsaetzlich nicht erhaltend, und der Min/Max-Limiter kappt
+// zusaetzlich systematisch die Spitzen. Gemessen ueber 200 Schritte bei 96 px
+// verschwanden dabei 27 695 m von 39 893 m abgetragenem Material, also 69% -
+// genau das Material, das die Ebenen und Schwemmfaecher aufbauen soll.
+//
+// Stattdessen wird mit den WASSERFLUESSEN transportiert: die Anteile, mit denen
+// eine Zelle ihr Wasser in die vier Richtungen abgibt, liegen aus pipeDepth.comp
+// bereits vor. Das ist per Konstruktion erhaltend - was eine Zelle abgibt,
+// bekommt genau ein Nachbar - und physikalisch direkter: geloestes Sediment
+// geht dorthin, wohin das Wasser geht.
+//
+// Einziger Verlustpfad ist der Kartenrand, und der ist gewollt: Fluesse tragen
+// ihre Fracht aus dem Gebiet hinaus. Er wird fixed-point-atomar mitgezaehlt
+// (exportAccum), damit die Massenbilanz vollstaendig aufgeht statt nur
+// ungefaehr - dieselbe Technik wie in shaders/water/dropletErosionStep.comp,
+// weil GLSL keine Float-Atomics auf Images kennt.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D sedimentIn;
+layout(rgba32f, binding = 1) uniform readonly image2D outflowFraction;
+layout(r32f, binding = 2) uniform writeonly image2D sedimentOut;
+layout(r32i, binding = 3) uniform iimage2D exportAccum;   // 1x1, Fixed-Point
+
+uniform int u_size;
+uniform float u_fixed_point_scale;
+
+bool inside(ivec2 coord) {
+    return coord.x >= 0 && coord.x < u_size && coord.y >= 0 && coord.y < u_size;
+}
+
+// Wieviel Fracht gibt `coord` in Richtung `channel` ab?
+// channel: 0=links, 1=rechts, 2=oben, 3=unten (Reihenfolge wie im Fluss-Vektor).
+float outflowFrom(ivec2 coord, int channel) {
+    if (!inside(coord)) {
+        return 0.0;
+    }
+    return imageLoad(sedimentIn, coord).r * imageLoad(outflowFraction, coord)[channel];
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float sediment = imageLoad(sedimentIn, coord).r;
+    vec4 fractions = imageLoad(outflowFraction, coord);
+    float outL = sediment * fractions.x;
+    float outR = sediment * fractions.y;
+    float outT = sediment * fractions.z;
+    float outB = sediment * fractions.w;
+
+    // Zufluss = der jeweils ENTGEGENGESETZTE Ausfluss der Nachbarn.
+    float incoming = outflowFrom(coord + ivec2(-1, 0), 1)
+                   + outflowFrom(coord + ivec2(1, 0), 0)
+                   + outflowFrom(coord + ivec2(0, -1), 3)
+                   + outflowFrom(coord + ivec2(0, 1), 2);
+    float outgoing = outL + outR + outT + outB;
+
+    imageStore(sedimentOut, coord, vec4(max(0.0, sediment - outgoing + incoming), 0.0, 0.0, 0.0));
+
+    // Was ueber den Kartenrand hinausgeht, verlaesst das Gebiet. Nur die
+    // aeusserste Zellreihe traegt bei, deshalb der Zweig - der atomare
+    // Schreibzugriff laeuft damit auf 4*u_size statt auf u_size^2 Threads.
+    float exported = 0.0;
+    if (coord.x == 0)          exported += outL;
+    if (coord.x == u_size - 1) exported += outR;
+    if (coord.y == 0)          exported += outT;
+    if (coord.y == u_size - 1) exported += outB;
+    if (exported > 0.0) {
+        imageAtomicAdd(exportAccum, ivec2(0, 0), int(round(exported * u_fixed_point_scale)));
+    }
+}

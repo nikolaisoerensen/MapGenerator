@@ -1,0 +1,93 @@
+#version 430
+// Pass 4 des Feld-Erosionsmodells: der eigentliche Erosionskern.
+//
+// Formelgleich zu core/erosion_generator.py
+// HydraulicFieldSimulator._pass_erode_deposit().
+//
+//     C = Kc * Hangfaktor * min(1,(q/q_ref)^m) * Bezugssaeule
+//     C > s  -> loesen   (C - s) * Ks * Erodierbarkeit
+//     C <= s -> ablagern (s - C) * Kd
+//
+// Zwei Eigenheiten, die im CPU-Docstring ausfuehrlich begruendet sind und hier
+// nur kurz wiederholt werden, weil beide beim Lesen des Shaders sonst wie
+// Fluechtigkeitsfehler aussehen:
+//
+// 1. Das Gefaelle wird vom WASSERSPIEGEL genommen (Gelaende + Wassertiefe),
+//    nicht vom Gelaende. In einem gefuellten Becken ist der Spiegel eben, das
+//    Gefaelle geht gegen null und damit die Kapazitaet - dort wird abgelagert
+//    statt gegraben. Mit dem Gelaendegefaelle entstanden gemessen 35-42 echte
+//    Senken, weil eine sich fuellende Grube weiterhin steile Waende und hohen
+//    Zufluss hat.
+//
+// 2. Es gibt ZWEI Hangfaktoren. Der Abtrag nutzt den wahren Wert OHNE
+//    Untergrenze (sonst haette auch ein ebener Seeboden noch Kapazitaet und
+//    Punkt 1 waere wieder ausgehebelt); das TRAGEN nutzt die Untergrenze,
+//    damit Wasser seine Fracht nicht schlagartig am Hangfuss abladen muss,
+//    sondern sie in die Ebene hineintraegt.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D heightIn;
+layout(r32f, binding = 1) uniform readonly image2D waterMap;
+layout(r32f, binding = 2) uniform readonly image2D sedimentIn;
+layout(r32f, binding = 3) uniform readonly image2D dischargeMap;
+layout(r32f, binding = 4) uniform readonly image2D erodibilityMap;
+layout(r32f, binding = 5) uniform writeonly image2D heightOut;
+layout(r32f, binding = 6) uniform writeonly image2D sedimentOut;
+
+uniform int u_size;
+uniform float u_pipe_length;
+uniform float u_capacity_kc;
+uniform float u_dissolve_ks;
+uniform float u_deposit_kd;
+uniform float u_reference_discharge;
+uniform float u_threshold_discharge;
+uniform float u_discharge_exponent;
+uniform float u_capacity_reference;
+uniform float u_min_slope_factor;
+
+float surfaceAt(ivec2 coord) {
+    ivec2 c = clamp(coord, ivec2(0), ivec2(u_size - 1));
+    return imageLoad(heightIn, c).r + imageLoad(waterMap, c).r;
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    // Zentrale Differenz wie numpy.gradient - an den Raendern nutzt np.gradient
+    // eine einseitige Differenz, die clamp()-Randbehandlung hier entspricht dem
+    // bis auf den Faktor 2 an genau der aeussersten Zellreihe. Der Unterschied
+    // beschraenkt sich auf einen Ring, der ohnehin an der offenen Grenze liegt.
+    float gx = 0.5 * (surfaceAt(coord + ivec2(1, 0)) - surfaceAt(coord + ivec2(-1, 0)));
+    float gy = 0.5 * (surfaceAt(coord + ivec2(0, 1)) - surfaceAt(coord + ivec2(0, -1)));
+    float grad = length(vec2(gx, gy)) / u_pipe_length;
+    float slopeTrue = grad / sqrt(1.0 + grad * grad);
+    float slopeErode = slopeTrue;
+    float slopeCarry = max(slopeTrue, u_min_slope_factor);
+
+    // Schwelle abziehen, unter der nichts bewegt wird - siehe
+    // HydraulicFieldSimulator.EROSION_THRESHOLD_DISCHARGE fuer die Messung,
+    // die sie noetig gemacht hat (48% der Karte verursachten 64% der Erosion,
+    // flaechig statt in Rinnen).
+    float discharge = max(0.0, imageLoad(dischargeMap, coord).r - u_threshold_discharge);
+    float dischargeFactor = min(1.0, pow(discharge / u_reference_discharge, u_discharge_exponent));
+    // NICHT "common" nennen - das ist in GLSL ein reserviertes Wort und
+    // scheitert erst beim Kompilieren auf der GPU, also dort, wo es
+    // headless niemand sieht.
+    float capacityBase = u_capacity_kc * dischargeFactor * u_capacity_reference;
+    float capacityErode = slopeErode * capacityBase;
+    float capacityCarry = slopeCarry * capacityBase;
+
+    float sediment = imageLoad(sedimentIn, coord).r;
+    float erodibility = imageLoad(erodibilityMap, coord).r;
+
+    // Die beiden Zweige schliessen sich aus, weil capacityErode <= capacityCarry
+    // gilt. Das "dazwischen" ist kein Sonderfall, sondern der eingeschwungene
+    // Zustand eines Wasserlaufs, der genau so viel traegt, wie er tragen kann.
+    float dissolved = max(0.0, capacityErode - sediment) * u_dissolve_ks * erodibility;
+    float deposited = min(max(0.0, sediment - capacityCarry) * u_deposit_kd, sediment);
+
+    float height = imageLoad(heightIn, coord).r;
+    imageStore(heightOut, coord, vec4(height - dissolved + deposited, 0.0, 0.0, 0.0));
+    imageStore(sedimentOut, coord, vec4(sediment + dissolved - deposited, 0.0, 0.0, 0.0));
+}

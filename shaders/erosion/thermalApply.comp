@@ -1,0 +1,54 @@
+#version 430
+// Pass 6b des Feld-Erosionsmodells: Boeschungs-Ausfluss anwenden.
+//
+// Formelgleich zum zweiten Teil von core/erosion_generator.py
+// HydraulicFieldSimulator._pass_thermal(). Gather statt Scatter: jede Zelle
+// SAMMELT ein, was ihre Nachbarn in ihre Richtung abgeben. Weil jede
+// transportierte Einheit damit genau einer Quelle und einem Ziel zugeordnet
+// ist, ist die Massenbilanz strukturell exakt - ohne Renormierung.
+//
+// Schreibt zusaetzlich die ueber den ganzen Lauf akkumulierten Boeschungs-
+// Anteile fort (thermalAccum: r = Abtrag, g = Auftrag), aus denen der
+// Erosion-Tab seine beiden Thermal-Ansichten speist.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D heightIn;
+layout(rgba32f, binding = 1) uniform readonly image2D outflowIn;
+layout(rg32f, binding = 2) uniform readonly image2D thermalAccumIn;
+layout(r32f, binding = 3) uniform writeonly image2D heightOut;
+layout(rg32f, binding = 4) uniform writeonly image2D thermalAccumOut;
+
+uniform int u_size;
+
+bool inside(ivec2 coord) {
+    return coord.x >= 0 && coord.x < u_size && coord.y >= 0 && coord.y < u_size;
+}
+
+// Wieviel gibt `coord` in Richtung `channel` ab? (0=links, 1=rechts, 2=oben,
+// 3=unten - dieselbe Reihenfolge wie in thermalFlux.comp.) Ausserhalb der
+// Karte: 0, geschlossene Grenze.
+float outflowFrom(ivec2 coord, int channel) {
+    if (!inside(coord)) {
+        return 0.0;
+    }
+    return imageLoad(outflowIn, coord)[channel];
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    vec4 own = imageLoad(outflowIn, coord);
+    float outgoing = own.x + own.y + own.z + own.w;
+
+    float incoming = outflowFrom(coord + ivec2(-1, 0), 1)
+                   + outflowFrom(coord + ivec2(1, 0), 0)
+                   + outflowFrom(coord + ivec2(0, -1), 3)
+                   + outflowFrom(coord + ivec2(0, 1), 2);
+
+    float height = imageLoad(heightIn, coord).r;
+    imageStore(heightOut, coord, vec4(height + incoming - outgoing, 0.0, 0.0, 0.0));
+
+    vec2 accum = imageLoad(thermalAccumIn, coord).rg;
+    imageStore(thermalAccumOut, coord, vec4(accum.x + outgoing, accum.y + incoming, 0.0, 0.0));
+}

@@ -755,7 +755,8 @@ class NavigationPanel(QGroupBox):
             return
 
         # Tab-Reihenfolge
-        tab_order = ["terrain", "geology", "weather", "water", "biome", "settlement", "overview"]
+        tab_order = ["terrain", "geology", "erosion", "weather", "water",
+                     "biome", "settlement", "overview"]
 
         if self.current_tab in tab_order:
             current_index = tab_order.index(self.current_tab)

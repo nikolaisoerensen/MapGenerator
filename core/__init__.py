@@ -13,11 +13,13 @@ from .terrain_generator import (
     ShadowCalculator
 )
 
-# Geology Generation
+# Geology Generation (3D-Gesteinsstapel-Rework, siehe core/geology_generator.py -
+# RockTypeClassifier/MassConservationManager aus dem Vorgänger-Modell entfallen,
+# ihre Aufgaben übernehmen jetzt core.geology_layers.ROCK_LAYERS + die
+# vektorisierten Modul-Funktionen in geology_generator.py)
 from .geology_generator import (
     GeologySystemGenerator,
-    RockTypeClassifier,
-    MassConservationManager
+    GeologyData,
 )
 
 # Weather Generation
@@ -35,7 +37,7 @@ from .water_generator import (
     LakeDetectionSystem,
     FlowNetworkBuilder,
     ManningFlowCalculator,
-    ErosionSedimentationSystem,
+    DropletErosionSystem,
     SoilMoistureCalculator,
     EvaporationCalculator
 )
@@ -90,7 +92,7 @@ __all__ = [
     'LakeDetectionSystem',
     'FlowNetworkBuilder',
     'ManningFlowCalculator',
-    'ErosionSedimentationSystem',
+    'DropletErosionSystem',
     'SoilMoistureCalculator',
     'EvaporationCalculator',
 
@@ -162,7 +164,7 @@ def get_all_generators():
             'lakes': LakeDetectionSystem(),
             'flow': FlowNetworkBuilder(),
             'manning': ManningFlowCalculator(),
-            'erosion': ErosionSedimentationSystem(),
+            'erosion': DropletErosionSystem(),
             'soil': SoilMoistureCalculator(),
             'evaporation': EvaporationCalculator()
         },

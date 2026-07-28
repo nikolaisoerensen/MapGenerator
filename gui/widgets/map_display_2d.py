@@ -1,11 +1,11 @@
 import numpy as np
-from scipy.ndimage import zoom
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QLabel
+from scipy.ndimage import zoom, maximum_filter, minimum_filter
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLabel
 from PyQt6.QtCore import pyqtSignal
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.collections import LineCollection
-from matplotlib.colors import ListedColormap, LogNorm, LinearSegmentedColormap
+from matplotlib.colors import ListedColormap, LogNorm, LinearSegmentedColormap, Normalize, PowerNorm, hsv_to_rgb
 from matplotlib.figure import Figure
 from gui.config.gui_default import CanvasSettings, ColorSchemes
 
@@ -82,10 +82,9 @@ def _validate_input_data(data):
 
     # Echte 2D-Daten (Skalarfelder), RGB/RGBA-Bilddaten (z.B. Geology
     # rock_map, (H,W,3) Gesteinsanteile) ODER (H,W,2) Vektorfelder (wind_map -
-    # eigener Pfeil-Renderer _render_wind_map()) sind gültig für die
-    # Darstellung. Andere Kanalzahlen (z.B. slopemap) sind NICHT direkt
-    # darstellbar - der Aufrufer muss sie vorher auf ein darstellbares Format
-    # reduzieren (siehe TerrainTab update_display_mode()).
+    # eigener Pfeil-Renderer _render_wind_map(); slopemap - eigener Kompass-
+    # Farbrad-Renderer _render_slopemap()/compute_slope_compass_rgb()) sind
+    # gültig für die Darstellung.
     if data.ndim == 3 and data.shape[2] not in (2, 3, 4):
         return False
     elif data.ndim not in (2, 3):
@@ -101,6 +100,52 @@ def _validate_input_data(data):
         return False
 
     return True
+
+
+def compute_slope_compass_rgb(dz_dx, dz_dy):
+    """
+    Nutzer-Vorgabe (Kompass-Hangausrichtung, ursprünglich angefragt vor den
+    Bugfix-Runden dieser Session, jetzt umgesetzt): färbt jeden Pixel nach
+    der Ausrichtung des Hangs (Abwärts-Richtung/"Aspect", nicht die
+    Gradienten-Richtung selbst - ein Gradient zeigt bergauf) auf einem
+    zusammenhängenden, im Uhrzeigersinn verlaufenden HSV-Farbkreis
+    (Hue=Himmelsrichtung, 0°=Rot=Norden, 90°=Ost, 180°=Süd, 270°=West) -
+    benachbarte Himmelsrichtungen bekommen dadurch automatisch benachbarte,
+    ineinander mischbare Farbtöne, statt einer beliebigen Rot/Grün/Blau/Gelb-
+    Zuordnung ohne Kreis-Struktur. Sättigung skaliert mit der Steilheit
+    (0°=flach=weiß/entsättigt, 90°=senkrecht=voll gesättigt), Value bleibt
+    konstant bei 1.0 - identische Formel wird von map_display_3d.py für die
+    3D-Ansicht wiederverwendet (Nutzer-Vorgabe: "gleiche Farben für 2D und
+    3D").
+
+    Kompass-Konvention dieses Projekts (mehrfach in dieser Session verifiziert,
+    siehe [[project-3d-sun-normal-fix]]): Zeile H-1=Norden, Zeile 0=Süden,
+    Spalte 0=Westen, Spalte W-1=Osten - identisch zu map_display_2d.py's
+    durchgängigem origin='lower' und core/terrain_generator.py's Schatten-
+    Raycasting. dz_dy = ∂Höhe/∂Zeilenindex (siehe SlopeCalculator.
+    calculate_slopes(), np.gradient(heightmap)[0]) ist deshalb positiv, wenn
+    das Gelände Richtung Norden ANSTEIGT - die Abwärts-Richtung (Aspect) ist
+    folglich das NEGATIVE des Gradienten.
+
+    Parameter: dz_dx, dz_dy (H,W) float - Höhengradient (SlopeCalculator-
+    Konvention, (H,W,2)-slopemap[...,0]/[...,1]).
+    Rückgabe: (H,W,3) float64 RGB in [0,1], direkt für ax.imshow()/als
+    Overlay-Textur verwendbar.
+    """
+    downhill_east = -dz_dx
+    downhill_north = -dz_dy
+    bearing_deg = np.degrees(np.arctan2(downhill_east, downhill_north)) % 360.0
+
+    slope_angle_deg = np.degrees(np.arctan(np.hypot(dz_dx, dz_dy)))
+    saturation = np.clip(slope_angle_deg / 90.0, 0.0, 1.0)
+
+    hsv = np.stack([
+        (bearing_deg / 360.0).astype(np.float64),
+        saturation.astype(np.float64),
+        np.ones_like(saturation, dtype=np.float64),
+    ], axis=-1)
+    return hsv_to_rgb(hsv)
+
 
 def _get_layer_range(layer_key):
     """
@@ -224,13 +269,11 @@ def rasterize_plot_boundaries_rgba(plot_nodes, plot_edges, plot_cores, wildernes
 class MapDisplay2D(QWidget):
     """
     Funktionsweise: 2D-Visualisierung von Heightmaps und anderen Generator-Outputs mit Matplotlib
-    Aufgabe: Interaktive 2D-Darstellung mit Zoom, Pan und Measure-Tools
+    Aufgabe: Interaktive 2D-Darstellung mit Zoom und Pan
     """
 
     # Signals für Tool-Interaktion
     coordinates_changed = pyqtSignal(float, float)  # (x, y)
-    measurement_completed = pyqtSignal(float)  # (distance)
-    export_requested = pyqtSignal(str)  # (format)
 
     def __init__(self, parent=None):
         """
@@ -244,12 +287,6 @@ class MapDisplay2D(QWidget):
         self.contour_lines_enabled = True
         self._contour_reference_heightmap = None  # für Contour-Overlay auf Nicht-Heightmap-Layern
         self._water_biomes_reference = None  # für See/Fluss-Farbunterscheidung in _render_water_map
-        self.shadow_overlay_enabled = False
-        self.shadow_angle_index = None
-        self.measure_mode = False
-        self.measure_start = None
-        self.measure_line = None
-        self.measure_texts = []  # Liste für Measure-Text-Labels
         self.current_colorbar = None  # Referenz auf aktuelle Colorbar
         self.zoom_limits = None  # Zoom-Grenzen basierend auf Daten
 
@@ -281,15 +318,6 @@ class MapDisplay2D(QWidget):
         self.contour_checkbox.toggled.connect(self._toggle_contour_lines)
         self.contour_checkbox.setVisible(False)
         tool_layout.addWidget(self.contour_checkbox)
-
-        self.measure_button = QPushButton("Measure Distance")
-        self.measure_button.setCheckable(True)
-        self.measure_button.toggled.connect(self._toggle_measure_mode)
-        tool_layout.addWidget(self.measure_button)
-
-        self.export_button = QPushButton("Export PNG")
-        self.export_button.clicked.connect(self._export_png)
-        tool_layout.addWidget(self.export_button)
 
         # Koordinaten-Display
         self.coord_label = QLabel("Coordinates: (0, 0)")
@@ -332,11 +360,9 @@ class MapDisplay2D(QWidget):
     def _connect_events(self):
         """
         Funktionsweise: Verbindet Matplotlib-Events mit Interaktions-Handlers
-        Aufgabe: Setup von Mouse-Events für Zoom, Pan und Measure-Tools
+        Aufgabe: Setup von Mouse-Events für Koordinaten-Anzeige und Zoom
         """
-        self.canvas.mpl_connect('button_press_event', self._on_mouse_press)
         self.canvas.mpl_connect('motion_notify_event', self._on_mouse_move)
-        self.canvas.mpl_connect('button_release_event', self._on_mouse_release)
         self.canvas.mpl_connect('scroll_event', self._on_mouse_scroll)
 
     def update_display(self, data, layer_type="heightmap"):
@@ -346,6 +372,29 @@ class MapDisplay2D(QWidget):
         Parameter: data (numpy.ndarray) - Daten zum Anzeigen, layer_type (str) - Datentyp
         """
         if data is None:
+            return
+
+        if layer_type == "geology_cross_section":
+            # Sonderfall: data ist ein dict (layer_boundaries/terrain_height/
+            # axis/position), kein einzelnes 2D/3D-Array wie bei jedem anderen
+            # Layer - _validate_input_data() würde das ablehnen. Eigener,
+            # schlanker Pfad statt der Zoom-/Contour-Logik unten, die auf ein
+            # reines Raster-Bild zugeschnitten ist (siehe
+            # _render_geology_cross_section()).
+            self.current_data = data
+            self.current_layer = layer_type
+            if self.current_colorbar:
+                self.current_colorbar.remove()
+                self.current_colorbar = None
+            self.ax.clear()
+            self._render_geology_cross_section(data)
+            # Kein _apply_styling() hier: es würde die x/y-Achsenbeschriftung
+            # ("Elevation (m)" etc.), die _render_geology_cross_section() selbst
+            # setzt, mit den generischen "X/Y Coordinate"-Labels überschreiben.
+            # Titel/Grid werden deshalb hier direkt gesetzt statt geteilt.
+            self.ax.grid(True, alpha=0.3, color=CanvasSettings.CANVAS_2D["grid_color"])
+            self.ax.set_title("Geology: Layer Cross-Section", fontsize=14, fontweight='bold')
+            self.canvas.draw()
             return
 
         # Datenvalidierung
@@ -364,17 +413,22 @@ class MapDisplay2D(QWidget):
             'max_zoom_range': max(data.shape) * 1.0   # Maximum 100% der größeren Dimension
         }
 
-        # Measure-Tools beim Layer-Wechsel zurücksetzen
-        self._reset_measure_tools()
-
         # Alte Colorbar entfernen
         if self.current_colorbar:
             self.current_colorbar.remove()
             self.current_colorbar = None
 
         self.ax.clear()
+        # Cross-Section (falls zuvor aktiv) schaltet auf 'auto'-Aspect um
+        # (siehe _render_geology_cross_section) - für jeden regulären
+        # Raster-Layer wieder auf 'equal' zurücksetzen.
+        self.ax.set_aspect('equal')
 
-        if layer_type == "heightmap":
+        if layer_type in ("heightmap", "heightmap_combined"):
+            # Beide Varianten (rohe Terrain-Heightmap vs. kombiniertes
+            # Endergebnis) nutzen dieselbe feste Farbskala, damit sie visuell
+            # vergleichbar sind - nur die zugrunde liegenden Daten (data)
+            # unterscheiden sich zwischen den beiden Radio-Modi.
             self._render_heightmap(data)
         elif layer_type == "slopemap":
             self._render_slopemap(data)
@@ -391,12 +445,17 @@ class MapDisplay2D(QWidget):
         elif layer_type == "wind_map":
             self._render_wind_map(data)
         else:
+            # Deckt u.a. hardness_map und die isolierten Geology-Δz-Diagnose-
+            # Layer ("tilt_delta"/"fold_delta"/"fault_delta"/"intrusion_delta",
+            # 3D-Gesteinsstapel-Rework) ab - diverging Colormap für die
+            # signierten Δz-Layer kommt über layer_ranges, siehe
+            # gui/config/gui_default.py.
             self._render_generic_map(data, layer_type)
 
         # Contour-Lines-Overlay auf Nicht-Heightmap-Layern (Heightmap zeichnet
         # ihre eigenen Konturen bereits in _render_heightmap direkt aus den
         # Layer-Daten selbst - dieselbe Quelle, kein zweites Overlay nötig).
-        if (layer_type != "heightmap" and self.contour_lines_enabled
+        if (layer_type not in ("heightmap", "heightmap_combined") and self.contour_lines_enabled
                 and self._contour_reference_heightmap is not None):
             self._draw_contour_lines(self._contour_reference_heightmap)
 
@@ -422,23 +481,6 @@ class MapDisplay2D(QWidget):
         - kein eigenes Redraw, die Layer-Daten kommen im selben Zug über update_display().
         """
         self._water_biomes_reference = water_biomes_map
-
-    def _reset_measure_tools(self):
-        """
-        Funktionsweise: Setzt alle Measure-Tools zurück
-        Aufgabe: Cleanup von Measure-Line, Text-Labels und Status-Variablen
-        """
-        if self.measure_line:
-            self.measure_line.remove()
-            self.measure_line = None
-
-        # Alle Measure-Texte entfernen
-        for text in self.measure_texts:
-            if text in self.ax.texts:
-                text.remove()
-        self.measure_texts.clear()
-
-        self.measure_start = None
 
     def _render_heightmap(self, heightmap):
         """
@@ -486,37 +528,128 @@ class MapDisplay2D(QWidget):
                                    linewidths=0.5, alpha=0.7)
         self.ax.clabel(contours, inline=True, fontsize=8)
 
-    def _render_slopemap(self, slope_degrees):
+    def _render_slopemap(self, slopemap):
         """
-        Funktionsweise: Rendert Steigungs-Magnitude (bereits in Grad, 2D) mit
-        Steepness-Colormap
-        Aufgabe: Spezialisierte Darstellung für Slope-Daten. Erwartet ein
-        bereits auf 2D reduziertes Grad-Array (siehe TerrainTab.update_display_mode,
-        das (H,W,2) dx/dy-Gradienten vorher zu einer Magnitude in Grad umrechnet -
-        MapDisplay2D kann nur echte 2D-Bilder zeichnen).
-        Parameter: slope_degrees (numpy.ndarray) - Steigung in Grad zum Rendern
+        Funktionsweise: Rendert Hangausrichtung + Steilheit als Kompass-
+        Farbrad (siehe compute_slope_compass_rgb()) - Hue=Himmelsrichtung,
+        Saettigung=Steilheit.
+        Aufgabe: Spezialisierte Darstellung fuer Slope-Daten. Erwartet jetzt
+        das rohe (H,W,2) dz/dx,dz/dy-Array direkt (TerrainTab.
+        update_display_mode reicht es unveraendert durch, siehe dortiger
+        Kommentar - frueher wurde hier auf eine reine Steilheits-Magnitude
+        in Grad reduziert, was die Richtungsinformation verwarf).
+        Parameter: slopemap (numpy.ndarray) - (H,W,2) Hoehengradient
         """
-        _, vmin, vmax, _ = _get_layer_range("slopemap")
-        im = self.ax.imshow(slope_degrees, cmap=plt.cm.YlOrRd, origin='lower', interpolation='bilinear',
-                             vmin=vmin, vmax=vmax)
-
-        self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
+        rgb = compute_slope_compass_rgb(slopemap[:, :, 0], slopemap[:, :, 1])
+        self.ax.imshow(rgb, origin='lower', interpolation='bilinear')
+        self.current_colorbar = None
         self.current_colorbar.set_label('Slope (°)')
 
     def _render_rock_map(self, rock_map):
         """
-        Funktionsweise: Rendert Gesteinstyp-Anteile als RGB-Bild
-        Aufgabe: rock_map ist (H,W,3) - je Kanal der Anteil eines Gesteinstyps
-        (z.B. igneous/sedimentary/metamorphic). imshow zeigt (H,W,3)-Arrays
-        direkt als Echtfarbbild, dafür OHNE Colorbar (keine skalare Werte-Achse
-        bei RGB-Composite-Daten). rock_map kommt vom Generator als uint8 mit
-        R+G+B=255 (Mass-Conservation, siehe core/geology_generator.py) - vorher
-        wurde direkt auf [0,1] geclippt, wodurch praktisch jeder Kanalwert (>1)
-        auf 1.0 kappte und die Karte fast überall reinweiß erschien.
-        Parameter: rock_map (numpy.ndarray) - (H,W,3) Gesteinsanteile, uint8 [0,255]
+        Funktionsweise: Rendert die ausbeißende Gesteinsformation/Intrusion je
+        Pixel als RGB-Bild (3D-Gesteinsstapel-Rework, siehe core/
+        geology_generator.py._build_rock_map()) - jeder Pixel ist EIN diskreter
+        Gesteinstyp (Lookup-Farbe aus core.geology_layers.ALL_ROCK_TYPES,
+        optional durch Foliation-Textur leicht moduliert), kein Mischverhältnis
+        mehr. imshow zeigt (H,W,3)-Arrays direkt als Echtfarbbild, dafür OHNE
+        Colorbar (keine skalare Werte-Achse bei RGB-Composite-Daten).
+        Parameter: rock_map (numpy.ndarray) - (H,W,3) uint8 RGB
         """
         display_data = np.clip(rock_map.astype(np.float32) / 255.0, 0.0, 1.0)
         self.ax.imshow(display_data, origin='lower', interpolation='nearest')
+
+    def _render_geology_cross_section(self, payload: dict):
+        """
+        Funktionsweise: Vertikaler Schichtstapel-Querschnitt entlang X oder Y
+        (Diagnose-Ansicht aus der 3D-Gesteinsstapel-Konzept-Diskussion, Frage 18)
+        Aufgabe: Zeichnet gefüllte Schicht-Bänder (core.geology_layers.
+        ROCK_LAYERS-Farben, älteste/unterste zuerst), GEKAPPT an der realen
+        Terrain-Höhenlinie (alles darüber ist bereits erodiert und würde
+        sonst als "noch vorhandenes" Gestein erscheinen - Nutzer-Feedback:
+        vorher war die oberste sichtbare Schicht kaum als tatsächlicher
+        Ausbiss erkennbar, Fault-Versätze gingen im vollen, ungekappten
+        Schichtpaket unter), plus Intrusionen als von unten kommende
+        Ausbeulung durch alle Schichten, plus die Terrain-Höhenlinie selbst
+        als Überlagerung - KEIN imshow, sondern ax.fill_between() je Schicht
+        + ein Linienplot, da hier kein 2D-Raster, sondern ein 1D-Profil
+        dargestellt wird. `payload` kommt aus GeologyTab.
+        _update_cross_section_display().
+        Parameter: payload (dict) - "layer_boundaries" (N_LAYERS,H,W) m,
+        "terrain_height" (H,W) m, "intrusion_distance_map" (H,W) km signiert
+        oder None, "axis" ("x"|"y"), "position" ([0,1]-Bruchteil entlang der
+        jeweils anderen Achse).
+        """
+        from core.geology_layers import ALL_ROCK_TYPES, BASALT_INTRUSION, N_LAYERS
+
+        layer_boundaries = payload.get("layer_boundaries")
+        terrain_height = payload.get("terrain_height")
+        if layer_boundaries is None or terrain_height is None:
+            return
+        intrusion_distance_map = payload.get("intrusion_distance_map")
+        axis = payload.get("axis", "x")
+        position = float(np.clip(payload.get("position", 0.5), 0.0, 1.0))
+
+        height, width = terrain_height.shape[:2]
+        if axis == "x":
+            row = int(round(position * (height - 1)))
+            boundaries_slice = layer_boundaries[:, row, :]  # (N_LAYERS, width)
+            terrain_slice = terrain_height[row, :].astype(np.float64)
+            intrusion_slice = intrusion_distance_map[row, :] if intrusion_distance_map is not None else None
+            coord = np.arange(width)
+            x_label = f"X (row Y={row})"
+        else:
+            col = int(round(position * (width - 1)))
+            boundaries_slice = layer_boundaries[:, :, col]  # (N_LAYERS, height)
+            terrain_slice = terrain_height[:, col].astype(np.float64)
+            intrusion_slice = intrusion_distance_map[:, col] if intrusion_distance_map is not None else None
+            coord = np.arange(height)
+            x_label = f"Y (col X={col})"
+
+        # Profil statt Raster-Bild - erzwungene Bild-Seitenverhältnis-Gleichheit
+        # aus dem normalen 2D-Kartenmodus wäre hier irreführend (siehe
+        # update_display(), das 'equal' für jeden regulären Layer wiederherstellt).
+        self.ax.set_aspect('auto')
+
+        stack_floor = float(np.min(boundaries_slice)) - 50.0
+        root_floor = stack_floor  # ggf. unten von der Intrusions-Wurzel unterboten, siehe unten
+        lower_true = np.full_like(terrain_slice, stack_floor)
+        for i, layer in enumerate(ALL_ROCK_TYPES[:N_LAYERS]):
+            upper_true = boundaries_slice[i].astype(np.float64)
+            # Nur bis zur Terrainlinie zeichnen - alles darüber ist erodiert
+            # und existiert nicht mehr. lower_true/upper_true (ungekappt)
+            # bleiben die Grundlage für die jeweils nächste (jüngere) Schicht,
+            # nur die ANZEIGE wird pro Schicht gekappt.
+            lower_display = np.minimum(lower_true, terrain_slice)
+            upper_display = np.minimum(upper_true, terrain_slice)
+            color = tuple(c / 255.0 for c in layer.color)
+            self.ax.fill_between(coord, lower_display, upper_display, color=color, label=layer.name, linewidth=0)
+            lower_true = upper_true
+
+        if intrusion_slice is not None:
+            inside = intrusion_slice < 0
+            if np.any(inside):
+                # Wurzeltiefe wächst mit der SDF-Eindringtiefe (wie tief man
+                # im Blob-Inneren ist) - ergibt eine dom-/linsenförmige
+                # Ausbeulung von unten statt eines starren Rechtecks, ganz
+                # ohne zusätzliche Rausch-Daten (Nutzer-Wunsch: Intrusionen
+                # als von unten kommende Ausbeulung durch alle Schichten).
+                penetration = np.clip(-intrusion_slice, 0.0, None)  # km, 0 am Rand, groß in der Mitte
+                root_depth = stack_floor - penetration * 300.0  # m Wurzeltiefe pro km Eindringtiefe
+                root_floor = float(np.min(root_depth[inside]))
+                basalt_color = tuple(c / 255.0 for c in BASALT_INTRUSION.color)
+                self.ax.fill_between(coord, root_depth, terrain_slice, where=inside,
+                                     color=basalt_color, label=BASALT_INTRUSION.name, linewidth=0)
+
+        self.ax.plot(coord, terrain_slice, color='black', linewidth=1.5, label='Terrain')
+
+        y_min = min(float(np.min(terrain_slice)), float(np.min(boundaries_slice[0])), root_floor) - 50.0
+        y_max = max(float(np.max(terrain_slice)), float(np.max(boundaries_slice[-1]))) + 50.0
+        self.ax.set_xlim(float(coord[0]), float(coord[-1]))
+        self.ax.set_ylim(y_min, y_max)
+        self.ax.set_xlabel(x_label)
+        self.ax.set_ylabel('Elevation (m)')
+        self.ax.legend(loc='upper right', fontsize=6, ncol=2)
 
     def _render_biome_map(self, biome_map):
         """
@@ -570,9 +703,73 @@ class MapDisplay2D(QWidget):
             self.ax.imshow(lake_mask, cmap=ListedColormap(['#0b3d91']), origin='lower',
                             interpolation='nearest', vmin=0, vmax=1, alpha=0.85)
 
+    # Nutzer-Vorgabe 2026-07-25: "lokale Minima/Maxima als Beschriftung in der
+    # Karte, damit eindeutig ist wie kalt/warm es wird" - ca. 6 Punkte
+    # insgesamt (Mix aus lokalen Minima/Maxima), IMMER inklusive dem
+    # globalen Minimum/Maximum der sichtbaren Karte.
+    TEMP_EXTREMA_LABEL_COUNT = 6
+
+    def _find_temperature_extrema_points(self, temp_map, target_count=None):
+        """
+        Findet bis zu target_count markante Punkte (globales Minimum/Maximum
+        IMMER dabei, aufgefüllt mit weiteren lokalen Minima/Maxima) für die
+        Text-Beschriftung von _render_temperature_map(). Lokale Extrema über
+        einen Maximum-/Minimum-Filter (Fenstergröße ~1/8 der kleineren
+        Kartenseite) - ein Pixel gilt als lokales Maximum/Minimum, wenn es
+        innerhalb seines Fensters dem gefilterten Wert entspricht. Mindest-
+        abstand zwischen ausgewählten Punkten (selbe Fenstergröße), damit
+        die Beschriftungen nicht überlappen/clustern.
+        Rückgabe: Liste von (wert, row, col)-Tupeln, längstens target_count.
+        """
+        if target_count is None:
+            target_count = self.TEMP_EXTREMA_LABEL_COUNT
+        h, w = temp_map.shape
+        window = max(3, int(min(h, w) * 0.15))
+        min_separation_sq = (window * 0.8) ** 2
+
+        selected = []
+
+        def far_enough(row, col):
+            return all((row - sr) ** 2 + (col - sc) ** 2 >= min_separation_sq for _, sr, sc in selected)
+
+        # Globales Minimum/Maximum sind immer dabei (Nutzer-Vorgabe).
+        gmax_row, gmax_col = np.unravel_index(np.argmax(temp_map), temp_map.shape)
+        gmin_row, gmin_col = np.unravel_index(np.argmin(temp_map), temp_map.shape)
+        selected.append((float(temp_map[gmax_row, gmax_col]), int(gmax_row), int(gmax_col)))
+        if far_enough(gmin_row, gmin_col):
+            selected.append((float(temp_map[gmin_row, gmin_col]), int(gmin_row), int(gmin_col)))
+
+        local_max = maximum_filter(temp_map, size=window, mode='nearest')
+        local_min = minimum_filter(temp_map, size=window, mode='nearest')
+        max_rows, max_cols = np.where(temp_map == local_max)
+        min_rows, min_cols = np.where(temp_map == local_min)
+        max_candidates = sorted(
+            zip(temp_map[max_rows, max_cols].tolist(), max_rows.tolist(), max_cols.tolist()), reverse=True)
+        min_candidates = sorted(
+            zip(temp_map[min_rows, min_cols].tolist(), min_rows.tolist(), min_cols.tolist()))
+
+        pools = [max_candidates, min_candidates]
+        pool_idx = 0
+        guard = 0
+        while len(selected) < target_count and guard < 4 * (len(max_candidates) + len(min_candidates) + 1):
+            guard += 1
+            pool = pools[pool_idx % 2]
+            pool_idx += 1
+            if not pool:
+                continue
+            value, row, col = pool.pop(0)
+            if far_enough(row, col):
+                selected.append((float(value), int(row), int(col)))
+
+        return selected
+
     def _render_temperature_map(self, temp_map):
         """
-        Funktionsweise: Rendert Temperatur-Map mit Rot-Blau Colormap
+        Funktionsweise: Rendert Temperatur-Map mit Rot-Blau Colormap, plus
+        Text-Beschriftungen an ca. 6 markanten Punkten (globales Min/Max
+        immer dabei, siehe _find_temperature_extrema_points()) - macht
+        eindeutig, wie kalt/warm es auf der sichtbaren Karte tatsächlich
+        wird, statt nur über die Farbskala grob abschätzbar.
         Aufgabe: Spezialisierte Darstellung für Temperatur-Daten
         Parameter: temp_map (numpy.ndarray) - Temperatur-Daten zum Rendern
         """
@@ -583,15 +780,38 @@ class MapDisplay2D(QWidget):
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Temperature (°C)')
 
+        for value, row, col in self._find_temperature_extrema_points(temp_map):
+            self.ax.text(col, row, f"{value:.0f}°C", ha='center', va='center',
+                         fontsize=8, fontweight='bold', color='black',
+                         bbox=dict(boxstyle='round,pad=0.15', fc='white', ec='none', alpha=0.75))
+
+    # Nutzer-Vorgabe 2026-07-25: "1mm soll optisch eher wie 10mm wirken, 50mm
+    # soll wie 50mm wirken" - kleine Niederschlagsmengen sind auf einer
+    # linearen Farbskala (0-70mm) kaum vom Hintergrund zu unterscheiden.
+    # PowerNorm mit gamma<1 spreizt den unteren Wertebereich stark über den
+    # Farbverlauf, während der obere Bereich nahe linear bleibt (glatter
+    # Übergang zwischen den beiden Extremen) - kein echter Logarithmus (der
+    # bräuchte einen positiven vmin, precip_map enthält aber 0-Werte), aber
+    # optisch sehr ähnlich. gamma=0.4 gewählt, weil (x/vmax)^0.4 bei x=1mm/
+    # vmax=70mm auf einen Farb-Anteil kommt, der nahe an dem liegt, den x=10mm
+    # auf der ALTEN linearen Skala hatte - runder Exponent, kein exakt
+    # hergeleiteter Wert.
+    PRECIP_DISPLAY_GAMMA = 0.4
+
     def _render_precipitation_map(self, precip_map):
         """
-        Funktionsweise: Rendert Niederschlags-Map mit Grün-Farbschema
+        Funktionsweise: Rendert Niederschlags-Map mit Grün-Farbschema und
+        einer quasi-logarithmischen PowerNorm (siehe PRECIP_DISPLAY_GAMMA),
+        damit kleine (1-5mm) und große (50mm+) Niederschlagsmengen beide
+        farblich unterscheidbar bleiben, statt dass kleine Werte auf der
+        linearen 0-70mm-Skala fast unsichtbar sind.
         Aufgabe: Spezialisierte Darstellung für Niederschlags-Daten
         Parameter: precip_map (numpy.ndarray) - Niederschlags-Daten zum Rendern
         """
         _, vmin, vmax, _ = _get_layer_range("precip_map")
+        norm = PowerNorm(gamma=self.PRECIP_DISPLAY_GAMMA, vmin=vmin, vmax=vmax)
         im = self.ax.imshow(precip_map, cmap=plt.cm.Greens, origin='lower', interpolation='bilinear',
-                             vmin=vmin, vmax=vmax)
+                             norm=norm)
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Precipitation (mm)')
@@ -608,13 +828,25 @@ class MapDisplay2D(QWidget):
         vorher bereits als Magnitude reduziert an) - zeigt jetzt zusätzlich
         die tatsächliche Windrichtung. Pfeillänge UND -farbe skalieren mit
         der lokalen Windstärke.
+
+        Nutzer-Korrektur: vorher hatte NUR der Heatmap-Hintergrund ein festes
+        vmin/vmax (0-30, Blues) und EINE Colorbar dazu - Stromlinien-/Pfeil-
+        Farbe (`color=smag`/`color=mag_sampled`, cmap=plasma) liefen OHNE
+        vmin/vmax mit, matplotlib skalierte sie also automatisch auf das
+        Min/Max DIESES EINEN Frames. Die gezeigte Colorbar (Blues) hatte damit
+        weder dieselbe Farbskala noch denselben Wertebereich wie die
+        tatsächlich angezeigten Pfeil-/Stromlinien-Farben - "eine Skala ohne
+        Bewandnis". Jetzt EIN gemeinsames (cmap, vmin, vmax) aus
+        CanvasSettings.CANVAS_2D["layer_ranges"]["wind_map"] (0-40 m/s) für
+        Hintergrund, Stromlinien UND Pfeile, eine einzige Colorbar dazu.
         Parameter: wind_map (numpy.ndarray) - (H,W,2) u/v-Windkomponenten in m/s
         """
         height, width = wind_map.shape[0], wind_map.shape[1]
         magnitude = np.sqrt(wind_map[:, :, 0] ** 2 + wind_map[:, :, 1] ** 2)
 
-        _, vmin, vmax, _ = _get_layer_range("wind_map")
-        im = self.ax.imshow(magnitude, cmap=plt.cm.Blues, origin='lower',
+        cmap_name, vmin, vmax, _ = _get_layer_range("wind_map")
+        wind_cmap = plt.get_cmap(cmap_name) if cmap_name else plt.cm.plasma
+        im = self.ax.imshow(magnitude, cmap=wind_cmap, origin='lower',
                              interpolation='bilinear', alpha=0.5, vmin=vmin, vmax=vmax)
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Wind Speed (m/s)')
@@ -634,11 +866,28 @@ class MapDisplay2D(QWidget):
             su = zoom(wind_map[:, :, 0], zoom_factors, order=1)
             sv = zoom(wind_map[:, :, 1], zoom_factors, order=1)
             smag = zoom(magnitude, zoom_factors, order=1)
+
+            # Rand-Marge auf NaN setzen (Nutzer-Beobachtung: Stromlinien
+            # knicken am Kartenrand ab und laufen daran entlang statt sauber
+            # abzuschneiden - typisches Artefakt numerischer Randbehandlung
+            # im CFD-Feld selbst, siehe z.B. den Clip in
+            # _semi_lagrangian_advect(), der Sample-Positionen am Gitterrand
+            # auf sich selbst zurückfaltet statt echten Ausfluss abzubilden).
+            # matplotlib.streamplot beendet eine Linie an NaN-Zellen sauber,
+            # das ist robuster als jede Feinabstimmung der CFD-Randbehandlung
+            # selbst und wirkt unabhängig davon, wie viele Randpixel im
+            # jeweiligen Einzelfall betroffen sind.
+            margin = max(1, round(stream_grid * 0.02))
+            su[:margin, :] = su[-margin:, :] = np.nan
+            su[:, :margin] = su[:, -margin:] = np.nan
+            sv[:margin, :] = sv[-margin:, :] = np.nan
+            sv[:, :margin] = sv[:, -margin:] = np.nan
+
             sx = np.linspace(0, width - 1, stream_grid)
             sy = np.linspace(0, height - 1, stream_grid)
             self.ax.streamplot(sx, sy, su, sv,
-                                color=smag, cmap=plt.cm.plasma, density=1.3,
-                                linewidth=0.8, arrowsize=0.9)
+                                color=smag, cmap=wind_cmap, norm=Normalize(vmin=vmin, vmax=vmax),
+                                density=1.3, linewidth=0.8, arrowsize=0.9)
 
         grid = 48
         y_idx = np.linspace(0, height - 1, min(grid, height)).astype(int)
@@ -648,7 +897,7 @@ class MapDisplay2D(QWidget):
         v = wind_map[yy, xx, 1]
         mag_sampled = magnitude[yy, xx]
 
-        self.ax.quiver(xx, yy, u, v, mag_sampled, cmap=plt.cm.plasma,
+        self.ax.quiver(xx, yy, u, v, mag_sampled, cmap=wind_cmap, clim=(vmin, vmax),
                         angles='xy', scale_units='xy', width=0.0022, alpha=0.85)
 
     def _render_generic_map(self, data, layer_type=None):
@@ -789,7 +1038,13 @@ class MapDisplay2D(QWidget):
                 pass
         self._civ_overlay_artists = []
 
-        im = self.ax.imshow(civ_map, cmap=plt.cm.plasma, origin='lower', alpha=alpha, zorder=2)
+        # Farbskala aus derselben zentralen Tabelle wie alle anderen Layer
+        # (CanvasSettings.CANVAS_2D["layer_ranges"]) statt fest verdrahtet -
+        # damit stimmt die Färbung mit der 3D-Ansicht überein und ist zwischen
+        # zwei Karten vergleichbar, statt pro Karte neu zu skalieren.
+        cmap_name, vmin, vmax, _ = _get_layer_range("civ_map")
+        im = self.ax.imshow(civ_map, cmap=plt.get_cmap(cmap_name or "plasma"), origin='lower',
+                             alpha=alpha, zorder=2, vmin=vmin, vmax=vmax)
         self._civ_overlay_artists.append(im)
         self.canvas.draw()
 
@@ -995,6 +1250,10 @@ class MapDisplay2D(QWidget):
             "biome_map": "Biome Distribution",
             "water_map": "Water Bodies",
             "temperature_map": "Temperature Field",
+            "net_change_map": "Erosion: Net Terrain Change",
+            "sediment_load_map": "Erosion: Sediment Load",
+            "water_depth_map": "Erosion: Water Depth",
+            "flow_velocity_map": "Erosion: Flow Velocity",
             "precipitation_map": "Precipitation Field",
             "temp_map": "Temperature Field",
             "precip_map": "Precipitation Field",
@@ -1002,7 +1261,13 @@ class MapDisplay2D(QWidget):
             "wind_map": "Wind Speed",
             "suitability_map": "Settlement Suitability",
             "civ_map": "Civilization Influence",
-            "plot_map": "Plot Boundaries"
+            "plot_map": "Plot Boundaries",
+            "terrain_hub_delta": "Geology: Terrain Hub (Stack Only)",
+            "tilt_delta": "Geology: Tilt (Stack Only)",
+            "fold_delta": "Geology: Fold (Stack Only)",
+            "fault_delta": "Geology: Fault (Stack Only)",
+            "intrusion_delta": "Geology: Intrusion Δz",
+            "geology_cross_section": "Geology: Layer Cross-Section",
         }
 
         title = layer_titles.get(self.current_layer, "Map Data")
@@ -1033,49 +1298,10 @@ class MapDisplay2D(QWidget):
         if self.current_data is not None:
             self.update_display(self.current_data, self.current_layer)
 
-    def set_shadow_overlay(self, enabled: bool, angle_index: int = None):
-        """
-        Platzhalter-Hook für das globale Shell-Checkbox "Shadows". Hillshade-
-        Rendering ist noch nicht implementiert - speichert nur den Zustand,
-        damit eine spätere Shading-Implementierung hier andocken kann.
-        """
-        self.shadow_overlay_enabled = enabled
-        self.shadow_angle_index = angle_index
-
-    def _toggle_measure_mode(self, enabled):
-        """
-        Funktionsweise: Aktiviert/Deaktiviert Measure-Tool für Distanz-Messung
-        Aufgabe: Toggle zwischen normalem und Measure-Modus
-        Parameter: enabled (bool) - True wenn Measure-Modus aktiv sein soll
-        """
-        self.measure_mode = enabled
-        if not enabled:
-            self._reset_measure_tools()
-            self.canvas.draw()
-
-    def _on_mouse_press(self, event):
-        """
-        Funktionsweise: Handler für Mouse-Press Events
-        Aufgabe: Startet Measure-Operation oder andere Interaktionen
-        Parameter: event - Matplotlib MouseEvent
-        """
-        if event.inaxes != self.ax:
-            return
-
-        # Error-Handling für ungültige Koordinaten
-        if event.xdata is None or event.ydata is None:
-            return
-
-        if self.measure_mode:
-            self.measure_start = (event.xdata, event.ydata)
-            if self.measure_line:
-                self.measure_line.remove()
-                self.measure_line = None
-
     def _on_mouse_move(self, event):
         """
         Funktionsweise: Handler für Mouse-Move Events
-        Aufgabe: Aktualisiert Koordinaten-Display und Measure-Line
+        Aufgabe: Aktualisiert Koordinaten-Display
         Parameter: event - Matplotlib MouseEvent
         """
         if event.inaxes != self.ax:
@@ -1089,52 +1315,6 @@ class MapDisplay2D(QWidget):
         x, y = event.xdata, event.ydata
         self.coord_label.setText(f"Coordinates: ({x:.1f}, {y:.1f})")
         self.coordinates_changed.emit(x, y)
-
-        # Measure-Line Update
-        if self.measure_mode and self.measure_start:
-            if self.measure_line:
-                self.measure_line.remove()
-
-            start_x, start_y = self.measure_start
-            self.measure_line = self.ax.plot([start_x, x], [start_y, y], 'r-', linewidth=2, alpha=0.7)[0]
-
-            # Distanz berechnen
-            distance = np.sqrt((x - start_x) ** 2 + (y - start_y) ** 2)
-
-            # Alten Distanz-Text entfernen
-            for text in self.measure_texts:
-                if text in self.ax.texts:
-                    text.remove()
-            self.measure_texts.clear()
-
-            # Neuen Distanz-Text hinzufügen
-            text_obj = self.ax.text((start_x + x) / 2, (start_y + y) / 2, f'{distance:.1f}',
-                                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-            self.measure_texts.append(text_obj)
-
-            self.canvas.draw()
-
-    def _on_mouse_release(self, event):
-        """
-        Funktionsweise: Handler für Mouse-Release Events
-        Aufgabe: Finalisiert Measure-Operation
-        Parameter: event - Matplotlib MouseEvent
-        """
-        if event.inaxes != self.ax:
-            return
-
-        # Error-Handling für ungültige Koordinaten
-        if event.xdata is None or event.ydata is None:
-            return
-
-        if self.measure_mode and self.measure_start:
-            start_x, start_y = self.measure_start
-            end_x, end_y = event.xdata, event.ydata
-
-            distance = np.sqrt((end_x - start_x) ** 2 + (end_y - start_y) ** 2)
-            self.measurement_completed.emit(distance)
-
-            self.measure_start = None
 
     def _on_mouse_scroll(self, event):
         """
@@ -1202,41 +1382,6 @@ class MapDisplay2D(QWidget):
         self.ax.set_xlim(new_xlim)
         self.ax.set_ylim(new_ylim)
         self.canvas.draw()
-
-    def _export_png(self):
-        """
-        Funktionsweise: Exportiert aktuelle Darstellung als hochauflösende PNG
-        Aufgabe: Export-Quality Rendering für High-Resolution Output
-
-        TODO: Implementierung in zukünftigem Stadium
-        - File-Dialog für Speicherpfad
-        - Tatsächliches Speichern der Export-Figure
-        - Verschiedene Export-Formate (PNG, PDF, SVG)
-        - Export-Einstellungen (DPI, Größe)
-        """
-        # Temporäre Deaktivierung - wird später implementiert
-        pass
-
-        # if self.current_data is None:
-        #     return
-        #
-        # # Temporäre Figure für High-Resolution Export
-        # export_fig = Figure(figsize=(16, 12), dpi=300)
-        # export_ax = export_fig.add_subplot(111)
-        #
-        # # Aktuellen Content auf Export-Axes rendern
-        # if self.current_layer == "heightmap":
-        #     export_ax.imshow(self.current_data, cmap=self.heightmap_cmap, origin='lower')
-        # elif self.current_layer == "biome_map":
-        #     export_ax.imshow(self.current_data, cmap=self.biome_cmap, origin='lower')
-        # else:
-        #     export_ax.imshow(self.current_data, cmap=plt.cm.viridis, origin='lower')
-        #
-        # export_ax.set_title(f"Exported {self.current_layer}", fontsize=16)
-        # export_fig.tight_layout()
-        #
-        # # Export-Signal mit temporärer Figure
-        # self.export_requested.emit("PNG")
 
     def reset_view(self):
         """

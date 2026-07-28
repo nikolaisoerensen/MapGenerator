@@ -1,0 +1,48 @@
+#version 430
+// Pass 2 der Böschungswinkel-Erosion (siehe thermalErosionFlux.comp für
+// Pass 1). Wendet den GERADE berechneten Fluss an: sammelt Zufluss von
+// Nachbarn (deren jeweils entgegengesetzter Ausfluss), zieht eigenen
+// Ausfluss ab, aktualisiert Höhe UND die kumulierten Abtrag-/Ablagerungs-
+// Akkumulatoren (accumIn/Out .r=Abtrag, .g=Ablagerung - dieselbe Zwei-Kanal-
+// Konvention wie sedimentTransport.comp, hier aber für die gesamte
+// Iterationskette akkumuliert statt nur "noch unterwegs").
+//
+// Kartenrand liefert 0 Zufluss (geschlossene Grenze, siehe
+// thermalErosionFlux.comp-Docstring).
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba32f, binding = 0) uniform readonly image2D fluxIn;
+layout(r32f, binding = 1) uniform readonly image2D heightIn;
+layout(rg32f, binding = 2) uniform readonly image2D accumIn;
+layout(r32f, binding = 3) uniform writeonly image2D heightOut;
+layout(rg32f, binding = 4) uniform writeonly image2D accumOut;
+
+uniform int u_size;
+
+vec4 fluxAt(ivec2 coord) {
+    if (coord.x < 0 || coord.x >= u_size || coord.y < 0 || coord.y >= u_size) {
+        return vec4(0.0);
+    }
+    return imageLoad(fluxIn, coord);
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    // fluxIn-Kanaele DIESER Zelle: x=f_L, y=f_R, z=f_T, w=f_B (eigener Ausfluss).
+    vec4 f = fluxAt(coord);
+    float inFromLeft = fluxAt(coord + ivec2(-1, 0)).y;   // Nachbar links, dessen f_R
+    float inFromRight = fluxAt(coord + ivec2(1, 0)).x;   // Nachbar rechts, dessen f_L
+    float inFromTop = fluxAt(coord + ivec2(0, -1)).w;    // Nachbar oben, dessen f_B
+    float inFromBottom = fluxAt(coord + ivec2(0, 1)).z;  // Nachbar unten, dessen f_T
+
+    float incoming = inFromLeft + inFromRight + inFromTop + inFromBottom;
+    float outgoing = f.x + f.y + f.z + f.w;
+
+    float hIn = imageLoad(heightIn, coord).r;
+    imageStore(heightOut, coord, vec4(hIn + incoming - outgoing, 0.0, 0.0, 0.0));
+
+    vec2 accum = imageLoad(accumIn, coord).rg;
+    imageStore(accumOut, coord, vec4(accum.x + outgoing, accum.y + incoming, 0.0, 0.0));
+}

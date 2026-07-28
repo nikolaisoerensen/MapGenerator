@@ -42,6 +42,9 @@ float calculateShadow(vec2 shadowCoord) {
     float elevRad = u_sun_elevation * DEG_TO_RAD;
     float azimRad = u_sun_azimuth * DEG_TO_RAD;
 
+    // Y-Vorzeichen: siehe core/terrain_generator.py._raycast_shadow_cpu()
+    // (Zeile height-1 = Norden, verifiziert ueber prevailing_wind_direction,
+    // kein Minus noetig).
     vec3 sunDir = vec3(
         cos(elevRad) * sin(azimRad),
         cos(elevRad) * cos(azimRad),

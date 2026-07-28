@@ -11,6 +11,7 @@ Funktionsweise: Zentrale Parameter-Defaults für alle Slider und Controls
   Reset-Button jedes Sliders (siehe gui/widgets/widgets.py ParameterSlider) -
   erklärt in einfachen Worten, was der Parameter fachlich bewirkt.
 """
+import random
 
 
 class TERRAIN:
@@ -22,7 +23,11 @@ class TERRAIN:
     # Pixelauflösung (siehe gui/widgets/map_display_3d.py _calculate_terrain_scaling()
     # und core/terrain_generator.py SlopeCalculator._calculate_cpu_slopes() - beide
     # brauchen dieselbe Meter-pro-Pixel-Annahme, sonst driften 3D-Darstellung und
-    # Slope-basierte Physik/Biome-Klassifikation auseinander)
+    # Slope-basierte Physik/Biome-Klassifikation auseinander). Bleibt als reiner
+    # Default-/Fallback-Wert bestehen (siehe MAP_DISTANCE_KM["default"] unten) -
+    # der tatsächliche, live einstellbare Wert kommt seit
+    # [[project-terrain-review]] über DataLODManager.get_map_distance_km(),
+    # nicht mehr aus diesem statischen Import.
     WORLD_SIZE_KM = 10.0
 
     MAPSIZE = {
@@ -30,6 +35,20 @@ class TERRAIN:
         "description": "Auflösung der Karte in Pixeln (Breite = Höhe). Größere "
                         "Werte zeigen mehr Detail, verlangsamen aber jede "
                         "nachfolgende Generierungsstufe."
+    }
+    # Bisher fest als WORLD_SIZE_KM-Konstante codiert, geteilt von 5 Dateien
+    # (terrain_generator.py, biome_generator.py, water_generator.py,
+    # weather_generator.py, map_display_3d.py) - jetzt ein echter Slider
+    # direkt unter Map Size, da Map Size (Pixel-Auflösung) und Map Distance
+    # (reale km-Ausdehnung) zwei unabhängige, aber eng verwandte Größen sind.
+    MAP_DISTANCE_KM = {
+        "min": 1.0, "max": 100.0, "default": WORLD_SIZE_KM, "step": 1.0, "suffix": "km",
+        "description": "Reale Ausdehnung der Karte in Kilometern (Breite = "
+                        "Höhe), unabhängig von der Pixel-Auflösung (Map "
+                        "Size). Bestimmt, wie viele reale Meter ein Pixel "
+                        "abdeckt - beeinflusst dadurch Steigungen, "
+                        "Schatten und alle geländeabhängigen Berechnungen "
+                        "in Geology/Weather/Water/Biome."
     }
     # Default 4000m (statt vorher 2000m), damit die Farbskala (0-4000m, siehe
     # CanvasSettings.CANVAS_2D) beim Default-Seed auch tatsächlich ausgenutzt wird.
@@ -44,12 +63,22 @@ class TERRAIN:
     # bei frequency=0.037 und lacunarity=2.3 übersteigt die Oktaven-Frequenz ab
     # Oktave 5 den Wert 1.0 (Wellenlänge unter einem Pixel) - diese Oktaven fügen
     # nur noch unkorreliertes "Static"-Rauschen statt Landschaftsdetail hinzu.
+    # BaseTerrainGenerator._calc_noise() clamped effective_octaves seit
+    # [[project-terrain-review]] automatisch auf die Nyquist-Grenze (0.5
+    # Zyklen/Pixel) herunter, sodass ein zu hoher Slider-Wert kein kaputtes
+    # Ergebnis mehr erzeugt - er hat ab diesem Punkt nur schlicht keine
+    # sichtbare Wirkung mehr, siehe Beschreibung unten.
     OCTAVES = {
         "min": 1, "max": 8, "default": 4, "step": 1,
         "description": "Anzahl der übereinandergelegten Rausch-Schichten "
                         "unterschiedlicher Frequenz. Mehr Oktaven fügen "
                         "feinere Detailebenen hinzu, verlangsamen aber die "
-                        "Berechnung."
+                        "Berechnung. Oktaven jenseits der aktuellen "
+                        "Frequency/Frequency-Scaling-Kombination werden "
+                        "automatisch ignoriert, sobald ihre Frequenz über "
+                        "0.5 Zyklen/Pixel liegt (kein sichtbarer Effekt "
+                        "mehr möglich) - bei den Standardwerten betrifft "
+                        "das bereits Oktave 5 und höher."
     }
     FREQUENCY = {
         "min": 0.001, "max": 0.1, "default": 0.037, "step": 0.001,
@@ -85,14 +114,28 @@ class TERRAIN:
                         "spitzere und isoliertere Berggipfel)."
     }
     MAP_SEED = {
-        "min": 0, "max": 999999, "default": 542595, "step": 1,
+        # Zufällig bei JEDEM Programmstart neu gewürfelt (Modul-Import
+        # passiert einmal pro Prozessstart) - Nutzer-Vorgabe: die App soll
+        # nicht immer mit demselben Seed starten. Der Slider selbst bleibt
+        # danach normal einstellbar/reproduzierbar, nur der Startwert ist
+        # nicht mehr fest.
+        "min": 0, "max": 999999, "default": random.randint(0, 999999), "step": 1,
         "description": "Zufalls-Startwert für die Terrain-Generierung - "
                         "derselbe Seed erzeugt bei sonst gleichen "
                         "Parametern immer exakt dieselbe Karte."
     }
 
 class GEOLOGY:
-    """Parameter für core/geology_generator.py"""
+    """
+    Parameter für core/geology_generator.py (3D-Gesteinsstapel-Modell, siehe
+    docs/session_design_2026-07-22_geology_3dstack_concept.md und den
+    zugehörigen Umsetzungsplan). Die früheren RIDGE_WARPING/BEVEL_WARPING/
+    METAMORPH_FOLIATION/METAMORPH_FOLDING/IGNEOUS_FLOWING-Regler sind ersatzlos
+    entfernt - ihre Effekte sind in den Reglern unten als benannte Komponenten
+    des gemeinsamen Tektonik-Verschiebungsfelds aufgegangen (Ridge -> FOLD_DETAIL,
+    Bevel -> FAULT_EDGE_SOFTNESS, Folding -> FOLD_INTENSITY, Foliation ->
+    FOLIATION_DETAIL, Igneous Flowing -> INTRUSION_DETAIL).
+    """
     SEDIMENTARY_HARDNESS = {
         "min": 1, "max": 100, "default": 30, "step": 1,
         "description": "Widerstandsfähigkeit von Sedimentgestein gegen "
@@ -112,33 +155,88 @@ class GEOLOGY:
                         "beeinflusst, wie schnell Wasser dieses Gestein "
                         "abträgt."
     }
-    RIDGE_WARPING = {
-        "min": 0.0, "max": 2.0, "default": 0.5, "step": 0.1,
-        "description": "Verzerrt Gebirgskämme mit zusätzlichem Rauschen - "
-                        "höhere Werte lassen Bergketten weniger geradlinig "
-                        "und gleichmäßig wirken."
+    TILT_INTENSITY = {
+        "min": 0.0, "max": 150.0, "default": 15.0, "step": 1.0, "suffix": " m/km",
+        "description": "Verkippt den gesamten Gesteinsstapel wie eine schiefe "
+                        "Ebene (Meter Höhenunterschied pro km) - bei 0 bleibt "
+                        "der Stapel horizontal, höhere Werte kippen ihn "
+                        "sichtbar in eine Richtung (siehe Tilt Direction). "
+                        "Wirkt NUR auf den Gesteinsstapel/Ausbiss, NICHT auf "
+                        "die sichtbare Geländehöhe - deshalb darf der Regler "
+                        "deutlich stärker eingestellt werden als bisher."
     }
-    BEVEL_WARPING = {
-        "min": 0.0, "max": 2.0, "default": 0.3, "step": 0.1,
-        "description": "Verzerrt die Übergänge/Kanten zwischen "
-                        "Gesteinstypen mit zusätzlichem Rauschen für "
-                        "weniger scharfe, natürlicher wirkende Grenzen."
+    TILT_DIRECTION = {
+        "min": 0.0, "max": 360.0, "default": 45.0, "step": 5.0, "suffix": "°",
+        "description": "Richtung der Verkippung in Grad (0=Ost, 90=Nord) - "
+                        "ohne Wirkung, solange Tilt Intensity 0 ist."
     }
-    METAMORPH_FOLIATION = {
-        "min": 0.0, "max": 1.0, "default": 0.4, "step": 0.1,
-        "description": "Stärke der Schieferung (parallele Streifenstruktur) "
-                        "in metamorphem Gestein."
+    FOLD_INTENSITY = {
+        "min": 0.0, "max": 2000.0, "default": 400.0, "step": 20.0, "suffix": " m",
+        "description": "Amplitude der großräumigen geologischen Faltung in "
+                        "Metern - verschiebt den Gesteinsstapel wellenförmig "
+                        "auf und ab (Antiklinalen/Synklinalen) und damit, "
+                        "welche Schicht wo ausbeißt. Wirkt NUR auf den "
+                        "Gesteinsstapel, NICHT auf die sichtbare Geländehöhe "
+                        "- deshalb darf der Regler deutlich stärker "
+                        "eingestellt werden als bisher."
     }
-    METAMORPH_FOLDING = {
-        "min": 0.0, "max": 1.0, "default": 0.6, "step": 0.1,
-        "description": "Stärke der Faltung (wellenförmige Verformung) in "
-                        "metamorphem Gestein."
+    FOLD_DETAIL = {
+        "min": 0.0, "max": 1.0, "default": 0.4, "step": 0.05,
+        "description": "Mischt eine feinere, unregelmäßigere Rauheits-Komponente "
+                        "in die Faltung (entspricht dem früheren Ridge Warping) - "
+                        "0 = nur die glatte großräumige Faltung, höhere Werte "
+                        "lassen die Faltenzüge weniger geradlinig wirken."
     }
-    IGNEOUS_FLOWING = {
-        "min": 0.0, "max": 1.0, "default": 0.7, "step": 0.1,
-        "description": "Wie stark vulkanisches Gestein Fließmuster zeigt "
-                        "(z.B. erkennbare Lavaströme statt gleichmäßiger "
-                        "Verteilung)."
+    FAULT_INTENSITY = {
+        "min": 0.0, "max": 400.0, "default": 100.0, "step": 10.0, "suffix": " m",
+        "description": "Vertikaler Versatz (Sprunghöhe) an Störungslinien in "
+                        "Metern - 0 erzeugt kein Störungsnetz, höhere Werte "
+                        "lassen Gesteinsblöcke deutlicher gegeneinander "
+                        "versetzt erscheinen."
+    }
+    FAULT_DETAIL = {
+        "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.05,
+        "description": "Verzweigungstiefe/-dichte des Störungsnetzes - "
+                        "niedrige Werte erzeugen wenige, einfache "
+                        "Bruchlinien, hohe Werte ein dichteres, stärker "
+                        "verästeltes Netz."
+    }
+    FAULT_EDGE_SOFTNESS = {
+        "min": 0.02, "max": 2.0, "default": 0.3, "step": 0.02, "suffix": " km",
+        "description": "Breite der weichen Übergangszone an einer Störungskante "
+                        "in km (entspricht dem früheren Bevel Warping) - kleine "
+                        "Werte ergeben einen scharfen Versatz-Sprung, große "
+                        "Werte eine breite, allmähliche Übergangszone."
+    }
+    INTRUSION_DENSITY = {
+        "min": 0.0, "max": 1.0, "default": 0.3, "step": 0.05,
+        "description": "Anzahl vulkanischer Intrusionskörper (Basalt), die den "
+                        "Gesteinsstapel lokal durchschlagen - 0 erzeugt keine "
+                        "Intrusionen."
+    }
+    INTRUSION_SIZE = {
+        "min": 0.2, "max": 5.0, "default": 1.0, "step": 0.1, "suffix": " km",
+        "description": "Typischer Radius einer Intrusion in km."
+    }
+    INTRUSION_DETAIL = {
+        "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.05,
+        "description": "Randrauschen der Intrusionskörper (entspricht dem "
+                        "früheren Igneous Flowing) - 0 ergibt kreisrunde "
+                        "Ränder, höhere Werte unregelmäßigere, natürlicher "
+                        "wirkende Konturen."
+    }
+    METAMORPHIC_OVERPRINT_INTENSITY = {
+        "min": 0.0, "max": 1.0, "default": 0.4, "step": 0.05,
+        "description": "Reichweite/Stärke der Gesteins-Umwandlung (Härte-"
+                        "Anhebung Richtung Metamorphic Hardness) in der Nähe "
+                        "von Störungen und Intrusionen - 0 deaktiviert jede "
+                        "Metamorphose-Wirkung."
+    }
+    FOLIATION_DETAIL = {
+        "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.05,
+        "description": "Feinheit/Kontrast der Schieferungs-Textur (parallele "
+                        "Streifen) in metamorph überprägten Zonen - rein "
+                        "visuell, ohne jede Höhenwirkung."
     }
 
 class SETTLEMENT:
@@ -290,16 +388,36 @@ class SETTLEMENT:
 class WEATHER:
     """Parameter für core/weather_generator.py"""
     AIR_TEMP_ENTRY = {
-        "min": -30, "max": 40, "default": 15, "step": 1, "suffix": "°C",
-        "description": "Lufttemperatur am Kartenrand, wo die Luft "
-                        "'eintritt' - Grundlage für die gesamte "
-                        "Temperaturberechnung auf der Karte."
+        "min": -30, "max": 40, "default": 0, "step": 1, "suffix": "°C",
+        "description": "Zusätzlicher Temperatur-Offset AUF eine realistische, "
+                        "aus Breitengrad und Jahreszeit berechnete Basis-"
+                        "temperatur (0 = reine Klimatologie ohne Verschiebung) "
+                        "- damit lässt sich die ganze Welt gleichmäßig wärmer "
+                        "oder kälter stellen (z.B. für eine Eiszeit- oder "
+                        "Treibhaus-Stimmung)."
     }
-    SOLAR_POWER = {
-        "min": 0, "max": 50, "default": 20, "step": 1, "suffix": "°C",
-        "description": "Stärke der Sonnenerwärmung - wie viel wärmer "
-                        "sonnenbeschienene Flächen gegenüber beschatteten "
-                        "Flächen werden."
+    GROUND_TEMP_OFFSET = {
+        "min": -30, "max": 40, "default": 0, "step": 1, "suffix": "°C",
+        "description": "Zusätzlicher Temperatur-Offset AUF eine realistische, "
+                        "aus Breitengrad und Jahreszeit berechnete Boden-"
+                        "Basistemperatur (0 = reine Klimatologie ohne "
+                        "Verschiebung) - verschiebt Schatten- UND Sonnen-"
+                        "temperatur des Bodens GEMEINSAM (die Differenz "
+                        "zwischen beiden ist eine feste interne Konstante, "
+                        "kein eigener Regler). Unabhängig vom Luft-Offset "
+                        "(air_temp_entry) - Boden und Luft sind physikalisch "
+                        "getrennte Größen, die erst über Konvektion "
+                        "gekoppelt werden."
+    }
+    SUN_RELEVANCE_FACTOR = {
+        "min": 0.0, "max": 10.0, "default": 1.0, "step": 0.1, "suffix": "x",
+        "description": "Multiplikator auf die feste Sonne/Schatten-Boden-"
+                        "temperatur-Spanne (GROUND_TEMP_SPREAD) - bei 0 hat "
+                        "Sonnenexposition KEINEN Einfluss mehr auf die "
+                        "Bodentemperatur (nur noch ground_temp_offset zählt), "
+                        "bei 1 (Standard) die kalibrierte Spanne, bei 10 das "
+                        "Zehnfache. Feiner Schritt (0.1) für Kontrolle im "
+                        "unteren Bereich."
     }
     ALTITUDE_COOLING = {
         "min": 2, "max": 100, "default": 6, "step": 1, "suffix": "°C/km",
@@ -327,6 +445,22 @@ class WEATHER:
                         "lokal wechselnde Windrichtungen (besonders am "
                         "Kartenrand verstärkt)."
     }
+    # Checkbox, kein Slider (siehe gui/tabs/weather_tab.py _create_wind_parameters()) -
+    # Weather-Rework Punkt A: bei AN wird das synoptische Druckgefälle um einen
+    # aus der AKTUELL simulierten Temperatur abgeleiteten Term ergänzt (wärmer
+    # als der Schicht-Durchschnitt = lokal niedrigerer effektiver Druck, treibt
+    # zusätzlichen thermischen Wind). Default AN, aber abschaltbar (Nutzer-
+    # Vorgabe: "ich will aber auch wieder zurückgehen können, falls es
+    # misslingt") - bei AUS läuft exakt der bisherige, rein synoptische Pfad.
+    THERMAL_PRESSURE_COUPLING = {
+        "default": True,
+        "description": "Druckfeld zusätzlich aus der simulierten Temperatur "
+                        "ableiten (wärmere Gebiete erzeugen lokal niedrigeren "
+                        "Druck, was zusätzlichen Wind erzeugt) statt nur dem "
+                        "vorgegebenen Grundgefälle zu folgen. Bei Bedarf "
+                        "abschaltbar, um auf das alte, rein synoptische "
+                        "Verhalten zurückzufallen."
+    }
     WIND_SPEED_FACTOR = {
         "min": 0.1, "max": 3.0, "default": 1.0, "step": 0.1,
         "description": "Genereller Multiplikator für die Windgeschwindigkeit "
@@ -344,19 +478,21 @@ class WEATHER:
     # Lokale Abweichung entsteht weiterhin über die bestehende
     # Terrain-Ablenkung (terrain_factor), nicht über diesen Parameter.
     PREVAILING_WIND_DIRECTION = {
-        "min": 0, "max": 360, "default": 225, "step": 5, "suffix": "°",
-        "description": "Grundrichtung des vorherrschenden Windes (0°=Ost, "
-                        "90°=Nord) - rotiert leicht mit den Jahreszeiten, "
-                        "lokale Abweichungen entstehen zusätzlich durchs "
-                        "Gelände."
+        "min": 0, "max": 360, "default": 0, "step": 5, "suffix": "°",
+        "description": "Herkunftsrichtung des vorherrschenden Windes, z.B. "
+                        "0°=Wind aus Westen, 90°=aus Süden (der Wind WEHT "
+                        "dann Richtung Osten bzw. Norden) - rotiert leicht "
+                        "mit den Jahreszeiten, lokale Abweichungen entstehen "
+                        "zusätzlich durchs Gelände."
     }
     # Eintritts-Luftfeuchte (ersetzt die bisher hartcodierte 50%-Baseline in
     # _calculate_atmospheric_moisture_cpu()'s Verdunstungs-Ausgangswert).
     AIR_HUMIDITY_ENTRY = {
-        "min": 0, "max": 100, "default": 50, "step": 1, "suffix": "%",
-        "description": "Luftfeuchtigkeit am Kartenrand beim Lufteintritt - "
-                        "Ausgangswert für die Verdunstungs-/"
-                        "Feuchtigkeitsberechnung."
+        "min": -50, "max": 50, "default": 0, "step": 1, "suffix": "%",
+        "description": "Zusätzlicher Feuchte-Offset AUF eine realistische, "
+                        "aus dem Breitengrad berechnete Basis-Luftfeuchte "
+                        "(0 = reine Klimatologie ohne Verschiebung, feuchter "
+                        "am Äquator als an den Polen)."
     }
     # Geografische Breite/Länge der Karte - treibt die echte astronomische
     # Sonnenstandsberechnung für saisonale Shadowmaps (siehe
@@ -370,6 +506,15 @@ class WEATHER:
                         "echten Sonnenstand (Winkel und Jahreszeiten-"
                         "Schwankung) für die Schattenberechnung."
     }
+    # Nutzer-Entscheidung 2026-07-24: kein eigener Slider mehr (gui/tabs/
+    # weather_tab.py) - der Effekt (reine Tageszeit-Feinverschiebung der 7
+    # Sonnenwinkel-Samples, siehe calculate_solar_position()) ist real, aber
+    # zu schwach, um einen eigenen Regler zu rechtfertigen (KEINE Wirkung
+    # auf Klimatologie/Jahreszeiten/Temperatur-Basiswert - die hängen nur an
+    # Latitude). Bleibt als feste interne Konstante bestehen - core/
+    # weather_generator.py und gui/tabs/base_tab.py lesen den Parameter
+    # bereits über `.get('map_longitude', MAP_LONGITUDE["default"])`, ein
+    # fehlender Slider-Wert fällt also automatisch hierauf zurück.
     MAP_LONGITUDE = {
         "min": -180, "max": 180, "default": 15, "step": 1, "suffix": "°",
         "description": "Geografische Länge der Karte - beeinflusst die "
@@ -389,13 +534,116 @@ class WEATHER:
     CLIMATE_ZONE_SEASONAL_OFFSETS = {
         "temperate": {
             "air_temp_entry":     [-9.0, -3.0, 3.0, 6.0, 0.0, -7.0],   # °C
-            "solar_power":        [-8.0, -2.0, 4.0, 6.0, -1.0, -7.0],  # °C-Skala
             "wind_speed_factor":  [0.15, 0.05, -0.05, -0.10, 0.0, 0.10],
             # % - Summe Peak-zu-Tal bleibt < 30% des 0-100%-Sliderbereichs
             "air_humidity_entry": [15.0, 5.0, -5.0, 0.0, 8.0, 18.0],
         },
     }
     CLIMATE_ZONE = "temperate"  # vorerst fix, siehe Backlog für spätere Auswahl
+
+
+class EROSION:
+    """
+    Parameter für core/erosion_generator.py (Feld-Erosion, eigener Generator
+    seit 2026-07-28 - siehe dortigen Modul-Docstring).
+
+    Die drei Charakter-Regler Kc/Ks/Kd stammen aus dem Vorbild
+    (LanLou123/Webgl-Erosion); alles andere ergänzt, was ein
+    einmal-durchlaufendes Verfahren gegenüber einer endlos interaktiven
+    Anwendung zusätzlich braucht (Abbruch, Auflösung, Varianten).
+
+    ALLE Startwerte sind vorläufig und noch nicht gegen das visuelle Ergebnis
+    kalibriert - die gemessene Ausgangslage steht als Tabelle bei
+    HydraulicFieldSimulator.REFERENCE_SPECIFIC_DISCHARGE.
+    """
+
+    EROSION_CAPACITY = {
+        "min": 0.1, "max": 5.0, "default": 1.0, "step": 0.1,
+        "description": "Wie viel Material fließendes Wasser überhaupt tragen "
+                        "kann (Kc). Zusammen mit Erosion Strength und "
+                        "Deposition Rate der Charakter-Regler: hoch = viel "
+                        "Material in Bewegung, tiefe Täler und ausgedehnte "
+                        "Schwemmebenen."
+    }
+    EROSION_STRENGTH = {
+        "min": 0.0, "max": 2.0, "default": 0.5, "step": 0.05,
+        "description": "Wie schnell untersättigtes Wasser Material löst (Ks). "
+                        "Der Hauptregler für die Tiefe der Täler - 0 schaltet "
+                        "die fluviale Erosion vollständig ab."
+    }
+    DEPOSITION_RATE = {
+        "min": 0.0, "max": 2.0, "default": 0.5, "step": 0.05,
+        "description": "Wie schnell übersättigtes Wasser seine Fracht wieder "
+                        "abgibt (Kd). Hohe Werte erzeugen ausgeprägte Ebenen "
+                        "und Schwemmfächer dort, wo das Wasser langsamer wird."
+    }
+    RAINFALL = {
+        "min": 0.0, "max": 5.0, "default": 2.0, "step": 0.1,
+        "description": "Gleichmäßiger Regen über die gesamte Karte. Bewusst "
+                        "unabhängig vom Weather-Niederschlag: die Erosion "
+                        "modelliert geologische Zeit, nicht das heutige "
+                        "Wetter - deshalb läuft sie auch VOR Weather."
+    }
+    EVAPORATION_RATE = {
+        "min": 0.0, "max": 0.1, "default": 0.015, "step": 0.001,
+        "description": "Gegenspieler des Regens. Bestimmt, wie weit Wasser "
+                        "läuft, bevor es versickert - und damit, wie weit die "
+                        "Erosion in flache Bereiche hineinreicht."
+    }
+    CONVERGENCE_THRESHOLD = {
+        "min": 1e-8, "max": 1e-5, "default": 1e-6, "step": 1e-7,
+        "description": "Abbruchkriterium: mittlere Höhenänderung pro Schritt, "
+                        "relativ zum Relief der Karte. Kleiner = länger = "
+                        "ausgereiftere Landschaft. Ein Modell mit ständigem "
+                        "Regen und ohne Hebung kommt nie ganz zum Stillstand - "
+                        "die Schwelle sagt 'es lohnt nicht mehr', nicht 'fertig'."
+    }
+    MAX_STEPS = {
+        "min": 200, "max": 20000, "default": 8000, "step": 100,
+        "description": "Obergrenze der Simulationsschritte. Greift, wenn das "
+                        "Konvergenzkriterium vorher nicht erreicht wird - "
+                        "verhindert einen Lauf ohne absehbares Ende."
+    }
+    SIMULATION_RESOLUTION = {
+        "min": 128, "max": 1024, "default": 512, "step": 128, "suffix": "px",
+        "description": "Auflösung der Simulation, unabhängig von Map Size - "
+                        "das Ergebnis wird anschließend auf die Kartengröße "
+                        "skaliert. Hält Laufzeit und Optik über alle "
+                        "Kartengrößen vergleichbar. Ohne GPU wird auf 256 "
+                        "begrenzt (siehe Statistik-Anzeige)."
+    }
+    THERMAL_STRENGTH = {
+        "min": 0.0, "max": 2.0, "default": 0.3, "step": 0.05,
+        "description": "Stärke der Böschungswinkel-Erosion: wie schnell zu "
+                        "steile Hänge nachrutschen. 0 schaltet sie ab."
+    }
+    TALUS_ANGLE_SCALE = {
+        "min": 0.5, "max": 2.0, "default": 1.0, "step": 0.05,
+        "description": "Skaliert den kritischen Böschungswinkel. Klein = "
+                        "flachere stabile Hänge (alles rutscht ab), groß = "
+                        "steile Wände bleiben stehen."
+    }
+    HARDNESS_INFLUENCE = {
+        "min": 0.0, "max": 1.0, "default": 0.0, "step": 0.05,
+        "description": "Wie stark die Gesteinshärte aus Geology eingeht - auf "
+                        "die Löserate UND den Böschungswinkel. 0 % ist exakt "
+                        "das Verhalten des Vorbilds (das kein Gestein kennt), "
+                        "100 % volle Kopplung: hartes Gestein löst langsamer "
+                        "und hält steilere Wände."
+    }
+    SMOOTHING = {
+        "min": 0.0, "max": 1.0, "default": 0.3, "step": 0.05,
+        "description": "Glättet gezielt Ein-Pixel-Grate und -Rinnen, also "
+                        "Gitterartefakte - echte Hänge bleiben unangetastet. "
+                        "0 schaltet den Pass ab."
+    }
+    THERMAL_VARIANT = {
+        "min": 0, "max": 1, "default": 0, "step": 1,
+        "description": "Verfahren der Böschungserosion: 0 = Gather "
+                        "(massenexakt, das in diesem Projekt gewachsene "
+                        "Verfahren), 1 = Flux (die Variante des Vorbilds). "
+                        "Zum direkten optischen Vergleich."
+    }
 
 
 class WATER:
@@ -412,64 +660,48 @@ class WATER:
     # wirksamen Bereich liegt (vorher lagen ~90% des Sliders oberhalb jedes
     # real vorkommenden Becken-Volumens - das war zugleich die Ursache für
     # "Slider fühlt sich nicht reaktiv an", siehe [[project-water-flood-calibration]]).
+    # Neukalibrierung 2026-07-27: `total_volume` in _classify_lake_basins
+    # (core/water_generator.py) wird jetzt mit der realen Zellfläche
+    # multipliziert und ist damit ein ECHTES Volumen in m³. Vorher war es die
+    # blosse Summe der Wassertiefen über alle überfluteten Pixel
+    # ("Meter-Pixel") - dieselbe Geländeform ergab damit bei map_size 512
+    # rund viermal so viele Seen wie bei 128, und map_distance_km ging gar
+    # nicht ein. Der Slider war dadurch auflösungsabhängig und musste nach
+    # jeder Map-Size-Änderung neu gefunden werden.
+    # Bereich/Default: bei den Default-Einstellungen (128 px auf 10 km,
+    # also 78 m/px = 6100 m² pro Zelle) entspricht der Default von 5000 m³
+    # etwa einer Senke von 1 m mittlerer Tiefe auf knapp einer Zelle - klein
+    # genug für viele kleine Bergseen, gross genug, um einzelne
+    # Rausch-Vertiefungen auszusortieren. Das Maximum (5 Mio. m³) entspricht
+    # einem grossen Talsee.
     LAKE_VOLUME_THRESHOLD = {
-        "min": 0.001, "max": 0.3, "default": 0.02, "step": 0.005, "suffix": "m",
-        "description": "Mindest-'Volumen' eines Geländebeckens, damit dort "
-                        "ein See entsteht - niedrigere Werte lassen auch "
-                        "kleine/flache Senken zu Seen werden."
+        "min": 100.0, "max": 5_000_000.0, "default": 5000.0, "step": 100.0, "suffix": "m³",
+        "description": "Mindest-Wasservolumen eines Geländebeckens, damit "
+                        "dort ein See entsteht - niedrigere Werte lassen auch "
+                        "kleine/flache Senken zu Seen werden. Echtes Volumen "
+                        "in Kubikmetern, also unabhängig von Map Size und Map "
+                        "Distance: derselbe Wert erzeugt bei jeder Auflösung "
+                        "dieselben Seen."
     }
-    # ZWEITE Neukalibrierung (siehe [[project-3layer-wind-cfd]]): der neue
-    # gekoppelte 3-Schicht-Atmosphären-Loop (core/weather_generator.py
-    # _run_coupled_atmosphere_simulation) akkumuliert Kondensation über den
-    # gesamten Zeitschritt-Loop statt sie aus einem Einzelschuss-Magnus-Snapshot
-    # abzuleiten - precip_map liegt dadurch jetzt bei Default-Parametern um
-    # Größenordnungen höher (empirisch min~4, Mittel~13, max~31 gH2O/m² statt
-    # vorher ~0-2.8, Mittel~0.08) als zum Zeitpunkt der VORHERIGEN Kalibrierung
-    # (Kommentar unten) angenommen. Der alte 0.02-1.0-Bereich lag dadurch
-    # KOMPLETT unter jedem real vorkommenden precip_map-Wert (100% der Pixel
-    # zählten unabhängig vom Slider-Stand als Regen-Quelle) - Bereich neu an die
-    # tatsächliche Verteilung angepasst, Default knapp unter dem beobachteten
-    # Minimum (bleibt bewusst permissiv, siehe Docstring-Kommentar unten zur
-    # eigentlichen Funktion dieses Parameters).
-    RAIN_THRESHOLD = {
-        "min": 0.5, "max": 20.0, "default": 3.0, "step": 0.1, "suffix": "gH2O/m²",
-        "description": "Mindest-Niederschlag, damit ein Pixel überhaupt als "
-                        "Wasserquelle für Flüsse zählt (reiner Filter, "
-                        "keine Mengenangabe für die Flussgröße selbst)."
-    }
-    # Separat von RAIN_THRESHOLD: rain_threshold entscheidet nur noch, ob ein
-    # Pixel überhaupt Regen-Quelle ist (Beitrag zur Akkumulation), STREAM_THRESHOLD
-    # entscheidet, ob AKKUMULIERTER Durchfluss als sichtbarer Fluss gilt. Vorher
-    # war Creek = 1x rain_threshold - identisch mit der Quellen-Schwelle selbst,
-    # wodurch jedes einzelne Regen-Pixel sofort als Fluss galt, ganz ohne echten
-    # Zufluss von Nachbar-Zellen ("Fluss überall wo Regen fällt").
-    #
-    # ZWEITE Neukalibrierung (wie RAIN_THRESHOLD oben, gleicher Grund): mit dem
-    # alten default=2.0 lag SELBST der Minimalwert von flow_accumulation (jetzt
-    # ~4, da schon ein einzelnes Regen-Pixel durch den neuen precip_map-Bereich
-    # allein über der alten Creek-Schwelle 1x2.0 lag) über der Creek-Schwelle -
-    # 0% der Karte hatte noch die Klasse "kein Wasser", ~94% waren River/Grand
-    # River. Neuer Default (35.0) empirisch gegen einen frischen Smoke-Test der
-    # tatsächlichen flow_accumulation-Verteilung mit dem neuen precip_map-Bereich
-    # kalibriert - ergibt wieder eine absteigende Verteilung (mehr Creeks als
-    # Rivers, ein plausibler Anteil ganz ohne Wasser) statt eines dominanten
-    # Grand-River-Bands. Diese Kalibrierung ist an eine kleine Test-Karte
-    # (64x64, 5 Flow-Iterationen) gebunden - bei sehr großen Karten/hohen LODs
-    # kann flow_accumulation deutlich höher werden (mehr akkumulierende
-    # Upstream-Zellen), ggf. weitere Nachjustierung nötig.
-    # Nicht mehr im UI exponiert (siehe RIVER_ABUNDANCE unten) - bleibt als
-    # interner Default für ManningFlowCalculator's Performance-Gate
-    # (überspringt teure Tal-Breite-Suche für Pixel unterhalb dieses absoluten
-    # Werts) bestehen, bestimmt aber NICHT mehr, wie viele Pixel als Fluss
-    # KLASSIFIZIERT werden - das war als fester gH2O/m²-Wert skalen-/seed-
-    # abhängig und ließ je nach Karte "praktisch jeden Wasserzulauf" zum Fluss
-    # werden (Nutzer-Report, siehe RIVER_ABUNDANCE).
-    STREAM_THRESHOLD = {
-        "min": 5.0, "max": 150.0, "default": 35.0, "step": 1.0, "suffix": "gH2O/m²",
-        "description": "Interner Performance-Schwellwert für die Manning-"
-                        "Fließgeschwindigkeitsberechnung (kein UI-Regler mehr)."
-    }
-    # Ersetzt STREAM_THRESHOLD als primären Fluss-Dichte-Regler (Nutzer-Report:
+    # RAIN_THRESHOLD (Mindest-Niederschlag, damit ein Pixel als Wasserquelle
+    # zaehlt) ist 2026-07-27 vollstaendig entfernt: der einzige verbliebene
+    # Leser war der Simple-Fallback von FlowNetworkBuilder.build_flow_network(),
+    # der selbst geloescht wurde (er setzte die Wassertiefe mit der
+    # Niederschlagsmenge gleich und lieferte ein Fluss-Netzwerk ohne Fluesse -
+    # ein Ergebnis, das nur so aussah, als waere die Simulation gelungen).
+    # Im Pipe-Modell speist JEDE Zelle ihren Niederschlag ins System ein; ob
+    # daraus ein sichtbarer Wasserlauf wird, entscheidet allein die
+    # Durchfluss-Klassifikation (RIVER_ABUNDANCE unten). Ein vorgeschalteter
+    # Mengenfilter hat dort keine physikalische Entsprechung mehr.
+    # STREAM_THRESHOLD (interner Performance-Schwellwert fuer Mannings
+    # frühere Kanalgeometrie-Suche) ist seit dem D8 -> Pipe-Modell-Umbau
+    # 2026-07-25 vollständig entfernt - der einzige Zweck war das
+    # Überspringen der teuren Tal-Breite-Suche für schwache Zellen
+    # (_optimize_channel_geometry), die selbst gelöscht wurde (siehe
+    # ManningFlowCalculator-Docstring in core/water_generator.py). Die
+    # Fluss-Klassifikation läuft seit langem ohnehin perzentil-basiert
+    # (siehe RIVER_ABUNDANCE unten), kein Ersatzwert nötig.
+    # Ersetzt das ehemalige STREAM_THRESHOLD als primären Fluss-Dichte-Regler (Nutzer-Report:
     # "extrem viele Flüsse... nicht jeden Wasserzulauf"). Statt eines festen
     # gH2O/m²-Werts wird der tatsächliche Schwellwert live als PERZENTIL der
     # flow_accumulation-Verteilung DIESER Karte berechnet (siehe
@@ -488,55 +720,58 @@ class WATER:
                         "stärksten Wasserläufe werden zu Flüssen, hoch = "
                         "praktisch jeder Wasserzulauf gilt als Fluss."
     }
-    MANNING_COEFFICIENT = {
-        "min": 0.01, "max": 0.1, "default": 0.03, "step": 0.005,
-        "description": "Rauheits-Koeffizient nach der Manning-Gleichung "
-                        "(Standard-Formel für Fließgewässer). Höhere Werte "
-                        "(raueres Flussbett, z.B. felsig oder bewachsen) "
-                        "bremsen die Fließgeschwindigkeit, niedrigere "
-                        "Werte (glattes Bett) lassen Wasser schneller "
-                        "fließen."
+    # MANNING_COEFFICIENT (Rauheits-Koeffizient) ist 2026-07-27 vollstaendig
+    # entfernt: seit dem D8 -> Pipe-Modell-Umbau liefert PipeFlowSimulator
+    # Fliessgeschwindigkeit und Wassertiefe als echte simulierte Groessen,
+    # ManningFlowCalculator loest die Manning-Gleichung nicht mehr, und
+    # `manning_n` wurde von keiner Methode mehr gelesen. Der Slider stand
+    # trotzdem im Water-Tab und wurde sogar prominent im Statistics-Widget
+    # angezeigt - ein Regler ohne jede Wirkung. Eine Rauheits-Modellierung im
+    # Pipe-Modell muesste an der Rohr-Querschnittsflaeche
+    # (PipeFlowSimulator.PIPE_CROSS_SECTION_AREA) ansetzen, nicht an einem
+    # Manning-n; bis dahin gibt es hier bewusst keinen Ersatz-Slider.
+    # Abwechselnd Senken fuellen und erodieren (siehe core/water_generator.py
+    # DropletErosionSystem.simulate_erosion_sedimentation). Mehr Durchgaenge
+    # bedeuten NICHT mehr Erosion - die Partikelzahl wird gleichmaessig
+    # aufgeteilt -, sondern oefter wiederhergestellte Entwaesserung zwischen
+    # den Durchgaengen. Gemessen bei 128²/40k Partikeln, groesste
+    # zusammenhaengende Komponente des Kanalnetzes: 1 Durchgang -> 107 px,
+    # 2 -> 175 px, 4 -> 209 px, 6 -> 161 px. 4 ist das Optimum.
+    EROSION_PASSES = {
+        "min": 1, "max": 8, "default": 4, "step": 1,
+        "description": "Wie oft abwechselnd Senken aufgefüllt und erodiert "
+                        "wird. Mehr Durchgänge lassen zusammenhängendere "
+                        "Bach- und Flussläufe entstehen, weil zwischen den "
+                        "Durchgängen jedes Mal ein durchgehender Abfluss "
+                        "hergestellt wird - die Gesamtmenge an Erosion bleibt "
+                        "dabei gleich."
     }
     EROSION_STRENGTH = {
         "min": 0.1, "max": 5.0, "default": 2.5, "step": 0.1,
-        "description": "Genereller Multiplikator dafür, wie stark "
-                        "fließendes Wasser das Gelände abträgt (Erosion)."
+        "description": "Genereller Multiplikator dafür, wie stark ein "
+                        "Erosions-Partikel das Gelände abträgt (siehe "
+                        "core/water_generator.py DropletErosionSystem, "
+                        "Droplet-basierte Erosion seit 2026-07-25 - ersetzt "
+                        "die frühere Stream-Power-Formel)."
     }
-    # transport_capacity = sediment_capacity_factor * flow_speed^2.5
-    # (ErosionSedimentationSystem._transport_sediment_optimized) - flow_speed
-    # liegt seit der precip_map-Neukalibrierung ([[project-3layer-wind-cfd]])
-    # empirisch deutlich höher (Median ~3, Ausreißer bis ~30 m/s statt vorher
-    # geringerer Werte). Bei altem default=0.1 überstieg die Transport-
-    # kapazität wegen der ^2.5-Potenz praktisch überall bei weitem jede
-    # realistische Sediment-Fracht - Sedimentation blieb dadurch fast
-    # ausschließlich auf die allerletzten, langsamsten Zellen eines Fließpfads
-    # konzentriert (empirisch: nur 0.1-0.7% der Pixel überhaupt ungleich 0,
-    # "Sedimentation überall 0"-Report). Bei den tatsächlichen LOD-
-    # Iterationszahlen (3-10, siehe _get_lod_iterations) reichte das nicht,
-    # damit Material entlang des Fließwegs verteilt abgesetzt wird statt nur
-    # am Ende. default auf 0.001 gesenkt (verifiziert gegen einen echten
-    # Weather→Water-Testlauf: nach _distribute_sediment_floodplain steigt der
-    # Anteil ungleich-Null-Pixel von ~1-4% auf ~34-44%, Maximalwerte bleiben
-    # klein/plausibel), min/max entsprechend nach unten verschoben.
-    # Live-Test (2026-07-15, echte Karte): selbst default=0.001 ließ Sedimentation
-    # nur bei gleichzeitig sehr hoher erosion_strength/settling_velocity sichtbar
-    # werden - erst der bereits am unteren Rand des Sliders liegende Wert 0.0001
-    # (=min) ergab ein realistisches Bild ("wenn ich den auf 0 habe sieht es
-    # realistisch aus"). default direkt auf min gesenkt statt weiter in der Mitte
-    # zu kalibrieren.
-    # Slider-Bereich auf den tatsächlich sinnvollen Wertebereich zugeschnitten
-    # (Nutzer-Report: "eigentlich nur zwischen 0 und 0.02 sinnvoll") - der
-    # vorherige max=0.1 ließ 80% des Sliderwegs im Bereich liegen, in dem die
-    # ^2.5-Potenz von flow_speed (siehe Formel oben) die Transportkapazität
-    # praktisch immer sättigt, siehe Kalibrierungs-Historie oben.
+    # Droplet-Erosion-Umbau 2026-07-25 (siehe core/water_generator.py
+    # DropletErosionSystem, ersetzt die vorherige Stream-Power+MacCormack-
+    # Sedimenttransport-Formel "transport_capacity = sediment_capacity_factor
+    # * flow_speed^2.5"): sedimentCapacity = max(-deltaHeight * speed * water
+    # * capacityFactor, minCapacity) - eine STRUKTURELL andere Formel, der
+    # alte Bereich (0.0-0.02, auf die ^2.5-Sättigung von flow_speed
+    # zugeschnitten) ist dafür bedeutungslos. Neuer Bereich/Default folgt dem
+    # Referenzprojekt-Default (Sebastian Lague, github.com/SebLague/
+    # Hydraulic-Erosion) als Startpunkt - noch NICHT gegen die laufende App
+    # kalibriert.
     SEDIMENT_CAPACITY_FACTOR = {
-        "min": 0.0, "max": 0.02, "default": 0.0001, "step": 0.0002,
-        "description": "Wie viel Sediment ein Fluss bei gegebener "
-                        "Fließgeschwindigkeit maximal transportieren kann, "
-                        "bevor er es ablagert - niedrigere Werte lassen "
-                        "Flüsse schneller/mehr Sediment absetzen (mehr "
-                        "sichtbare Sedimentation, besonders in "
-                        "langsameren Flussabschnitten)."
+        "min": 0.5, "max": 12.0, "default": 4.0, "step": 0.1,
+        "description": "Wie viel Sediment ein Erosions-Partikel bei "
+                        "gegebener Fließgeschwindigkeit/Wassermenge maximal "
+                        "transportieren kann, bevor er es ablagert - "
+                        "niedrigere Werte lassen Partikel schneller/mehr "
+                        "Sediment absetzen (mehr sichtbare Sedimentation, "
+                        "besonders an flacheren Streckenabschnitten)."
     }
     EVAPORATION_BASE_RATE = {
         "min": 0.0001, "max": 0.01, "default": 0.002, "step": 0.0001, "suffix": "m/Tag",
@@ -557,21 +792,39 @@ class WATER:
                         "lässt den feuchten Streifen entlang des Wassers "
                         "breiter werden."
     }
-    # settling_velocity ist pro Sediment-Iteration nur der Anteil des
-    # ÜBER-Kapazität-Sediments, der tatsächlich absetzt (Rest bleibt in
-    # Transport und wandert weiter) - bei 0.01 setzen sich empirisch nur ~0.8%
-    # des transportierten Sediments über das gesamte LOD-Iterationsbudget ab
-    # (core/water_generator.py ErosionSedimentationSystem._transport_sediment_optimized),
-    # der Rest verlässt die Karte praktisch unverändert. 0.08 (statt 0.01)
-    # ergibt empirisch ~7x mehr abgesetztes Sediment bei identischem
-    # Iterationsbudget, bleibt aber innerhalb des bestehenden Slider-Bereichs.
+    # Droplet-Erosion-Umbau 2026-07-25 (siehe core/water_generator.py
+    # DropletErosionSystem, ersetzt ErosionSedimentationSystem._transport_sediment_maccormack):
+    # settling_velocity ist jetzt DROPLET_DEPOSIT_SPEED - pro Lebenszeit-Schritt
+    # eines Partikels der Anteil des über-Kapazität-Sediments, der bei diesem
+    # Schritt tatsächlich abgesetzt wird (Rest bleibt im Partikel und wandert
+    # weiter mit). Bereich/Default folgen dem Referenzprojekt-Default
+    # (Sebastian Lague, github.com/SebLause/Hydraulic-Erosion: depositSpeed=0.3)
+    # als Startpunkt - noch NICHT gegen die laufende App kalibriert.
     SETTLING_VELOCITY = {
-        "min": 0.001, "max": 0.1, "default": 0.1, "step": 0.001, "suffix": "m/s",
+        "min": 0.01, "max": 1.0, "default": 0.3, "step": 0.01, "suffix": "m/s",
         "description": "Anteil des überschüssigen (nicht mehr "
                         "transportierbaren) Sediments, der pro "
-                        "Berechnungsschritt tatsächlich zu Boden sinkt - "
+                        "Partikel-Schritt tatsächlich zu Boden sinkt - "
                         "höhere Werte lassen sichtbar mehr Sedimentation "
                         "entstehen."
+    }
+    # Böschungswinkel-Erosion ("Phase 6", core/water_generator.py
+    # ThermalErosionSystem) - Nutzer-Vorgabe 2026-07-25: härteres Gestein
+    # widersteht seitlichem Abrutschen besser (steile V-Wände bleiben
+    # erhalten), weicheres Material kollabiert zu Schutthalden/U-Form. Nur
+    # die STÄRKE ist per Slider einstellbar - der Böschungswinkel-Bereich
+    # selbst (15°-60° je nach Härte, siehe ThermalErosionSystem.
+    # REPOSE_ANGLE_MIN_DEG/MAX_DEG) ist ein fester interner Wert, um die
+    # UI-Fläche klein zu halten. Startwerte, noch NICHT gegen die laufende
+    # App kalibriert.
+    THERMAL_EROSION_STRENGTH = {
+        "min": 0.0, "max": 3.0, "default": 1.0, "step": 0.1,
+        "description": "Multiplikator dafür, wie stark Material lateral "
+                        "abrutscht, sobald die Hangneigung den (härte-"
+                        "abhängigen) Böschungswinkel überschreitet - 0 "
+                        "deaktiviert den Effekt, höhere Werte lassen "
+                        "eingeschnittene Täler schneller zu breiteren, "
+                        "flacheren Formen kollabieren."
     }
 
 
@@ -656,7 +909,10 @@ class VALIDATION_RULES:
         "geology": ["heightmap", "slopemap"],
         "settlement": ["heightmap", "slopemap", "water_map"],
         "weather": ["heightmap", "shademap", "soil_moist_map"],
-        "water": ["heightmap", "slopemap", "hardness_map", "rock_map", "precip_map", "temp_map", "wind_map",
+        # Erosion braucht nur Gelaende und Haerte - bewusst KEIN Weather
+        # (siehe core/erosion_generator.py: die Erosion laeuft vor Weather).
+        "erosion": ["heightmap", "hardness_map"],
+        "water": ["heightmap", "hardness_map", "precip_map", "temp_map", "wind_map",
                   "humid_map"],
         "biome": ["heightmap", "slopemap", "temp_map", "soil_moist_map", "water_biomes_map"]
     }
@@ -675,6 +931,7 @@ def get_parameter_config(generator_type, parameter_name):
         "geology": GEOLOGY,
         "settlement": SETTLEMENT,
         "weather": WEATHER,
+        "erosion": EROSION,
         "water": WATER,
         "biome": BIOME
     }

@@ -82,7 +82,7 @@ from OpenGL.GL import shaders
 import math
 from gui.config.gui_default import CanvasSettings, ColorSchemes
 from gui.config.value_default import TERRAIN
-from gui.widgets.map_display_2d import _calculate_contour_levels, _get_layer_range
+from gui.widgets.map_display_2d import _calculate_contour_levels, _get_layer_range, compute_slope_compass_rgb
 
 # 3D-interne Overlay-Layer-Namen (siehe self.overlay_data) -> Key in
 # CanvasSettings.CANVAS_2D["layer_ranges"] (dieselbe Tabelle, die auch die
@@ -94,7 +94,17 @@ _LAYER_RANGE_KEY_MAP = {
     "humidity": "humid_map", "wind": "wind_map",
     "water_map": "water_map", "soil_moisture": "soil_moist_map",
     "erosion": "erosion_map", "sedimentation": "sedimentation_map",
+    "thermal_erosion": "thermal_erosion_map",
+    "thermal_deposition": "thermal_deposition_map",
+    # Erosion-Tab (2026-07-28) - siehe gui/tabs/erosion_tab.py.
+    "net_change": "net_change_map", "sediment_load": "sediment_load_map",
+    "water_depth": "water_depth_map", "flow_velocity": "flow_velocity_map",
+    "evaporation": "evaporation_map",
     "flow_map": "flow_map", "hardness_map": "hardness_map", "slope": "slopemap",
+    "civ_map": "civ_map",
+    "terrain_hub_delta": "terrain_hub_delta", "tilt_delta": "tilt_delta",
+    "fold_delta": "fold_delta", "fault_delta": "fault_delta",
+    "intrusion_delta": "intrusion_delta",
 }
 
 
@@ -127,6 +137,13 @@ def _colorize_layer(data, layer_name):
             [_hex_to_rgb(hex_color) for _, hex_color in ColorSchemes.BIOME_COLOR_TABLE], dtype=np.uint8)
         return lookup[indices]
 
+    if layer_name == "slope" and data.ndim == 3 and data.shape[2] == 2:
+        # Kompass-Farbrad (Hangausrichtung=Hue, Steilheit=Saettigung) -
+        # identische Formel wie map_display_2d.py's _render_slopemap(),
+        # Nutzer-Vorgabe "gleiche Farben fuer 2D und 3D".
+        rgb_float = compute_slope_compass_rgb(data[:, :, 0], data[:, :, 1])
+        return (np.clip(rgb_float, 0.0, 1.0) * 255.0).astype(np.uint8)
+
     if data.ndim == 3 and data.shape[2] == 2:
         # Vektorfeld (z.B. wind) - Magnitude als Skalar-Grundlage nutzen.
         data = np.sqrt(data[:, :, 0] ** 2 + data[:, :, 1] ** 2)
@@ -144,6 +161,15 @@ def _colorize_layer(data, layer_name):
             norm = np.clip((np.log(safe_data) - np.log(vmin)) / log_range, 0.0, 1.0)
         else:
             norm = np.clip((data - vmin) / max(vmax - vmin, 1e-9), 0.0, 1.0)
+    elif cmap_name is not None:
+        # Colormap aus CanvasSettings bekannt (z.B. "RdBu_r" für die
+        # signierten Geology-Delta-Diagnose-Layer), aber kein fester Bereich
+        # definiert (vmin=vmax=None) - symmetrische Max-Abs-Normierung um 0
+        # statt reinem Daten-Min/Max, damit "kein Effekt" (0) bei einer
+        # divergierenden Farbskala in der Mitte (weiß bei RdBu_r) liegt statt
+        # zufällig irgendwo im Bereich zu landen.
+        max_abs = max(float(np.abs(data).max()), 1e-9)
+        norm = np.clip((data.astype(np.float64) + max_abs) / (2.0 * max_abs), 0.0, 1.0)
     else:
         cmap_name = "viridis"
         data_min, data_max = float(data.min()), float(data.max())
@@ -374,16 +400,33 @@ class MapDisplay3D(QOpenGLWidget):
         # Positive Elevation = Blick von oben herab (Kartenansicht). Negativ
         # bedeutete Kamera unterhalb der Map, Blick von unten nach oben.
         self.camera_elevation = 55.0  # Feste Elevation
-        self.camera_azimuth = 0.0  # Rotation um Z-Achse
+        # 180° statt 0°: bei azimuth=0 steht die Kamera auf der Nord-Seite
+        # (+Z, siehe _generate_terrain_mesh()s pos_z-Formel: Zeile height-1 =
+        # Norden) und blickt nach Süden - der Betrachter sähe damit
+        # bevorzugt Nordhänge, UMGEKEHRT zur 2D-Darstellung (origin='lower',
+        # Norden oben im Bild - ein Nutzer, der eine Nordup-Karte von Süden
+        # her betrachtet). Nutzer-Beobachtung: 3D-Kamera bei Terrain/Geology
+        # "auf Norden eingestellt", sollte "180° gedreht" sein - Kamera daher
+        # auf die Süd-Seite (-Z), Blickrichtung Norden, exakt wie beim
+        # gedachten Betrachter der 2D-Karte.
+        self.camera_azimuth = 180.0  # Rotation um Z-Achse
         self.fov = CanvasSettings.CANVAS_3D["fov"]
 
         # Rendering-Daten
         self.heightmap = None
         self.shademap = None  # Shadow-Map (beliebige Auflösung, wird auf Heightmap-Größe hochskaliert)
-        # Globaler Schatten-Toggle (Shell-Footer "Shadows"-Checkbox, siehe
-        # BaseMapTab.set_shadow_overlay()/set_shadow_overlay() unten) - gilt
-        # tab-übergreifend, da _render_terrain_base() (das Basis-Mesh, von
-        # jedem Tab-Render-Pfad aufgerufen) den Schatten-Multiplikator anwendet.
+        # Licht-Position (Weltkoordinaten, +X=Ost/+Z=Norden/+Y=oben - siehe
+        # _generate_terrain_mesh()s pos_x/pos_z-Formeln). Default aus
+        # gui_default.py (statischer "Sonne im Süden"-Fallback), wird über
+        # set_sun_direction() durch die tatsächlich berechnete Sonnenposition
+        # (Breitengrad/Jahreszeit) ersetzt, sobald diese verfügbar ist - siehe
+        # base_tab.py._push_data_to_current_display().
+        self._light_pos = tuple(CanvasSettings.CANVAS_3D["light_position"])
+        # Schatten sind dauerhaft aktiv (die frühere "Shadows"-Checkbox - sowohl
+        # der globale Shell-Footer-Toggle als auch die lokale Terrain-3D-Tab-
+        # Checkbox - wurde auf Nutzer-Wunsch entfernt, UI-Aufräumung Teil 2).
+        # _render_terrain_base() (das Basis-Mesh, von jedem Tab-Render-Pfad
+        # aufgerufen) wendet den Schatten-Multiplikator weiterhin an.
         self.shadows_enabled = True
         # Globaler Contour-Lines-Toggle (Shell-Footer, siehe set_contour_overlay()
         # unten). Anders als 2D braucht 3D keine separate Referenz-Heightmap - das
@@ -404,6 +447,14 @@ class MapDisplay3D(QOpenGLWidget):
         # länger über einen separaten Solid-Color-Overlay-Pass kompensiert, der in 3D
         # bisher komplett fehlte.
         self.water_biomes_reference = None
+        # Live-Wert von Terrains "Map Distance"-Slider (siehe
+        # DataLODManager.get_map_distance_km(), [[project-terrain-review]] 4f) -
+        # dieses Widget hat keinen eigenen data_lod_manager-Zugriff (reines
+        # Push-Rendering-Widget), daher über set_world_size_km() aktuell
+        # gehalten, statt der vorherigen statischen Klassenkonstante
+        # WORLD_SIZE_KM direkt zu lesen. Fallback-Default bleibt die
+        # Konstante, bis der erste Push passiert ist.
+        self.world_size_km = self.WORLD_SIZE_KM
         # Separates Mini-Shader-Programm für die Wind-Vektor-Pfeile (Weather-Tab,
         # Layer "wind") - der Haupt-Terrain-Shader erwartet Normal/TexCoord/LightPos-
         # Varyings, die für simple farbige GL_LINES nicht gebraucht werden, siehe
@@ -431,7 +482,12 @@ class MapDisplay3D(QOpenGLWidget):
         # Layer-Visibility für verschiedene Tabs
         self.layer_visibility = {
             "terrain": {"base": True, "slope": False},
-            "geology": {"rock_map": True, "hardness_map": False},
+            "geology": {"rock_map": True, "hardness_map": False,
+                        "terrain_hub_delta": False, "tilt_delta": False, "fold_delta": False,
+                        "fault_delta": False, "intrusion_delta": False},
+            "erosion": {"erosion": True, "sedimentation": False, "net_change": False, "sediment_load": False,
+                       "water_depth": False, "flow_velocity": False, "thermal_erosion": False,
+                       "thermal_deposition": False},
             "weather": {"precipitation": True, "temperature": False, "wind": False, "humidity": False},
             "water": {"water_map": True, "soil_moisture": False, "erosion": False, "sedimentation": False,
                       "flow_map": False},
@@ -442,7 +498,12 @@ class MapDisplay3D(QOpenGLWidget):
         # Overlay-Daten für verschiedene Tabs
         self.overlay_data = {
             "terrain": {"slope": None},
-            "geology": {"rock_map": None, "hardness_map": None},
+            "geology": {"rock_map": None, "hardness_map": None,
+                        "terrain_hub_delta": None, "tilt_delta": None, "fold_delta": None,
+                        "fault_delta": None, "intrusion_delta": None},
+            "erosion": {"erosion": None, "sedimentation": None, "net_change": None, "sediment_load": None,
+                       "water_depth": None, "flow_velocity": None, "thermal_erosion": None,
+                       "thermal_deposition": None},
             "weather": {"precipitation": None, "temperature": None, "wind": None, "humidity": None},
             "water": {"water_map": None, "soil_moisture": None, "erosion": None, "sedimentation": None,
                       "flow_map": None},
@@ -478,6 +539,13 @@ class MapDisplay3D(QOpenGLWidget):
 
             gl.glEnable(gl.GL_CULL_FACE)
             gl.glCullFace(gl.GL_BACK)
+            # Kompensiert die Vorzeichen-Spiegelung der X-Zeile in
+            # _update_view_matrix() (Ost-West-Spiegelungs-Fix, siehe dortiger
+            # Kommentar) - eine Spiegelung im View-Space kehrt zwangsläufig
+            # die Dreiecks-Wickelrichtung um, ohne dies würde Backface-Culling
+            # plötzlich das gesamte sichtbare Terrain wegculled statt der
+            # tatsächlichen Rückseiten.
+            gl.glFrontFace(gl.GL_CW)
             self._check_gl_error("after enabling face culling")
 
             # Background-Color aus gui_default.py
@@ -535,6 +603,8 @@ class MapDisplay3D(QOpenGLWidget):
             self._render_terrain_tab()
         elif self.current_tab == "geology":
             self._render_geology_tab()
+        elif self.current_tab == "erosion":
+            self._render_erosion_tab()
         elif self.current_tab == "weather":
             self._render_weather_tab()
         elif self.current_tab == "water":
@@ -630,21 +700,31 @@ class MapDisplay3D(QOpenGLWidget):
         self.shademap = shademap
         self.update()
 
-    def set_shadow_overlay(self, checked: bool, angle: int = None):
+    def set_sun_direction(self, elevation_deg: float, azimuth_deg: float, distance: float = 15.0):
         """
-        Funktionsweise: Globaler Schatten-Toggle (Shell-Footer "Shadows"-
-        Checkbox, siehe BaseMapTab.set_shadow_overlay()) - fehlte hier bisher
-        komplett, weshalb der hasattr()-Guard im Aufrufer lautlos fehlschlug
-        und der Toggle im 3D-Modus wirkungslos blieb.
-        Aufgabe: Setzt self.shadows_enabled, das _render_terrain_base() (über
-        _bind_shadow_texture()) bei jedem Frame abfragt.
-        Parameter: checked (bool) - Schatten an/aus. angle (optional, derzeit
-        ungenutzt) - der frühere manuelle Sonnenwinkel-Slider im Terrain-Tab
-        wurde entfernt (siehe Kanban-Punkt "Shadow Angle entfernen"); die
-        Shademap selbst wird bereits mit einem festen Standard-Sonnenwinkel
-        geliefert (siehe BaseMapTab._push_data_to_current_display()).
+        Funktionsweise: Setzt die Licht-Position aus einem echten Sonnenstand
+        (Elevation/Azimut, siehe core/terrain_generator.py.calculate_solar_position())
+        statt des statischen gui_default.py-Defaults - macht die 3D-Beleuchtung
+        breitengrad-/jahreszeitabhängig statt einer festen "Sonne im Süden,
+        45°"-Annahme.
+        Aufgabe: Weltraum-Konvention (siehe _generate_terrain_mesh()): +X=Ost,
+        +Z=Norden, +Y=oben - dieselbe Azimut-Formel wie
+        ShadowCalculator._raycast_shadow_cpu() (0°=Norden, 90°=Osten, 180°=
+        Süden, 270°=Westen), nur auf die 3D-Weltachsen (X,Z statt der
+        2D-Array-Achsen X,Y) übertragen. distance ist rein die Licht-Entfernung
+        vom Ursprung (keine physikalische Einheit, nur groß genug für ein
+        praktisch richtungsartiges Licht, ähnliche Größenordnung wie der
+        bisherige statische Default).
+        Parameter: elevation_deg - Sonnenhöhe über dem Horizont (0-90°),
+        azimuth_deg - Kompass-Azimut, distance - Licht-Entfernung
         """
-        self.shadows_enabled = checked
+        elev_rad = np.radians(elevation_deg)
+        azim_rad = np.radians(azimuth_deg)
+        self._light_pos = (
+            distance * np.cos(elev_rad) * np.sin(azim_rad),  # Ost-Komponente
+            distance * np.sin(elev_rad),                      # oben
+            distance * np.cos(elev_rad) * np.cos(azim_rad),  # Nord-Komponente
+        )
         self.update()
 
     def set_contour_overlay(self, checked: bool):
@@ -672,6 +752,19 @@ class MapDisplay3D(QOpenGLWidget):
         """
         self.water_biomes_reference = water_biomes_map
         self.update()
+
+    def set_world_size_km(self, world_size_km: float):
+        """
+        Funktionsweise: Aktualisiert die reale Kartenausdehnung in km, die
+        _calculate_terrain_scaling() für die Höhen-Skalierung des Meshs nutzt -
+        live von Terrains "Map Distance"-Slider gepusht (siehe
+        DataLODManager.get_map_distance_km(), [[project-terrain-review]] 4f),
+        da dieses Widget selbst keinen data_lod_manager hat.
+        """
+        if world_size_km and world_size_km != self.world_size_km:
+            self.world_size_km = float(world_size_km)
+            self._calculate_terrain_scaling()
+            self.update()
 
     def update_overlay_data(self, tab_type, layer_name, data):
         """
@@ -747,9 +840,8 @@ class MapDisplay3D(QOpenGLWidget):
         # dadurch wirkten baugleiche Berge bei unterschiedlicher map_size oder
         # unterschiedlichem Seed nicht im selben Verhältnis zueinander, und
         # jede Heightmap wurde automatisch auf denselben visuellen Höheneindruck
-        # gestreckt. Jetzt: 1 Render-Einheit entspricht immer WORLD_SIZE_KM/10 km.
-        world_size_km = self.WORLD_SIZE_KM
-        self.terrain_height_scale = 10.0 / (world_size_km * 1000.0)  # render units per meter
+        # gestreckt. Jetzt: 1 Render-Einheit entspricht immer world_size_km/10 km.
+        self.terrain_height_scale = 10.0 / (self.world_size_km * 1000.0)  # render units per meter
 
         # Vertikales Zentrum des Meshs in Welt-Y (Vertices bleiben unverändert
         # auf ihrer echten Höhe, siehe _generate_terrain_mesh) - die Kamera
@@ -899,11 +991,13 @@ class MapDisplay3D(QOpenGLWidget):
 
         gl.glUseProgram(self.shader_program)
 
-        # Light-Position aus gui_default.py
-        light_pos = CanvasSettings.CANVAS_3D["light_position"]
+        # Initialer Licht-Positions-Wert (siehe self._light_pos) - wird JEDEN
+        # Frame in _render_terrain_base() erneut gesetzt, sobald
+        # set_sun_direction() die echte Sonnenposition geliefert hat (gleiches
+        # Re-Set-pro-Frame-Muster wie useContours/useShadows dort).
         light_pos_location = gl.glGetUniformLocation(self.shader_program, "lightPos")
         if light_pos_location >= 0:
-            gl.glUniform3f(light_pos_location, *light_pos)
+            gl.glUniform3f(light_pos_location, *self._light_pos)
 
     def _generate_terrain_mesh(self):
         """
@@ -1083,6 +1177,29 @@ class MapDisplay3D(QOpenGLWidget):
 
         self.view_matrix = _create_lookat_matrix(eye, target, up)
 
+        # Nutzer-Beobachtung: 3D-Terrain ist Ost-West gespiegelt gegenüber der
+        # 2D-Ansicht ("links ist rechts und umgekehrt"). Ursache: die Kamera
+        # steht bei azimuth=180° (siehe __init__-Kommentar, Fix für die
+        # vorherige Nord-Süd-Verdrehung) auf der Süd-Seite und blickt nach
+        # Norden - das ist unvermeidlich mit einer Ost-West-Spiegelung
+        # verbunden, da ein reiner Kamera-Azimut-Wechsel bei fester Up-Achse
+        # IMMER Tiefe (Nord/Süd) UND Links/Rechts gemeinsam vertauscht (wie
+        # beim Herumgehen um einen Tisch: was vorher links war, ist von der
+        # Gegenseite aus rechts) - beweisbar über right=cross(forward,up) in
+        # _create_lookat_matrix(): bei azimuth=180 zeigt "right" auf -X
+        # (Westen) statt +X (Osten). Durch Negieren NUR der X-Zeile (right-
+        # Vektor + zugehörige Translation) wird ausschließlich dieser
+        # Rechts/Links-Seiteneffekt aufgehoben, ohne die bereits korrekte
+        # Nord-Süd-Blickrichtung erneut zu verändern - Osten landet dadurch
+        # wieder auf der Bildschirm-rechten Seite, exakt wie in der
+        # 2D-Ansicht. Ein reiner Vorzeichen-Wechsel im View-Space wie dieser
+        # kehrt zwangsläufig die Dreiecks-Wickelrichtung um (Spiegelungen
+        # kehren immer die Chiralität um) - deshalb wird in initializeGL()
+        # (siehe glCullFace(GL_BACK) dort) zusätzlich glFrontFace(GL_CW)
+        # gesetzt, um Backface-Culling weiterhin korrekt arbeiten zu lassen,
+        # statt dass das gesamte Terrain plötzlich weggeculled würde.
+        self.view_matrix[0, :] = -self.view_matrix[0, :]
+
     def _update_model_matrix(self):
         """
         Funktionsweise: Aktualisiert Model-Matrix für Terrain-Positionierung
@@ -1155,6 +1272,15 @@ class MapDisplay3D(QOpenGLWidget):
         if self.layer_visibility["geology"]["hardness_map"]:
             self._render_overlay("geology", "hardness_map")
 
+        # Diagnose-Modi (Terrain Hub/Tilt/Fold/Fault/Intrusion Only) - siehe
+        # gui/tabs/geology_tab.py _DELTA_DISPLAY_MODES. Signierte Verschiebungs-
+        # werte (m), _colorize_layer() bekommt dieselben Layer-Namen wie die
+        # 2D-Anzeige für ein konsistentes Farbschema.
+        for delta_layer in ("terrain_hub_delta", "tilt_delta", "fold_delta",
+                             "fault_delta", "intrusion_delta"):
+            if self.layer_visibility["geology"][delta_layer]:
+                self._render_overlay("geology", delta_layer)
+
     def _render_weather_tab(self):
         """
         Funktionsweise: Rendert Weather-Tab mit Klima-Daten
@@ -1180,6 +1306,20 @@ class MapDisplay3D(QOpenGLWidget):
         for layer in water_layers:
             if self.layer_visibility["water"][layer]:
                 self._render_overlay("water", layer)
+
+    def _render_erosion_tab(self):
+        """
+        Funktionsweise: Rendert den Erosion-Tab - Gelaende plus genau eines der
+        acht Erosions-Overlays.
+        Aufgabe: Die Radio-Buttons ueber dem Canvas sind die einzige Quelle der
+        Wahrheit fuer die Sichtbarkeit (siehe BaseMapTab._push_data_to_current_display),
+        deshalb wird hier schlicht ueber alle bekannten Layer iteriert.
+        """
+        self._render_terrain_base()
+        for layer in ("erosion", "sedimentation", "net_change", "sediment_load",
+                      "water_depth", "flow_velocity", "thermal_erosion", "thermal_deposition"):
+            if self.layer_visibility["erosion"].get(layer):
+                self._render_overlay("erosion", layer)
 
     def _render_biome_tab(self):
         """
@@ -1228,7 +1368,12 @@ class MapDisplay3D(QOpenGLWidget):
             # Shader-Parameter setzen
             render_mode_location = gl.glGetUniformLocation(self.shader_program, "renderMode")
             if render_mode_location >= 0:
-                mode_value = {"terrain": 0, "geology": 1, "weather": 2, "water": 3, "biome": 4, "settlement": 5}
+                # Erosion teilt sich den Render-Modus mit Water: beide zeichnen
+                # das Gelaende plus genau ein Skalarfeld-Overlay. Die Zahlen
+                # sind Shader-Uniforms - ein neuer Wert braeuchte auch einen
+                # neuen Zweig im Fragment-Shader.
+                mode_value = {"terrain": 0, "geology": 1, "weather": 2, "water": 3,
+                              "erosion": 3, "biome": 4, "settlement": 5}
                 gl.glUniform1i(render_mode_location, mode_value.get(self.current_tab, 0))
 
             height_scale_location = gl.glGetUniformLocation(self.shader_program, "heightScale")
@@ -1258,6 +1403,12 @@ class MapDisplay3D(QOpenGLWidget):
             contour_interval_location = gl.glGetUniformLocation(self.shader_program, "contourInterval")
             if contour_interval_location >= 0:
                 gl.glUniform1f(contour_interval_location, self.contour_interval)
+
+            # lightPos jeden Frame neu setzen (wie useContours/useShadows) -
+            # siehe set_sun_direction().
+            light_pos_location = gl.glGetUniformLocation(self.shader_program, "lightPos")
+            if light_pos_location >= 0:
+                gl.glUniform3f(light_pos_location, *self._light_pos)
 
             # useShadows jeden Frame neu setzen (wie useOverlay oben) - Shader-Uniforms
             # behalten sonst ihren letzten Wert über Draw-Calls/Frames hinweg. Vorher
@@ -1401,7 +1552,12 @@ class MapDisplay3D(QOpenGLWidget):
 
             render_mode_location = gl.glGetUniformLocation(self.shader_program, "renderMode")
             if render_mode_location >= 0:
-                mode_value = {"terrain": 0, "geology": 1, "weather": 2, "water": 3, "biome": 4, "settlement": 5}
+                # Erosion teilt sich den Render-Modus mit Water: beide zeichnen
+                # das Gelaende plus genau ein Skalarfeld-Overlay. Die Zahlen
+                # sind Shader-Uniforms - ein neuer Wert braeuchte auch einen
+                # neuen Zweig im Fragment-Shader.
+                mode_value = {"terrain": 0, "geology": 1, "weather": 2, "water": 3,
+                              "erosion": 3, "biome": 4, "settlement": 5}
                 gl.glUniform1i(render_mode_location, mode_value.get(tab_type, 0))
 
             gl.glDepthFunc(gl.GL_LEQUAL)
@@ -1473,15 +1629,30 @@ class MapDisplay3D(QOpenGLWidget):
         uv0 = self._sample_field_bilinear(wind_data, x, y, width, height)
         path_mag[0] = np.hypot(uv0[:, 0], uv0[:, 1])
 
+        # Nutzer-Beobachtung (Screenshot 2026-07-23): Stromlinien "knicken" am
+        # Kartenrand ab und laufen daran entlang statt sauber abzuschneiden -
+        # verursacht durch np.clip() hier, das eine aus dem Gitter
+        # herauslaufende Position auf den Rand zurückfaltete (Linie "rutscht"
+        # sichtbar am Rand entlang) statt die Linie dort enden zu lassen.
+        # map_display_2d.py's matplotlib-streamplot hat dasselbe Problem
+        # bereits über NaN-Zellen sauber gelöst (siehe _render_wind_map()) -
+        # hier (reine Vertex-Positionen, kein NaN-Support in GL_LINES) über
+        # ein "alive"-Flag pro Linie: sobald eine Linie das Gitter verlassen
+        # würde, friert ihre Position für alle Folgeschritte ein (Segmente
+        # danach haben Länge 0, unsichtbar), statt am Rand weiterzurutschen.
+        alive = np.ones(n_lines, dtype=bool)
         cur_x, cur_y = x.copy(), y.copy()
         for step in range(1, n_steps + 1):
             uv = self._sample_field_bilinear(wind_data, cur_x, cur_y, width, height)
             mag = np.hypot(uv[:, 0], uv[:, 1])
             safe_mag = np.where(mag > 1e-6, mag, 1.0)
-            cur_x = np.clip(cur_x + (uv[:, 0] / safe_mag) * step_len, 0, width - 1)
-            cur_y = np.clip(cur_y + (uv[:, 1] / safe_mag) * step_len, 0, height - 1)
+            new_x = cur_x + (uv[:, 0] / safe_mag) * step_len
+            new_y = cur_y + (uv[:, 1] / safe_mag) * step_len
+            alive &= (new_x >= 0) & (new_x <= width - 1) & (new_y >= 0) & (new_y <= height - 1)
+            cur_x = np.where(alive, new_x, cur_x)
+            cur_y = np.where(alive, new_y, cur_y)
             path_x[step], path_y[step] = cur_x, cur_y
-            path_mag[step] = mag
+            path_mag[step] = np.where(alive, mag, path_mag[step - 1])
 
         terrain_h = self._sample_field_bilinear(
             self.heightmap, path_x.ravel(), path_y.ravel(), width, height
@@ -1538,14 +1709,22 @@ class MapDisplay3D(QOpenGLWidget):
         if wind_data.ndim != 3 or wind_data.shape[2] != 2 or wind_data.shape[:2] != (height, width):
             return  # Shape-Mismatch (z.B. während eines LOD-Übergangs) - nächster Frame passt wieder
 
-        # Globale Windstärke-Skala (ganzes Feld, nicht nur das Pfeil-Raster) -
-        # gemeinsame Farbnormierung für Pfeile UND Stromlinien, stabil
-        # zwischen Frames statt sich mit dem groben Pfeil-Sample-Raster
-        # mitzuverschieben.
+        # Windstärke-Skala: FESTER Referenzwert aus derselben zentralen
+        # Quelle wie map_display_2d.py's _render_wind_map()-Colorbar
+        # (CanvasSettings.CANVAS_2D["layer_ranges"]["wind_map"], 0-40 m/s),
+        # NICHT mehr das Max des aktuellen Frames/dieser einen Karte.
+        # Nutzer-Korrektur: mit einer pro-Karte-relativen Skala bedeutete
+        # "volle Farbe/Länge" auf jeder Karte etwas anderes (die jeweils
+        # windigste Stelle DIESER Karte), wodurch Pfeile zwischen
+        # verschiedenen Karten/Frames nicht vergleichbar waren - exakt
+        # dieselbe Bewandnis-Lücke wie beim 2D-Colorbar-Fix. Derselbe
+        # Lookup wie 2D garantiert, dass beide Ansichten immer dieselbe
+        # Skala zeigen, ohne eine zweite Konstante parallel zu pflegen.
         full_magnitude = np.hypot(wind_data[:, :, 0], wind_data[:, :, 1])
-        global_max_mag = float(full_magnitude.max())
-        if global_max_mag < 1e-6:
+        if float(full_magnitude.max()) < 1e-6:
             return
+        _, _, wind_vmax, _ = _get_layer_range("wind_map")
+        global_max_mag = float(wind_vmax) if wind_vmax else float(full_magnitude.max())
 
         grid = 20  # dichter als zuvor (14) - Nutzer-Wunsch "kleinteiliger"
         y_idx = np.linspace(0, height - 1, min(grid, height)).astype(int)
@@ -1758,7 +1937,7 @@ class MapDisplay3D(QOpenGLWidget):
         if self.last_mouse_pos is None:
             return
 
-        dx = event.x() - self.last_mouse_pos.x()
+        dx = event.pos().x() - self.last_mouse_pos.x()
 
         if event.buttons() & Qt.MouseButton.LeftButton:
             # Nur Azimuth-Rotation (um Z-Achse)
@@ -1798,7 +1977,7 @@ class MapDisplay3D(QOpenGLWidget):
         """
         self.camera_distance = CanvasSettings.CANVAS_3D["camera_distance"]
         self.camera_elevation = 55.0
-        self.camera_azimuth = 0.0
+        self.camera_azimuth = 180.0  # siehe __init__-Kommentar
 
         self.camera_changed.emit(self.camera_elevation, self.camera_azimuth, self.camera_distance)
         self.update()
@@ -1868,19 +2047,9 @@ class MapDisplay3DWidget(QWidget):
         self.control_widgets["terrain_base"] = terrain_checkbox
         self.control_layout.insertWidget(0, terrain_checkbox)
 
-        # Shadows (Beleuchtungs-Sichtbarkeit, keine Layer-Auswahl) - ruft
-        # set_shadow_overlay() auf (denselben globalen Toggle wie die Shell-
-        # Footer-Checkbox, siehe MapDisplay3D.set_shadow_overlay()), nicht
-        # mehr set_layer_visibility() - Schatten gelten jetzt tab-übergreifend
-        # über die gemeinsame _render_terrain_base(), nicht mehr nur lokal
-        # für den Terrain-Tab.
-        shadows_checkbox = QCheckBox("Shadows")
-        shadows_checkbox.setChecked(True)
-        shadows_checkbox.toggled.connect(
-            lambda checked: self.display_3d.set_shadow_overlay(checked)
-        )
-        self.control_widgets["terrain_shadows"] = shadows_checkbox
-        self.control_layout.insertWidget(1, shadows_checkbox)
+        # Die frühere "Shadows"-Checkbox hier wurde auf Nutzer-Wunsch entfernt
+        # (UI-Aufräumung Teil 2) - Schatten sind jetzt dauerhaft aktiv
+        # (MapDisplay3D.shadows_enabled bleibt bei seinem Default True).
 
     def _setup_geology_controls(self):
         """
@@ -1985,6 +2154,10 @@ class MapDisplay3DWidget(QWidget):
             self._setup_terrain_controls()
         elif tab_type == "geology":
             self._setup_geology_controls()
+        elif tab_type == "erosion":
+            # Erosion nutzt dieselben Bedienelemente wie Water (Gelaende +
+            # genau ein Skalarfeld-Overlay).
+            self._setup_water_controls()
         elif tab_type == "weather":
             self._setup_weather_controls()
         elif tab_type == "water":
@@ -2010,6 +2183,14 @@ class MapDisplay3DWidget(QWidget):
         """
         self.display_3d.update_shademap(shademap)
 
+    def set_sun_direction(self, elevation_deg, azimuth_deg, distance=15.0):
+        """
+        Funktionsweise: Delegiert Sonnenstand-Update an 3D-Display
+        Aufgabe: Interface-Methode für externe Licht-Richtungs-Updates, siehe
+        MapDisplay3D.set_sun_direction()
+        """
+        self.display_3d.set_sun_direction(elevation_deg, azimuth_deg, distance)
+
     def update_overlay_data(self, tab_type, layer_name, data):
         """
         Funktionsweise: Delegiert Overlay-Update an 3D-Display
@@ -2028,14 +2209,6 @@ class MapDisplay3DWidget(QWidget):
         """
         self.display_3d.set_layer_visibility(tab_type, layer_name, visible)
 
-    def set_shadow_overlay(self, checked: bool, angle: int = None):
-        """
-        Funktionsweise: Delegiert Schatten-Toggle an 3D-Display.
-        Aufgabe: Interface-Methode für BaseMapTab.set_shadow_overlay() - gleicher
-        fehlender Delegations-Grund wie set_layer_visibility() oben.
-        """
-        self.display_3d.set_shadow_overlay(checked, angle)
-
     def set_contour_overlay(self, checked: bool):
         """
         Funktionsweise: Delegiert Contour-Lines-Toggle an 3D-Display.
@@ -2051,3 +2224,12 @@ class MapDisplay3DWidget(QWidget):
         Delegations-Grund wie set_layer_visibility() oben.
         """
         self.display_3d.set_water_biomes_reference(water_biomes_map)
+
+    def set_world_size_km(self, world_size_km: float):
+        """
+        Funktionsweise: Delegiert die reale Kartenausdehnung (km) an das
+        3D-Display (siehe [[project-terrain-review]] 4f).
+        Aufgabe: Interface-Methode für base_tab.py, analog zu
+        set_water_biomes_reference() oben.
+        """
+        self.display_3d.set_world_size_km(world_size_km)

@@ -1,0 +1,76 @@
+#version 430
+// Pass 1 der Böschungswinkel-Erosion ("Phase 6", siehe core/water_generator.py
+// ThermalErosionSystem für die volle Herleitung/identische Formeln). Braucht
+// Nachbarn AKTUELLE Höhe - Pass 2 (thermalErosionApply.comp) braucht dagegen
+// den GERADE hier berechneten Fluss, kann daher nicht mit diesem Pass
+// fusioniert werden.
+//
+// Kartenrand = GESCHLOSSENE Grenze (anders als beim Wasser-Pipe-Modell):
+// Material soll nicht von der Karte "abrutschen", Geisterzelle hat dieselbe
+// Höhe/denselben Böschungswinkel wie die Randzelle selbst -> kein Gefälle,
+// kein Transfer über den Rand (siehe heightAt()/reposeTanAt() unten).
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D heightMap;
+layout(r32f, binding = 1) uniform readonly image2D hardnessMap;
+layout(rgba32f, binding = 2) uniform writeonly image2D fluxOut;
+
+uniform int u_size;
+uniform float u_meters_per_pixel;
+uniform float u_transfer_rate;
+uniform float u_thermal_strength;
+uniform float u_repose_angle_min_deg;
+uniform float u_repose_angle_max_deg;
+uniform float u_hardness_reference_min;
+uniform float u_hardness_reference_max;
+uniform float u_cap_per_step;
+
+float heightAt(ivec2 coord) {
+    ivec2 c = clamp(coord, ivec2(0), ivec2(u_size - 1));
+    return imageLoad(heightMap, c).r;
+}
+
+float reposeTanAt(ivec2 coord) {
+    ivec2 c = clamp(coord, ivec2(0), ivec2(u_size - 1));
+    float hardness = imageLoad(hardnessMap, c).r;
+    float t = clamp((hardness - u_hardness_reference_min) /
+                     (u_hardness_reference_max - u_hardness_reference_min), 0.0, 1.0);
+    float angleDeg = u_repose_angle_min_deg + t * (u_repose_angle_max_deg - u_repose_angle_min_deg);
+    return tan(radians(angleDeg));
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float h = heightAt(coord);
+    float tanHere = reposeTanAt(coord);
+
+    float hL = heightAt(coord + ivec2(-1, 0));
+    float tanL = 0.5 * (tanHere + reposeTanAt(coord + ivec2(-1, 0)));
+    float hR = heightAt(coord + ivec2(1, 0));
+    float tanR = 0.5 * (tanHere + reposeTanAt(coord + ivec2(1, 0)));
+    float hT = heightAt(coord + ivec2(0, -1));
+    float tanT = 0.5 * (tanHere + reposeTanAt(coord + ivec2(0, -1)));
+    float hB = heightAt(coord + ivec2(0, 1));
+    float tanB = 0.5 * (tanHere + reposeTanAt(coord + ivec2(0, 1)));
+
+    float diffL = max(0.0, (h - hL) - u_meters_per_pixel * tanL);
+    float diffR = max(0.0, (h - hR) - u_meters_per_pixel * tanR);
+    float diffT = max(0.0, (h - hT) - u_meters_per_pixel * tanT);
+    float diffB = max(0.0, (h - hB) - u_meters_per_pixel * tanB);
+
+    float scale = u_transfer_rate * u_thermal_strength;
+    float rawL = diffL * scale;
+    float rawR = diffR * scale;
+    float rawT = diffT * scale;
+    float rawB = diffB * scale;
+
+    // Relief-relativer Deckel PRO ITERATION (u_cap_per_step, host-seitig aus
+    // heightmap.max()-min() vorberechnet) - verhindert, dass eine Zelle mit
+    // mehreren gleichzeitig "hungrigen" Nachbarn mehr abgibt, als sie hat.
+    float totalRaw = rawL + rawR + rawT + rawB;
+    float k = min(1.0, u_cap_per_step / max(totalRaw, 1e-12));
+
+    imageStore(fluxOut, coord, vec4(rawL * k, rawR * k, rawT * k, rawB * k));
+}

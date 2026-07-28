@@ -106,36 +106,150 @@ class CanvasSettings:
         # (ColorSchemes.BIOME_COLOR_TABLE etc.), keine kontinuierliche Skala.
         "layer_ranges": {
             "temp_map": ("RdBu_r", -30.0, 40.0),        # Blau=kalt, Rot=warm
-            # vmax war 5.0 (kalibriert gegen die alte Einzelschuss-Magnus-Formel,
-            # precip_map lag damals bei Default-Parametern nur bei ~0-2.8). Der
-            # seit [[project-3layer-wind-cfd]] gekoppelte 3-Schicht-Atmosphäre-Loop
-            # akkumuliert Kondensation über den GANZEN Zeitschritt-Loop statt aus
-            # einem Einzelschuss-Snapshot - precip_map liegt jetzt bei
-            # Default-Parametern empirisch bei min~4-7, max~28-34, mean~13-16.
-            # 100% der Pixel lagen über der alten 5.0-Grenze und clippten auf die
-            # gleiche Voll-Sättigungsfarbe ("Niederschlag konstant bei 5mm"-Report,
-            # war eine Farbskalen-Kalibrierung, kein Physik-Bug). vmax mit Puffer
-            # nach oben neu gesetzt - bei künftigen Änderungen an der Atmosphäre-
-            # Engine erneut gegen einen frischen Diagnose-Lauf prüfen.
-            "precip_map": ("Greens", 0.0, 35.0),
+            # Nutzer-Abstimmung 2026-07-24 (Revision der Zwischen-Kalibrierung
+            # vom 2026-07-23): precip_map ist keine Jahresmenge, sondern eine
+            # Perioden-Akkumulation mit ~50 als typischem Maximalwert (siehe
+            # PRECIP_ANNUAL_SCALE_FACTOR=0.5 in core/weather_generator.py) -
+            # vmax mit etwas Puffer über diesem typischen Maximum, damit
+            # seltene, legitime Ausreißer noch sichtbar differenzierbar
+            # bleiben statt sofort auf die volle Sättigungsfarbe zu clippen.
+            "precip_map": ("Greens", 0.0, 70.0),
             "humid_map": ("Blues", 0.0, 100.0),
-            "wind_map": ("Blues", 0.0, 30.0),           # Windstärke m/s (Heatmap-Teil von _render_wind_map)
+            "wind_map": ("plasma", 0.0, 40.0),           # Windstärke m/s - EINE Farbskala für Heatmap-Hintergrund, Stromlinien UND Pfeile in _render_wind_map (siehe dortiger Docstring: vorher hatte die Colorbar keinen Bezug zu den tatsächlichen Pfeil-/Stromlinien-Farben)
             "water_map": ("Blues", 0.0, 10.0),
             "flow_map": ("Blues", 0.0, 50.0),
             # Logarithmisch statt linear: Werteverteilung ist stark
             # rechtsschief (die meisten Pixel exakt 0, wenige Ausreißer
             # deutlich höher) - eine lineare Skala ließ den typischen/
-            # repräsentativen Wertebereich (~0.1, empirisch am echten
-            # Datensatz bestimmt) kaum vom Hintergrund unterscheiden.
-            # 0.02-0.5 log-normalisiert legt 0.1 exakt auf das geometrische
-            # Mittel (Skalenmitte). Erosion/Sedimentation nutzen denselben
-            # Wertebereich (gleicher Mechanismus, siehe core/water_generator.py
-            # ErosionSedimentationSystem).
-            "erosion_map": ("Reds", 0.02, 0.5, "log"),
-            "sedimentation_map": ("Oranges", 0.02, 0.5, "log"),
+            # repräsentativen Wertebereich kaum vom Hintergrund unterscheiden.
+            # Nutzer-Abstimmung 2026-07-25 (Revision der Kalibrierung vom
+            # 2026-07-24 - der alte 0.02-0.5-Bereich stammte noch aus der Zeit
+            # des festen 0.1m-Erosions-Deckels; seit dem relief-relativen
+            # Deckel (EROSION_CAP_RELIEF_FRACTION, core/water_generator.py
+            # ErosionSedimentationSystem) reichen akkumulierte Werte je nach
+            # Kartenrelief bis in den zweistelligen Meterbereich - der alte
+            # Bereich sättigte dadurch fast die gesamte Karte auf die oberste
+            # Farbe). Neuer Bereich 0.01-40m deckt vom gerade noch sichtbaren
+            # cm-Bereich bis zu einem substantiellen Gebirgs-Szenario ab
+            # (empirisch, siehe scratch_erosion_accumulated_depth_check.py -
+            # akkumulierter Erosions-Max von ~40m bei 850m Kartenrelief).
+            # Erosion/Sedimentation nutzen bewusst DENSELBEN Wertebereich
+            # (Nutzer-Vorgabe: direkt vergleichbar, gleiche Skala) - wie bei
+            # allen statischen Bereichen in dieser Tabelle KEINE Auto-
+            # Skalierung pro Karte, daher bei sehr flachen (kleines Relief)
+            # oder sehr extremen (Relief >> 2000m) Karten weiterhin nicht
+            # perfekt ausgenutzt - akzeptierter Kompromiss, konsistent mit
+            # z.B. temp_map's ebenfalls festem Bereich.
+            # NEU KALIBRIERT 2026-07-27. Der Bereich 0.01-40 m darüber stammte
+            # aus der Zeit, als Erosion auf JEDER LOD-Stufe einmal lief. Seit
+            # dem Umbau auf "nur am finalen LOD, dafür mit 4 Durchgängen und
+            # ~5 Partikeln pro Pixel" sind beide Karten kumulierter DURCHSATZ
+            # über sehr viel mehr Partikelwege: eine Zelle gibt dieselbe Fracht
+            # über den Lauf hinweg mehrfach ab und nimmt sie wieder auf (siehe
+            # DropletErosionSystem.simulate_erosion_sedimentation, Abschnitt
+            # "BEIDE KARTEN SIND KUMULIERTER DURCHSATZ"). Gemessen, jeweils
+            # 5 Partikel/Pixel und 4 Durchgänge:
+            #
+            #     Kartengröße   Median (>0)   99.9%      Maximum
+            #     128 px            ~100 m    ~7 100 m   ~10 000 m
+            #     512 px              75 m    17 383 m    41 698 m
+            #
+            # Mit vmax = 40 m sättigte praktisch die gesamte Karte auf die
+            # oberste Farbe, und der Kanalausgang stach als einzelner
+            # gesättigter Fleck heraus - genau das vom Nutzer auf der
+            # 512er-Karte gemeldete Bild.
+            #
+            # vmax ist bewusst am 99.9. Perzentil der größten hier gemessenen
+            # Karte ausgerichtet, nicht am Maximum: darüber liegen nur die
+            # wenigen Zellen des Kanalausgangs, und die sollen sättigen statt
+            # den Rest der Verteilung zusammenzudrücken. Der Kompromiss der
+            # ganzen Tabelle gilt auch hier - der Durchsatz wächst mit der
+            # Kartengröße (mehr Partikel, längere Wege), eine statische Skala
+            # kann deshalb nicht jede Größe gleich gut ausnutzen. Die
+            # Log-Skala federt genau das ab.
+            # NEU KALIBRIERT 2026-07-28 fuer das Feldverfahren
+            # (core/erosion_generator.py), Werte GEMESSEN statt geschaetzt.
+            #
+            # Erster Versuch war 0-400 m LINEAR. Das war zweifach falsch:
+            # der Bereich zu weit und die Skala zur Verteilung unpassend.
+            # Gemessen (Relief 4000 m, Regen 2.0):
+            #
+            #   Sim px  Schritte   max Erosion   95. Perzentil
+            #      128       300          90 m           24 m
+            #      128      2000         245 m           75 m
+            #      128      7200         275 m          127 m
+            #      256      2000         247 m           88 m
+            #
+            # Der typische Wert liegt also weit unter dem Maximum - die
+            # Verteilung ist stark rechtsschief, weil die meisten Zellen kaum
+            # etwas abbekommen und die Kanaele alles. Auf einer linearen
+            # 0-400-Skala landete damit praktisch die ganze Karte in der
+            # hellsten Farbstufe: der Nutzer sah "leere Karten", obwohl die
+            # Daten da waren. Logarithmisch mit 0.5 m als Untergrenze (darunter
+            # ist es Rauschen) und 300 m als Obergrenze bildet den gemessenen
+            # Bereich ueber alle Laufzeiten ab.
+            "erosion_map": ("Reds", 0.5, 300.0, "log"),
+            "sedimentation_map": ("Oranges", 0.5, 300.0, "log"),
+            # Signierte Netto-Hoehenaenderung - die Karte, an der eine
+            # unplausible Spitze sofort auffaellt. Divergierende Skala um 0,
+            # deshalb linear (eine Log-Skala kann keine Vorzeichen). Der
+            # Bereich ist am 95. Perzentil ausgerichtet und nicht am Maximum:
+            # die wenigen Extremzellen sollen saettigen, statt den Rest der
+            # Karte in ein einheitliches Grau zu druecken.
+            "net_change_map": ("RdBu_r", -150.0, 150.0, "linear"),
+            # Die noch im Wasser geloeste Fracht - im Vorbild die cyanfarbenen
+            # Frachtspuren, deshalb dieselbe Farbfamilie. Gemessenes Maximum
+            # ueber alle Laeufe: 0.6 bis 1.1 m.
+            "sediment_load_map": ("GnBu", 0.0, 1.2, "linear"),
+            # Fliessgeschwindigkeit. Die Obergrenze ist keine Schaetzung,
+            # sondern folgt aus dem Modell: der Netto-Fluss kann hoechstens
+            # das Doppelte der Gitter-Geschwindigkeit erreichen (siehe
+            # HydraulicFieldSimulator.MAX_FLOW_VELOCITY_M_S) - gemessenes
+            # Maximum 15.9 m/s bei einer Bezugsgeschwindigkeit von 8 m/s.
+            "flow_velocity_map": ("viridis", 0.0, 16.0, "linear"),
+            # Eingeschwungener Wasserstand aus dem Erosionslauf. Eigener
+            # Eintrag statt Mitbenutzung von "water_map": dort steht der
+            # Wasserstand des Water-Generators mit echtem Regen, hier der des
+            # synthetischen Erosionsregens - zwei verschiedene Groessen, die
+            # sich nicht dieselbe Skala teilen sollten. Gemessen 1.9 bis 15 m
+            # je nach Laufzeit.
+            "water_depth_map": ("Blues", 0.0, 12.0, "linear"),
+            # Böschungswinkel-Erosion (2026-07-27 als eigene Anzeigemodi
+            # ergänzt, siehe gui/tabs/water_tab.py) - derselbe Wertebereich
+            # und dieselbe Log-Skala wie die fluviale Erosion/Sedimentation
+            # darüber, damit sich beide Prozesse direkt vergleichen lassen.
+            # Farbwahl bewusst anders (violett/grün statt rot/orange), damit
+            # auf einen Blick erkennbar bleibt, welcher Mechanismus gerade
+            # angezeigt wird.
+            "thermal_erosion_map": ("Purples", 0.01, 40.0, "log"),
+            "thermal_deposition_map": ("Greens", 0.01, 40.0, "log"),
+            # Verdunstung in gH2O/m²/Tag - Obergrenze am Lake-Limit der
+            # Klassifikationsstufen orientiert (siehe
+            # EvaporationCalculator._EVAPORATION_LIMIT_BY_WATER_TYPE:
+            # Grand River deckelt bei 200, Seen sind unbegrenzt).
+            "evaporation_map": ("YlOrBr", 0.0, 250.0),
             "soil_moist_map": ("Blues", 0.0, 100.0),
+            # Zivilisations-Einfluss 0-1 (settlement.civ_influence). Bis
+            # 2026-07-27 ohne Eintrag: 2D nutzte fest plasma mit
+            # Auto-Skalierung, 3D fiel auf viridis mit eigener
+            # Auto-Skalierung zurueck - derselbe Layer sah in beiden
+            # Ansichten unterschiedlich aus. Fester Bereich statt
+            # Auto-Skalierung, damit sich zwei Karten direkt vergleichen
+            # lassen (gleiches Prinzip wie bei allen Eintraegen hier).
+            "civ_map": ("plasma", 0.0, 1.0),
             "slopemap": ("viridis", 0.0, 90.0),         # Grad
             "hardness_map": ("viridis", 0.0, 100.0),
+            # Geology-Δz-Diagnose-Layer (3D-Gesteinsstapel-Rework, siehe
+            # core/geology_generator.py): signierte Höhen-Komponenten in Metern -
+            # diverging Colormap (Blau=Absenkung, Rot=Anhebung), vmin/vmax
+            # bewusst None (Auto-Skalierung) statt geraten - konkrete Werte
+            # müssten gegen einen echten Diagnose-Lauf kalibriert werden, siehe
+            # docs/session_review_2026-07-22_geology.md.
+            "terrain_hub_delta": ("RdBu_r", None, None),
+            "tilt_delta": ("RdBu_r", None, None),
+            "fold_delta": ("RdBu_r", None, None),
+            "fault_delta": ("RdBu_r", None, None),
+            "intrusion_delta": ("RdBu_r", None, None),
         }
     }
 
@@ -169,6 +283,7 @@ class ColorSchemes:
     """
     TERRAIN = {
         "low": "#2980b9",  # Deep Blue
+        "erosion": "#c0703a",  # Braun-Orange - Gelaendeformung
         "water": "#3498db",  # Blue
         "land": "#27ae60",  # Green
         "mountain": "#95a5a6",  # Gray

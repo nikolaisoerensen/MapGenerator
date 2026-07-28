@@ -446,9 +446,21 @@ class BaseMapTab(QWidget):
         "humid_map": "humidity", "wind_map": "wind",
         "water_map": "water_map", "soil_moist_map": "soil_moisture",
         "erosion_map": "erosion", "sedimentation_map": "sedimentation",
+        "net_change_map": "net_change", "sediment_load_map": "sediment_load",
+        "water_depth_map": "water_depth", "flow_velocity_map": "flow_velocity",
+        "thermal_erosion_map": "thermal_erosion",
+        "thermal_deposition_map": "thermal_deposition",
+        "evaporation_map": "evaporation",
         "flow_map": "flow_map", "rock_map": "rock_map",
         "hardness_map": "hardness_map", "biome_map": "biome_map",
         "slopemap": "slope", "civ_map": "civ_map",
+        # Geology-Diagnose-Modi (Terrain Hub/Tilt/Fold/Fault/Intrusion Only,
+        # siehe gui/tabs/geology_tab.py _DELTA_DISPLAY_MODES) - identischer
+        # Key auf beiden Seiten, hier trotzdem explizit gelistet (kein
+        # Eintrag hier hieße: kein 3D-Overlay, siehe Docstring oben).
+        "terrain_hub_delta": "terrain_hub_delta", "tilt_delta": "tilt_delta",
+        "fold_delta": "fold_delta", "fault_delta": "fault_delta",
+        "intrusion_delta": "intrusion_delta",
     }
 
     # Für welche Tabs die radio buttons ÜBER dem Canvas die EINZIGE Quelle
@@ -464,9 +476,14 @@ class BaseMapTab(QWidget):
     # "genau ein Layer"-Muster wie bei den übrigen Tabs.
     _LAYER_SELECTION_KEYS_3D = {
         "terrain": {"slope"},
-        "geology": {"rock_map", "hardness_map"},
+        "geology": {"rock_map", "hardness_map", "terrain_hub_delta", "tilt_delta",
+                    "fold_delta", "fault_delta", "intrusion_delta"},
         "weather": {"precipitation", "temperature", "wind", "humidity"},
-        "water": {"water_map", "soil_moisture", "erosion", "sedimentation", "flow_map"},
+        # Erosion-Umbau 2026-07-28: die vier gelaendeformenden Layer sind aus
+        # "water" in den eigenen Erosion-Tab gewandert.
+        "erosion": {"erosion", "sedimentation", "net_change", "sediment_load",
+                    "water_depth", "flow_velocity", "thermal_erosion", "thermal_deposition"},
+        "water": {"water_map", "soil_moisture", "flow_map", "evaporation"},
         "biome": {"biome_map", "super_biome_mask"},
     }
 
@@ -494,21 +511,30 @@ class BaseMapTab(QWidget):
             return
 
         # get_terrain_data_combined() statt get_terrain_data(): für jede visuelle
-        # Referenz auf "die Heightmap" wollen wir das tatsächliche Endergebnis nach
-        # Geology-Tektonik/Water-Erosion/-Sedimentation sehen (dieselbe Datenbasis,
-        # die auch alle nachgelagerten Generatoren als heightmap_combined bekommen),
-        # nicht die unbearbeitete Terrain-Rohausgabe.
+        # Referenz auf "die Heightmap" AUSSER Terrains eigenem "Terrain Heightmap"-
+        # Rohmodus wollen wir das tatsächliche Endergebnis nach Geology-Tektonik/
+        # Water-Erosion/-Sedimentation sehen (dieselbe Datenbasis, die auch alle
+        # nachgelagerten Generatoren als heightmap_combined bekommen). Terrains
+        # "Terrain Heightmap"/"Heightmap Combined"-Radios sollen sich in 3D genauso
+        # unterscheidbar zeigen wie in 2D (Nutzer-Vorgabe) - für beide wird deshalb
+        # `data` direkt verwendet, nur alle anderen Layer-Typen (Slope etc., wo eine
+        # rohe Heightmap als 3D-Mesh keinen Sinn ergäbe) fallen weiterhin auf die
+        # kombinierte Heightmap zurück.
         if self.current_view == "3d" and hasattr(current_display.display, 'update_heightmap'):
-            heightmap = data if layer_type == "heightmap" else (
+            heightmap = data if layer_type in ("heightmap", "heightmap_combined") else (
                 self.data_lod_manager.get_terrain_data_combined("heightmap") if self.data_lod_manager else None
             )
             if heightmap is not None:
                 current_display.display.update_heightmap(heightmap, self.generator_type)
+            # Live "Map Distance"-Wert mitschicken (siehe [[project-terrain-review]]
+            # 4f) - das 3D-Widget hat keinen eigenen data_lod_manager-Zugriff.
+            if self.data_lod_manager and hasattr(current_display.display, 'set_world_size_km'):
+                current_display.display.set_world_size_km(self.data_lod_manager.get_map_distance_km())
         elif hasattr(current_display, 'update_display'):
             # Referenz-Heightmap fürs Contour-Overlay mitschicken, damit Höhenlinien
             # auch auf Nicht-Heightmap-Layern erscheinen (z.B. Water > Flowmap),
             # nicht nur wenn die Heightmap selbst der angezeigte Layer ist.
-            if (layer_type != "heightmap" and self.data_lod_manager
+            if (layer_type not in ("heightmap", "heightmap_combined") and self.data_lod_manager
                     and hasattr(current_display.display, 'set_contour_reference_heightmap')):
                 reference_heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
                 if reference_heightmap is not None:
@@ -559,6 +585,29 @@ class BaseMapTab(QWidget):
                     and shadow_data.ndim == 3 and shadow_data.shape[2] > DEFAULT_SHADOW_ANGLE_INDEX):
                 self.map_display_3d.display.update_shademap(shadow_data[:, :, DEFAULT_SHADOW_ANGLE_INDEX])
 
+        # Sonnenstand fürs 3D-Licht (siehe MapDisplay3D.set_sun_direction()) -
+        # ersetzt den statischen, breitengrad-unabhängigen gui_default.py-
+        # Default ("Sonne im Süden, 45°") durch den tatsächlich für die
+        # eingestellte Karten-Breite berechneten Sonnenstand, damit z.B. eine
+        # Südhalbkugel-Karte auch in 3D korrekt aus Norden beleuchtet wird.
+        # Repräsentativer Referenztag/-stunde (Sommer, Sonnenmittag) statt
+        # Monats-Animation - der 3D-View animiert nicht durchs Jahr, ein
+        # fester Zeitpunkt genügt, um zumindest Hemisphäre/Breitengrad korrekt
+        # abzubilden (analog zum festen Winkelindex 3 der Shademap oben).
+        if (self.map_display_3d and self.parameter_manager
+                and hasattr(self.map_display_3d.display, "set_sun_direction")):
+            try:
+                from core.terrain_generator import calculate_solar_position
+                from gui.config.value_default import WEATHER
+                weather_params = self.parameter_manager.get_tab_parameters("weather") or {}
+                latitude = weather_params.get("map_latitude", WEATHER.MAP_LATITUDE["default"])
+                longitude = weather_params.get("map_longitude", WEATHER.MAP_LONGITUDE["default"])
+                elevation, azimuth = calculate_solar_position(
+                    day_of_year=172, hour=13.0, latitude=latitude, longitude=longitude)
+                self.map_display_3d.display.set_sun_direction(elevation, azimuth)
+            except Exception as e:
+                self.logger.debug(f"3D-Sonnenstand-Update übersprungen: {e}")
+
     @error_handler
     def update_display_mode(self):
         """Display-Update über DataLODManager"""
@@ -569,15 +618,15 @@ class BaseMapTab(QWidget):
                 heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
                 if heightmap is not None:
                     display_id = f"{self.__class__.__name__}_{self.current_view}_heightmap"
-                    if self.data_lod_manager.display_update_manager.needs_update(display_id, heightmap, "heightmap"):
-                        self._push_data_to_current_display(heightmap, "heightmap")
-                        self.data_lod_manager.display_update_manager.mark_updated(display_id, heightmap, "heightmap")
+                    if self.data_lod_manager.display_update_manager.needs_update(display_id, heightmap, "heightmap_combined"):
+                        self._push_data_to_current_display(heightmap, "heightmap_combined")
+                        self.data_lod_manager.display_update_manager.mark_updated(display_id, heightmap, "heightmap_combined")
 
         except Exception as e:
             self.logger.debug(f"Display mode update failed: {e}")
 
     # =============================================================================
-    # GLOBALE OVERLAY-TOGGLES (Shell-Spalte 2: Contour Lines / Shadows)
+    # GLOBALE OVERLAY-TOGGLES (Shell-Spalte 2: Contour Lines)
     # =============================================================================
 
     def set_contour_overlay(self, checked: bool):
@@ -592,18 +641,6 @@ class BaseMapTab(QWidget):
                 current_display.display.set_contour_overlay(checked)
         except Exception as e:
             self.logger.debug(f"Contour overlay toggle failed: {e}")
-
-    def set_shadow_overlay(self, checked: bool):
-        """
-        Globaler Shadows-Toggle vom Shell-Layout. KANN von Sub-Classes
-        überschrieben werden (z.B. Terrain für den Sonnenwinkel-Parameter).
-        """
-        try:
-            current_display = self.get_current_display()
-            if current_display and hasattr(current_display.display, 'set_shadow_overlay'):
-                current_display.display.set_shadow_overlay(checked)
-        except Exception as e:
-            self.logger.debug(f"Shadow overlay toggle failed: {e}")
 
     # =============================================================================
     # GENERATION SYSTEM (nur UI-Proxy)
@@ -680,6 +717,21 @@ class BaseMapTab(QWidget):
         if generator_type == self.generator_type:
             self.update_parameter_ui(param_name, new_value)
 
+    # Generatoren, die das GELÄNDE verändern - ihre Ergebnisse fließen über
+    # DataLODManager.get_terrain_data_combined() in die kombinierte Heightmap
+    # ein, aus der JEDER Tab sein 3D-Mesh baut (siehe
+    # _push_data_to_current_display()).
+    #
+    # Sie brauchen deshalb eine Sonderbehandlung in on_data_updated(): ohne sie
+    # aktualisiert ein Tab seine Anzeige nur, wenn SEIN EIGENER Generator
+    # meldet. Der Erosion-Generator (seit 2026-07-28 ein eigener, der nach
+    # Geology läuft) blieb damit für alle anderen Tabs unsichtbar - das
+    # 3D-Mesh im Terrain-Tab zeigte weiter das unerodierte Gelände, obwohl
+    # "Heightmap Combined" die Erosion längst enthielt. Nutzer-Report
+    # 2026-07-28: "schau mal ob die 3D terrain meshes neu erzeugt werden
+    # sobald erosion neu gerechnet wurde".
+    _TERRAIN_FORMING_GENERATORS = ("terrain", "geology", "erosion")
+
     @pyqtSlot(str, str)
     def on_data_updated(self, generator_type: str, data_key: str):
         """Handler für Data-Updates vom DataLODManager"""
@@ -688,8 +740,12 @@ class BaseMapTab(QWidget):
             if hasattr(self, 'required_dependencies') and data_key in self.required_dependencies:
                 self.check_input_dependencies()
 
-            # Display-Update bei relevanten Daten
-            if generator_type == self.generator_type or data_key in getattr(self, 'display_data_keys', []):
+            # Display-Update bei relevanten Daten. Geländeformende Generatoren
+            # lösen es in JEDEM Tab aus, nicht nur im eigenen - siehe
+            # _TERRAIN_FORMING_GENERATORS.
+            if (generator_type == self.generator_type
+                    or generator_type in self._TERRAIN_FORMING_GENERATORS
+                    or data_key in getattr(self, 'display_data_keys', [])):
                 self.update_display_mode()
 
         except Exception as e:

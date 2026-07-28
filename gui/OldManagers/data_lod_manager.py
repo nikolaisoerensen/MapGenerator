@@ -205,7 +205,10 @@ TAB_DEPENDENCY_MATRIX = {
     "terrain": ["heightmap_combined", "slopemap", "shadowmap"],
     "geology": ["rock_map", "hardness_map"],
     "weather": ["wind_map", "temp_map", "precip_map", "humid_map"],
-    "water": ["flow_map", "flow_speed", "cross_section", "soil_moist_map", "erosion_map", "sedimentation_map",
+    "erosion": ["erosion_map", "sedimentation_map", "thermal_erosion_map",
+                "thermal_deposition_map", "sediment_load_map", "water_depth_map",
+                "flow_velocity_map"],
+    "water": ["flow_map", "flow_speed", "cross_section", "soil_moist_map",
               "evaporation_map", "ocean_outflow", "water_biomes_map"],
     "biome": ["biome_map", "biome_map_super", "super_biome_mask", "climate_classification", "biome_statistics"],
     "settlement": ["settlement_list", "landmark_list", "roadsite_list", "plot_map", "civ_map"]
@@ -230,6 +233,11 @@ DATA_DEPENDENCY_MATRIX = {
     "soil_moist_map": ["heightmap_combined"],
     "erosion_map": ["heightmap_combined"],
     "sedimentation_map": ["heightmap_combined"],
+    "thermal_erosion_map": ["heightmap_combined"],
+    "thermal_deposition_map": ["heightmap_combined"],
+    "sediment_load_map": ["heightmap_combined"],
+    "water_depth_map": ["heightmap_combined"],
+    "flow_velocity_map": ["heightmap_combined"],
     "evaporation_map": ["heightmap_combined"],
     "ocean_outflow": ["heightmap_combined"],
     "water_biomes_map": ["heightmap_combined"],
@@ -296,8 +304,13 @@ DATA_KEY_TO_TAB_MAPPING = {
     "flow_speed": "water",
     "cross_section": "water",
     "soil_moist_map": "water",
-    "erosion_map": "water",
-    "sedimentation_map": "water",
+    "erosion_map": "erosion",
+    "sedimentation_map": "erosion",
+    "thermal_erosion_map": "erosion",
+    "thermal_deposition_map": "erosion",
+    "sediment_load_map": "erosion",
+    "water_depth_map": "erosion",
+    "flow_velocity_map": "erosion",
     "evaporation_map": "water",
     "ocean_outflow": "water",
     "water_biomes_map": "water",
@@ -2667,11 +2680,49 @@ class DataLODManager(QObject):
         # === SIGNAL-VERBINDUNGEN ZWISCHEN KOMPONENTEN ===
         self._setup_integrated_signals()
 
+        # Reale Kartenausdehnung in km (siehe TERRAIN.MAP_DISTANCE_KM,
+        # [[project-terrain-review]] 4f) - bewusst NICHT LOD-versioniert wie
+        # heightmap/slopemap/etc. (kein Array, kein set_terrain_data_lod()-
+        # kompatibler Typ, und physikalisch ohnehin unabhängig von der
+        # Pixel-Auflösung/LOD-Stufe) - einfacher, direkt gehaltener Skalar,
+        # den Biome/Water/Weather/map_display_3d.py statt des vorherigen
+        # statischen TERRAIN.WORLD_SIZE_KM-Imports live abfragen.
+        self._map_distance_km = 10.0
+        # Analog zu _map_distance_km (siehe set_map_latitude()/get_map_latitude()) -
+        # Weather-Slider "map_latitude", live an Biome/Water gespiegelt für den
+        # Biome-Preseed-Knoten (biome.preseed_hint), der VOR Weather laufen
+        # kann und daher nicht auf Weathers eigenen Parameter-Satz zugreifen
+        # kann. Default 48.0 (WEATHER.MAP_LATITUDE-Default), bis Weather zum
+        # ersten Mal Parameter gesetzt hat.
+        self._map_latitude = 48.0
+        # Analog zu _map_distance_km/_map_latitude - Terrains "map_seed"-
+        # Slider, live an Geology gespiegelt (siehe set_map_seed()/
+        # get_map_seed()). GeologySystemGenerator wird lazy vom
+        # GenerationOrchestrator instanziiert OHNE map_seed-Konstruktor-
+        # Argument und dann für die gesamte App-Session wiederverwendet -
+        # ohne diese Spiegelung blieb Geology permanent beim Konstruktor-
+        # Default (42) hängen, unabhängig vom tatsächlich eingestellten
+        # Map Seed (Nutzer-Bug-Report: Intrusion/Fault/Tilt immer gleich).
+        # Default TERRAIN.MAP_SEED-Default, bis Terrain zum ersten Mal
+        # Parameter gesetzt hat (lazy Import wie an anderer Stelle in dieser
+        # Datei, TERRAIN.MAP_SEED["default"] ist jetzt bei jedem Programmstart
+        # zufällig statt fest - siehe value_default.py).
+        try:
+            from gui.config.value_default import TERRAIN
+            self._map_seed = int(TERRAIN.MAP_SEED["default"])
+        except ImportError:
+            self._map_seed = 42
+
         # === HAUPT-DATENSTRUKTUREN FÜR ALLE GENERATOR-OUTPUTS (LOD-ERWEITERT) ===
         self._terrain_data = {}  # {f"lod_{level}_{data_key}": data}
         self._geology_data = {}
         self._settlement_data = {}
         self._weather_data = {}
+        # Erosion ist seit 2026-07-28 ein eigener Generator (siehe
+        # core/erosion_generator.py) - er sitzt zwischen Geology und Weather
+        # und besitzt die vier gelaendeformenden Karten, die vorher Water
+        # gehoerten.
+        self._erosion_data = {}
         self._water_data = {}
         self._biome_data = {}
 
@@ -2685,6 +2736,7 @@ class DataLODManager(QObject):
         # einer späteren Runde dispatcht wird, darauf zugreifen kann.
         self._calculator_data = {}  # {f"lod_{level}_{calculator_id}_{output_key}": value}
         self._current_calculator_lods = {}  # {calculator_id: höchstes abgeschlossenes LOD}
+        self._calculator_target_lod = {}  # {calculator_id: angefragtes Ziel-LOD, siehe set_calculator_target_lod()}
 
         # === CACHE-MANAGEMENT (LOD-ERWEITERT) ===
         self._cache_timestamps = {}  # {f"{generator}_{lod}_{key}": timestamp}
@@ -2693,7 +2745,7 @@ class DataLODManager(QObject):
         # === CURRENT LOD-LEVELS FÜR JEDEN GENERATOR ===
         self._current_lods = {
             "terrain": 0, "geology": 0, "settlement": 0,
-            "weather": 0, "water": 0, "biome": 0
+            "erosion": 0, "weather": 0, "water": 0, "biome": 0
         }
 
         # === AUTOMATISCHE GENERIERUNG - PUNKT 3 ===
@@ -3103,6 +3155,26 @@ class DataLODManager(QObject):
         """
         return self._current_calculator_lods.get(calculator_id, 0)
 
+    def set_calculator_target_lod(self, calculator_id: str, target_lod: int):
+        """
+        Speichert das tatsächlich angefragte Ziel-LOD eines Calculator-Knotens
+        (von GenerationOrchestrator.request_generation() für jeden betroffenen
+        Knoten gesetzt, siehe CalculatorDispatcher.request()). Grundlage für
+        Executoren, die - anders als die meisten Calculator-Knoten - NUR am
+        finalen LOD echte Arbeit leisten sollen (z.B. Settlement, siehe
+        SettlementGenerator._is_final_lod()): vorher wurde "final" fälschlich
+        aus der GERADE VERFÜGBAREN (noch wachsenden) Terrain-Heightmap-Größe
+        abgeleitet, was bei JEDER Zwischen-Runde als "schon final" erkannt
+        wurde, da diese Ableitung immer nur den eigenen aktuellen Stand mit
+        sich selbst verglich - der echte, stabile Ziel-Wert steht dagegen
+        bereits hier bereit, sobald der Request gestellt wurde.
+        """
+        self._calculator_target_lod[calculator_id] = target_lod
+
+    def get_calculator_target_lod(self, calculator_id: str) -> Optional[int]:
+        """Angefragtes Ziel-LOD eines Calculator-Knotens, None falls nie gesetzt."""
+        return self._calculator_target_lod.get(calculator_id)
+
     # =============================================================================
     # TERRAIN DATA MANAGEMENT - LOD-ERWEITERT (BESTEHEND)
     # =============================================================================
@@ -3217,6 +3289,74 @@ class DataLODManager(QObject):
         else:
             return self.get_terrain_data_lod(data_key)
 
+    def set_map_distance_km(self, value: float):
+        """
+        Funktionsweise: Setzt die reale Kartenausdehnung in km (Terrains
+        "Map Distance"-Slider, siehe TERRAIN.MAP_DISTANCE_KM). Von
+        BaseTerrainGenerator.set_active_parameters() bei jeder Terrain-
+        Parameter-Änderung aktualisiert.
+        """
+        self._map_distance_km = float(value)
+
+    def get_map_distance_km(self) -> float:
+        """
+        Funktionsweise: Liefert die aktuelle reale Kartenausdehnung in km.
+        Aufgabe: Ersetzt den vorherigen statischen `TERRAIN.WORLD_SIZE_KM`-
+        Import in core/biome_generator.py, core/water_generator.py,
+        core/weather_generator.py und gui/widgets/map_display_3d.py (siehe
+        [[project-terrain-review]] 4f) - alle Konsumenten lesen jetzt
+        denselben live einstellbaren Wert statt einer Konstante, die pro
+        Datei separat hätte importiert und gepflegt werden müssen.
+        Return: float - Kartenausdehnung in km (Default 10.0, bis Terrain
+        zum ersten Mal Parameter gesetzt hat).
+        """
+        return self._map_distance_km
+
+    def set_map_latitude(self, value: float):
+        """
+        Funktionsweise: Setzt den Breitengrad der Karte (Weathers "map_latitude"-
+        Slider, siehe WEATHER.MAP_LATITUDE). Von WeatherSystemGenerator.
+        set_active_parameters() bei jeder Weather-Parameter-Änderung
+        aktualisiert - analog zu set_map_distance_km().
+        """
+        self._map_latitude = float(value)
+
+    def get_map_latitude(self) -> float:
+        """
+        Funktionsweise: Liefert den aktuellen Kartenbreitengrad.
+        Aufgabe: Ermöglicht Biome/Water den Zugriff auf denselben Breitengrad
+        wie Weather, ohne eine eigene Kopie des Parameters zu benötigen - vor
+        allem für biome.preseed_hint (core/biome_generator.py), das VOR
+        weather.temperature laufen kann und daher nicht auf Weathers eigenen
+        Parameter-Satz (self._current_parameters) zugreifen kann.
+        Return: float - Breitengrad in Grad (Default 48.0, bis Weather zum
+        ersten Mal Parameter gesetzt hat).
+        """
+        return self._map_latitude
+
+    def set_map_seed(self, value: int):
+        """
+        Funktionsweise: Setzt den globalen Map Seed (Terrains "map_seed"-
+        Slider, siehe TERRAIN.MAP_SEED). Von BaseTerrainGenerator.
+        set_active_parameters() bei jeder Terrain-Parameter-Änderung
+        aktualisiert - analog zu set_map_distance_km()/set_map_latitude().
+        """
+        self._map_seed = int(value)
+
+    def get_map_seed(self) -> int:
+        """
+        Funktionsweise: Liefert den aktuellen globalen Map Seed.
+        Aufgabe: Ermöglicht Geology denselben Seed wie Terrain zu verwenden,
+        ohne eine eigene Kopie des Parameters zu benötigen - GeologySystem-
+        Generator wird vom GenerationOrchestrator lazy instanziiert OHNE
+        map_seed-Konstruktor-Argument und für die App-Session
+        wiederverwendet, würde ohne diese Spiegelung permanent beim
+        Konstruktor-Default hängen bleiben, unabhängig von Seed-Änderungen.
+        Return: int - Map Seed (Default TERRAIN.MAP_SEED-Default, bis
+        Terrain zum ersten Mal Parameter gesetzt hat).
+        """
+        return self._map_seed
+
     def get_terrain_data_combined(self, data_key: str, lod_level: int = None):
         """
         Funktionsweise: Zugriff auf die kombinierte Heightmap (Terrain plus Geology-Tektonik
@@ -3247,22 +3387,141 @@ class DataLODManager(QObject):
         if geology_height_delta is not None and geology_height_delta.shape == base.shape:
             combined = combined + geology_height_delta
 
-        erosion_map = self.get_water_data_lod("erosion_map", lod_level)
+        # Die vier gelaendeformenden Karten gehoeren seit 2026-07-28 dem
+        # Erosion-Generator (core/erosion_generator.py), nicht mehr Water.
+        erosion_map = self.get_erosion_data_lod("erosion_map", lod_level)
         if erosion_map is not None and erosion_map.shape == base.shape:
             combined = combined - erosion_map
 
-        sedimentation_map = self.get_water_data_lod("sedimentation_map", lod_level)
+        sedimentation_map = self.get_erosion_data_lod("sedimentation_map", lod_level)
         if sedimentation_map is not None and sedimentation_map.shape == base.shape:
             combined = combined + sedimentation_map
 
+        # Boeschungswinkel-Erosion ("Phase 6", siehe core/water_generator.py
+        # ThermalErosionSystem) - dieselbe Additions-Konvention wie erosion_map/
+        # sedimentation_map oben (Abtrag negativ, Ablagerung positiv).
+        thermal_erosion_map = self.get_erosion_data_lod("thermal_erosion_map", lod_level)
+        if thermal_erosion_map is not None and thermal_erosion_map.shape == base.shape:
+            combined = combined - thermal_erosion_map
+
+        thermal_deposition_map = self.get_erosion_data_lod("thermal_deposition_map", lod_level)
+        if thermal_deposition_map is not None and thermal_deposition_map.shape == base.shape:
+            combined = combined + thermal_deposition_map
+
         return combined
+
+    def get_geology_height_delta(self, lod_level: int = None):
+        """
+        Funktionsweise: Reines Geology-Tektonik-Delta an jeder XY-Position -
+        NICHT Terrain-Heightmap + Delta. Ersetzt die frühere
+        get_geology_only_heightmap(), die fälschlich Terrain+Delta als
+        absolute Heightmap zurückgab (siehe [[project-terrain-review]]
+        Phase B, Nutzer-Korrektur vom 2026-07-22: "Geology_Heightmap ist
+        was durch Geology auf Heightmap draufkommt oder abgezogen wird an
+        jedem XY punkt" - damit bleiben Terrain- und Geology-Beitrag in der
+        Anzeige sauber getrennt, statt dass die Geology-Ansicht optisch mit
+        der Terrain-Ansicht verschmilzt).
+        Aufgabe: Grundlage für die künftige Geology-Tab-"Geology Heightmap"-
+        Ansicht (Diff-Colormap, rot/blau für negativ/positiv - Verdrahtung
+        folgt in der Geology-Runde, siehe Handover-Dokument).
+        Parameter: lod_level - gewünschtes LOD oder None für das höchste
+        verfügbare.
+        Return: geology.height_delta direkt (kein Terrain-Anteil), oder
+        None wenn noch keine Geology-Berechnung für dieses LOD vorliegt.
+        """
+        return self.get_geology_data_lod("height_delta", lod_level)
+
+    def get_water_height_delta(self, lod_level: int = None):
+        """
+        Funktionsweise: Reines Water-Delta (Sedimentation minus Erosion) an
+        jeder XY-Position - analog zu get_geology_height_delta(), NICHT
+        Terrain-Heightmap + Delta (siehe [[project-terrain-review]] Phase B).
+        Fehlende Einzelkarten zählen als 0 (z.B. Erosion schon berechnet,
+        Sedimentation noch nicht) statt None zu erzwingen, solange
+        mindestens eine der beiden vorliegt.
+        Aufgabe: Grundlage für die künftige Water-Tab-"Water Heightmap"-
+        Ansicht (Diff-Colormap) - Verdrahtung folgt in der Water-Runde.
+        Parameter: lod_level - gewünschtes LOD oder None für das höchste
+        verfügbare.
+        Return: sedimentation_map - erosion_map, oder None wenn weder
+        Erosion noch Sedimentation für dieses LOD vorliegen, oder wenn
+        beide vorliegen aber in unterschiedlicher Form (LOD-Mismatch).
+        """
+        erosion_map = self.get_erosion_data_lod("erosion_map", lod_level)
+        sedimentation_map = self.get_erosion_data_lod("sedimentation_map", lod_level)
+
+        if erosion_map is None and sedimentation_map is None:
+            return None
+        if erosion_map is None:
+            return sedimentation_map.copy()
+        if sedimentation_map is None:
+            return -erosion_map
+        if erosion_map.shape != sedimentation_map.shape:
+            return None
+
+        return sedimentation_map - erosion_map
+
+    def get_geology_layer_id_map(self, lod_level: int = None):
+        """
+        Funktionsweise: Finale Schicht-/Intrusions-Zuordnung je Pixel (Index in
+        core.geology_layers.ALL_ROCK_TYPES, 0..N_LAYERS-1 = ROCK_LAYERS,
+        N_LAYERS = Basalt-Intrusion) - Grundlage für die "Rock Outcrop"-Anzeige
+        mit 13+1-Kategorien-Legende (siehe geology_tab.py) und für einen
+        späteren, hier NICHT gebauten Ressourcen-Generator.
+        Return: (H,W) int16 Array oder None.
+        """
+        return self.get_geology_data_lod("layer_id_map", lod_level)
+
+    def get_geology_fault_distance_map(self, lod_level: int = None):
+        """Abstand zur nächsten Störungslinie in km (unsigniert) je Pixel -
+        Diagnose-Grundlage und Eingabe für einen künftigen Ressourcen-Generator
+        (z.B. Erz-/Ader-Vorkommen nahe Störungen)."""
+        return self.get_geology_data_lod("fault_distance_map", lod_level)
+
+    def get_geology_intrusion_distance_map(self, lod_level: int = None):
+        """Signierter Abstand zur nächsten Intrusion in km (<0 = innerhalb einer
+        Intrusion) je Pixel - Diagnose-Grundlage und Eingabe für einen künftigen
+        Ressourcen-Generator (z.B. Kontaktmetamorphose-Zonen)."""
+        return self.get_geology_data_lod("intrusion_distance_map", lod_level)
+
+    def get_geology_metamorphic_grade_map(self, lod_level: int = None):
+        """Metamorpher Grad [0-1] je Pixel (Störungs-/Intrusionsnähe kombiniert,
+        siehe core/geology_generator.py._compute_metamorphic_grade)."""
+        return self.get_geology_data_lod("metamorphic_grade_map", lod_level)
+
+    def get_geology_layer_boundaries(self, lod_level: int = None):
+        """
+        Deformierte Schicht-Obergrenzen (N_LAYERS,H,W) in Metern - Grundlage
+        für die Cross-Section-Diagnose-Ansicht in geology_tab.py/
+        map_display_2d.py (vertikaler Schnitt entlang X oder Y).
+        Return: (N_LAYERS,H,W) float32 Array oder None.
+        """
+        return self.get_geology_data_lod("layer_boundaries", lod_level)
+
+    def get_geology_delta_component(self, component: str, lod_level: int = None):
+        """
+        Funktionsweise: Isolierte Verformungs-Komponente (Diagnose-
+        Anzeigemodi) - einer von "terrain_hub"/"tilt"/"fold"/"fault"/
+        "intrusion", damit jeder Tektonik-Slider einzeln sichtbar gemacht
+        werden kann. WICHTIG (Teil-2-Rework): nur "intrusion" ist auch Teil
+        des tatsächlichen `height_delta` - "terrain_hub"/"tilt"/"fold"/
+        "fault" wirken NUR auf den Gesteinsstapel/Ausbiss, nicht auf die
+        Kartenhöhe (siehe core/geology_generator.py GeologyData-Docstring).
+        Parameter: component - "terrain_hub"|"tilt"|"fold"|"fault"|"intrusion"
+        Return: (H,W) float32 Array oder None, wenn die Komponente oder das
+        LOD noch nicht vorliegt.
+        """
+        components = self.get_geology_data_lod("delta_components", lod_level)
+        if not isinstance(components, dict):
+            return None
+        return components.get(component)
 
     def get_calculator_combined_heightmap(self, lod_level: int):
         """
         Funktionsweise: Wie get_terrain_data_combined("heightmap", ...), liest die drei
                  Anteile (Terrain-Basis, Geology-Tektonik, Water-Erosion/-Sedimentation)
                  aber direkt aus dem feingranularen Calculator-Storage
-                 (terrain.redistribution/geology.tectonic_deformation/
+                 (terrain.redistribution/geology.intrusions/
                  water.erosion_sedimentation) statt aus dem Domain-Level-Storage
                  (_terrain_data/_geology_data/_water_data).
         Aufgabe: Domain-Level-Storage wird erst befüllt, wenn ALLE Calculator-Knoten
@@ -3287,19 +3546,49 @@ class DataLODManager(QObject):
 
         combined = base.copy()
 
+        # "geology.intrusions" (NICHT das veraltete "geology.tectonic_deformation",
+        # das seit dem Geology-3D-Gesteinsstapel-Rework keinem Calculator-Knoten
+        # mehr entspricht - siehe calculator_graph.py) ist der einzige Knoten,
+        # der height_delta liefert (Intrusions-Dom-Hebung, siehe core/
+        # geology_generator.py._calc_intrusions()). Mit dem alten String
+        # lieferte get_calculator_output() hier IMMER None, wodurch Weather/
+        # Water/Settlement/Biome (alle Konsumenten dieser Methode, siehe deren
+        # _get_prepared_*_inputs()) beim Zugriff auf die "kombinierte"
+        # Heightmap VOR dem vollständigen Domain-Level-Assembly die Geology-
+        # Hebung durch Intrusionen niemals sahen - lautlos falsche
+        # Zwischenergebnisse (Slope/Solar-Heating/Wind-Ablenkung etc.), nie
+        # sichtbar in der finalen Anzeige (get_terrain_data_combined() nutzt
+        # einen separaten, korrekten Pfad über get_geology_data_lod()).
         geology_height_delta = self.get_calculator_output(
-            "geology.tectonic_deformation", "height_delta", lod_level)
+            "geology.intrusions", "height_delta", lod_level)
         if geology_height_delta is not None and geology_height_delta.shape == base.shape:
             combined = combined + geology_height_delta
 
-        erosion_map = self.get_calculator_output("water.erosion_sedimentation", "erosion_map", lod_level)
+        # Knoten-ID seit 2026-07-28 erosion.hydraulic statt
+        # water.erosion_sedimentation - die Erosion ist ein eigener Generator
+        # geworden und laeuft VOR Weather (siehe core/erosion_generator.py).
+        erosion_map = self.get_calculator_output("erosion.hydraulic", "erosion_map", lod_level)
         if erosion_map is not None and erosion_map.shape == base.shape:
             combined = combined - erosion_map
 
         sedimentation_map = self.get_calculator_output(
-            "water.erosion_sedimentation", "sedimentation_map", lod_level)
+            "erosion.hydraulic", "sedimentation_map", lod_level)
         if sedimentation_map is not None and sedimentation_map.shape == base.shape:
             combined = combined + sedimentation_map
+
+        # Boeschungswinkel-Erosion ("Phase 6", siehe core/water_generator.py
+        # ThermalErosionSystem) - direkt aus dem Calculator-Storage, analog zu
+        # erosion_map/sedimentation_map oben (siehe Methoden-Docstring, warum
+        # dieser Pfad statt get_terrain_data_combined() noetig ist).
+        thermal_erosion_map = self.get_calculator_output(
+            "erosion.hydraulic", "thermal_erosion_map", lod_level)
+        if thermal_erosion_map is not None and thermal_erosion_map.shape == base.shape:
+            combined = combined - thermal_erosion_map
+
+        thermal_deposition_map = self.get_calculator_output(
+            "erosion.hydraulic", "thermal_deposition_map", lod_level)
+        if thermal_deposition_map is not None and thermal_deposition_map.shape == base.shape:
+            combined = combined + thermal_deposition_map
 
         return combined
 
@@ -3333,16 +3622,31 @@ class DataLODManager(QObject):
 
     def set_geology_data_complete_lod(self, geology_data, lod_level: int, parameters: Dict[str, Any]):
         """
-        Speichert komplettes GeologyData-Objekt mit LOD-Level und zerlegt es in seine Data-Keys
+        Speichert komplettes GeologyData-Objekt mit LOD-Level und zerlegt es in seine Data-Keys.
+        Erweitert um die Felder des 3D-Gesteinsstapel-Reworks (siehe core/
+        geology_generator.py): layer_id_map/fault_distance_map/intrusion_distance_map/
+        metamorphic_grade_map/layer_boundaries sind reguläre np.ndarray-Produkte
+        (layer_boundaries ist 3D, (N_LAYERS,H,W) - _validate_lod_input() prüft keine
+        Dimensionalität, das ist unproblematisch). delta_components ist ein dict von
+        Arrays statt selbst ein Array, daher mit require_array=False abgelegt - siehe
+        get_geology_delta_component() unten.
         """
         self._geology_data[f"lod_{lod_level}_geology_data_object"] = geology_data
 
         data_keys = []
-        for key in ("rock_map", "hardness_map", "height_delta"):
+        for key in ("rock_map", "hardness_map", "height_delta", "layer_id_map",
+                    "fault_distance_map", "intrusion_distance_map", "metamorphic_grade_map",
+                    "layer_boundaries"):
             value = getattr(geology_data, key, None)
             if value is not None:
                 self._set_data_lod("geology", self._geology_data, key, value, lod_level, parameters)
                 data_keys.append(key)
+
+        delta_components = getattr(geology_data, "delta_components", None)
+        if delta_components is not None:
+            self._set_data_lod("geology", self._geology_data, "delta_components", delta_components,
+                                lod_level, parameters, require_array=False)
+            data_keys.append("delta_components")
 
         self._update_cache_timestamp("geology", lod_level, "complete", parameters)
         data_keys.append("complete")
@@ -3356,7 +3660,8 @@ class DataLODManager(QObject):
         self._weather_data[f"lod_{lod_level}_weather_data_object"] = weather_data
 
         data_keys = []
-        for key in ("wind_map", "temp_map", "precip_map", "humid_map"):
+        for key in ("wind_map", "temp_map", "precip_map", "humid_map",
+                    "wind_map_layers", "temp_map_layers", "humid_map_layers"):
             value = getattr(weather_data, key, None)
             if value is not None:
                 self._set_data_lod("weather", self._weather_data, key, value, lod_level, parameters)
@@ -3365,7 +3670,8 @@ class DataLODManager(QObject):
         # Saisonale Monats-Listen (je 6 np.ndarray) - Nicht-Array-Produkte,
         # analog zum bestehenden ocean_outflow/biome_statistics-Muster
         # (require_array=False), für die animierte Weather-Tab-Anzeige.
-        for key in ("wind_map_monthly", "temp_map_monthly", "precip_map_monthly", "humid_map_monthly"):
+        for key in ("wind_map_monthly", "temp_map_monthly", "precip_map_monthly", "humid_map_monthly",
+                    "wind_map_layers_monthly", "temp_map_layers_monthly", "humid_map_layers_monthly"):
             value = getattr(weather_data, key, None)
             if value:
                 self._set_data_lod("weather", self._weather_data, key, value, lod_level,
@@ -3377,15 +3683,57 @@ class DataLODManager(QObject):
         self.lod_data_stored.emit("weather", lod_level, data_keys)
         self.data_updated.emit("weather", "complete")
 
+    def set_erosion_data_complete_lod(self, erosion_data, lod_level: int, parameters: Dict[str, Any]):
+        """
+        Speichert das komplette ErosionData-Objekt und zerlegt es in seine
+        Data-Keys. Die Key-Liste kommt aus
+        ErosionSystemGenerator.EROSION_DATA_KEYS (eine Quelle fuer beide
+        Speicherpfade) - eine hier lokal gepflegte Kopie war beim Water-Pendant
+        bereits einmal unvollstaendig und liess Outputs lautlos verschwinden.
+
+        Die Kennzahlen des Laufs (Schrittzahl, Konvergenz, Massenbilanz,
+        tatsaechliche Simulationsaufloesung) sind Skalare und werden mit
+        require_array=False abgelegt - das Statistik-Widget des Erosion-Tabs
+        liest sie von dort.
+        """
+        from core.erosion_generator import ErosionSystemGenerator
+
+        self._erosion_data[f"lod_{lod_level}_erosion_data_object"] = erosion_data
+
+        data_keys = []
+        for key in ErosionSystemGenerator.EROSION_DATA_KEYS:
+            value = getattr(erosion_data, key, None)
+            if value is not None:
+                self._set_data_lod("erosion", self._erosion_data, key, value, lod_level, parameters)
+                data_keys.append(key)
+
+        for key in ErosionSystemGenerator.EROSION_SCALAR_KEYS:
+            value = getattr(erosion_data, key, None)
+            if value is not None:
+                self._set_data_lod("erosion", self._erosion_data, key, value, lod_level,
+                                   parameters, require_array=False)
+                data_keys.append(key)
+
+        self._update_cache_timestamp("erosion", lod_level, "complete", parameters)
+        data_keys.append("complete")
+        self.lod_data_stored.emit("erosion", lod_level, data_keys)
+        self.data_updated.emit("erosion", "complete")
+
     def set_water_data_complete_lod(self, water_data, lod_level: int, parameters: Dict[str, Any]):
         """
-        Speichert komplettes WaterData-Objekt mit LOD-Level und zerlegt es in seine Data-Keys
+        Speichert komplettes WaterData-Objekt mit LOD-Level und zerlegt es in seine Data-Keys.
+        Die Key-Liste kommt aus HydrologySystemGenerator.WATER_DATA_KEYS (eine
+        Quelle für beide Speicherpfade) - eine hier lokal gepflegte Kopie war
+        bereits einmal unvollständig und ließ Outputs lautlos verschwinden.
         """
+        from core.water_generator import HydrologySystemGenerator
+
         self._water_data[f"lod_{lod_level}_water_data_object"] = water_data
 
         data_keys = []
-        for key in ("water_map", "flow_map", "flow_speed", "cross_section", "soil_moist_map",
-                    "erosion_map", "sedimentation_map", "evaporation_map", "water_biomes_map"):
+        for key in HydrologySystemGenerator.WATER_DATA_KEYS:
+            if key == "ocean_outflow":
+                continue  # Skalar, unten separat mit require_array=False
             value = getattr(water_data, key, None)
             if value is not None:
                 self._set_data_lod("water", self._water_data, key, value, lod_level, parameters)
@@ -3485,6 +3833,15 @@ class DataLODManager(QObject):
     def get_weather_data(self, data_key: str) -> Optional[np.ndarray]:
         """Legacy-Methode"""
         return self.get_weather_data_lod(data_key)
+
+    def get_erosion_data_lod(self, data_key: str, lod_level: int = None):
+        """Gibt Erosion-Daten fuer LOD-Level zurueck (bestes verfuegbares LOD
+        als Fallback)."""
+        return self._get_data_lod("erosion", self._erosion_data, data_key, lod_level)
+
+    def get_erosion_data(self, data_key: str):
+        """Legacy-Methode (hoechstes verfuegbares LOD)."""
+        return self.get_erosion_data_lod(data_key)
 
     def get_water_data_lod(self, data_key: str, lod_level: int = None) -> Optional[np.ndarray]:
         """Gibt Water-Daten für LOD-Level zurück (bestes verfügbares LOD als Fallback)"""
@@ -3669,6 +4026,80 @@ class DataLODManager(QObject):
         current_hash = hashlib.md5(str(sorted(parameters.items())).encode()).hexdigest()
         return self._parameter_hashes[cache_key] == current_hash
 
+    # KEINE LOD-EVICTION (Versuch 2026-07-27 zurückgenommen)
+    #
+    # Der Speicherverbrauch wächst über eine LOD-Kette monoton: jede
+    # Zwischenauflösung bleibt bis zum nächsten "Regenerate All" vollständig
+    # liegen, obwohl nur die höchste angezeigt und nur die unmittelbare
+    # Vorstufe noch gelesen wird. Water allein legt pro LOD rund 70 B/px im
+    # Calculator-Storage ab plus ~44 B/px im Domain-Storage; bei map_size 1024
+    # über LOD 1-6 sind das etwa 160 MB.
+    #
+    # Ein Eviction-Schritt nach jeder abgeschlossenen Runde (alles unterhalb
+    # von "langsamster Knoten minus 1" verwerfen) war implementiert und ist
+    # wieder entfernt, weil er die EINZEL-Neuberechnung eines Generators
+    # zerstört: `GenerationOrchestrator.reset_lod_status()` setzt dessen
+    # Knoten auf completed_lod=0 zurück, der Dispatcher beginnt also wieder
+    # bei Runde 1 = LOD 1. Die dafür nötigen UPSTREAM-Daten (Terrain-
+    # Heightmap, Geology-Härte, Weather-Karten bei LOD 1) gehören aber
+    # Generatoren, die NICHT invalidiert wurden und deshalb auch nicht neu
+    # rechnen - sie lagen nur noch bei LOD 2/3 vor. Und
+    # get_calculator_output() sucht ausschliesslich ABWÄRTS (bestes LOD <=
+    # angefordert), findet bei einer Anfrage für LOD 1 also nichts.
+    # Beobachtet in der laufenden App als
+    #   "water.erosion_sedimentation failed at LOD 1:
+    #    fehlende Dependencies: heightmap, hardness_map"
+    # nach einem Klick auf GENERIEREN im Water-Tab, analog für
+    # biome.preseed_hint und biome.climate_classification.
+    #
+    # Eine korrekte Eviction braucht zuerst eine der beiden Voraussetzungen:
+    # (a) get_calculator_output() kann für reine Upstream-Eingaben auch AUFWÄRTS
+    #     zurückfallen und die höhere Auflösung herunterskalieren (die
+    #     _get_prepared_*_inputs()-Methoden tun das ohnehin schon) - dabei
+    #     muss der Vorstufen-Zugriff `lod_level - 1` für Erosion/Pipe-Zustand
+    #     ausdrücklich AUSGENOMMEN bleiben, sonst wird der aktuelle Stand als
+    #     "vorheriger" gelesen und doppelt gezählt; ODER
+    # (b) eine Einzel-Neuberechnung startet nicht wieder bei LOD 1, sondern
+    #     beim höchsten noch vorhandenen LOD ihrer Upstream-Daten.
+    # Beides ist ein Eingriff in die LOD-Semantik der gesamten Pipeline und
+    # gehört in eine eigene Runde mit eigenem Regressionstest.
+
+    def clear_calculator_node_output(self, calculator_id: str, lod_level: int) -> int:
+        """
+        Funktionsweise: Löscht die im Calculator-Storage abgelegten Outputs
+        GENAU EINES Knotens für GENAU EIN LOD.
+        Aufgabe: Ein Knoten, dessen eigenes Vorergebnis Teil seiner eigenen
+        Eingabe ist, muss diesen Stand loswerden, bevor er neu rechnet -
+        sonst baut jeder Lauf auf dem vorherigen auf. Betroffen sind
+        water.erosion_sedimentation und water.thermal_erosion: beide holen
+        ihre Heightmap über get_calculator_combined_heightmap(), und die zieht
+        genau deren erosion_map/thermal_erosion_map ab bzw. addiert deren
+        Sedimentation. Ohne diesen Schritt erodierte ein zweiter Lauf auf dem
+        bereits erodierten Gelände des ersten, und der Abtrag wuchs mit jeder
+        Regenerierung weiter an.
+
+        Bewusst knotenlokal statt generatorweit: ein pauschales Leeren beim
+        Invalidieren (frühere Fassung _clear_calculator_storage_for()) traf
+        auch Knoten, die gerade in einem laufenden Thread rechneten, und riss
+        deren Zwischenstand weg - siehe die Begründung in
+        invalidate_cache_lod(). Hier fasst jeder Knoten ausschliesslich seine
+        EIGENEN Outputs an, unmittelbar bevor er sie ohnehin überschreibt.
+
+        Frühere LOD-Stufen bleiben absichtlich stehen: get_calculator_output()
+        sucht abwärts weiter und findet dort die Nullkarten der nicht
+        rechnenden Runden (siehe _is_final_lod()) - also korrekt "auf dieser
+        Stufe wurde noch nicht erodiert".
+        Parameter: calculator_id - z.B. "water.erosion_sedimentation"
+        Parameter: lod_level - LOD, dessen Einträge entfernt werden
+        Return: int - Anzahl gelöschter _calculator_data-Einträge
+        """
+        prefix = f"lod_{lod_level}_{calculator_id}_"
+        removed = 0
+        for key in [k for k in self._calculator_data if k.startswith(prefix)]:
+            del self._calculator_data[key]
+            removed += 1
+        return removed
+
     def invalidate_cache_lod(self, generator_type: str, lod_level: int = None):
         """
         Invalidiert Cache für spezifisches LOD-Level oder alle LODs
@@ -3706,6 +4137,7 @@ class DataLODManager(QObject):
                 "terrain": self._terrain_data,
                 "geology": self._geology_data,
                 "weather": self._weather_data,
+                "erosion": self._erosion_data,
                 "water": self._water_data,
                 "biome": self._biome_data,
                 "settlement": self._settlement_data,
@@ -3714,6 +4146,35 @@ class DataLODManager(QObject):
             if data_dict is not None:
                 data_dict.clear()
                 self._current_lods[generator_type] = 0
+
+            # KEIN pauschales Leeren des Calculator-Storage an dieser Stelle.
+            #
+            # Es war hier implementiert (_clear_calculator_storage_for(), siehe
+            # dort) und ist wieder entfernt: invalidate_cache_lod() läuft über
+            # invalidate_downstream_dependencies() bei JEDER Änderung eines
+            # UPSTREAM-Generators - auch dann, wenn der betroffene Generator
+            # gerade mitten in seinem eigenen Lauf steckt. Der Purge zog dessen
+            # laufenden Zwischenstand unter ihm weg.
+            #
+            # Beobachtet in der laufenden App: Terrain erreicht LOD 3, die
+            # automatische LOD-Progression stellt Terrain auf LOD 4 und
+            # invalidiert damit Weather. weather.temperature hatte für LOD 1
+            # bereits gerechnet und dabei - so ist der gekoppelte 3-Schicht-Loop
+            # gebaut - auch die Outputs von weather.wind/humidity/precipitation
+            # geschrieben. Der Purge löschte sie, der noch laufende Thread
+            # meldete temperature danach als fertig, weather.wind wurde bereit,
+            # fand nichts vor und scheiterte:
+            #   "weather.wind: temp_map_monthly für LOD 1 nicht verfügbar"
+            #
+            # Der ursprüngliche Zweck bleibt erhalten, aber lokal statt
+            # pauschal: die beiden Knoten, die ihr eigenes Vorergebnis als
+            # Eingabe wiedersehen würden (water.erosion_sedimentation und
+            # water.thermal_erosion lesen ihre Heightmap über
+            # get_calculator_combined_heightmap(), die genau diese Karten
+            # abzieht), räumen ihren eigenen Eintrag selbst weg, bevor sie
+            # rechnen - siehe clear_calculator_node_output() und deren Aufrufe
+            # in core/water_generator.py. Das ist gegen laufende Threads
+            # sicher, weil jeder Knoten nur seine EIGENEN Outputs anfasst.
 
         self.cache_invalidated.emit(generator_type)
         self.logger.info(f"Cache invalidated for {generator_type}" +
@@ -3734,6 +4195,7 @@ class DataLODManager(QObject):
             self._geology_data,
             self._settlement_data,
             self._weather_data,
+            self._erosion_data,
             self._water_data,
             self._biome_data
         ]
@@ -3775,6 +4237,7 @@ class DataLODManager(QObject):
             "geology": calculate_lod_memory(self._geology_data),
             "settlement": calculate_lod_memory(self._settlement_data),
             "weather": calculate_lod_memory(self._weather_data),
+            "erosion": calculate_lod_memory(self._erosion_data),
             "water": calculate_lod_memory(self._water_data),
             "biome": calculate_lod_memory(self._biome_data)
         }
@@ -3797,6 +4260,7 @@ class DataLODManager(QObject):
             "geology": calculate_array_memory(self._geology_data),
             "settlement": calculate_array_memory(self._settlement_data),
             "weather": calculate_array_memory(self._weather_data),
+            "erosion": calculate_array_memory(self._erosion_data),
             "water": calculate_array_memory(self._water_data),
             "biome": calculate_array_memory(self._biome_data)
         }
@@ -3829,7 +4293,7 @@ class DataLODManager(QObject):
                 "current_lods": self._current_lods,
                 "total_data_objects": sum(len(d) for d in [
                     self._terrain_data, self._geology_data, self._settlement_data,
-                    self._weather_data, self._water_data, self._biome_data
+                    self._weather_data, self._erosion_data, self._water_data, self._biome_data
                 ]),
                 "cache_entries": len(self._cache_timestamps),
                 "memory_usage_mb": self.get_memory_usage(),
@@ -3881,6 +4345,7 @@ class DataLODManager(QObject):
             "geology": extract_lod_info(self._geology_data),
             "settlement": extract_lod_info(self._settlement_data),
             "weather": extract_lod_info(self._weather_data),
+            "erosion": extract_lod_info(self._erosion_data),
             "water": extract_lod_info(self._water_data),
             "biome": extract_lod_info(self._biome_data),
             "current_lods": self._current_lods.copy(),
@@ -3919,8 +4384,21 @@ class DataLODManager(QObject):
         self._geology_data.clear()
         self._settlement_data.clear()
         self._weather_data.clear()
+        self._erosion_data.clear()
         self._water_data.clear()
         self._biome_data.clear()
+
+        # Feingranularer Calculator-Storage (siehe __init__-Kommentar
+        # "LOD-Lockstep-Umbau, Tracker #16") - fehlte hier bisher komplett,
+        # obwohl get_calculator_output()/set_calculator_output() (von JEDEM
+        # Calculator-Knoten genutzt, nicht nur Erosion) NUR diese Dicts lesen/
+        # schreiben. "Regenerate All" loeschte dadurch nur die alten Anzeige-
+        # Dicts oben, waehrend der eigentliche Berechnungs-Zwischenstand
+        # (inkl. water.erosion_sedimentation) unbemerkt stehen blieb - Bug-
+        # Report 2026-07-25 ("nach Reset alles auf null?").
+        self._calculator_data.clear()
+        self._current_calculator_lods.clear()
+        self._calculator_target_lod.clear()
 
         # Cache löschen
         self._cache_timestamps.clear()

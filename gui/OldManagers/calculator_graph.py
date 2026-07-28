@@ -46,25 +46,56 @@ _CALCULATOR_SPECS = [
     CalculatorSpec("terrain.slope", "terrain", ["terrain.redistribution"], ["slopemap"]),
     CalculatorSpec("terrain.shadow", "terrain", ["terrain.redistribution"], ["shadowmap"]),
 
-    # --- Geology (#5-#10) ---
-    CalculatorSpec("geology.classify_elevation", "geology", ["terrain.redistribution"], ["rock_map_raw"]),
-    CalculatorSpec("geology.slope_hardening", "geology",
-                   ["geology.classify_elevation", "terrain.slope"], ["rock_map_hardened"]),
-    CalculatorSpec("geology.blend_zones", "geology", ["geology.slope_hardening"], ["rock_map_blended"]),
-    CalculatorSpec("geology.tectonic_deformation", "geology",
-                   ["geology.blend_zones"], ["rock_map_deformed", "height_delta"]),
-    # Nicht in docs/generation_pipeline_dependencies.md aufgeführt (dort undokumentiert
-    # geblieben) - RockTypeClassifier.apply_faceted_boundaries(), letzter Formungsschritt
-    # vor Mass-Conservation (facettiert auch die Tektonik-Effekte, siehe
-    # core/geology_generator.py Docstring).
-    CalculatorSpec("geology.faceted_boundaries", "geology",
-                   ["geology.tectonic_deformation"], ["rock_map_faceted"]),
-    CalculatorSpec("geology.mass_conservation", "geology", ["geology.faceted_boundaries"], ["rock_map"]),
-    CalculatorSpec("geology.hardness", "geology", ["geology.mass_conservation"], ["hardness_map"]),
+    # --- Geology (3D-Gesteinsstapel-Rework, siehe core/geology_generator.py
+    # und den zugehörigen Umsetzungsplan) ---
+    # layer_thickness braucht jetzt auch terrain.slope (Slope-Verdünnung der
+    # Schichtdicke, Teil-2-Rework Punkt A4).
+    CalculatorSpec("geology.layer_thickness", "geology",
+                   ["terrain.redistribution", "terrain.slope"], ["layer_thickness"]),
+    # stack_deformation (vormals tectonic_delta) enthält jetzt zusätzlich den
+    # Terrain-Hub-Anteil (terrain_hub_delta) - wirkt NUR auf den Ausbiss,
+    # NICHT mehr additiv in height_delta (siehe geology.intrusions unten).
+    CalculatorSpec("geology.tectonic_displacement", "geology", ["terrain.redistribution"],
+                   ["stack_deformation", "terrain_hub_delta", "tilt_delta", "fold_delta",
+                    "fault_delta", "fault_distance_map"]),
+    CalculatorSpec("geology.outcrop", "geology",
+                   ["geology.layer_thickness", "geology.tectonic_displacement", "terrain.redistribution"],
+                   ["layer_id_map", "layer_boundaries"]),
+    # Keine direkte Abhängigkeit mehr von geology.tectonic_displacement -
+    # height_delta kommt jetzt ausschließlich aus der Intrusions-Dom-Hebung
+    # selbst, stack_deformation wird hier nicht mehr gelesen (nur noch
+    # transitiv über geology.outcrop gebraucht).
+    CalculatorSpec("geology.intrusions", "geology", ["geology.outcrop"],
+                   ["layer_id_map", "intrusion_distance_map", "intrusion_delta", "height_delta"]),
+    # Rein Gesteinstyp-Klassifikation (Relief-Proxy aus der Terrain-Heightmap),
+    # trägt bewusst KEINEN Höhenbeitrag bei - würde sich sonst mit Waters
+    # erosion_map/sedimentation_map verdoppeln (siehe Umsetzungsplan Punkt 8).
+    # Braucht deshalb auch KEINE neue water.*-Abhängigkeit.
+    CalculatorSpec("geology.sediment_overlay", "geology", ["geology.intrusions"], ["layer_id_map"]),
+    CalculatorSpec("geology.metamorphic_overprint", "geology",
+                   ["geology.tectonic_displacement", "geology.intrusions"], ["metamorphic_grade_map"]),
+    CalculatorSpec("geology.rock_color", "geology",
+                   ["geology.sediment_overlay", "geology.metamorphic_overprint"], ["rock_map"]),
+    CalculatorSpec("geology.hardness", "geology",
+                   ["geology.sediment_overlay", "geology.metamorphic_overprint"], ["hardness_map"]),
 
     # --- Weather (#11-#14) ---
+    # erosion.hydraulic als Abhaengigkeit: weather.temperature ist die Wurzel
+    # der Weather-Kette (wind/humidity/precipitation haengen an ihr), und sie
+    # liest ihre Heightmap ueber get_calculator_combined_heightmap(). Ohne
+    # diese Kante rechnet das gesamte Wetter auf dem UNerodierten Gelaende -
+    # genau der Zustand, der bis 2026-07-28 galt, als die Erosion noch hinter
+    # Weather im Water-Block lag. Sie ist damit die Kante, wegen der die
+    # Erosion ueberhaupt ein eigener Generator geworden ist.
+    #
+    # OFFEN und bewusst nicht mitgezogen: terrain.shadow wirft seine Schatten
+    # weiterhin auf dem unerodierten Gelaende. Das zu aendern hiesse, einen
+    # TERRAIN-Knoten auf die Erosion warten zu lassen - machbar (kein Zyklus,
+    # die Erosion braucht keine shadowmap), aber ein Eingriff in die
+    # Generator-Reihenfolge, der eine eigene Runde verdient.
     CalculatorSpec("weather.temperature", "weather",
-                   ["terrain.redistribution", "terrain.shadow"], ["temp_map"]),
+                   ["terrain.redistribution", "terrain.shadow", "erosion.hydraulic"],
+                   ["temp_map"]),
     CalculatorSpec("weather.wind", "weather",
                    ["terrain.redistribution", "weather.temperature", "terrain.shadow"], ["wind_map"]),
     CalculatorSpec("weather.humidity", "weather",
@@ -73,29 +104,184 @@ _CALCULATOR_SPECS = [
                    ["weather.humidity", "weather.temperature", "weather.wind", "terrain.redistribution"],
                    ["precip_map"]),
 
+    # --- Erosion (eigener Generator seit 2026-07-28) ---
+    #
+    # EIN Knoten fuer den kompletten Feld-Erosionslauf (Pipe-Hydraulik +
+    # mitstroemendes Sedimentfeld + Boeschungswinkel, siehe
+    # core/erosion_generator.py). Ein einzelner Knoten, weil die acht Passes
+    # einen gemeinsamen, eng gekoppelten Zustand teilen - sie ueber mehrere
+    # Knoten zu trennen hiesse, Hoehe/Wasser/Fluss/Sediment jede Runde durch
+    # den Storage zu schleusen.
+    #
+    # WARUM ZWISCHEN GEOLOGY UND WEATHER: bis 2026-07-28 lag die Erosion im
+    # Water-Block und damit HINTER weather.*. Temperatur, Wind und
+    # Niederschlag rechneten also auf dem UNerodierten Gelaende - obwohl die
+    # Erosion per Nutzer-Vorgabe ohnehin nicht vom Regen abhaengen darf. Der
+    # eigene Knoten mit ausschliesslich terrain/geology-Abhaengigkeiten dreht
+    # das um: ab hier sehen ALLE nachgelagerten Generatoren die tatsaechlichen
+    # Taeler. Die Regen-Entkopplung bleibt strukturell erzwungen, weil
+    # weather.* hier gar nicht auftaucht.
+    CalculatorSpec("erosion.hydraulic", "erosion",
+                   ["terrain.redistribution", "geology.hardness"],
+                   ["erosion_map", "sedimentation_map",
+                    "thermal_erosion_map", "thermal_deposition_map",
+                    "sediment_load_map", "water_depth_map", "flow_velocity_map"]),
+
     # --- Water (#15-#21, #22 erosion_feedback bewusst ausgeschlossen - siehe Docstring) ---
-    CalculatorSpec("water.lake_detection", "water", ["terrain.redistribution"], ["lake_map"]),
+    #
+    # ZWINGENDE REIHENFOLGE PRO LOD-RUNDE (Nutzer-Vorgabe 2026-07-27):
+    #   erosion.hydraulic -> lake_detection -> flow_network -> manning_flow ->
+    #   {soil_moisture, evaporation}
+    #
+    # Erst wird das GELAENDE geformt (Droplet-Erosion + Boeschungswinkel,
+    # beide UNABHAENGIG vom Weather-Niederschlag), danach wird der
+    # Wasserkreislauf mit dem ECHTEN Regen auf genau diesem veraenderten
+    # Gelaende simuliert. Diese Reihenfolge steht bewusst hier im Graph und
+    # nicht nur in HydrologySystemGenerator._execute_generation(): der
+    # CalculatorDispatcher leitet die Ausfuehrungsreihenfolge AUSSCHLIESSLICH
+    # aus depends_on ab und startet alle in derselben Runde bereiten Knoten
+    # parallel als eigene Threads. Ohne die lake_detection -> thermal_erosion-
+    # Kante wurden lake_detection und erosion_sedimentation gleichzeitig
+    # bereit - Seen wurden dann je nach Thread-Timing auf dem NICHT erodierten
+    # Gelaende gesucht und flow_network simulierte auf einer Heightmap, die
+    # die Erosion dieser Runde mal enthielt und mal nicht (nicht
+    # reproduzierbare Ergebnisse zwischen zwei identischen Laeufen).
+    #
+    # Droplet-Erosion-Umbau 2026-07-25 (siehe core/water_generator.py
+    # DropletErosionSystem): vollstaendig entkoppelt von water.flow_network -
+    # Partikel spawnen hoehen-gewichtet direkt aus der Heightmap, brauchen
+    # weder simulierten Abfluss noch terrain.slope (der Droplet-Gradient
+    # kommt direkt aus bilinearer Heightmap-Abtastung). Dieser Knoten haengt
+    # deshalb bewusst NICHT von weather.precipitation ab - Erosion modelliert
+    # geologische Zeit und ist vom heutigen Wetter unabhaengig. Die
+    # Reihenfolge-Regression in smoke_test_water_pipeline_order.py sichert
+    # beide Eigenschaften (Reihenfolge UND Regen-Entkopplung) strukturell ab.
+    # === ALTBESTAND DROPLET-EROSION (stillgelegt 2026-07-28) ===
+    # Ersetzt durch den Knoten erosion.hydraulic oben (Feldverfahren in
+    # core/erosion_generator.py). Kann samt DropletErosionSystem und den
+    # zugehoerigen _calc_*-Methoden in core/water_generator.py vollstaendig
+    # geloescht werden, sobald das Feldmodell freigegeben ist.
+    # CalculatorSpec("water.erosion_sedimentation", "water",
+    #                ["terrain.redistribution", "geology.hardness"],
+    #                ["erosion_map", "sedimentation_map"]),
+    # Böschungswinkel-Erosion ("Phase 6", siehe core/water_generator.py
+    # ThermalErosionSystem) - läuft NACH water.erosion_sedimentation (Fluss-
+    # Erosion schneidet zuerst das V-Kerbtal, Thermal Erosion kollabiert/
+    # verbreitert es danach je nach Härte, siehe ThermalErosionSystem-
+    # Docstring). Eigener Knoten statt in water.erosion_sedimentation
+    # eingefaltet (Nutzer-Entscheidung 2026-07-25) - separat einstellbar/
+    # anzeigbar. Letzter Knoten, der die Heightmap veraendert: ab hier ist das
+    # Gelaende dieser LOD-Runde final.
+    # === ALTBESTAND (stillgelegt 2026-07-28) ===
+    # Die Boeschungswinkel-Erosion ist jetzt ein Pass INNERHALB von
+    # erosion.hydraulic (dort umschaltbar zwischen dem hier verwendeten
+    # Gather-Verfahren und der Flux-Variante des Vorbilds). ThermalErosionSystem
+    # selbst bleibt in Gebrauch - der Erosion-Generator benutzt seine
+    # Konstanten und seine Haerte-Winkel-Beziehung.
+    # CalculatorSpec("water.thermal_erosion", "water",
+    #                ["water.erosion_sedimentation", "geology.hardness"],
+    #                ["thermal_erosion_map", "thermal_deposition_map"]),
+    # Pipe-Modell-Umbau 2026-07-25 (D8-Steilster-Abstieg -> virtuelle-Rohre-
+    # Hydraulik, siehe core/water_generator.py PipeFlowSimulator): lake_detection
+    # liefert kein full_basin_map mehr (die ungefilterte Wasserscheiden-
+    # Zuordnung wurde nur für die jetzt entfallene Wasserscheiden-Umleitung
+    # gebraucht - Senken füllen/laufen im Pipe-Modell strukturell von selbst
+    # über). water.steepest_descent (D8-Fließrichtung) entfällt komplett -
+    # es gibt kein "die eine Richtung" mehr unter kontinuierlichem Fluss.
+    # erosion.hydraulic als Abhaengigkeit: Senken werden auf dem fertig
+    # erodierten Gelaende gesucht (siehe Reihenfolge-Block oben). Diese Kante
+    # ersetzt die frueher hier stehende auf water.thermal_erosion und ist der
+    # Grund, warum der GESAMTE Water-Block das erodierte Gelaende sieht - die
+    # uebrigen Water-Knoten erben sie transitiv.
+    CalculatorSpec("water.lake_detection", "water",
+                   ["terrain.redistribution", "erosion.hydraulic"],
+                   ["lake_map"]),
+    # water_depth/velocity_x/velocity_y kommen jetzt DIREKT aus der
+    # Pipe-Simulation (echte simulierte Werte, siehe PipeFlowSimulator) -
+    # nicht mehr aus water.manning_flow (dessen Kanalgeometrie-Suche würde
+    # sonst eine zweite, abweichende "Wahrheit" für dieselbe physikalische
+    # Größe liefern). Erbt die Erosions-Reihenfolge transitiv ueber
+    # water.lake_detection. weather.precipitation ist hier - und NUR hier -
+    # die Wasserquelle: der Kreislauf laeuft mit dem echten Regen.
+    # water_biomes_map ist auf dieser Stufe die ZENTRALLINIE (ein Pixel
+    # breit, rein akkumulationsbasiert klassifiziert); die raeumlich
+    # ausgedehnte, gemalte Fassung liefert water.manning_flow.
+    # weather.temperature/wind/humidity treiben die potentielle Verdunstung -
+    # die zweite Senke des Modells neben dem Randabfluss (siehe
+    # core/water_generator.py EvaporationCalculator.
+    # calculate_potential_evaporation()). Sie haengt bewusst NUR von
+    # Wetterdaten ab und nicht von der Wasser-Klassifikation, sonst entstuende
+    # ein Zyklus mit water.evaporation. Ohne diese Senke konnte Wasser in
+    # abflusslosen Becken nur steigen.
     CalculatorSpec("water.flow_network", "water",
-                   ["terrain.redistribution", "weather.precipitation", "water.lake_detection"],
-                   ["flow_accumulation", "water_biomes_map"]),
-    CalculatorSpec("water.steepest_descent", "water", ["terrain.redistribution"], ["flow_directions"]),
+                   ["terrain.redistribution", "weather.precipitation", "weather.temperature",
+                    "weather.wind", "weather.humidity", "water.lake_detection"],
+                   ["flow_accumulation", "water_biomes_map", "water_depth", "velocity_x", "velocity_y",
+                    "ocean_outflow", "evaporated_volume", "depth_state", "flux_state"]),
+    # Geschrumpft auf reine Fluss-Breiten-Malerei (calculate_channel_width/
+    # paint_channel_width) - die frühere unabhängige Manning-Kanalgeometrie-
+    # Suche für flow_speed/water_depth ist gelöscht (redundant seit beide
+    # Größen direkt aus water.flow_network kommen, siehe
+    # ManningFlowCalculator-Docstring). cross_section wird jetzt aus der
+    # Kontinuitätsgleichung der simulierten Werte abgeleitet, braucht daher
+    # kein terrain.slope mehr als eigene Kante.
+    #
+    # water_biomes_map ist ein EIGENER Output dieses Knotens (die gemalte
+    # Fassung), kein Ueberschreiben von water.flow_networks gleichnamigem
+    # Output mehr: get_calculator_output() ist auf (LOD, calculator_id, key)
+    # geschluesselt, beide Fassungen existieren also unabhaengig
+    # nebeneinander. Vorher schrieb dieser Knoten in den Output-Slot eines
+    # FREMDEN Knotens - da water.evaporation/biome.super_override/
+    # settlement.suitability nur von water.flow_network abhingen, konnten sie
+    # in derselben Runde parallel laufen und je nach Thread-Timing die
+    # Zentrallinie ODER die gemalte Fassung lesen. Alle Konsumenten der
+    # FINALEN Wasser-Klassifikation haengen jetzt explizit von diesem Knoten
+    # ab; wer bewusst die Zentrallinie braucht (Boden-Feuchte-Quellflaeche),
+    # liest weiterhin water.flow_network.
     CalculatorSpec("water.manning_flow", "water",
-                   ["water.flow_network", "terrain.slope", "terrain.redistribution"],
-                   ["flow_speed", "cross_section"]),
-    CalculatorSpec("water.erosion_sedimentation", "water",
-                   ["water.flow_network", "water.manning_flow", "water.steepest_descent", "geology.hardness"],
-                   ["erosion_map", "sedimentation_map"]),
-    CalculatorSpec("water.soil_moisture", "water", ["water.flow_network"], ["soil_moist_map"]),
+                   ["water.flow_network", "terrain.redistribution"],
+                   ["cross_section", "channel_width", "water_biomes_map"]),
+    # weather.temperature zusaetzlich zur Wasser-Klassifikation: treibt den
+    # biom-abhaengigen Trocknungs-Term (siehe Biome-Preseed-Plan Punkt C) -
+    # weather.temperature haengt selbst nur von terrain.* ab, kein Zyklus.
+    # Haengt von BEIDEN Wasser-Knoten ab: water.flow_network fuer die
+    # Zentrallinie (100%-Feuchte-Quellflaeche, entkoppelt die Feuchte-
+    # Ausdehnung von der visuellen Flussbreite) und water.manning_flow fuer
+    # die gemalte Klassifikation.
+    # terrain.shadow zusaetzlich (2026-07-27): die Besonnung steuert, wie
+    # stark ein Hang austrocknet - sonnenabgewandte Haenge und von
+    # Nachbarbergen verschattete Lagen bleiben feuchter (Nutzer-Vorgabe:
+    # "die ebenen, nordhänge (bereiche wo wenig sonne hinkommt) sind eher
+    # feucht"). Die shadowmap enthaelt die tatsaechliche Beleuchtung inklusive
+    # Verschattung durch Nachbarberge und ist damit die bessere Quelle als
+    # eine reine Hangausrichtung aus der slopemap.
+    CalculatorSpec("water.soil_moisture", "water",
+                   ["water.manning_flow", "water.flow_network", "weather.temperature",
+                    "terrain.shadow"],
+                   ["soil_moist_map"]),
     CalculatorSpec("water.evaporation", "water",
-                   ["weather.temperature", "weather.wind", "weather.humidity", "water.flow_network"],
+                   ["weather.temperature", "weather.wind", "weather.humidity", "water.manning_flow"],
                    ["evaporation_map"]),
 
-    # --- Biome (#23-#27) ---
+    # --- Biome (#23-#27, + preseed_hint neu) ---
+    # Billiger Vorab-Biome-Schaetzwert NUR aus Slope+Breitengrad (kein
+    # Gauss-Fitness), haengt bewusst NUR von terrain.* ab (nicht von water.*/
+    # biome.base_classification) - loest das Henne-Ei-Problem "echte Biome-
+    # Klassifikation braucht water.soil_moisture, water.soil_moisture
+    # bräuchte fuer eine biom-abhaengige Kapazitaet wiederum den Biome-Typ"
+    # fuer die allererste LOD-Runde (siehe Biome-Preseed-Plan Punkt B). Ab
+    # LOD 2 nutzt water.soil_moisture stattdessen die ECHTE biome_map der
+    # Vorstufe (biome.integrate_layers bei lod_level-1).
+    CalculatorSpec("biome.preseed_hint", "biome",
+                   ["terrain.redistribution", "terrain.slope"], ["preseed_biome_map"]),
     CalculatorSpec("biome.base_classification", "biome",
                    ["terrain.redistribution", "weather.temperature", "weather.precipitation",
                     "water.soil_moisture"], ["base_biome_map"]),
+    # water.manning_flow statt water.flow_network: Biome brauchen die FINALE,
+    # gemalte Wasser-Klassifikation (Fluss in voller Breite), nicht die
+    # ein Pixel breite Zentrallinie - siehe water.manning_flow-Kommentar oben.
     CalculatorSpec("biome.super_override", "biome",
-                   ["terrain.redistribution", "weather.temperature", "water.flow_network",
+                   ["terrain.redistribution", "weather.temperature", "water.manning_flow",
                     "water.soil_moisture"], ["super_biome_mask", "super_biome_probabilities"]),
     CalculatorSpec("biome.integrate_layers", "biome",
                    ["biome.base_classification", "biome.super_override"], ["biome_map"]),
@@ -104,8 +290,11 @@ _CALCULATOR_SPECS = [
                    ["weather.temperature", "weather.precipitation"], ["climate_classification"]),
 
     # --- Settlement (#28-#34) ---
+    # water.manning_flow statt water.flow_network: Siedlungseignung bewertet
+    # die Naehe zu tatsaechlichen Gewaesserflaechen, also die FINALE gemalte
+    # Klassifikation - siehe water.manning_flow-Kommentar oben.
     CalculatorSpec("settlement.suitability", "settlement",
-                   ["terrain.redistribution", "terrain.slope", "water.flow_network"],
+                   ["terrain.redistribution", "terrain.slope", "water.manning_flow"],
                    ["combined_suitability_map"]),
     CalculatorSpec("settlement.settlements", "settlement",
                    ["settlement.suitability", "terrain.redistribution"], ["settlement_list"]),
@@ -148,7 +337,19 @@ CALCULATOR_GRAPH: Dict[str, CalculatorSpec] = {spec.calculator_id: spec for spec
 # Ticket #4) = 39 aktive Knoten. Davon 2 (city_blocks, landscape_voronoi) im
 # Zuge von [[project-settlement-plot-physics-rebuild]] wieder entfernt (durch
 # settlement.plot_nodes/PlotPhysicsSystem vollständig ersetzt) = 37 aktive Knoten.
-assert len(CALCULATOR_GRAPH) == 37, f"Erwartet 37 aktive Calculators, gefunden {len(CALCULATOR_GRAPH)}"
+# Geology-3D-Gesteinsstapel-Rework (siehe core/geology_generator.py) ersetzte die
+# 7 alten Geology-Knoten (classify_elevation...hardness) durch 8 neue
+# (layer_thickness...hardness) = netto +1 -> 38 aktive Knoten. Biome-Preseed-
+# Plan fuegte biome.preseed_hint hinzu = netto +1 -> 39 aktive Knoten.
+# Pipe-Modell-Umbau 2026-07-25 entfernte water.steepest_descent (D8-
+# Fliessrichtung, siehe core/water_generator.py PipeFlowSimulator) = netto -1
+# -> 38 aktive Knoten. Derselbe Umbau fuegte water.thermal_erosion hinzu
+# (Boeschungswinkel-Erosion, "Phase 6") = netto +1 -> 39 aktive Knoten.
+# Erosion-Umbau 2026-07-28 (Partikel- -> Feldverfahren, eigener Generator,
+# siehe core/erosion_generator.py): water.erosion_sedimentation und
+# water.thermal_erosion stillgelegt, dafuer erosion.hydraulic neu = netto -1
+# -> 38 aktive Knoten.
+assert len(CALCULATOR_GRAPH) == 38, f"Erwartet 38 aktive Calculators, gefunden {len(CALCULATOR_GRAPH)}"
 
 
 class CalculatorRoundScheduler:

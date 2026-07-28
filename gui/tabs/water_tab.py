@@ -34,7 +34,13 @@ class WaterTab(BaseMapTab):
 
         # Generator-Konfiguration vor BaseMapTab.__init__()
         self.generator_type = "water"
-        self.required_dependencies = ["heightmap", "slopemap", "hardness_map", "rock_map",
+        # Genau die Karten, die Water tatsächlich liest (siehe
+        # HydrologySystemGenerator._get_prepared_water_inputs()). slopemap und
+        # rock_map sind 2026-07-27 entfernt: beide wurden verlangt, aber von
+        # keiner Water-Berechnung je benutzt - der Tab blockierte die
+        # Generierung dadurch, bis Geology seine rock_map geliefert hatte,
+        # obwohl Water sie nicht braucht.
+        self.required_dependencies = ["heightmap", "hardness_map",
                                       "precip_map", "temp_map", "wind_map", "humid_map"]
 
         # Water-spezifische Attribute (vor super(), da create_parameter_controls
@@ -90,12 +96,21 @@ class WaterTab(BaseMapTab):
             self.logger.info("Control panel layout was detached - reinstalled")
 
         try:
-            self._create_parameter_group("Lake Detection", ["lake_volume_threshold", "rain_threshold"], 0.01)
+            # rain_threshold und manning_coefficient sind 2026-07-27 entfernt -
+            # beide hatten seit dem Pipe-Modell-Umbau keinen Effekt mehr auf
+            # das Ergebnis (siehe gui/config/value_default.py WATER für die
+            # volle Begründung).
+            self._create_parameter_group("Lake Detection", ["lake_volume_threshold"], 100.0)
             self._create_parameter_group(
-                "Flow Dynamics", ["river_abundance", "manning_coefficient", "diffusion_radius"], 0.001)
-            self._create_parameter_group(
-                "Erosion & Sedimentation",
-                ["erosion_strength", "sediment_capacity_factor", "settling_velocity"], 0.01)
+                "Flow Dynamics", ["river_abundance", "diffusion_radius"], 0.001)
+            # === ALTBESTAND (stillgelegt 2026-07-28) ===
+            # Die Erosions-Regler sind in den Erosion-Tab gewandert
+            # (gui/tabs/erosion_tab.py). Sie haetten hier keinen Effekt mehr,
+            # weil Water kein Gelaende mehr formt.
+            # self._create_parameter_group(
+            #     "Erosion & Sedimentation",
+            #     ["erosion_strength", "erosion_passes", "sediment_capacity_factor",
+            #      "settling_velocity", "thermal_erosion_strength"], 0.01)
             self._create_parameter_group("Evaporation", ["evaporation_base_rate"], 0.0001)
             self._create_dependency_status()
             self._create_gpu_status()
@@ -179,22 +194,38 @@ class WaterTab(BaseMapTab):
 
         self.display_mode_group = QButtonGroup()
 
+        # Thermal Erosion/Deposition ergänzt (2026-07-27): beide formen das
+        # Gelände sichtbar um und haben einen eigenen Slider, waren aber in
+        # keinem Anzeigemodus zu sehen - der Effekt des Sliders liess sich
+        # dadurch nur indirekt über die kombinierte Heightmap beurteilen.
         modes = [
-            ("height", "Height", 0),
-            ("water_map", "Water Depth", 1),
-            ("flow_map", "Flow", 2),
-            ("erosion_map", "Erosion", 3),
-            ("sedimentation_map", "Sedimentation", 4),
-            ("soil_moist_map", "Soil Moisture", 5),
+            ("height", "Height"),
+            ("water_map", "Water Depth"),
+            ("flow_map", "Flow"),
+            # === ALTBESTAND (stillgelegt 2026-07-28) ===
+            # Erosion, Sedimentation und die beiden Thermal-Karten haben einen
+            # eigenen Tab (gui/tabs/erosion_tab.py). Hier wuerden sie nur noch
+            # leere Karten zeigen, weil WaterData sie nicht mehr fuehrt.
+            # ("erosion_map", "Erosion"),
+            # ("sedimentation_map", "Sedimentation"),
+            # ("thermal_erosion_map", "Thermal Erosion"),
+            # ("thermal_deposition_map", "Thermal Deposition"),
+            ("soil_moist_map", "Soil Moisture"),
+            ("evaporation_map", "Evaporation"),
         ]
 
-        for mode_key, label, button_id in modes:
+        for button_id, (mode_key, label) in enumerate(modes):
             radio = QRadioButton(label)
             if button_id == 0:
                 radio.setChecked(True)
-            radio.toggled.connect(lambda checked, key=mode_key: self._on_display_mode_changed(key, checked))
+            # buttonClicked statt toggled: toggled feuert beim Umschalten
+            # ZWEIMAL (einmal mit checked=False für das abgewählte Radio).
             self.display_mode_group.addButton(radio, button_id)
             layout.addWidget(radio)
+
+        self._display_modes_by_id = {button_id: mode_key
+                                      for button_id, (mode_key, _) in enumerate(modes)}
+        self.display_mode_group.idClicked.connect(self._on_display_mode_selected)
 
         return layout
 
@@ -216,12 +247,15 @@ class WaterTab(BaseMapTab):
         except Exception as e:
             self.logger.error(f"Parameter change handling failed: {e}")
 
-    def _on_display_mode_changed(self, mode: str, checked: bool):
-        """Handler für Display Mode Changes"""
-        if checked:
-            self.current_display_mode = mode
-            self.update_display_mode()
-            self.logger.debug(f"Display mode changed to: {mode}")
+    def _on_display_mode_selected(self, button_id: int):
+        """Handler für Display-Mode-Wechsel (an QButtonGroup.idClicked, nicht
+        an QRadioButton.toggled - letzteres feuert beim Umschalten zweimal)."""
+        mode = self._display_modes_by_id.get(button_id)
+        if mode is None:
+            return
+        self.current_display_mode = mode
+        self.update_display_mode()
+        self.logger.debug(f"Display mode changed to: {mode}")
 
     # =============================================================================
     # DISPLAY UPDATE SYSTEM
@@ -245,7 +279,7 @@ class WaterTab(BaseMapTab):
                 # Kombiniert, nicht die unbearbeitete Terrain-Rohausgabe - siehe
                 # DataLODManager.get_terrain_data_combined()
                 data = self.data_lod_manager.get_terrain_data_combined("heightmap")
-                data_type = "heightmap"
+                data_type = "heightmap_combined"
             else:
                 data = self.data_lod_manager.get_water_data(self.current_display_mode)
                 data_type = self.current_display_mode
@@ -329,6 +363,9 @@ class WaterTab(BaseMapTab):
                         "water_map": self.data_lod_manager.get_water_data("water_map"),
                         "flow_speed": self.data_lod_manager.get_water_data("flow_speed"),
                         "erosion_map": self.data_lod_manager.get_water_data("erosion_map"),
+                        "sedimentation_map": self.data_lod_manager.get_water_data("sedimentation_map"),
+                        "thermal_erosion_map": self.data_lod_manager.get_water_data("thermal_erosion_map"),
+                        "ocean_outflow": self.data_lod_manager.get_water_data("ocean_outflow"),
                     }
                     if any(value is not None for value in results.values()):
                         self.hydrology_stats.update_generation_statistics(results)
@@ -383,9 +420,7 @@ class WaterTab(BaseMapTab):
         try:
             values = {
                 "heightmap": self.data_lod_manager.get_terrain_data("heightmap"),
-                "slopemap": self.data_lod_manager.get_terrain_data("slopemap"),
                 "hardness_map": self.data_lod_manager.get_geology_data("hardness_map"),
-                "rock_map": self.data_lod_manager.get_geology_data("rock_map"),
                 "precip_map": self.data_lod_manager.get_weather_data("precip_map"),
                 "temp_map": self.data_lod_manager.get_weather_data("temp_map"),
                 "wind_map": self.data_lod_manager.get_weather_data("wind_map"),
@@ -443,13 +478,15 @@ class HydrologyStatisticsWidget(QGroupBox):
         preview_group = QGroupBox("Parameter Preview")
         preview_layout = QVBoxLayout()
 
-        self.lake_threshold_label = QLabel("Lake Threshold: 0.1m")
-        self.erosion_strength_label = QLabel("Erosion Strength: 1.0")
-        self.manning_coeff_label = QLabel("Manning Coefficient: 0.03")
+        self.lake_threshold_label = QLabel("Lake Threshold: -")
+        self.erosion_strength_label = QLabel("Erosion Strength: -")
+        self.thermal_strength_label = QLabel("Thermal Erosion Strength: -")
+        self.river_abundance_label = QLabel("River Abundance: -")
 
         preview_layout.addWidget(self.lake_threshold_label)
         preview_layout.addWidget(self.erosion_strength_label)
-        preview_layout.addWidget(self.manning_coeff_label)
+        preview_layout.addWidget(self.thermal_strength_label)
+        preview_layout.addWidget(self.river_abundance_label)
 
         preview_group.setLayout(preview_layout)
         layout.addWidget(preview_group)
@@ -460,10 +497,14 @@ class HydrologyStatisticsWidget(QGroupBox):
         self.water_coverage_label = QLabel("Water Coverage: -")
         self.avg_flow_speed_label = QLabel("Avg Flow Speed: -")
         self.total_erosion_label = QLabel("Total Erosion: -")
+        self.net_terrain_change_label = QLabel("Net Terrain Change: -")
+        self.ocean_outflow_label = QLabel("Ocean Outflow: -")
 
         stats_layout.addWidget(self.water_coverage_label)
         stats_layout.addWidget(self.avg_flow_speed_label)
         stats_layout.addWidget(self.total_erosion_label)
+        stats_layout.addWidget(self.net_terrain_change_label)
+        stats_layout.addWidget(self.ocean_outflow_label)
 
         stats_group.setLayout(stats_layout)
         layout.addWidget(stats_group)
@@ -471,15 +512,38 @@ class HydrologyStatisticsWidget(QGroupBox):
         self.setLayout(layout)
 
     def update_parameter_preview(self, parameters: dict):
-        """Aktualisiert Parameter-Preview"""
-        self.lake_threshold_label.setText(f"Lake Threshold: {parameters.get('lake_volume_threshold', 0.1):.3f}m")
-        self.erosion_strength_label.setText(f"Erosion Strength: {parameters.get('erosion_strength', 1.0):.1f}")
-        self.manning_coeff_label.setText(f"Manning Coefficient: {parameters.get('manning_coefficient', 0.03):.3f}")
+        """
+        Aktualisiert die Parameter-Preview. Zeigt nur Parameter, die das
+        Ergebnis tatsächlich beeinflussen - der frühere "Manning Coefficient"
+        wurde hier prominent angezeigt, obwohl er seit dem Pipe-Modell-Umbau
+        keinerlei Wirkung mehr hatte (siehe gui/config/value_default.py WATER).
+        """
+        lake_threshold = parameters.get("lake_volume_threshold")
+        erosion_strength = parameters.get("erosion_strength")
+        thermal_strength = parameters.get("thermal_erosion_strength")
+        river_abundance = parameters.get("river_abundance")
+
+        self.lake_threshold_label.setText(
+            "Lake Threshold: -" if lake_threshold is None else f"Lake Threshold: {lake_threshold:,.0f} m³")
+        self.erosion_strength_label.setText(
+            "Erosion Strength: -" if erosion_strength is None else f"Erosion Strength: {erosion_strength:.1f}")
+        self.thermal_strength_label.setText(
+            "Thermal Erosion Strength: -" if thermal_strength is None
+            else f"Thermal Erosion Strength: {thermal_strength:.1f}")
+        self.river_abundance_label.setText(
+            "River Abundance: -" if river_abundance is None
+            else f"River Abundance: {river_abundance * 100:.0f}% der Wasserläufe")
 
     def update_generation_statistics(self, results: dict):
         """
         Aktualisiert Statistiken nach abgeschlossener Generation.
-        Parameter: results (dict mit water_map/flow_speed/erosion_map)
+        Parameter: results (dict mit water_map/flow_speed/erosion_map/
+            sedimentation_map/thermal_erosion_map/ocean_outflow)
+
+        Einheiten-Korrektur 2026-07-27: "Total Erosion" wurde als "m/Jahr"
+        beschriftet. Die Droplet-Erosion liefert kumulierte METER über die
+        LOD-Kette, keine Jahresrate - es gibt im gesamten Modell keinen
+        Zeitbezug, gegen den eine Rate definiert wäre.
         """
         water_map = results.get("water_map")
         if water_map is not None:
@@ -494,6 +558,36 @@ class HydrologyStatisticsWidget(QGroupBox):
             self.avg_flow_speed_label.setText(f"Avg Flow Speed: {avg_speed:.2f} m/s")
 
         erosion_map = results.get("erosion_map")
+        thermal_erosion_map = results.get("thermal_erosion_map")
         if erosion_map is not None:
-            total_erosion = np.sum(erosion_map)
-            self.total_erosion_label.setText(f"Total Erosion: {total_erosion:.1f} m/Jahr")
+            total_erosion = float(np.sum(erosion_map))
+            thermal_note = ""
+            if thermal_erosion_map is not None:
+                thermal_note = f" (+ {float(np.sum(thermal_erosion_map)):,.0f} m Böschung)"
+            self.total_erosion_label.setText(
+                f"Erosions-Durchsatz: {total_erosion:,.0f} m{thermal_note}")
+
+        sedimentation_map = results.get("sedimentation_map")
+        if erosion_map is not None and sedimentation_map is not None:
+            # Netto-Höhenänderung der Karte: was abgetragen und nicht wieder
+            # abgelagert wurde, hat die Karte verlassen (Partikel-Restfracht
+            # am Kartenrand, siehe DropletErosionSystem "Massenerhaltung").
+            #
+            # Die beiden Karten sind kumulierter DURCHSATZ, nicht
+            # Netto-Änderung: eine Zelle kann dieselbe Fracht über den Lauf
+            # hinweg mehrfach abgeben und wieder aufnehmen (siehe
+            # DropletErosionSystem.simulate_erosion_sedimentation). Ihre Summen
+            # sind deshalb als "Durchsatz" beschriftet, und die Kennzahl, die
+            # tatsächlich beschreibt, wie stark sich das Gelände verformt hat,
+            # ist die Spanne der Netto-Änderung pro Zelle - genau die Zahl, an
+            # der sich eine unplausible Spitze erkennen lässt.
+            net_per_cell = np.asarray(sedimentation_map, dtype=np.float64) - erosion_map
+            net_change = float(net_per_cell.sum())
+            self.net_terrain_change_label.setText(
+                f"Net Terrain Change: {net_change:,.0f} m "
+                f"(pro Zelle {float(net_per_cell.min()):+,.0f} … "
+                f"{float(net_per_cell.max()):+,.0f} m)")
+
+        ocean_outflow = results.get("ocean_outflow")
+        if ocean_outflow is not None:
+            self.ocean_outflow_label.setText(f"Ocean Outflow: {float(ocean_outflow):,.0f} m³")

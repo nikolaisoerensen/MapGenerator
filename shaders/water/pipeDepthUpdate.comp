@@ -1,0 +1,57 @@
+#version 430
+// Pass 2 des virtuellen-Rohre-Hydraulikmodells (siehe pipeFluxUpdate.comp fuer
+// Pass 1 und core/water_generator.py PipeFlowSimulator fuer die volle
+// Herleitung). Braucht den GERADE in Pass 1 berechneten Fluss (fluxIn ist
+// hier der WRITE-Output von Pass 1 dieser Iteration, nicht der Zustand der
+// vorherigen Iteration) - kann daher nicht mit Pass 1 fusioniert werden.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D depthIn;
+layout(r32f, binding = 1) uniform readonly image2D rainMap;
+layout(rgba32f, binding = 2) uniform readonly image2D fluxIn;
+// Verdunstung als zweite Senke neben dem Randabfluss (Meter Wassersaeule PRO
+// SCHRITT, bereits mit dt multipliziert vom Dispatcher) - siehe
+// core/water_generator.py PipeFlowSimulator.EVAPORATION_TO_DEPTH_RATE. Ohne
+// sie konnte Wasser in abflusslosen Becken nur steigen.
+layout(r32f, binding = 3) uniform readonly image2D evaporationMap;
+layout(r32f, binding = 4) uniform writeonly image2D depthOut;
+
+uniform int u_size;
+uniform float u_dt;
+uniform float u_pipe_length;
+
+// fluxIn-Kanaele: x=f_L, y=f_R, z=f_T, w=f_B (Ausfluss DIESER Zelle).
+// Kartenrand liefert 0 Zufluss (offene Grenze, siehe pipeFluxUpdate.comp).
+vec4 fluxAt(ivec2 coord) {
+    if (coord.x < 0 || coord.x >= u_size || coord.y < 0 || coord.y >= u_size) {
+        return vec4(0.0);
+    }
+    return imageLoad(fluxIn, coord);
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float d1 = imageLoad(depthIn, coord).r + imageLoad(rainMap, coord).r;
+    vec4 f = fluxAt(coord);
+
+    // Zufluss von Nachbarn = deren jeweils ENTGEGENGESETZTER Ausfluss.
+    float inFromLeft = fluxAt(coord + ivec2(-1, 0)).y;   // Nachbar links, dessen f_R
+    float inFromRight = fluxAt(coord + ivec2(1, 0)).x;   // Nachbar rechts, dessen f_L
+    float inFromTop = fluxAt(coord + ivec2(0, -1)).w;    // Nachbar oben, dessen f_B
+    float inFromBottom = fluxAt(coord + ivec2(0, 1)).z;  // Nachbar unten, dessen f_T
+
+    float incoming = inFromLeft + inFromRight + inFromTop + inFromBottom;
+    float outgoing = f.x + f.y + f.z + f.w;
+    float cellArea = u_pipe_length * u_pipe_length;
+
+    float dTransported = max(0.0, d1 + u_dt / cellArea * (incoming - outgoing));
+
+    // Verdunstung zuletzt, begrenzt durch den vorhandenen Wasserstand - eine
+    // trockene Zelle kann nicht verdunsten (identisch zur CPU-Referenz
+    // PipeFlowSimulator._pipe_step_cpu).
+    float evaporated = min(dTransported, max(0.0, imageLoad(evaporationMap, coord).r));
+    float d2 = dTransported - evaporated;
+    imageStore(depthOut, coord, vec4(d2, 0.0, 0.0, 0.0));
+}

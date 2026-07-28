@@ -11,7 +11,7 @@ Funktionsweise: Dynamisches Wetter- und Feuchtigkeitssystem mit DataLODManager-I
 
 Parameter Input:
 - air_temp_entry (Lufttemperatur bei Karteneintritt in °C)
-- solar_power (max. solare Gewinne, default 20°C)
+- ground_temp_offset (Offset auf die Boden-Zieltemperatur-Klimatologie, default 0°C)
 - altitude_cooling (Abkühlen der Luft pro km Altitude, default 6°C)
 - thermic_effect (Thermische Verformung der Windvektoren durch shademap)
 - wind_speed_factor (Windgeschwindigkeit je Luftdruckdifferenz)
@@ -83,6 +83,23 @@ _BIOME_ROUGHNESS_DAMPING = np.array([
     0.00, 0.00, 0.02, 0.02, 0.02,   # 15-19: ocean/lake/grand_river/river/creek
 ], dtype=np.float32)
 
+# Solar-Absorptionsfaktor je Biome-Kategorie (gleiche Index-Reihenfolge wie
+# _BIOME_ROUGHNESS_DAMPING oben) - wie stark ein Biom die volle
+# Sonne/Schatten-Spanne (T_min..T_max, siehe _get_solar_absorption_factor())
+# tatsächlich erreicht. 1.0 = volle Erwärmung (z.B. Wüste, kahler Fels),
+# niedriger = Vegetation reflektiert/verdunstet einen Teil weg (dichter
+# Bewuchs erwärmt sich weniger als offener Boden bei gleicher Einstrahlung).
+# Stilisiert, nicht meteorologisch kalibriert - Startwerte, siehe
+# _get_solar_absorption_factor() für die Herleitung/Anwendung.
+_BIOME_SOLAR_ABSORPTION = np.array([
+    0.95, 0.55, 0.55, 0.90, 0.50, 0.70, 1.00, 0.85, 0.45, 0.60,
+    0.75, 0.50, 0.65, 0.80, 0.95,   # 0-14: ice_cap..badlands
+    0.85, 0.85, 0.85, 0.85, 0.85,   # 15-19: ocean/lake/grand_river/river/creek
+    # (Wasserflächen: leicht reduziert statt 1.0 - ihre Temperatur wird
+    # ohnehin schon separat über den Verdunstungs-Kühlungsterm dieser Datei
+    # gedämpft, kein Doppel-Effekt gewünscht)
+], dtype=np.float32)
+
 # Stärke des Grat-/Canyon-Speedup-Terms (WindNinja-Terrain-Shape-Effekt,
 # siehe [[project-wind-ridge-speedup]]) - maximale multiplikative
 # Geschwindigkeitsänderung (+/-) bei extremer (3-Sigma-)Krümmung, empirischer
@@ -99,6 +116,70 @@ _RIDGE_SPEEDUP_STRENGTH = 0.35
 # stabilitätsgekappt.
 _LEE_TURBULENCE_BOOST = 1.5
 
+# Rand-Puffer (Weather-Rework Punkt C, Nutzer-Beobachtung "extreme
+# Randeffekte, keine Erweiterung der Map") - km-basiert statt fixer Pixelzahl,
+# damit die Pufferbreite mit map_distance_km sinnvoll mitskaliert (siehe
+# WeatherSystemGenerator._compute_edge_padding_px()). Kein eigener Slider -
+# im Umsetzungsplan nicht als Regler vorgesehen, nur als fester Standardwert.
+_EDGE_PADDING_KM = 2.0
+# Maximale Sponge-Layer-Dämpfung am äußersten Rand-Pixel des Puffers (0 = kein
+# Effekt, 1 = pro Zeitschritt hart auf den Ausgangszustand zurückgesetzt) -
+# rampt von 0 an der Puffer-Innenkante glatt (smoothstep) auf diesen Wert
+# hoch, siehe _run_coupled_atmosphere_simulation.
+_EDGE_SPONGE_MAX_STRENGTH = 0.4
+
+# Nutzer-Abstimmung 2026-07-24 (Revision der ersten Kalibrierung vom
+# 2026-07-23): precip_map ist eine Akkumulation über EINE simulierte
+# saisonale Periode (kein Jahreswert - "mm Niederschlag" ist als Wasser-
+# Tiefe ohnehin bereits pro m² definiert, unabhängig von Pixelgröße, keine
+# Flächen-Umrechnung nötig/nichts, das mit der Pixelauflösung skaliert
+# werden müsste). Ziel-Kalibrierung: 50mm als typischer Maximalwert unter
+# Default-Parametern, seltene Ausreißer bei extremen Wetter-/Breitengrad-
+# Kombinationen dürfen darüber liegen (kein hartes Limit - siehe die 500
+# gH2O/m²-Sicherheitsklemme in _run_coupled_atmosphere_simulation, in
+# Rohwerten VOR diesem Faktor, bleibt unverändert bestehen). Empirischer
+# Rohwert-Bereich bei Default-Parametern über verschiedene Breitengrade/
+# Luftfeuchte-Einstellungen: Mittelwert ~1-50, Maximum ~4-120 - Faktor 0.5
+# bildet das auf ~0.5-25 (typisch) bzw. bis ~60 (seltene Extreme) ab. Reiner
+# End-Skalierungsfaktor (KEINE neue Physik), NUR an der äußeren Monats-
+# Mittelungs-Stelle angewendet (_calc_temperature/_calc_precipitation,
+# siehe dortige Kommentare) - NICHT innerhalb von
+# _run_coupled_atmosphere_simulation selbst, damit die dortige
+# Wasserbilanz-Prüfung (Weather-Rework Punkt H, smoke_test_weather_
+# climatology.py run_water_mass_balance) weiterhin in den tatsächlichen
+# physikalischen Rohwerten rechnet, unbeeinflusst von dieser rein
+# präsentations-/verbrauchsseitigen Nachskalierung.
+PRECIP_ANNUAL_SCALE_FACTOR = 0.5
+
+# Bodentemperatur-/konvektiver-Wärmeübergangs-Modell (löst den alten
+# additiven solar_power-Term ab, siehe [[project-ground-heat-transfer]] und
+# Plan "Weather: Bodentemperatur-Modell + konvektiver Wärmeübergang").
+# Alle Konstanten hier sind Startwerte/Literaturkonstanten, an mehreren
+# Stellen explizit als "muss nachjustiert werden" markiert (Nutzer-Vorgabe) -
+# siehe Docstrings der jeweiligen Verwendungsstelle für Details.
+ALPHA0 = 5.8                          # W/(m^2*K), Paquet-Basiswert bei 0 m/s Wind (Literaturkonstante)
+RHO_AIR = 1.2                         # kg/m^3, Standard-Luftdichte nahe Bodenniveau
+C_P_AIR = 1005.0                      # J/(kg*K), spezifische Wärmekapazität trockener Luft
+# Referenzhöhe der "biome-relevanten" Luftsäule für die Boden-Luft-
+# Wärmeaustausch-Massenbilanz - BEWUSST UNABHÄNGIG von
+# AtmosphereLayers.THICKNESS_M[GROUND]=150m (treibt nur die vertikale
+# Fluss-Divergenz zwischen den 3 CFD-Schichten) und REF_ALTITUDE_AGL[GROUND]
+# =75m (treibt die theta<->t_real-Umrechnung) - beide bleiben fürs
+# bestehende 3-Schicht-CFD-Gerüst unverändert.
+GROUND_HEAT_COLUMN_HEIGHT_M = 20.0    # m
+GROUND_HEAT_CAPACITY_PER_M2 = RHO_AIR * GROUND_HEAT_COLUMN_HEIGHT_M * C_P_AIR  # J/(m^2*K), = 24120
+GROUND_TEMP_SPREAD = 20.0             # °C, T_max-T_min am Boden, feste interne Spanne (kein Slider) - Startwert
+# Effektive Austausch-Zeitskala (siehe _run_coupled_atmosphere_simulation,
+# Boden-Luft-Wärmeübergang) - KEIN reales "Monat = X Sekunden"-Konzept,
+# reiner Kalibrierungswert (numerisch geprüft: bei diesem Wert bleibt der
+# Schritt-Faktor bei allen LOD-Stufen komfortabel unter 1.0/stabil, UND die
+# Windabhängigkeit der Angleichungsgeschwindigkeit bleibt sichtbar statt in
+# Sättigung zu laufen - siehe Plan-Dokument "Numerische Prüfung"). Startwert.
+GROUND_HEAT_TIME_SCALE_S = 7200.0     # s (2 "effektive" Stunden pro Monats-Durchlauf)
+WIND_FACTOR_MIN_SPEED = 0.5           # m/s, Clamp gegen Divisionsblowup nahe 0 m/s
+ATM_OPTICAL_DEPTH = 0.15              # dimensionslos, Airmass-Dämpfung bei flachem Sonnenwinkel - Startwert
+ATM_MIN_ELEVATION_DEG = 3.0           # Grad, Clamp gegen Horizont-Divisionsblowup
+
 
 class WeatherData:
     """
@@ -107,7 +188,10 @@ class WeatherData:
     Attributes:
         wind_map: 2D numpy.float32 array (H,W,2), Windvektoren in m/s
         temp_map: 2D numpy.float32 array, Lufttemperatur in °C
-        precip_map: 2D numpy.float32 array, Niederschlag in gH2O/m²
+        precip_map: 2D numpy.float32 array, Niederschlag in mm/Jahr-Äquivalent
+            (siehe PRECIP_ANNUAL_SCALE_FACTOR - kalibrierte Nachskalierung des
+            rohen, physikalisch bilanzierten Kondensations-/Advektions-
+            Ergebnisses, nicht direkt gemessene Rohgröße)
         humid_map: 2D numpy.float32 array, Luftfeuchtigkeit in gH2O/m³
         lod_level: int, Numerisches LOD-Level
         actual_size: int, Tatsächliche Kartengröße
@@ -226,16 +310,132 @@ class WeatherSystemGenerator:
         """Setzt die Parameter, die alle _calc_*-Methoden bis zur nächsten frischen
         Anfrage verwenden (vom GenerationOrchestrator aufgerufen)."""
         self._current_parameters = parameters
+        # An DataLODManager spiegeln (analog BaseTerrainGenerator/map_distance_km,
+        # siehe DataLODManager.set_map_latitude()) - macht den Breitengrad für
+        # Biome/Water verfügbar, u.a. für biome.preseed_hint, das VOR Weather
+        # laufen kann und daher nicht auf self._current_parameters zugreifen kann.
+        if self.data_lod_manager and 'map_latitude' in parameters:
+            self.data_lod_manager.set_map_latitude(parameters['map_latitude'])
+
+    # Referenz-Klimatologie (Nutzer-Abstimmung 2026-07-23, siehe Chat) -
+    # Zeilen = Breitengrad 0..90 in 10°-Schritten, Spalten = die 6 saisonalen
+    # Jan/Feb..Nov/Dez-Perioden dieser Datei, Werte = mittlere Temperatur °C
+    # bei 100m Referenzhöhe (Nordhalbkugel-Konvention - Südhalbkugel spiegelt
+    # die Spalten um ein halbes Jahr, siehe _climate_baseline()). Ersetzt die
+    # frühere reine 2-Stützstellen-Kurve (nur Äquator+Pol, cos(Breitengrad)-
+    # Interpolation dazwischen) durch eine an 10 Breitengraden abgestimmte
+    # Tabelle - deutlich näher an einer echten Klimatologie als eine reine
+    # Cosinus-Form zwischen zwei Extremwerten.
+    _TEMP_CLIMATOLOGY_TABLE = np.array([
+        # JanFeb MarApr MayJun JulAug SepOct NovDez
+        [26.0, 27.0, 27.0, 26.0, 27.0, 26.0],   # 0°
+        [24.0, 26.0, 27.0, 27.0, 26.0, 24.0],   # 10°
+        [19.0, 23.0, 27.0, 28.0, 25.0, 20.0],   # 20°
+        [13.0, 19.0, 25.0, 27.0, 21.0, 15.0],   # 30°
+        [4.0, 11.0, 19.0, 22.0, 15.0, 7.0],     # 40°
+        [-2.0, 5.0, 14.0, 17.0, 9.0, 1.0],      # 50°
+        [-12.0, -3.0, 8.0, 13.0, 3.0, -8.0],    # 60°
+        [-22.0, -12.0, 2.0, 7.0, -4.0, -16.0],  # 70°
+        [-28.0, -18.0, -3.0, 3.0, -10.0, -22.0],  # 80°
+        [-32.0, -22.0, -6.0, 0.0, -14.0, -26.0],  # 90°
+    ], dtype=np.float64)
+
+    def _climate_baseline(self, latitude_deg: float, month_index: int) -> Tuple[float, float]:
+        """
+        Realistische Klimatologie-Basiswerte (Temperatur °C, relative Feuchte
+        [0-1]) für einen Breitengrad und Monats-Index (0=Jan/Feb-Periode ...
+        5=Nov/Dez), OHNE Nutzer-Offset - `air_temp_entry`/`air_humidity_entry`
+        werden AUSSERHALB dieser Funktion additiv angewendet (siehe
+        _generate_seasonal_parameters).
+        - Temperatur: bilineare Interpolation in _TEMP_CLIMATOLOGY_TABLE
+          (10 Breitengrad-Stützstellen × 6 Monats-Perioden, siehe Tabellen-
+          Docstring oben) - abgestimmte Zwischenwerte statt einer reinen
+          cos(Breitengrad)-Kurve zwischen nur zwei Extremen (Äquator/Pol).
+        - Feuchte: weiterhin die einfache Breitengrad-Kurve aus Runde 1
+          (grobe Näherung, feuchter am Äquator, trockener zu den Polen) -
+          nicht Teil dieser Abstimmungsrunde.
+        Südhalbkugel (latitude_deg<0): Spalten-Index um 3 Perioden (=ein
+        halbes Jahr) verschoben statt der Tabelle selbst - Sommer im Januar
+        statt im Juli.
+        """
+        abs_lat = min(abs(latitude_deg), 90.0)
+        row_f = abs_lat / 10.0
+        row_lo = int(np.floor(row_f))
+        row_hi = min(row_lo + 1, 9)
+        row_t = row_f - row_lo
+
+        col = month_index % 6
+        if latitude_deg < 0:
+            col = (col + 3) % 6
+
+        temp_lo = self._TEMP_CLIMATOLOGY_TABLE[row_lo, col]
+        temp_hi = self._TEMP_CLIMATOLOGY_TABLE[row_hi, col]
+        temp_baseline = float(temp_lo + (temp_hi - temp_lo) * row_t)
+
+        lat_factor = float(np.cos(np.radians(abs_lat)))  # 1 am Äquator, 0 am Pol
+        EQUATOR_HUMID, POLE_HUMID = 0.75, 0.45
+        humid_baseline = POLE_HUMID + (EQUATOR_HUMID - POLE_HUMID) * lat_factor
+
+        return temp_baseline, humid_baseline
+
+    # Winterintensität pro saisonaler Periode (Nordhalbkugel-Konvention,
+    # JanFeb..NovDez - Südhalbkugel spiegelt über denselben Spalten-Shift wie
+    # _TEMP_CLIMATOLOGY_TABLE) - 1.0 = Tiefwinter, 0.0 = Hochsommer, für
+    # _baroclinic_wind_factor() unten.
+    _WINTER_INTENSITY_BY_COL = (1.0, 0.6, 0.15, 0.0, 0.4, 0.8)
+
+    def _baroclinic_wind_factor(self, latitude_deg: float, month_index: int) -> float:
+        """
+        Nutzer-Bug-Report 2026-07-23: gemessene Windstärken lagen selbst bei
+        Extremwerten nur bei ~2-11 m/s, weil der thermisch gekoppelte
+        Druckterm (Weather-Rework Punkt A, THERMAL_PRESSURE_COEFF) den
+        Karten-MITTELWERT abzieht - eine gleichmäßige Klimatologie-
+        Verschiebung der GANZEN Karte (z.B. "das ist jetzt eine Polkarte im
+        Januar") hebt sich dadurch exakt heraus und hat GAR KEINEN Effekt auf
+        Wind, nur lokale (Terrain-/Sonnenstand-)Gradienten wirken. Echte
+        Baroklinität (Äquator-Pol-Temperaturgefälle, treibt Jetstream/
+        Frontalzonen) nimmt real mit |Breitengrad| zu und ist im Winter am
+        stärksten (größerer Temperaturkontrast als im Sommer) - das bildet
+        dieser Faktor nach, indem er das GESAMTE synoptische Druckfeld
+        (pressure_field, inkl. Monats-Rauschen) skaliert, BEVOR daraus
+        Wind-Beschleunigung abgeleitet wird.
+        Angewendet als direkter Multiplikator auf die fertigen, simulierten
+        u/v-Windkomponenten (siehe "Ergebnis zusammensetzen" unten) statt auf
+        einen einzelnen internen Term: zwei Versuche, stattdessen NUR das
+        synoptische Druckfeld bzw. NUR den druckgetriebenen u_target/v_target-
+        Beschleunigungsterm zu skalieren, blieben empirisch wirkungslos (beide
+        Terme sind gegenüber Terrain-Ablenkung/thermischer Konvektion im
+        Loop zu schwach, um die resultierende Windstärke spürbar zu
+        verschieben, selbst bei 2.7-facher Skalierung). Eine direkte
+        Skalierung des Endergebnisses ist weniger "physikalisch hergeleitet",
+        garantiert aber tatsächlich den vom Nutzer gewünschten Effekt
+        (spürbar stärkerer Wind bei hoher Breite im Winter) unabhängig davon,
+        welcher interne Term gerade dominiert.
+        Rückgabe: ~0.3 (Äquator, ganzjährig ruhig) bis ~6.0 (hohe Breite,
+        Tiefwinter, sturmstark) - reine Kalibrierungsgröße, keine exakt
+        hergeleitete physikalische Konstante.
+        """
+        abs_lat = min(abs(latitude_deg), 90.0)
+        col = month_index % 6
+        if latitude_deg < 0:
+            col = (col + 3) % 6
+        winter_intensity = self._WINTER_INTENSITY_BY_COL[col]
+        return 0.3 + 5.7 * (abs_lat / 90.0) * (0.15 + 0.85 * winter_intensity)
 
     def _generate_seasonal_parameters(self, base_parameters: Dict[str, Any],
                                        month_index: int) -> Dict[str, Any]:
         """
-        Funktionsweise: month_index 0..5 = Jan/Feb .. Nov/Dez. Nutzt
-        WEATHER.CLIMATE_ZONE_SEASONAL_OFFSETS als saisonale FORM um den
-        User-Slider-Wert als Zentrum ("Jahres-Mittel" der Klimazone), statt
-        einer beliebigen Sinus-Kurve - Werte bleiben dadurch klimazonen-
-        typisch plausibel. Deterministisch aus map_seed (analog Fix #21:
-        aus parameters gelesen, nicht aus dem konstruktionszeit-fixen
+        Funktionsweise: month_index 0..5 = Jan/Feb .. Nov/Dez. Temperatur/
+        Feuchte kommen aus einer echten Breitengrad×Monat-Klimatologie
+        (_climate_baseline) - `air_temp_entry`/`air_humidity_entry`/
+        `ground_temp_offset` sind additive Offsets darauf (Stilentscheidung:
+        "wärmere/kältere Welt"), NICHT mehr die alleinige Basis.
+        `ground_temp_offset` hat bewusst KEINE eigene Saisonalität (Nutzer-
+        Entscheidung: Sommer/Winter kommt ausschließlich aus der
+        Klimatologie) - nur `wind_speed_factor` nutzt weiterhin WEATHER.
+        CLIMATE_ZONE_SEASONAL_OFFSETS als saisonale Form um den Sliderwert
+        (unverändert). Deterministisch aus map_seed (analog
+        Fix #21: aus parameters gelesen, nicht aus dem konstruktionszeit-fixen
         self.map_seed, da GenerationOrchestrator.get_generator_instance()
         WeatherSystemGenerator ohne map_seed konstruiert).
         Aufgabe: Liefert ein vollständiges Parameter-Dict für einen einzelnen
@@ -257,10 +457,49 @@ class WeatherSystemGenerator:
             jitter = rng.normal(0.0, jitter_frac * (config["max"] - config["min"]))
             return float(np.clip(base_value + offset + jitter, config["min"], config["max"]))
 
-        params["air_temp_entry"] = _apply_offset("air_temp_entry", WEATHER.AIR_TEMP_ENTRY)
-        params["solar_power"] = _apply_offset("solar_power", WEATHER.SOLAR_POWER)
+        latitude = base_parameters.get('map_latitude', WEATHER.MAP_LATITUDE["default"])
+        climate_temp, climate_humid_fraction = self._climate_baseline(latitude, month_index)
+        # Die ~5°C Variation (Nutzer-Vorgabe) ist RÄUMLICH gedacht (Perlin-
+        # Noise über die Karte, "Randwerte sollen über Perlin Noise eine
+        # Varianz haben"), NICHT ein zusätzlicher, für die GESAMTE Karte
+        # gleicher Zufalls-Sprung pro Monat - das lieferte hier vorher
+        # rng.normal(0.0, 5.0) fälschlich obendrauf (Verwechslung räumlich vs.
+        # zeitlich) und verbreiterte die Schwankung über die eigentlich
+        # gewünschte Spanne hinaus. Die tatsächliche räumliche Streuung kommt
+        # unverändert aus _generate_atmospheric_noise() (~±3-5°C, per Pixel),
+        # hier bleibt air_temp_entry deshalb rein deterministisch aus
+        # Klimatologie + Nutzer-Offset.
+        temp_offset = base_parameters.get('air_temp_entry', WEATHER.AIR_TEMP_ENTRY["default"])
+        humid_offset = base_parameters.get('air_humidity_entry', WEATHER.AIR_HUMIDITY_ENTRY["default"])
+        params["air_temp_entry"] = float(np.clip(
+            climate_temp + temp_offset,
+            WEATHER.AIR_TEMP_ENTRY["min"], WEATHER.AIR_TEMP_ENTRY["max"]))
+        # Bug-Fix: vorher wurde die KOMBINIERTE Basis+Offset-Summe auf den
+        # Slider-EIGENEN Bereich (-50..+50, ein reiner Offset-Bereich) statt
+        # auf ein sinnvolles absolutes Prozent-Fenster geklemmt - die
+        # Klimatologie-Basis allein liegt bereits bei 45-75%, wurde dadurch
+        # fast immer hart auf 50 gekappt, unabhängig vom Slider. Da dieser
+        # Wert bisher ohnehin nirgends gelesen wurde (siehe Bug-Fix in
+        # _run_coupled_atmosphere_simulation's Initialbedingung), blieb das
+        # bisher unbemerkt - jetzt wo er tatsächlich die Anfangs-Feuchte
+        # speist, muss die Klemmung auf 0-100% (physikalisch sinnvoller
+        # Prozent-Bereich) erfolgen, nicht auf den schmalen Slider-Bereich.
+        params["air_humidity_entry"] = float(np.clip(
+            climate_humid_fraction * 100.0 + humid_offset, 0.0, 100.0))
+
+        # Boden-Zieltemperatur-Basis (löst solar_power ab) - exakt dasselbe
+        # Klimatologie+Offset-Muster wie air_temp_entry oben (KEINE eigene
+        # Saisonalität über _apply_offset()/CLIMATE_ZONE_SEASONAL_OFFSETS,
+        # Nutzer-Entscheidung: Sommer/Winter kommt ausschließlich aus
+        # _climate_baseline). Unabhängig vom Luft-Offset - Boden und Luft
+        # sind physikalisch getrennte Größen, erst über Konvektion gekoppelt
+        # (siehe _run_coupled_atmosphere_simulation).
+        ground_offset = base_parameters.get('ground_temp_offset', WEATHER.GROUND_TEMP_OFFSET["default"])
+        params["ground_temp_baseline"] = float(np.clip(
+            climate_temp + ground_offset,
+            WEATHER.GROUND_TEMP_OFFSET["min"], WEATHER.GROUND_TEMP_OFFSET["max"]))
+
         params["wind_speed_factor"] = _apply_offset("wind_speed_factor", WEATHER.WIND_SPEED_FACTOR)
-        params["air_humidity_entry"] = _apply_offset("air_humidity_entry", WEATHER.AIR_HUMIDITY_ENTRY)
 
         # Windrichtung ist zirkular - Rotation der Basisrichtung um eine
         # saisonale Amplitude (moderat, "vorherrschende Richtung" soll nicht
@@ -474,6 +713,9 @@ class WeatherSystemGenerator:
         # _run_coupled_atmosphere_simulation sechsmal neu abzufragen (siehe
         # [[project-wind-roughness]]).
         roughness_damping = self._get_roughness_damping(heightmap.shape, lod_level)
+        # Statisch über alle 6 Monate dieser Runde, gleiches Muster wie
+        # roughness_damping direkt darüber (siehe _get_solar_absorption_factor()).
+        solar_absorption_factor = self._get_solar_absorption_factor(heightmap.shape, lod_level)
 
         from gui.config.value_default import WEATHER
         from core.terrain_generator import generate_seasonal_sun_angles
@@ -481,14 +723,51 @@ class WeatherSystemGenerator:
         longitude = self._current_parameters.get('map_longitude', WEATHER.MAP_LONGITUDE["default"])
 
         monthly_shadowmaps = []
+        monthly_sun_angles = []
         month_params_list = []
         for month_index in range(6):
             month_params = self._generate_seasonal_parameters(self._current_parameters, month_index)
             sun_angles = generate_seasonal_sun_angles(month_index, latitude, longitude)
             month_shadowmap = self.shadow_calculator.calculate_shadows(
                 heightmap, lod_level, sun_angles_override=sun_angles)
+            # Dieselbe LOD-gefilterte Kanal-Teilmenge, die auch die Shadowmap
+            # erzeugt hat (siehe _weighted_solar_exposure()-Docstring - die
+            # Kanalzahl muss exakt übereinstimmen, sonst Shape-Mismatch-Fallback).
+            filtered_angles, _ = self.shadow_calculator.get_sun_angles_for_lod(
+                lod_level, sun_angles_override=sun_angles)
             monthly_shadowmaps.append(month_shadowmap)
+            monthly_sun_angles.append(filtered_angles)
             month_params_list.append(month_params)
+
+        # LOD-Vererbung (Weather-Rework Punkt F) - Endzustand derselben 6
+        # saisonalen Perioden der VORHERIGEN, gröberen LOD-Stufe, falls
+        # vorhanden (allererster Durchlauf: None, reproduziert das alte,
+        # rein noise-basierte Anfangsverhalten unverändert). Alle drei
+        # Felder werden gemeinsam benötigt - fehlt eines (z.B. alter Cache-
+        # Eintrag ohne *_layers_monthly), wird komplett auf Noise-Seeding
+        # zurückgefallen statt mit einem unvollständigen Zustand zu starten.
+        prev_temp_layers_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.temperature", "temp_map_layers_monthly", lod_level - 1) if lod_level > 1 else None
+        prev_wind_layers_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.wind", "wind_map_layers_monthly", lod_level - 1) if lod_level > 1 else None
+        prev_humid_layers_monthly = self.data_lod_manager.get_calculator_output(
+            "weather.humidity", "humid_map_layers_monthly", lod_level - 1) if lod_level > 1 else None
+        has_lod_inheritance = (prev_temp_layers_monthly is not None and prev_wind_layers_monthly is not None
+                               and prev_humid_layers_monthly is not None)
+
+        # Bodenfeuchte-/Wasserflächen-Kopplung (Weather-Rework Punkt G) - reale
+        # water.soil_moisture-Karte der VORHERIGEN LOD-Stufe (analog zum
+        # Erosion-Vorstufen-Muster in water_generator.py, kein Zyklus: strikt
+        # eine bereits abgeschlossene, frühere Runde). Nicht monats-abhängig
+        # (Water rechnet keine 6 saisonalen Bodenfeuchte-Karten), daher einmal
+        # geholt und für alle 6 Monate wiederverwendet. Fehlt sie (allererster
+        # LOD-Durchlauf, Water noch nie gelaufen), bleibt soil_moisture_field
+        # None - _run_coupled_atmosphere_simulation fällt dann exakt auf den
+        # alten pauschalen 50%-Platzhalter zurück.
+        prev_soil_moist_map = self.data_lod_manager.get_calculator_output(
+            "water.soil_moisture", "soil_moist_map", lod_level - 1) if lod_level > 1 else None
+        soil_moisture_field = (self._interpolate_2d_bicubic(prev_soil_moist_map, target_size)
+                                if prev_soil_moist_map is not None else None)
 
         try:
             monthly_temp_maps, monthly_wind_maps = [], []
@@ -496,9 +775,19 @@ class WeatherSystemGenerator:
             monthly_temp_layers, monthly_wind_layers, monthly_humid_layers = [], [], []
 
             for month_index in range(6):
+                initial_state = None
+                if has_lod_inheritance:
+                    initial_state = {
+                        'temp_layers': prev_temp_layers_monthly[month_index],
+                        'wind_layers': prev_wind_layers_monthly[month_index],
+                        'humid_layers': prev_humid_layers_monthly[month_index],
+                    }
                 result = self._run_coupled_atmosphere_simulation(
                     heightmap, monthly_shadowmaps[month_index], month_params_list[month_index],
-                    target_size, n_steps=atmosphere_steps, roughness_damping=roughness_damping)
+                    target_size, n_steps=atmosphere_steps, roughness_damping=roughness_damping,
+                    initial_state=initial_state, soil_moisture_field=soil_moisture_field,
+                    sun_angles=monthly_sun_angles[month_index],
+                    solar_absorption_factor=solar_absorption_factor)
 
                 monthly_temp_layers.append(result['temp_layers'])
                 monthly_wind_layers.append(result['wind_layers'])
@@ -507,7 +796,10 @@ class WeatherSystemGenerator:
                 monthly_temp_maps.append(result['temp_layers'][AtmosphereLayers.GROUND])
                 monthly_wind_maps.append(result['wind_layers'][AtmosphereLayers.GROUND])
                 monthly_humid_maps.append(result['humid_layers'][AtmosphereLayers.GROUND])
-                monthly_precip_maps.append(result['precip_map'])
+                # PRECIP_ANNUAL_SCALE_FACTOR hier (nicht in
+                # _run_coupled_atmosphere_simulation) angewendet - siehe
+                # dortiger Docstring-Kommentar.
+                monthly_precip_maps.append(result['precip_map'] * PRECIP_ANNUAL_SCALE_FACTOR)
 
             # Mehrgenerationen-Puffer für Feuchte (siehe frühere _calc_humidity-
             # Fassung, Verhalten hier 1:1 erhalten, nur an den neuen Aufrufort
@@ -556,7 +848,8 @@ class WeatherSystemGenerator:
                 f"nutzen ihren eigenen Einzelschicht-Fallback")
             monthly_temp_maps = [
                 self._calculate_temperature_field(
-                    heightmap, monthly_shadowmaps[m], month_params_list[m], target_size)
+                    heightmap, monthly_shadowmaps[m], month_params_list[m], target_size,
+                    sun_angles=monthly_sun_angles[m])
                 for m in range(6)
             ]
             temp_map = np.mean(np.stack(monthly_temp_maps, axis=0), axis=0).astype(np.float32)
@@ -695,6 +988,11 @@ class WeatherSystemGenerator:
                 humid_map_monthly[month_index], temp_map_monthly[month_index],
                 wind_map_monthly[month_index], heightmap, month_params))
 
+        # PRECIP_ANNUAL_SCALE_FACTOR auch im Einzelschicht-Fallback (siehe
+        # dortiger Docstring-Kommentar) - sonst würde dieser seltener
+        # erreichte Pfad precip_map in einer anderen Größenordnung als der
+        # normale gekoppelte Pfad liefern.
+        monthly_precip_maps = [p * PRECIP_ANNUAL_SCALE_FACTOR for p in monthly_precip_maps]
         precip_map = np.mean(np.stack(monthly_precip_maps, axis=0), axis=0).astype(np.float32)
         self.data_lod_manager.set_calculator_output(
             calculator_id, lod_level, {"precip_map": precip_map, "precip_map_monthly": monthly_precip_maps})
@@ -720,7 +1018,11 @@ class WeatherSystemGenerator:
     def _run_coupled_atmosphere_simulation(self, heightmap: np.ndarray, shadowmap: np.ndarray,
                                           month_params: Dict[str, Any], target_size: int,
                                           n_steps: int,
-                                          roughness_damping: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
+                                          roughness_damping: Optional[np.ndarray] = None,
+                                          initial_state: Optional[Dict[str, np.ndarray]] = None,
+                                          soil_moisture_field: Optional[np.ndarray] = None,
+                                          sun_angles: Optional[list] = None,
+                                          solar_absorption_factor: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
         """
         Gekoppelte 3-Schicht-Atmosphären-Simulation (Boden/Mittel/Hoch, siehe
         AtmosphereLayers) - ersetzt das bisherige "Temp einmal -> Wind einmal ->
@@ -755,20 +1057,78 @@ class WeatherSystemGenerator:
         z.B. wenn Biome in dieser Session nie angefragt wurde) reproduziert
         exakt das alte Verhalten ohne Rauigkeits-Term.
 
+        initial_state (optional, Weather-Rework Punkt F "LOD-Vererbung"): dict
+        mit 'temp_layers' (3,H_alt,W_alt, reale Temperatur), 'wind_layers'
+        (3,H_alt,W_alt,2), 'humid_layers' (3,H_alt,W_alt) - das ENDERGEBNIS
+        derselben saisonalen Periode der VORHERIGEN, gröberen LOD-Stufe (von
+        _calc_temperature aus deren bereits gespeicherten *_layers_monthly-
+        Outputs geholt). Wird bikubisch auf die aktuelle Auflösung hoch-
+        skaliert und als CFD-Startbedingung verwendet statt der reinen
+        Perlin-Noise-Randomisierung - eine neue, höhere LOD-Stufe beginnt
+        damit nahe am bereits eingeschwungenen Zustand der Vorstufe, statt
+        wieder bei einer frischen, unkorrelierten Zufalls-Verteilung. None
+        (Default, z.B. beim allerersten LOD-Durchlauf) reproduziert exakt das
+        alte, rein noise-basierte Anfangsverhalten.
+
+        soil_moisture_field (optional, Weather-Rework Punkt G "Bodenfeuchte-/
+        Wasserflächen-Kopplung über vorheriges LOD"): reale
+        `water.soil_moisture`-Karte (0-100, siehe core/water_generator.py) der
+        VORHERIGEN, gröberen LOD-Stufe, bereits vom Aufrufer bikubisch auf die
+        aktuelle Rohauflösung hochskaliert (VOR dem Rand-Puffer dieser
+        Methode - wird hier zusätzlich per np.pad(mode='edge') mitgepolstert,
+        analog zu heightmap/shadowmap oben). Ersetzt den bisherigen fest
+        verdrahteten Platzhalter (`soil_moisture=50/100=0.5`, weder Wüste noch
+        See unterschieden sich) in der Verdunstungs-Berechnung. None (Default,
+        z.B. allererster LOD-Durchlauf, bevor Water je gelaufen ist)
+        reproduziert exakt den alten pauschalen 50%-Wert.
+
         Rückgabe: dict mit 'wind_layers' (3,H,W,2), 'temp_layers' (3,H,W, reale
         Temperatur), 'humid_layers' (3,H,W), 'precip_map' (H,W).
         """
         from gui.config.value_default import WEATHER  # TURBULENCE_STRENGTH-Default weiter unten
 
+        # Rand-Puffer (Weather-Rework Punkt C, siehe _compute_edge_padding_px())
+        # - Eingaben werden per Rand-Extension auf ein größeres Gitter gebracht,
+        # die GESAMTE Simulation läuft transparent darauf (jede nachfolgende
+        # Ableitung aus heightmap.shape betrifft automatisch das vergrößerte
+        # Gitter), ein Sponge-Layer dämpft den Puffer-Bereich pro Zeitschritt
+        # zurück zu seinem Ausgangszustand (siehe unten), am Ende wird auf die
+        # ursprüngliche Größe zurückgeschnitten.
+        edge_pad_px = self._compute_edge_padding_px(heightmap.shape[0])
+        if edge_pad_px > 0:
+            heightmap = np.pad(heightmap, edge_pad_px, mode='edge')
+            if shadowmap.ndim == 3:
+                shadowmap = np.pad(shadowmap, ((edge_pad_px, edge_pad_px), (edge_pad_px, edge_pad_px), (0, 0)),
+                                    mode='edge')
+            else:
+                shadowmap = np.pad(shadowmap, edge_pad_px, mode='edge')
+            if roughness_damping is not None:
+                roughness_damping = np.pad(roughness_damping, edge_pad_px, mode='edge')
+            if solar_absorption_factor is not None:
+                solar_absorption_factor = np.pad(solar_absorption_factor, edge_pad_px, mode='edge')
+            if soil_moisture_field is not None:
+                soil_moisture_field = np.pad(soil_moisture_field, edge_pad_px, mode='edge')
+
         height, width = heightmap.shape
+
+        # Weather-Rework Punkt G: reale Bodenfeuchte/Wasserflächen statt des
+        # alten pauschalen 50%-Platzhalters - fehlt sie (allererster LOD-
+        # Durchlauf), bleibt exakt der bisherige Wert erhalten.
+        if soil_moisture_field is not None:
+            soil_moisture_norm = np.clip(soil_moisture_field.astype(np.float32) / 100.0, 0.0, 1.0)
+        else:
+            soil_moisture_norm = np.full((height, width), 0.5, dtype=np.float32)
         L = AtmosphereLayers
         altitude_cooling_rate = month_params['altitude_cooling'] / 1000.0  # °C/m (Parameter ist °C/km)
 
         # Latentwärme-Kopplungsstärke: °C pro gH2O/m³ Kondensation/Verdunstung.
-        # Startwert (Bereich 0.05-0.15 laut Plan), empirisch, dokumentiert wie
-        # frühere Kalibrierungen dieser Session - noch nicht am echten Nutzer-
-        # Feedback nachjustiert.
-        LATENT_HEAT_COEFFICIENT = 0.1
+        # Nutzer-Feedback 2026-07-25: der urspruengliche Startwert (0.1) ergab
+        # laut scratch_ground_heat_humidity_isolation.py nur ~0.01-0.12°C
+        # Effekt zwischen trockenem und feuchtem Lauf ueber alle Breitengrade -
+        # zu schwach neben dem neuen sensiblen Waermeuebergang, Nutzer wollte
+        # spuerbar mehr (~1°C). Empirisch hochskaliert (ca. 17x, gemessener
+        # Mittelwert ~0.06°C bei 0.1 -> Ziel ~1°C), erneut verifiziert.
+        LATENT_HEAT_COEFFICIENT = 1.7
         # Vertikaler Austausch: Bruchteil pro Zeitschritt, der zwischen
         # Nachbarschichten geblendet wird, proportional zur Thermik-Stärke -
         # geklemmt, damit ein einzelner Zeitschritt nie mehr als 30% einer
@@ -782,6 +1142,19 @@ class WeatherSystemGenerator:
         # ist u/v jetzt eine prognostische, transportierte Größe, ein hartes
         # Überschreiben würde die advehierte Struktur jedes Mal zerstören.
         PRESSURE_RELAX_RATE = 0.3
+        # Weather-Rework Punkt A: thermisch gekoppeltes Druckfeld (mit
+        # Rückweg) - wärmer als der Schicht-Durchschnitt = lokal niedrigerer
+        # effektiver Druck (Auftriebs-Rückkopplung), addiert sich zum
+        # bestehenden synoptischen Gefälle (bleibt bewusst zusätzlich
+        # bestehen, siehe pressure_field oben - "realistische Wetterlagen
+        # kommen auch von außerhalb der Karte"). Koeffizient: °C-Anomalie zu
+        # Druck-Gradient-Einheit - Startwert (analog zu LATENT_HEAT_
+        # COEFFICIENT oben), noch nicht am echten Nutzer-Feedback
+        # nachjustiert. Per Checkbox abschaltbar (WEATHER.
+        # THERMAL_PRESSURE_COUPLING, Default AN) - bei AUS reproduziert der
+        # Code exakt den vorherigen, rein synoptischen Pfad.
+        THERMAL_PRESSURE_COEFF = 0.03
+        thermal_pressure_coupling = month_params.get('thermal_pressure_coupling', True)
         # Wind-Geschwindigkeits-Multiplikatoren für die Initialbedingung je
         # Schicht (Wind nimmt mit Höhe zu, geringere Bodenreibung) - nur
         # Startwert, der Loop entwickelt die tatsächliche Struktur.
@@ -813,14 +1186,82 @@ class WeatherSystemGenerator:
         slopemap = self._calculate_slopes_vectorized(heightmap)
         curvature_norm = self._calculate_curvature_normalized(heightmap)
 
-        # Rand-Verstärkung für Vorticity Confinement (Nutzer-Wunsch: "an der
-        # Kartengrenze mehr Varianz" - der Kartenrand ist, wo die synoptische
-        # Randbedingung einströmt, dort real am wenigsten "ausgeglichen"). Faktor
-        # 1.0 in der Kartenmitte, bis 2.5x direkt am Rand, exponentiell abklingend
-        # über ~8% der Kartengröße - Startwerte, empirisch nachjustierbar.
+        # Gewichtete Solar-Einstrahlung - Kombination der 7 Sonnenwinkel-Kanäle
+        # über einen aus dem ECHTEN, monats-/breitengrad-abhängigen Sonnenstand
+        # abgeleiteten Airmass-Dämpfungsfaktor (siehe _weighted_solar_exposure()
+        # Docstring, ATM_OPTICAL_DEPTH oben) statt der alten festen Tageszeit-
+        # Gewichtung. Die Hangausrichtungs-Abhängigkeit selbst steckt bereits
+        # PRO KANAL in shadowmap (dot(normal, sun_dir) aus _calculate_slope_
+        # shading_cpu je Sonnenwinkel) - hier kommt nur die Gewichtung der
+        # Kanäle untereinander hinzu. Einmalig vor dem Zeitschritt-Loop
+        # berechnet (shadowmap ändert sich innerhalb eines Monats nicht),
+        # analog zu roughness_damping.
+        solar_exposure = self._weighted_solar_exposure(shadowmap, sun_angles=sun_angles)
+
+        # Bodentemperatur-Modell (löst den alten additiven solar_power-Term
+        # ab, siehe Plan "Weather: Bodentemperatur-Modell + konvektiver
+        # Wärmeübergang"): T_boden = T_min + (T_max-T_min)*effective_exposure,
+        # eine echte Soll-Temperatur statt einer additiven Störung. Biom-
+        # abhängiger Absorptionsfaktor (best-effort, None bei fehlenden Biome-
+        # Daten -> keine Änderung ggü. reiner solar_exposure) dämpft, wie weit
+        # ein Pixel die volle Spanne tatsächlich erreicht (dichte Vegetation
+        # reflektiert/verdunstet einen Teil weg, siehe _BIOME_SOLAR_ABSORPTION).
+        ground_temp_baseline = month_params['ground_temp_baseline']
+        # sun_relevance_factor (Nutzer-Slider, Default 1.0 = unveraendert)
+        # skaliert die feste GROUND_TEMP_SPREAD - bei 0 hat Sonnenexposition
+        # keinen Einfluss mehr auf T_boden, nur noch ground_temp_baseline
+        # zaehlt. .get() mit Default statt required_params, da rueckwaerts-
+        # kompatibel zu Aufrufern/Tests ohne diesen neuen Parameter.
+        sun_relevance = month_params.get('sun_relevance_factor', 1.0)
+        effective_spread = GROUND_TEMP_SPREAD * sun_relevance
+        ground_temp_min = ground_temp_baseline - effective_spread / 2.0
+        ground_temp_max = ground_temp_baseline + effective_spread / 2.0
+        effective_exposure = solar_exposure * (
+            solar_absorption_factor if solar_absorption_factor is not None else 1.0)
+        effective_exposure = np.clip(effective_exposure, 0.0, 1.0)
+        ground_temp_target = (ground_temp_min
+                               + (ground_temp_max - ground_temp_min) * effective_exposure).astype(np.float32)
+
+        # Hangflächen-Korrektur für den Boden-Luft-Wärmeübergang (dimensionsloses
+        # Flächenverhältnis, KEINE absolute m²-Fläche nötig - kürzt sich in der
+        # Formel unten heraus). gx,gy = dz/dx, dz/dy (m/m), aus der ohnehin schon
+        # berechneten slopemap oben.
+        ground_area_slope_ratio = np.sqrt(1.0 + slopemap[:, :, 0] ** 2 + slopemap[:, :, 1] ** 2).astype(np.float32)
+
+        # Rand-Verstärkung für Vorticity Confinement (Nutzer-Wunsch aus einer
+        # früheren Runde: "an der Kartengrenze mehr Varianz" - der Kartenrand
+        # ist, wo die synoptische Randbedingung einströmt, dort real am
+        # wenigsten "ausgeglichen"). Faktor 1.0 in der Kartenmitte, bis 2.5x
+        # direkt am (jetzt: Puffer-)Rand, exponentiell abklingend.
+        # Abkling-Distanz: bei aktivem Rand-Puffer (edge_pad_px, siehe oben)
+        # AN DEN PUFFER GEKOPPELT statt an die (jetzt größere, gepolsterte)
+        # Gittergröße - sonst reicht der Boost, der ursprünglich für den
+        # damaligen 5px-Rand kalibriert war, bei den heutigen typischen
+        # Kartengrößen deutlich weiter als der neue Rand-Puffer breit ist und
+        # bleibt nach dem Zurückschneiden sichtbar in der eigentlichen
+        # Kartenfläche - genau die vom Nutzer beobachteten "immer noch starken
+        # Randeffekte" trotz Rand-Puffer. Ohne Puffer (edge_pad_px=0) bleibt
+        # die alte, größen-relative Abklingdistanz als Fallback erhalten.
         edge_dist = np.minimum.reduce([x_idx, width - 1 - x_idx, y_idx, height - 1 - y_idx])
+        vorticity_decay_dist = edge_pad_px * 0.6 if edge_pad_px > 0 else 0.08 * min(height, width)
         vorticity_edge_boost = (1.0 + 1.5 * np.exp(
-            -edge_dist / max(0.08 * min(height, width), 1e-6))).astype(np.float32)
+            -edge_dist / max(vorticity_decay_dist, 1e-6))).astype(np.float32)
+
+        # Sponge-Layer für den Rand-Puffer (siehe edge_pad_px oben) - dämpft
+        # u/v/theta/q im Puffer-Bereich pro Zeitschritt sanft zurück zu ihrem
+        # Ausgangszustand (siehe theta_bg/u_bg/v_bg/q_bg unten), 0 in der
+        # eigentlichen (später zurückgeschnittenen) Kartenfläche, glatt
+        # (smoothstep) auf _EDGE_SPONGE_MAX_STRENGTH ansteigend zum äußersten
+        # Puffer-Pixel hin - Standardtechnik für offene Ränder in
+        # CFD-/Wettersimulationen, verhindert dass der künstliche Puffer-Rand
+        # selbst Reflexionen/Artefakte erzeugt, die in die Kartenfläche
+        # hineinadvehieren.
+        if edge_pad_px > 0:
+            sponge_t = np.clip((edge_pad_px - edge_dist) / edge_pad_px, 0.0, 1.0)
+            sponge_t = sponge_t * sponge_t * (3.0 - 2.0 * sponge_t)  # smoothstep
+            sponge_weight = (_EDGE_SPONGE_MAX_STRENGTH * sponge_t).astype(np.float32)
+        else:
+            sponge_weight = None
 
         # Gemeinsames synoptisches Druckfeld (eine Größenordnung, alle Schichten
         # spüren dieselbe großräumige Richtung + Monats-Rauschen - nur die
@@ -839,23 +1280,126 @@ class WeatherSystemGenerator:
         ]
 
         # --- Initialbedingung ---
-        surface_temp = self._calculate_temperature_field(heightmap, shadowmap, month_params, target_size)
-        # Konstante potentielle Temperatur über alle Schichten als Start (gut
-        # durchmischte Atmosphäre) - reale Temperatur pro Schicht ergibt sich
-        # daraus automatisch kälter mit Höhe (siehe Klassen-Docstring von
-        # AtmosphereLayers).
-        theta = [surface_temp.astype(np.float32).copy() for _ in range(L.COUNT)]
+        if initial_state is not None:
+            # LOD-Vererbung (Weather-Rework Punkt F) - Endzustand derselben
+            # saisonalen Periode der Vorstufe bikubisch hochskaliert, statt
+            # der reinen Noise-Randomisierung unten. Rückumrechnung reale
+            # Temp -> potentielle Temp ist die exakte Umkehrung von t_real
+            # weiter unten in der Zeitschritt-Schleife.
+            #
+            # Bug-Fix (Nutzer-Bug-Report 2026-07-24, "alles wird viel zu kalt
+            # über mehrere LOD-Runden"): initial_state['temp_layers'] (und
+            # wind_layers/humid_layers) sind das bereits ZURÜCKGESCHNITTENE
+            # Ergebnis der Vorstufe (siehe "Ergebnis zusammensetzen" unten,
+            # der Rand-Puffer-Crop passiert dort VOR dem Speichern) - also in
+            # der UNGEPOLSTERTEN Zielgröße (target_size), NICHT in der
+            # gepolsterten Arbeitsgittergröße (height/width) dieser Runde.
+            # Die vorherige Fassung interpolierte direkt auf height/width
+            # hoch - das dehnt das ungepolsterte Vorstufen-Ergebnis über das
+            # GESAMTE (größere, gepolsterte) Gitter, wodurch jeder Pixel an
+            # einer FALSCHEN, verschobenen Position landet, sobald der Rand-
+            # Puffer aktiv ist (siehe _compute_edge_padding_px() oben - bei
+            # kleinen LODs ein erheblicher Anteil der Gittergröße). Die
+            # anschließende theta-Rekonstruktion (+ altitude_cooling_rate *
+            # heightmap) kombinierte dadurch das (falsch positionierte)
+            # ererbte real_temp_i mit der (korrekt positionierten) aktuellen
+            # heightmap an im Wesentlichen ZUFÄLLIG unpassenden Punkten -
+            # der Höhen-Anteil hob sich beim theta<->t_real-Roundtrip NICHT
+            # mehr sauber auf, sondern akkumulierte über jede LOD-Runde einen
+            # Fehler (empirisch verifiziert: frischer LOD-3-Sprung ohne
+            # Vererbung kam bei einem Berg auf ~-24°C, derselbe Berg über
+            # LOD1->2->3 vererbt auf ~-45°C).
+            # Fix: ERST auf die ungepolsterte target_size hochskalieren
+            # (passend zur Größe, in der die Vorstufe tatsächlich gespeichert
+            # wurde), DANN mit demselben Rand-Puffer wie heightmap/shadowmap/
+            # soil_moisture_field oben polstern (np.pad mode='edge') - erst
+            # danach sind alle Felder wieder pixelgenau deckungsgleich.
+            prev_temp_layers = initial_state['temp_layers']
+            prev_wind_layers = initial_state['wind_layers']
+            prev_humid_layers = initial_state['humid_layers']
+            theta, u, v, q = [], [], [], []
+            for i in range(L.COUNT):
+                real_temp_i = self._interpolate_2d_bicubic(prev_temp_layers[i], target_size)
+                u_i = self._interpolate_2d_bicubic(prev_wind_layers[i, :, :, 0], target_size)
+                v_i = self._interpolate_2d_bicubic(prev_wind_layers[i, :, :, 1], target_size)
+                q_i = self._interpolate_2d_bicubic(prev_humid_layers[i], target_size)
+                if edge_pad_px > 0:
+                    real_temp_i = np.pad(real_temp_i, edge_pad_px, mode='edge')
+                    u_i = np.pad(u_i, edge_pad_px, mode='edge')
+                    v_i = np.pad(v_i, edge_pad_px, mode='edge')
+                    q_i = np.pad(q_i, edge_pad_px, mode='edge')
+                # Bug-Fix (Nutzer-Bug-Report 2026-07-23) - siehe ausführliche
+                # Begründung beim Haupt-Loop unten (Suchbegriff "t_real[i] =").
+                # heightmap gehört jetzt mit zur theta<->t_real-Umrechnung.
+                theta.append((real_temp_i + altitude_cooling_rate * (heightmap + L.REF_ALTITUDE_AGL[i])
+                              ).astype(np.float32))
+                u.append(u_i.astype(np.float32))
+                v.append(v_i.astype(np.float32))
+                q.append(q_i.astype(np.float32))
+        else:
+            surface_temp = self._calculate_temperature_field(heightmap, shadowmap, month_params, target_size)
+            # Bug-Fix (Nutzer-Bug-Report 2026-07-23): surface_temp enthält
+            # bereits den Höhen-Lapse-Term (_calculate_temperature_field
+            # zieht heightmap*altitude_cooling_rate ab), theta soll aber die
+            # elevations-UNABHÄNGIGE potentielle Temperatur sein (Solar-/
+            # Rausch-Variation bleibt erhalten, NUR der Höhen-Anteil wird
+            # wieder herausgerechnet) - sonst wird die lokale Terrainhöhe nur
+            # EINMALIG hier eingeprägt und geht bei jeder horizontalen
+            # Advektion (Wind trägt theta über die Karte) verloren, weil
+            # t_real weiter unten nur noch den FESTEN Schicht-AGL-Versatz
+            # abzieht, nie die tatsächliche Terrainhöhe DIESER Zelle. Ergebnis
+            # vorher: warme Luft "vergisst" beim Herunterwehen vom Berg ihre
+            # Herkunftshöhe nicht (trägt weiter ihr kaltes theta), aber kalte
+            # Bergluft, die durch wärmere Tal-Luft ersetzt wird, kühlt sich
+            # NICHT mehr ab, sobald sie am Berg ankommt - Berge wurden dadurch
+            # tendenziell zu warm, Täler im Vergleich zu kalt.
+            theta_seed = surface_temp + altitude_cooling_rate * heightmap
+            # Konstante potentielle Temperatur über alle Schichten als Start (gut
+            # durchmischte Atmosphäre) - reale Temperatur pro Schicht ergibt sich
+            # daraus automatisch kälter mit Höhe (siehe Klassen-Docstring von
+            # AtmosphereLayers).
+            theta = [theta_seed.astype(np.float32).copy() for _ in range(L.COUNT)]
 
-        base_wind = self._simulate_wind_field_simple(heightmap, month_params)
-        u = [(base_wind[:, :, 0] * LAYER_WIND_SEED_MULT[i]).astype(np.float32) for i in range(L.COUNT)]
-        v = [(base_wind[:, :, 1] * LAYER_WIND_SEED_MULT[i]).astype(np.float32) for i in range(L.COUNT)]
+            base_wind = self._simulate_wind_field_simple(heightmap, month_params)
+            u = [(base_wind[:, :, 0] * LAYER_WIND_SEED_MULT[i]).astype(np.float32) for i in range(L.COUNT)]
+            v = [(base_wind[:, :, 1] * LAYER_WIND_SEED_MULT[i]).astype(np.float32) for i in range(L.COUNT)]
 
-        ground_temp_c = np.clip(theta[L.GROUND] - altitude_cooling_rate * L.REF_ALTITUDE_AGL[L.GROUND], -50, 60)
-        sat_vp0 = 6.112 * np.exp(17.67 * ground_temp_c / (ground_temp_c + 243.5))
-        ground_wind_speed0 = np.sqrt(u[L.GROUND] ** 2 + v[L.GROUND] ** 2)
-        wind_factor0 = np.minimum(2.0, ground_wind_speed0 / 5.0)
-        evap_rate0 = 0.5 * (sat_vp0 / 100.0) * (1.0 + wind_factor0)  # soil_moisture=50/100=0.5
-        q = [(evap_rate0 * 140.0 * LAYER_HUMID_SEED_MULT[i]).astype(np.float32) for i in range(L.COUNT)]
+            ground_temp_c = np.clip(
+                theta[L.GROUND] - altitude_cooling_rate * (heightmap + L.REF_ALTITUDE_AGL[L.GROUND]), -50, 60)
+            sat_vp0 = 6.112 * np.exp(17.67 * ground_temp_c / (ground_temp_c + 243.5))
+            ground_wind_speed0 = np.sqrt(u[L.GROUND] ** 2 + v[L.GROUND] ** 2)
+            wind_factor0 = np.minimum(2.0, ground_wind_speed0 / 5.0)
+            evap_rate0 = soil_moisture_norm * (sat_vp0 / 100.0) * (1.0 + wind_factor0)
+
+            # Bug-Fix (Nutzer-Bug-Report 2026-07-23): air_humidity_entry
+            # (Klimatologie-Feuchte-Basis + Slider-Offset, siehe
+            # _generate_seasonal_parameters) wurde bisher NIRGENDS im
+            # gekoppelten Loop gelesen - q kam bisher AUSSCHLIESSLICH aus der
+            # Verdunstung, unabhängig vom Breitengrad/Slider (verifiziert:
+            # trockene vs. feuchte air_humidity_entry-Werte ergaben exakt
+            # identische precip_map-Ergebnisse). Ambiente Basis-Feuchte auf
+            # dieselbe rho_max-Skala umgerechnet wie die Kondensations-
+            # Sättigung weiter unten im Loop (rho_max = 5*exp(0.06*T), siehe
+            # dortiger Kommentar "identische Magnus-Skala") und additiv zur
+            # Verdunstungs-Komponente addiert - beide speisen denselben
+            # q-Ausgangszustand (und darüber automatisch auch q_bg/den Sponge-
+            # Rand-Hintergrund, siehe direkt unterhalb dieses Blocks).
+            relative_humidity_frac = np.clip(
+                month_params.get('air_humidity_entry', 50.0) / 100.0, 0.0, 1.0)
+            rho_max_ground = 5.0 * np.exp(0.06 * ground_temp_c)
+            ambient_q0 = relative_humidity_frac * rho_max_ground
+
+            q = [((evap_rate0 * 140.0 + ambient_q0) * LAYER_HUMID_SEED_MULT[i]).astype(np.float32)
+                 for i in range(L.COUNT)]
+
+        # Ausgangszustand für den Sponge-Layer (siehe sponge_weight oben) -
+        # der Rand-Puffer wird pro Zeitschritt zu DIESEM (noch unbeeinflussten)
+        # Zustand hin gedämpft, nicht zu einem hart vorgegebenen Wert.
+        if sponge_weight is not None:
+            theta_bg = [t.copy() for t in theta]
+            u_bg = [x.copy() for x in u]
+            v_bg = [x.copy() for x in v]
+            q_bg = [x.copy() for x in q]
 
         precip_accum = np.zeros((height, width), dtype=np.float32)
 
@@ -876,8 +1420,24 @@ class WeatherSystemGenerator:
                 q[i] = self._semi_lagrangian_advect(q[i], u_old, v_old, y_idx, x_idx)
 
                 # 2a. Druckgradient - Relaxation statt hartem Reset (siehe
-                # PRESSURE_RELAX_RATE-Kommentar oben).
+                # PRESSURE_RELAX_RATE-Kommentar oben). t_real[i] wird hier
+                # (statt erst in Schritt 2c wie zuvor) benötigt, sobald das
+                # thermisch gekoppelte Druckfeld aktiv ist - deshalb vorgezogen,
+                # Schritt 2c liest denselben Wert weiter unten nur noch.
+                # Bug-Fix (Nutzer-Bug-Report 2026-07-23): heightmap (statisches
+                # Terrain, wird NICHT advehiert) gehört mit in die t_real-
+                # Ableitung - theta selbst ist jetzt elevations-unabhängig
+                # (siehe Initialbedingung oben), die tatsächliche Höhen-
+                # Abkühlung/-Erwärmung muss deshalb JEDEN Schritt FRISCH aus
+                # der lokalen Terrainhöhe DIESER Zelle berechnet werden, nicht
+                # nur einmalig beim Seeding - sonst "vergisst" advehierte Luft
+                # ihre ursprüngliche Herkunftshöhe nicht bzw. "merkt" nie, dass
+                # sie jetzt über anderem Terrain steht.
+                t_real[i] = theta[i] - altitude_cooling_rate * (heightmap + L.REF_ALTITUDE_AGL[i])
                 pressure_iter = pressure_field - terrain_pressure_layers[i]
+                if thermal_pressure_coupling:
+                    thermal_pressure_term = -(t_real[i] - np.mean(t_real[i])) * THERMAL_PRESSURE_COEFF
+                    pressure_iter = pressure_iter + thermal_pressure_term
                 grad_x = np.zeros((height, width), dtype=np.float32)
                 grad_y = np.zeros((height, width), dtype=np.float32)
                 grad_x[:, 1:-1] = (pressure_iter[:, 2:] - pressure_iter[:, :-2]) * 0.5
@@ -905,7 +1465,8 @@ class WeatherSystemGenerator:
                 # 2c. Thermische Konvektion (Schatten-Term nur GROUND - nur die
                 # Bodenschicht "sieht" die Sonneneinstrahlung direkt, siehe
                 # Docstring Schritt 3 in der Klassen-Beschreibung oben).
-                t_real[i] = theta[i] - altitude_cooling_rate * L.REF_ALTITUDE_AGL[i]
+                # t_real[i] bereits in Schritt 2a berechnet (siehe dortiger
+                # Kommentar zum thermisch gekoppelten Druckfeld).
                 temp_grad_x = np.zeros((height, width), dtype=np.float32)
                 temp_grad_y = np.zeros((height, width), dtype=np.float32)
                 temp_grad_x[:, 1:-1] = (t_real[i][:, 2:] - t_real[i][:, :-2]) * 0.5
@@ -913,11 +1474,7 @@ class WeatherSystemGenerator:
                 convection_strength = (t_real[i] - np.mean(t_real[i])) * month_params['thermic_effect'] * 0.08
                 u[i] += temp_grad_x * 0.05 + convection_strength
                 if i == L.GROUND:
-                    if len(shadowmap.shape) == 3:
-                        shadow_avg = np.mean(shadowmap, axis=2)
-                    else:
-                        shadow_avg = shadowmap
-                    shadow_effect = (shadow_avg - 0.5) * month_params['thermic_effect'] * 0.15
+                    shadow_effect = (solar_exposure - 0.5) * month_params['thermic_effect'] * 0.15
                     v[i] += temp_grad_y * 0.05 + shadow_effect
                 else:
                     v[i] += temp_grad_y * 0.05
@@ -932,6 +1489,48 @@ class WeatherSystemGenerator:
                     u[i] *= (1.0 - damping)
                     v[i] *= (1.0 - damping)
 
+                # 2e. Boden->Luft-Wärmeübergang (löst den alten additiven
+                # solar_power-Term ab, siehe Plan "Weather: Bodentemperatur-
+                # Modell + konvektiver Wärmeübergang" und ground_temp_target/
+                # ground_area_slope_ratio oben). NACH der Rauigkeits-Dämpfung
+                # platziert (Nutzer-bestätigt) - konsistent mit der
+                # Verdunstungs-Windböen-Verstärkung in Schritt 3 unten, die
+                # ebenfalls bewusst den bereits gedämpften Wind liest, statt
+                # an der alten (vor der Dämpfung liegenden) Stelle des
+                # ehemaligen solar_power-Terms.
+                #
+                # Paquet-Formel für den konvektiven Wärmeübergangskoeffizienten
+                # (W/(m^2*K), 5.8 = Windstille-Basiswert), plus ein vom Nutzer
+                # vorgegebener, massenerhaltungs-bewusster "effektiver
+                # Windfaktor": bei mehr Wind strömt pro Zeitschritt auch mehr
+                # Luftmasse durch die Referenzsäule (GROUND_HEAT_COLUMN_HEIGHT_M),
+                # die einzelne vorbeistreichende Luftmasse erwärmt sich trotz
+                # höheren Wärmeübergangs-Vielfachen also weniger stark - siehe
+                # GROUND_HEAT_CAPACITY_PER_M2-Docstring oben. v_eff clamped
+                # gegen Divisionsblowup nahe 0 m/s (glättet einen Sprung in der
+                # wörtlichen 3-Zweig-Nutzer-Formel, siehe Plan "Numerische
+                # Prüfung").
+                if i == L.GROUND:
+                    wind_speed_ground = np.sqrt(u[L.GROUND] ** 2 + v[L.GROUND] ** 2)
+                    alpha_v = np.where(
+                        wind_speed_ground <= 5.0,
+                        ALPHA0 + 3.8 * wind_speed_ground,
+                        7.1 * np.power(np.maximum(wind_speed_ground, 1e-6), 0.78),
+                    )
+                    v_eff = np.maximum(wind_speed_ground, WIND_FACTOR_MIN_SPEED)
+                    effective_wind_factor = alpha_v / (GROUND_HEAT_CAPACITY_PER_M2 * v_eff)
+                    dt_seconds = GROUND_HEAT_TIME_SCALE_S / max(n_steps, 1)
+                    ground_air_diff = ground_temp_target - t_real[L.GROUND]
+                    delta_t_ground = (ground_air_diff * ground_area_slope_ratio
+                                       * effective_wind_factor * dt_seconds)
+                    # Stabilitäts-Clamp (nicht Teil der Nutzer-Formel, aber
+                    # empfohlen): verhindert ein Überschießen über
+                    # ground_temp_target hinaus in einem einzelnen Schritt,
+                    # unabhängig vom genauen Kalibrierungsstand der Konstanten
+                    # oben - macht das System unbedingt stabil.
+                    delta_t_ground = np.clip(delta_t_ground, -np.abs(ground_air_diff), np.abs(ground_air_diff))
+                    theta[L.GROUND] += delta_t_ground
+
                 # 3. Latentwärme - identische Magnus-Skala wie
                 # _calculate_precipitation_cpu/_calculate_atmospheric_moisture_cpu
                 # (siehe [[project-precip-humidity-calibration]]), KEIN zweites
@@ -942,15 +1541,19 @@ class WeatherSystemGenerator:
                 condensation = np.minimum(oversaturation * rho_max * 0.6, q[i])
                 theta[i] += condensation * LATENT_HEAT_COEFFICIENT
                 q[i] = np.maximum(q[i] - condensation, 0.0)
-                if i in (L.GROUND, L.MID):
-                    precip_accum += condensation
+                # Wasserbilanz (Nutzer-Vorgabe: "es soll nichts aus dem Nichts
+                # erschaffen oder vernichtet werden"): FRÜHER trug nur GROUND/MID
+                # zu precip_accum bei - HIGH-Kondensation wurde aus q[HIGH]
+                # entfernt, aber NIRGENDS wieder aufgeführt und verschwand damit
+                # spurlos aus der Bilanz. Jetzt zählt jede Schicht mit.
+                precip_accum += condensation
 
                 if i == L.GROUND:
                     ground_temp_c = np.clip(t_real[i], -50, 60)
                     sat_vp = 6.112 * np.exp(17.67 * ground_temp_c / (ground_temp_c + 243.5))
                     wind_speed = np.sqrt(u[i] ** 2 + v[i] ** 2)
                     wind_factor = np.minimum(2.0, wind_speed / 5.0)
-                    evap_rate = 0.5 * (sat_vp / 100.0) * (1.0 + wind_factor)
+                    evap_rate = soil_moisture_norm * (sat_vp / 100.0) * (1.0 + wind_factor)
                     # Über n_steps verteilt, damit die kumulierte Zufuhr über den
                     # ganzen Loop näherungsweise dieselbe Größenordnung erreicht
                     # wie der bisherige Einzelschuss-Faktor 140.0.
@@ -1022,13 +1625,36 @@ class WeatherSystemGenerator:
                 self._apply_continuity_correction(wind_field_i, vertical_flux_term=vertical_flux_terms[i])
                 u[i], v[i] = wind_field_i[:, :, 0], wind_field_i[:, :, 1]
 
+            # 6. Sponge-Layer (siehe sponge_weight oben) - dämpft den
+            # Rand-Puffer-Bereich EINMAL pro Zeitschritt (nicht pro Schicht-
+            # Teilschritt) sanft zurück zu seinem Ausgangszustand, NACH allen
+            # Physik-Schritten dieses Zeitschritts, damit die eigentliche
+            # Kartenfläche (sponge_weight dort == 0) unverändert bleibt.
+            if sponge_weight is not None:
+                for i in range(L.COUNT):
+                    theta[i] += (theta_bg[i] - theta[i]) * sponge_weight
+                    q[i] += (q_bg[i] - q[i]) * sponge_weight
+                    u[i] += (u_bg[i] - u[i]) * sponge_weight
+                    v[i] += (v_bg[i] - v[i]) * sponge_weight
+
         # --- Ergebnis zusammensetzen ---
+        # heightmap-Anteil siehe Bug-Fix-Kommentar beim Haupt-Loop oben
+        # (Suchbegriff "t_real[i] =") - dieselbe Umrechnung fürs finale Ergebnis.
         temp_layers = np.stack(
-            [theta[i] - altitude_cooling_rate * L.REF_ALTITUDE_AGL[i] for i in range(L.COUNT)], axis=0
+            [theta[i] - altitude_cooling_rate * (heightmap + L.REF_ALTITUDE_AGL[i]) for i in range(L.COUNT)], axis=0
         ).astype(np.float32)
         wind_layers = np.stack(
             [np.stack([u[i], v[i]], axis=-1) for i in range(L.COUNT)], axis=0
         ).astype(np.float32)
+        # Baroklinitäts-Skalierung (Nutzer-Bug-Report 2026-07-23, siehe
+        # _baroclinic_wind_factor()-Docstring) - macht hohe Breite im Winter
+        # spürbar stürmischer, den Äquator ganzjährig ruhiger, angewendet auf
+        # das fertige Windfeld VOR dem orographischen Niederschlags-Anteil
+        # unten (der dadurch konsistent mitskaliert - stärkerer Wind bedeutet
+        # real auch mehr Steigungsregen, kein Nebeneffekt zum Ignorieren).
+        baroclinic_factor = self._baroclinic_wind_factor(
+            month_params.get('map_latitude', 48.0), month_params.get('month_index', 0))
+        wind_layers = wind_layers * baroclinic_factor
         humid_layers = np.stack(q, axis=0).astype(np.float32)
 
         # Orographischer Zusatzbeitrag (Luv-/Lee, identische Formel wie
@@ -1042,8 +1668,35 @@ class WeatherSystemGenerator:
         wind_slope_alignment = wind_norm_x * slopemap[:, :, 0] + wind_norm_y * slopemap[:, :, 1]
         orographic_factor = np.maximum(0, wind_slope_alignment) * wind_speed_ground * 0.3
         oro_precip = humid_layers[L.GROUND] * orographic_factor * 0.05
+        precip_raw = precip_accum + oro_precip
 
-        precip_map = np.clip(precip_accum + oro_precip, 0.0, 500.0).astype(np.float32)
+        if edge_pad_px > 0:
+            # Rand-Puffer zurückschneiden (siehe edge_pad_px oben) - der
+            # Sponge-Layer hat den Puffer-Bereich bereits pro Zeitschritt
+            # sanft gedämpft, hier wird er endgültig verworfen. Die
+            # Wasserbilanz-Prüfung unten bezieht sich damit ausschließlich auf
+            # die tatsächlich zurückgegebene Kartenfläche - der Puffer selbst
+            # ist kein Teil der Karte und darf ihre Bilanz nicht verfälschen.
+            crop = slice(edge_pad_px, -edge_pad_px)
+            temp_layers = temp_layers[:, crop, crop]
+            wind_layers = wind_layers[:, crop, crop, :]
+            humid_layers = humid_layers[:, crop, crop]
+            precip_raw = precip_raw[crop, crop]
+
+        # Wasserbilanz: die 500 gH2O/m²-Kappung war zuvor eine stille
+        # Massenvernichtung (Wasser oberhalb der Grenze verschwand einfach).
+        # Bleibt als reines Sicherheitsventil gegen pathologische Eingaben
+        # bestehen (500 liegt weit über plausiblen Werten, siehe
+        # [[project-precip-humidity-calibration]]), wird aber jetzt geloggt,
+        # statt lautlos zu kappen - falls das in normalem Betrieb je greift,
+        # ist das ein Hinweis auf einen echten Bilanzfehler, keine Bagatelle.
+        clipped_mass = float(np.sum(np.maximum(0.0, precip_raw - 500.0)))
+        if clipped_mass > 0.0:
+            self.logger.warning(
+                f"Niederschlags-Kappung bei 500 gH2O/m² hat {clipped_mass:.1f} gH2O/m² "
+                f"Gesamtmasse entfernt - deutet auf eine pathologische Eingabe oder einen "
+                f"Bilanzfehler hin, nicht auf normalen Betrieb.")
+        precip_map = np.clip(precip_raw, 0.0, 500.0).astype(np.float32)
 
         return {
             'wind_layers': wind_layers,
@@ -1071,7 +1724,7 @@ class WeatherSystemGenerator:
             raise ValueError("Invalid values in shadowmap")
 
         # Parameter-Range-Validation
-        required_params = ['air_temp_entry', 'solar_power', 'altitude_cooling',
+        required_params = ['air_temp_entry', 'ground_temp_offset', 'altitude_cooling',
                           'thermic_effect', 'wind_speed_factor', 'terrain_factor']
 
         for param in required_params:
@@ -1082,12 +1735,38 @@ class WeatherSystemGenerator:
         if not (-50 <= parameters['air_temp_entry'] <= 60):
             raise ValueError(f"air_temp_entry {parameters['air_temp_entry']} outside physical range [-50, 60]°C")
 
-        if not (0 <= parameters['solar_power'] <= 50):
-            raise ValueError(f"solar_power {parameters['solar_power']} outside valid range [0, 50]°C")
+        from gui.config.value_default import WEATHER as _WEATHER_VALIDATION
+        if not (_WEATHER_VALIDATION.GROUND_TEMP_OFFSET["min"] <= parameters['ground_temp_offset']
+                <= _WEATHER_VALIDATION.GROUND_TEMP_OFFSET["max"]):
+            raise ValueError(f"ground_temp_offset {parameters['ground_temp_offset']} outside valid range "
+                              f"[{_WEATHER_VALIDATION.GROUND_TEMP_OFFSET['min']}, "
+                              f"{_WEATHER_VALIDATION.GROUND_TEMP_OFFSET['max']}]°C")
 
         # LOD-Level-Validation
         if not (1 <= lod_level <= 10):
             raise ValueError(f"Invalid lod_level {lod_level}, must be in range [1, 10]")
+
+    def _compute_edge_padding_px(self, grid_size: int) -> int:
+        """
+        Rand-Puffer in Pixeln für diese Grid-Auflösung (siehe _EDGE_PADDING_KM) -
+        die CFD-Simulation läuft auf einem um diesen Puffer vergrößerten Gitter
+        (Rand-Extension der Eingaben via np.pad(..., mode='edge')), ein
+        Sponge-Layer dämpft den Puffer-Bereich pro Zeitschritt zurück zu seinem
+        Ausgangszustand (siehe _run_coupled_atmosphere_simulation), danach wird
+        auf die ursprüngliche Größe zurückgeschnitten - reduziert Rand-Artefakte
+        ohne dass am Kartenrand Wassermasse verschwindet oder entsteht (der
+        Sponge-Layer bildet nur auf den ohnehin verworfenen Puffer-Bereich ab,
+        siehe Umsetzungsplan Punkt H "Wasserbilanz").
+        """
+        map_distance_km = self.data_lod_manager.get_map_distance_km() if self.data_lod_manager else None
+        if not map_distance_km or map_distance_km <= 0:
+            return 0
+        km_per_px = map_distance_km / max(grid_size, 1)
+        pad_px = int(round(_EDGE_PADDING_KM / km_per_px))
+        # Nie mehr als 20% der Gittergröße - vermeidet absurd große Puffer bei
+        # sehr kleinen LOD-Vorschau-Stufen oder sehr kleinen Kartengrößen.
+        max_pad = max(0, grid_size // 5)
+        return max(0, min(pad_px, max_pad))
 
     def _get_lod_size(self, lod_level: int, original_size: int) -> int:
         """
@@ -1188,11 +1867,13 @@ class WeatherSystemGenerator:
         return heightmap, shadowmap_interp
 
     def _calculate_temperature_field(self, heightmap: np.ndarray, shadowmap: np.ndarray,
-                                   parameters: Dict[str, Any], target_size: int) -> np.ndarray:
+                                   parameters: Dict[str, Any], target_size: int,
+                                   sun_angles: Optional[list] = None) -> np.ndarray:
         """
         Temperaturfeld-Berechnung mit GPU-Shader-Integration und 3-stufigem Fallback
 
-        Integriert Altitude-Cooling, Solar-Heating, Latitude-Gradient und Noise-Variation
+        Integriert Altitude-Cooling, Boden-Zieltemperatur (T_boden), Latitude-Gradient
+        und Noise-Variation. sun_angles: siehe _weighted_solar_exposure()-Docstring.
         """
         try:
             # GPU-Shader-Request (Optimal)
@@ -1205,7 +1886,7 @@ class WeatherSystemGenerator:
                     },
                     'parameters': {
                         'air_temp_entry': parameters['air_temp_entry'],
-                        'solar_power': parameters['solar_power'],
+                        'ground_temp_baseline': parameters['ground_temp_baseline'],
                         'altitude_cooling': parameters['altitude_cooling'],
                         'map_seed': self.map_seed
                     },
@@ -1225,7 +1906,8 @@ class WeatherSystemGenerator:
 
         # CPU-Fallback (Gut)
         try:
-            return self._calculate_temperature_cpu_optimized(heightmap, shadowmap, parameters, target_size)
+            return self._calculate_temperature_cpu_optimized(heightmap, shadowmap, parameters, target_size,
+                                                               sun_angles=sun_angles)
         except Exception as e:
             self.logger.error(f"CPU temperature calculation failed: {e}")
 
@@ -1233,7 +1915,8 @@ class WeatherSystemGenerator:
         return self._calculate_temperature_simple(heightmap, parameters)
 
     def _calculate_temperature_cpu_optimized(self, heightmap: np.ndarray, shadowmap: np.ndarray,
-                                           parameters: Dict[str, Any], target_size: int) -> np.ndarray:
+                                           parameters: Dict[str, Any], target_size: int,
+                                           sun_angles: Optional[list] = None) -> np.ndarray:
         """
         CPU-optimierte Temperatur-Berechnung mit vectorized NumPy-Operations
         """
@@ -1244,22 +1927,27 @@ class WeatherSystemGenerator:
         altitude_cooling_rate = parameters['altitude_cooling'] / 1000.0  # °C pro Meter (Parameter ist °C/km)
         temp_map -= heightmap * altitude_cooling_rate
 
-        # Solar-Heating (vectorized)
-        if len(shadowmap.shape) == 3:
-            # Gewichtete Kombination aller Shadow-Angles
-            shadow_weighted = np.mean(shadowmap, axis=2)
-        else:
-            shadow_weighted = shadowmap
-
-        # Shadow-Map: 0 (Schatten) bis 1 (volle Sonne)
-        solar_effect = (shadow_weighted - 0.5) * parameters['solar_power']
+        # Boden-Zieltemperatur (T_boden, löst den alten additiven solar_power-
+        # Term ab) - dieser Pfad hat kein t_real/keinen Zeitschritt-Loop
+        # (Erstlauf-Seed ohne LOD-Vererbung), bleibt daher wie bisher eine
+        # einmalige additive Störung auf die Basistemperatur, nur mit dem
+        # neuen T_min/T_max-Wertebereich statt der alten solar_power-Spanne.
+        shadow_weighted = self._weighted_solar_exposure(shadowmap, sun_angles=sun_angles)
+        ground_temp_baseline = parameters['ground_temp_baseline']
+        effective_spread = GROUND_TEMP_SPREAD * parameters.get('sun_relevance_factor', 1.0)
+        ground_temp_min = ground_temp_baseline - effective_spread / 2.0
+        ground_temp_max = ground_temp_baseline + effective_spread / 2.0
+        ground_temp_target = ground_temp_min + (ground_temp_max - ground_temp_min) * shadow_weighted
+        solar_effect = ground_temp_target - parameters['air_temp_entry']
         temp_map += solar_effect
 
-        # Latitude-Gradient (vectorized)
-        height, width = heightmap.shape
-        y_coords = np.arange(height).reshape(-1, 1)
-        latitude_effect = (y_coords / (height - 1)) * 5.0  # 5°C Nord-Süd-Gradient
-        temp_map += latitude_effect
+        # KEIN eigener Breitengrad-Gradient mehr hier - parameters['air_temp_entry']
+        # kommt jetzt bereits aus der Breitengrad×Monat-Klimatologie
+        # (_climate_baseline, siehe _generate_seasonal_parameters). Ein
+        # zusätzlicher, rein bildzeilen-basierter Gradient hier würde den
+        # Breitengrad-Effekt doppelt und mit einer zweiten, unabhängigen
+        # (und physikalisch falschen, weil an der Bild-Y-Achse statt am
+        # echten Breitengrad hängenden) Formel zählen.
 
         # Atmospheric Noise-Variation
         noise_variation = self._generate_atmospheric_noise(
@@ -1336,11 +2024,16 @@ class WeatherSystemGenerator:
                                            wind_direction_deg: float) -> np.ndarray:
         """
         Funktionsweise: Lineares Druckgefälle entlang einer beliebigen
-        Windrichtung (Grad, math. Konvention: 0°=Wind Richtung +x/Ost,
-        90°=+y) - ersetzt das früher hartcodierte West-Ost-Gefälle. Bei
-        wind_direction_deg=0 identisch zur alten Formel (Projektion s
-        entspricht dann x_coords), da 'prevailing_wind_direction' den
-        Windursprung in Ost-Konvention beschreibt.
+        Windrichtung - ersetzt das früher hartcodierte West-Ost-Gefälle.
+        wind_direction_deg ist die HERKUNFTSRICHTUNG (siehe
+        WEATHER.PREVAILING_WIND_DIRECTION-Beschreibung): 0°=Wind aus Westen
+        (weht nach Osten, +x), 90°=aus Süden (weht nach Norden, +y - Zeile
+        height-1 = Norden, siehe core/terrain_generator.py._raycast_shadow_cpu()
+        für dieselbe Array-Konvention). dx=cos(theta), dy=sin(theta) ergeben
+        direkt die Weht-nach-Richtung, da diese Herkunfts-Konvention exakt
+        180° gegenüber der alten Blas-Richtungs-Formel liegt und sich beide
+        Vorzeichen dadurch aufheben (Bei wind_direction_deg=0 identisch zur
+        alten Formel, Projektion s entspricht dann x_coords).
         Aufgabe: Treibt die Richtung, aus der der vorherrschende Wind weht,
         in die initiale Druckfeld-Konstruktion der CFD-Simulation ein - lokale
         Abweichung entsteht weiterhin über die bestehende Terrain-Ablenkung.
@@ -1449,7 +2142,10 @@ class WeatherSystemGenerator:
 
     def _simulate_wind_field_simple(self, heightmap: np.ndarray, parameters: Dict[str, Any]) -> np.ndarray:
         """
-        Simple-Fallback: Basic Wind-Field ohne CFD-Komplexität
+        Simple-Fallback: Basic Wind-Field ohne CFD-Komplexität. Auch der
+        Initial-Seed für die 3-Schicht-CFD (siehe base_wind in
+        _run_coupled_atmosphere_simulation). wind_direction_deg ist die
+        Herkunftsrichtung (siehe _build_directional_pressure_field-Docstring).
         """
         height, width = heightmap.shape
         wind_field = np.zeros((height, width, 2), dtype=np.float32)
@@ -1748,7 +2444,9 @@ class WeatherSystemGenerator:
 
         weather_data.temp_map = np.full((target_size, target_size),
                                       parameters.get('air_temp_entry', 15.0), dtype=np.float32)
-        weather_data.precip_map = np.full((target_size, target_size), 50.0, dtype=np.float32)
+        # Placeholder in mm/Jahr-Äquivalent (siehe PRECIP_ANNUAL_SCALE_FACTOR) -
+        # entspricht ungefähr einer gemäßigten, mittleren Niederschlagsmenge.
+        weather_data.precip_map = np.full((target_size, target_size), 800.0, dtype=np.float32)
         weather_data.humid_map = np.full((target_size, target_size), 30.0, dtype=np.float32)
 
         weather_data.lod_level = lod_level
@@ -1834,8 +2532,10 @@ class WeatherSystemGenerator:
         height, width = heightmap.shape
         slopemap = np.zeros((height, width, 2), dtype=np.float32)
 
-        from gui.config.value_default import TERRAIN
-        spacing = (TERRAIN.WORLD_SIZE_KM * 1000.0) / height
+        # Live-Wert statt der vorherigen statischen TERRAIN.WORLD_SIZE_KM-
+        # Konstante (siehe [[project-terrain-review]] 4f).
+        map_distance_km = self.data_lod_manager.get_map_distance_km() if self.data_lod_manager else 10.0
+        spacing = (map_distance_km * 1000.0) / height
 
         # dz/dx (vectorized)
         slopemap[:, 1:-1, 0] = (heightmap[:, 2:] - heightmap[:, :-2]) * 0.5 / spacing
@@ -1869,8 +2569,10 @@ class WeatherSystemGenerator:
         dieser Datei.
         """
         height, width = heightmap.shape
-        from gui.config.value_default import TERRAIN
-        spacing = (TERRAIN.WORLD_SIZE_KM * 1000.0) / height
+        # Live-Wert statt der vorherigen statischen TERRAIN.WORLD_SIZE_KM-
+        # Konstante (siehe [[project-terrain-review]] 4f).
+        map_distance_km = self.data_lod_manager.get_map_distance_km() if self.data_lod_manager else 10.0
+        spacing = (map_distance_km * 1000.0) / height
 
         d2x = np.zeros((height, width), dtype=np.float32)
         d2y = np.zeros((height, width), dtype=np.float32)
@@ -1896,6 +2598,48 @@ class WeatherSystemGenerator:
         y_idx = np.clip((np.arange(tgt_h) * src_h / tgt_h).astype(int), 0, src_h - 1)
         x_idx = np.clip((np.arange(tgt_w) * src_w / tgt_w).astype(int), 0, src_w - 1)
         return label_map[np.ix_(y_idx, x_idx)]
+
+    def _weighted_solar_exposure(self, shadowmap: np.ndarray,
+                                  sun_angles: Optional[list] = None) -> np.ndarray:
+        """
+        Gewichtete Kombination der bis zu 7 Sonnenwinkel-Kanäle einer
+        shadowmap. Jeder Kanal enthält bereits pro Pixel dot(normal, sun_dir)
+        für GENAU diesen einen Sonnenwinkel (siehe ShadowCalculator.
+        _calculate_slope_shading_cpu()) - die Hangausrichtungs-Abhängigkeit
+        ("Flächen bekommen je nach Ausrichtung zur Sonne unterschiedlich viel
+        Licht ab") ist damit bereits pro Kanal vorhanden, hier kommt nur die
+        Gewichtung der Kanäle untereinander hinzu.
+
+        Parameter: sun_angles - optionale Liste von (elevation, azimuth)-
+            Paaren (Grad), EXAKT die Kanal-Teilmenge, die die übergebene
+            shadowmap erzeugt hat (z.B. das Ergebnis von ShadowCalculator.
+            get_sun_angles_for_lod(), NICHT die volle 7er-Liste bei
+            niedrigerem LOD). Wenn gesetzt, wird pro Kanal ein aus dem ECHTEN
+            Elevationswinkel abgeleiteter Atmosphären-Dämpfungsfaktor
+            (Airmass/Beer-Lambert-artig, siehe ATM_OPTICAL_DEPTH) genutzt
+            statt der festen ShadowCalculator.sun_weights - Sonnenstand
+            variiert bereits pro Monat/Breitengrad (siehe
+            generate_seasonal_sun_angles()), die alte feste Tageszeit-
+            Gewichtung bildete das nicht ab. Ohne sun_angles (z.B. Aufrufer
+            außerhalb der monatlichen Weather-Simulation) bleibt das alte
+            Verhalten (feste sun_weights) unverändert erhalten.
+
+        Fällt auf ein flaches Mittel zurück, wenn shadowmap 2D ist (kein
+        Kanal-Stack) oder die Kanalzahl nicht zu den Gewichten passt (z.B.
+        ein älterer Cache-Eintrag mit abweichender Kanalzahl).
+        """
+        if shadowmap.ndim != 3:
+            return shadowmap
+        if sun_angles is not None and len(sun_angles) == shadowmap.shape[2]:
+            elevations = np.array([e for e, _ in sun_angles], dtype=np.float64)
+            elevations_clamped = np.radians(np.clip(elevations, ATM_MIN_ELEVATION_DEG, 90.0))
+            airmass = 1.0 / np.sin(elevations_clamped)
+            weights = np.exp(-ATM_OPTICAL_DEPTH * (airmass - 1.0))
+        else:
+            weights = np.asarray(self.shadow_calculator.sun_weights, dtype=np.float64)
+            if weights.shape[0] != shadowmap.shape[2]:
+                return np.mean(shadowmap, axis=2).astype(np.float32)
+        return np.average(shadowmap, axis=2, weights=weights).astype(np.float32)
 
     def _get_roughness_damping(self, target_shape: Tuple[int, int], lod_level: int) -> Optional[np.ndarray]:
         """
@@ -1926,6 +2670,24 @@ class WeatherSystemGenerator:
             biome_map = self._resize_nearest_labels(biome_map, target_shape)
         ids = np.clip(biome_map.astype(np.int32), 0, len(_BIOME_ROUGHNESS_DAMPING) - 1)
         return _BIOME_ROUGHNESS_DAMPING[ids]
+
+    def _get_solar_absorption_factor(self, target_shape: Tuple[int, int], lod_level: int) -> Optional[np.ndarray]:
+        """
+        Best-effort biom-abhängiger Solar-Absorptionsfaktor (siehe
+        _BIOME_SOLAR_ABSORPTION oben) - IDENTISCHER Aufbau wie
+        _get_roughness_damping() direkt darüber (gleiche Datenquelle,
+        gleiches None-Fallback bei fehlenden Biome-Daten, gleiches
+        Nearest-Neighbor-Resampling bei Shape-Abweichung) - siehe dortige
+        Docstring für die Begründung, hier nicht wiederholt.
+        """
+        biome_map = self.data_lod_manager.get_calculator_output(
+            "biome.integrate_layers", "biome_map", lod_level)
+        if biome_map is None:
+            return None
+        if biome_map.shape[:2] != tuple(target_shape):
+            biome_map = self._resize_nearest_labels(biome_map, target_shape)
+        ids = np.clip(biome_map.astype(np.int32), 0, len(_BIOME_SOLAR_ABSORPTION) - 1)
+        return _BIOME_SOLAR_ABSORPTION[ids]
 
     def _generate_atmospheric_noise(self, shape: Tuple[int, int], target_size: int,
                                     month_index: int = 0) -> np.ndarray:
@@ -2013,11 +2775,9 @@ class WeatherSystemGenerator:
         temp_diff = temp_map - avg_temp
         convection_strength = temp_diff * parameters['thermic_effect'] * 0.08
 
-        # Shadow-based thermal effects
-        if len(shadowmap.shape) == 3:
-            shadow_avg = np.mean(shadowmap, axis=2)
-        else:
-            shadow_avg = shadowmap
+        # Shadow-based thermal effects - Tageszeit-gewichtet statt flachem
+        # Mittel, siehe _weighted_solar_exposure().
+        shadow_avg = self._weighted_solar_exposure(shadowmap)
 
         shadow_effect = (shadow_avg - 0.5) * parameters['thermic_effect'] * 0.15
 
@@ -2334,7 +3094,14 @@ class TemperatureCalculator:
 
     def _calculate_base_temperature(self, heightmap: np.ndarray, shadowmap: np.ndarray,
                                    parameters: Dict[str, Any]) -> np.ndarray:
-        """Base Temperature mit Altitude-Cooling und Solar-Heating"""
+        """
+        Base Temperature mit Altitude-Cooling und Solar-Heating.
+        STALE/unreachable: TemperatureCalculator wird nirgends instanziiert
+        aufgerufen (verifiziert, siehe Plan "Weather: Bodentemperatur-Modell +
+        konvektiver Wärmeübergang") - nutzt daher weiterhin den alten
+        'solar_power'-Parameter-Namen statt 'ground_temp_offset', bewusst
+        nicht mitgezogen (toter Code, kein aktiver Aufrufer).
+        """
         # Basis-Temperatur
         temp_map = np.full(heightmap.shape, parameters['air_temp_entry'], dtype=np.float32)
 
@@ -2428,17 +3195,20 @@ class AtmosphericMoistureManager:
 
 # ===== LEGACY COMPATIBILITY =====
 
-def generate_weather_system(heightmap, shade_map, soil_moist_map, air_temp_entry, solar_power,
+def generate_weather_system(heightmap, shade_map, soil_moist_map, air_temp_entry, ground_temp_offset,
                            altitude_cooling, thermic_effect, wind_speed_factor, terrain_factor,
                            flow_direction=None, flow_accumulation=None, map_seed=None):
     """
-    Legacy-Kompatibilität für alte API
+    Legacy-Kompatibilität für alte API. Verifiziert ohne aktive Aufrufer im
+    Projekt (siehe Plan "Weather: Bodentemperatur-Modell + konvektiver
+    Wärmeübergang") - Parameter dennoch mitgezogen, um bei künftiger
+    Verwendung keinen stillen KeyError zu produzieren.
     """
     generator = WeatherSystemGenerator(map_seed=map_seed or 42)
 
     parameters = {
         'air_temp_entry': air_temp_entry,
-        'solar_power': solar_power,
+        'ground_temp_offset': ground_temp_offset,
         'altitude_cooling': altitude_cooling,
         'thermic_effect': thermic_effect,
         'wind_speed_factor': wind_speed_factor,

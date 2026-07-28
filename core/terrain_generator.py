@@ -34,6 +34,7 @@ import numpy as np
 from opensimplex import OpenSimplex
 import hashlib
 import logging
+import math
 from typing import Dict, List, Tuple, Optional, Any
 
 
@@ -677,9 +678,16 @@ class ShadowCalculator:
         shadows = np.zeros((shadow_resolution, shadow_resolution), dtype=np.float32)
         total_weight = sum(sun_weights)
 
+        # Dieselben Konstanten wie der CPU-Hauptpfad (_is_in_shadow_cpu:
+        # step_size=0.5, max_distance=max(width,height)*2 - bei der hier immer
+        # 64x64 großen shadow_heightmap also 128.0) statt der vorherigen
+        # ShaderManager-eigenen Defaults (max_distance=100.0, step_size=1.0) -
+        # sonst unterschieden sich GPU- und CPU-Schatten sichtbar je nachdem,
+        # welcher Pfad gerade aktiv war. Siehe [[project-terrain-review]] 4b.
         for (elevation, azimuth), weight in zip(sun_angles, sun_weights):
             shadow_map = self.shader_manager.process_shadow_raycast(
-                shadow_heightmap, elevation, azimuth, shadow_resolution
+                shadow_heightmap, elevation, azimuth, shadow_resolution,
+                max_distance=float(shadow_resolution * 2), step_size=0.5, height_scale=1.0
             )
             if shadow_map is None:
                 raise RuntimeError("process_shadow_raycast returned no data")
@@ -765,7 +773,22 @@ class ShadowCalculator:
         height, width = heightmap.shape
         shadow_map = np.ones((height, width), dtype=np.float32)
 
-        # Sonnenrichtung berechnen
+        # Sonnenrichtung berechnen. Azimuth-Konvention (siehe
+        # calculate_solar_position()): 0°=Norden, 90°=Osten, 180°=Süden,
+        # 270°=Westen, im Uhrzeigersinn. Array-Konvention dieser Codebase
+        # (verifiziert über _semi_lagrangian_advect()s source_y=y_idx-v*dt
+        # PLUS den unveränderten prevailing_wind_direction-Code, der bei
+        # Default 225° konsistent "Wind von Nordosten" ergibt, exakt wie vom
+        # Nutzer beobachtet, OHNE jede Änderung - beweist Zeile height-1 =
+        # Norden, Zeile 0 = Süden, NICHT umgekehrt wie ein Kommentar in
+        # _old_01/core_old/weather_generator.py behauptet, der zu einem
+        # früheren, inzwischen archivierten Implementierungsstand gehört und
+        # sich als nicht mehr gültig herausstellte): sun_y MUSS daher bei
+        # Süd-Azimut (180°) NEGATIV sein (Richtung abnehmende Zeile), exakt
+        # was die Formel ohne Vorzeichen-Anpassung bereits liefert - ein
+        # zwischenzeitlicher Fix-Versuch (Y negiert) beruhte auf der falschen,
+        # archivierten Konvention und wurde nach dieser Verifikation wieder
+        # zurückgenommen.
         elevation_rad = np.radians(sun_elevation)
         azimuth_rad = np.radians(sun_azimuth)
 
@@ -913,7 +936,8 @@ class SlopeCalculator:
         """
         Funktionsweise: Berechnet Slope-Map mit 3-stufigem Fallback
         Parameter: heightmap - Höhendaten
-        Parameter: parameters - Slope-Parameter (spacing, smoothing, etc.)
+        Parameter: parameters - ungenutzt, nur für Signatur-Kompatibilität mit
+        anderen calculate_*()-Methoden dieses Musters
         Returns: numpy.ndarray - Slope-Map mit Shape (H,W,2) für dz/dx und dz/dy
         """
         # Keine GPU-Beschleunigung: ShaderManager bietet keine Slope-/Gradient-Methode
@@ -1005,18 +1029,20 @@ class SlopeCalculator:
         Returns: numpy.ndarray - CPU-berechnete Slopes
         """
         # NumPy gradient für optimierte Performance. spacing = reale Meter pro Pixel,
-        # NICHT 1.0 - die Karte deckt immer TERRAIN.WORLD_SIZE_KM x WORLD_SIZE_KM ab
+        # NICHT 1.0 - die Karte deckt immer map_distance_km x map_distance_km ab
         # (siehe gui/widgets/map_display_3d.py), unabhängig von der Pixelauflösung.
         # Ein fester spacing=1.0 hieß: 1m Höhenunterschied zwischen Nachbarpixeln wird
         # wie 1m realer Horizontal-Abstand behandelt, obwohl ein Pixel bei typischen
         # Kartengrößen tatsächlich ~50-300m Horizontal-Abstand abdeckt - das ergab
         # Gradienten um ~10-15 (entspricht ~85-89°) auf praktisch der gesamten Karte.
-        if 'spacing' in parameters:
-            spacing = parameters['spacing']
-        else:
-            from gui.config.value_default import TERRAIN
-            world_size_m = TERRAIN.WORLD_SIZE_KM * 1000.0
-            spacing = world_size_m / heightmap.shape[0]
+        # map_distance_km kommt aus demselben parameters-Dict wie alle anderen
+        # Terrain-Slider (live einstellbar seit [[project-terrain-review]] 4f),
+        # Fallback auf TERRAIN.WORLD_SIZE_KM nur für Standalone-/Legacy-Aufrufer,
+        # die parameters ohne diesen Key übergeben.
+        from gui.config.value_default import TERRAIN
+        map_distance_km = parameters.get('map_distance_km', TERRAIN.WORLD_SIZE_KM)
+        world_size_m = map_distance_km * 1000.0
+        spacing = world_size_m / heightmap.shape[0]
 
         # Berechne Gradienten in beide Richtungen
         grad_y, grad_x = np.gradient(heightmap, spacing, edge_order=2)
@@ -1026,17 +1052,6 @@ class SlopeCalculator:
         slopemap = np.zeros((height, width, 2), dtype=np.float32)
         slopemap[:, :, 0] = grad_x  # dz/dx
         slopemap[:, :, 1] = grad_y  # dz/dy
-
-        # Optional: Smoothing
-        smoothing = parameters.get('smoothing', 0.0)
-        if smoothing > 0:
-            try:
-                from scipy.ndimage import gaussian_filter
-                slopemap[:, :, 0] = gaussian_filter(slopemap[:, :, 0], sigma=smoothing)
-                slopemap[:, :, 1] = gaussian_filter(slopemap[:, :, 1], sigma=smoothing)
-            except ImportError:
-                # Fallback ohne scipy
-                pass
 
         return slopemap
 
@@ -1121,6 +1136,25 @@ class BaseTerrainGenerator:
         """Setzt die Parameter, die alle _calc_*-Methoden bis zur nächsten frischen
         Anfrage verwenden (vom GenerationOrchestrator aufgerufen)."""
         self._current_parameters = parameters
+
+        # Live-Wert für DataLODManager.get_map_distance_km() aktuell halten -
+        # Biome/Water/Weather/map_display_3d.py lesen darüber statt eines
+        # statischen TERRAIN.WORLD_SIZE_KM-Imports (siehe
+        # [[project-terrain-review]] 4f). self.data_lod_manager kann in
+        # Standalone-/Test-Nutzung noch None sein (siehe
+        # _ensure_data_lod_manager()) - dann bleibt der Default bestehen.
+        if self.data_lod_manager is not None and 'map_distance_km' in parameters:
+            self.data_lod_manager.set_map_distance_km(parameters['map_distance_km'])
+
+        # Live-Wert für DataLODManager.get_map_seed() aktuell halten - Geology
+        # liest darüber statt eines Konstruktor-Arguments (siehe
+        # GeologySystemGenerator.set_active_parameters(), Nutzer-Bug-Report:
+        # Intrusion/Fault/Tilt blieben bei jedem Map Seed identisch, weil
+        # GeologySystemGenerator lazy vom GenerationOrchestrator OHNE
+        # map_seed-Konstruktor-Argument instanziiert und für die gesamte
+        # App-Session wiederverwendet wird).
+        if self.data_lod_manager is not None and 'map_seed' in parameters:
+            self.data_lod_manager.set_map_seed(parameters['map_seed'])
 
     def _ensure_data_lod_manager(self):
         """Lazy-Fallback für Standalone-Nutzung (Tests, calculate_heightmap() ohne
@@ -1220,6 +1254,25 @@ class BaseTerrainGenerator:
 
         return terrain_data
 
+    @staticmethod
+    def _max_safe_octaves(adjusted_frequency: float, lacunarity: float, requested_octaves: int) -> int:
+        """
+        Funktionsweise: Größte Oktavenzahl n, für die
+        adjusted_frequency * lacunarity**(n-1) <= 0.5 (Nyquist-Grenze, 0.5
+        Zyklen/Pixel) gilt - geschlossene Form statt Schleife, da lacunarity
+        pro Oktave multiplikativ wächst.
+        Parameter: adjusted_frequency (float) - bereits größen-normalisierte
+        Basisfrequenz (siehe _calc_noise), lacunarity (float), requested_octaves
+        (int) - vom Slider angefragte Oktavenzahl, obere Grenze des Ergebnisses.
+        Returns: int - mindestens 1, höchstens requested_octaves.
+        """
+        if requested_octaves <= 1 or adjusted_frequency <= 0 or lacunarity <= 1.0:
+            return max(1, requested_octaves)
+        if adjusted_frequency > 0.5:
+            return 1
+        max_n = 1 + math.floor(math.log(0.5 / adjusted_frequency) / math.log(lacunarity))
+        return max(1, min(requested_octaves, max_n))
+
     def _calc_noise(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'terrain.noise' (#1): rohes Noise-Grid [-1,1]"""
         parameters = self._current_parameters
@@ -1232,6 +1285,23 @@ class BaseTerrainGenerator:
 
         # Frequency für LOD-Größe anpassen
         adjusted_frequency = frequency * (64 / size)  # Referenz: LOD 64
+
+        # Oktaven, die die Nyquist-Grenze (0.5 Zyklen/Pixel) überschreiten, fügen
+        # nur noch Aliasing statt echtem Detail hinzu - bei Default-Werten
+        # (frequency=0.037, lacunarity=2.3) liegt das schon ab Oktave 5 vor (siehe
+        # OCTAVES-Beschreibung in value_default.py). Der UI-Slider erlaubt aber
+        # weiterhin bis zu 8 Oktaven und Lacunarity bis 4.0 - hier statt eines
+        # kaputten Ergebnisses still auf die tatsächlich sinnvolle Oktavenzahl
+        # clampen (wirkt einheitlich auf GPU-/CPU-/Simple-Fallback, da alle drei
+        # denselben effective_octaves-Wert von hier bekommen, statt den Fix
+        # separat für jeden der drei Pfade nachzubauen).
+        effective_octaves = self._max_safe_octaves(adjusted_frequency, lacunarity, octaves)
+        if effective_octaves < octaves:
+            self.logger.debug(
+                f"Octaves clamped from {octaves} to {effective_octaves} "
+                f"(frequency={adjusted_frequency:.4f}, lacunarity={lacunarity}: "
+                f"higher octaves would exceed the 0.5 cycles/pixel Nyquist limit)")
+        octaves = effective_octaves
 
         # map_seed war hier vorher nie gelesen worden - der Noise-Generator
         # behielt den Seed, mit dem er beim allerersten Generate-Klick
@@ -1368,20 +1438,30 @@ class BaseTerrainGenerator:
             if param not in parameters:
                 raise ValueError(f"Missing required parameter: {param}")
 
-        # Range-Validation - Grenzen synchron zu gui/config/value_default.py TERRAIN
-        validations = {
-            'map_size': lambda x: 32 <= x <= 1024 and x % 32 == 0,  # Vielfaches von MAPSIZEMIN (UI-Step)
-            'amplitude': lambda x: 30 <= x <= 6000,
-            'octaves': lambda x: 1 <= x <= 12,
-            'frequency': lambda x: 0.001 <= x <= 0.1,
-            'persistence': lambda x: 0.1 <= x <= 1.0,
-            'lacunarity': lambda x: 1.1 <= x <= 4.0,
-            'redistribute_power': lambda x: 0.5 <= x <= 4.0
+        # Range-Validation - Grenzen direkt aus gui/config/value_default.py TERRAIN
+        # gelesen statt hier ein zweites Mal hart codiert, damit beide Quellen
+        # strukturell nicht mehr auseinanderdriften können (vorher erlaubte
+        # 'octaves' hier bis 12, obwohl der UI-Slider nur bis 8 geht).
+        from gui.config.value_default import TERRAIN
+        param_to_config = {
+            'map_size': TERRAIN.MAPSIZE, 'amplitude': TERRAIN.AMPLITUDE,
+            'octaves': TERRAIN.OCTAVES, 'frequency': TERRAIN.FREQUENCY,
+            'persistence': TERRAIN.PERSISTENCE, 'lacunarity': TERRAIN.LACUNARITY,
+            'redistribute_power': TERRAIN.REDISTRIBUTE_POWER,
+            # Nicht in required_params (Slider ist neu, ältere/Standalone-
+            # Aufrufer liefern ihn evtl. noch nicht mit) - wird trotzdem
+            # geprüft, sobald vorhanden.
+            'map_distance_km': TERRAIN.MAP_DISTANCE_KM,
         }
 
-        for param, validator in validations.items():
-            if param in parameters and not validator(parameters[param]):
-                raise ValueError(f"Invalid value for {param}: {parameters[param]}")
+        for param, config in param_to_config.items():
+            if param not in parameters:
+                continue
+            value = parameters[param]
+            if not (config["min"] <= value <= config["max"]):
+                raise ValueError(f"Invalid value for {param}: {value}")
+            if param == 'map_size' and value % 32 != 0:
+                raise ValueError(f"Invalid value for {param}: {value} (must be a multiple of 32)")
 
     def _determine_fallback_used(self) -> str:
         """
@@ -1543,57 +1623,6 @@ def create_terrain_data() -> TerrainData:
     """
     return TerrainData()
 
-def validate_terrain_parameters(parameters: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Funktionsweise: Standalone Parameter-Validation
-    Parameter: parameters - Zu validierende Parameter
-    Returns: dict - Validation-Result mit errors/warnings
-    """
-    result = {
-        "valid": True,
-        "errors": [],
-        "warnings": []
-    }
-
-    required_params = ['map_seed', 'map_size', 'amplitude', 'octaves',
-                      'frequency', 'persistence', 'lacunarity', 'redistribute_power']
-
-    # Required Parameters prüfen
-    for param in required_params:
-        if param not in parameters:
-            result["valid"] = False
-            result["errors"].append(f"Missing required parameter: {param}")
-
-    # Range-Validation
-    validations = {
-        'map_size': (lambda x: 32 <= x <= 2048 and x % 32 == 0, "Must be a multiple of 32 between 32 and 2048"),
-        'amplitude': (lambda x: 0 <= x <= 1000, "Must be between 0 and 1000"),
-        'octaves': (lambda x: 1 <= x <= 10, "Must be between 1 and 10"),
-        'frequency': (lambda x: 0.001 <= x <= 1.0, "Must be between 0.001 and 1.0"),
-        'persistence': (lambda x: 0.0 <= x <= 2.0, "Must be between 0.0 and 2.0"),
-        'lacunarity': (lambda x: 1.0 <= x <= 5.0, "Must be between 1.0 and 5.0"),
-        'redistribute_power': (lambda x: 0.1 <= x <= 3.0, "Must be between 0.1 and 3.0")
-    }
-
-    for param, (validator, message) in validations.items():
-        if param in parameters:
-            try:
-                if not validator(parameters[param]):
-                    result["valid"] = False
-                    result["errors"].append(f"Invalid {param}: {message}")
-            except (TypeError, ValueError):
-                result["valid"] = False
-                result["errors"].append(f"Invalid type for {param}: expected number")
-
-    # Warnings für suboptimale Parameter
-    if parameters.get('octaves', 0) > 8:
-        result["warnings"].append("High octave count may impact performance")
-    if parameters.get('amplitude', 0) > 500:
-        result["warnings"].append("Very high amplitude may create unrealistic terrain")
-
-    return result
-
-
 # ================================
 # UTILITY FUNCTIONS
 # ================================
@@ -1722,12 +1751,11 @@ def test_terrain_generator():
         'redistribute_power': 1.0
     }
 
-    validation_result = validate_terrain_parameters(test_params)
-    assert validation_result["valid"], f"Parameter validation failed: {validation_result['errors']}"
-    print("✓ Parameter validation passed")
-
     # Test Generator ohne ShaderManager
     generator = create_terrain_generator(map_seed=12345, shader_manager=None)
+
+    generator._validate_parameters(test_params)
+    print("✓ Parameter validation passed")
 
     # Test Terrain-Generierung
     terrain_data = generator.calculate_heightmap(test_params, lod_level=2)

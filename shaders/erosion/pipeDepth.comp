@@ -1,0 +1,80 @@
+#version 430
+// Pass 3 des Feld-Erosionsmodells: Wasserhoehe, Geschwindigkeit, Durchfluss
+// und die Abfluss-Anteile.
+//
+// Formelgleich zum zweiten Teil von core/erosion_generator.py
+// HydraulicFieldSimulator._pass_flux_and_depth(). Braucht den GERADE in
+// pipeFlux.comp berechneten Fluss und kann deshalb nicht mit ihm fusioniert
+// werden - dieselbe Trennung wie im Water-Modell (pipeFluxUpdate/pipeDepthUpdate).
+//
+// Die vier Abfluss-ANTEILE (welcher Bruchteil des Wassers einer Zelle in
+// welche Richtung geht) werden hier mitgeschrieben, weil genau sie den
+// Sedimenttransport treiben (sedimentTransport.comp): geloeste Fracht geht
+// dorthin, wohin das Wasser geht. Sie hier zu berechnen statt spaeter zu
+// rekonstruieren haelt beide Transporte garantiert konsistent - und weil die
+// K-Skalierung in Pass 1 bereits sicherstellt, dass ihre Summe nie ueber 1
+// liegt, erbt der Sedimenttransport die Massenerhaltung gratis.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D waterIn;      // nach Regen
+layout(rgba32f, binding = 1) uniform readonly image2D fluxIn;
+layout(r32f, binding = 2) uniform writeonly image2D waterOut;
+layout(rg32f, binding = 3) uniform writeonly image2D velocityOut;
+layout(r32f, binding = 4) uniform writeonly image2D dischargeOut;
+layout(rgba32f, binding = 5) uniform writeonly image2D outflowFractionOut;
+
+uniform int u_size;
+uniform float u_dt;
+uniform float u_pipe_length;
+uniform float u_min_depth_for_velocity;
+
+// Ausfluss eines Nachbarn. Ausserhalb der Karte liefert die Geisterzelle 0 -
+// was dort hinausfliesst, verlaesst das Gebiet (offene Grenze).
+vec4 fluxAt(ivec2 coord) {
+    if (coord.x < 0 || coord.x >= u_size || coord.y < 0 || coord.y >= u_size) {
+        return vec4(0.0);
+    }
+    return imageLoad(fluxIn, coord);
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    float water = imageLoad(waterIn, coord).r;
+    vec4 f = imageLoad(fluxIn, coord);   // x=links, y=rechts, z=oben, w=unten
+
+    // Zufluss von den Nachbarn = deren jeweils ENTGEGENGESETZTER Ausfluss.
+    float inL = fluxAt(coord + ivec2(-1, 0)).y;
+    float inR = fluxAt(coord + ivec2(1, 0)).x;
+    float inT = fluxAt(coord + ivec2(0, -1)).w;
+    float inB = fluxAt(coord + ivec2(0, 1)).z;
+
+    float cellArea = u_pipe_length * u_pipe_length;
+    float incoming = inL + inR + inT + inB;
+    float outgoing = f.x + f.y + f.z + f.w;
+    float newWater = max(0.0, water + u_dt / cellArea * (incoming - outgoing));
+
+    float dAvg = max(0.5 * (water + newWater), u_min_depth_for_velocity);
+    float netX = 0.5 * (inL - f.x + f.y - inR);
+    float netY = 0.5 * (inT - f.z + f.w - inB);
+    vec2 velocity = vec2(netX, netY) / (u_pipe_length * dAvg);
+
+    // In fast trockenen Zellen wird die Geschwindigkeit auf 0 gesetzt statt
+    // aus einem verschwindenden Nenner hochgerechnet.
+    if (newWater < u_min_depth_for_velocity) {
+        velocity = vec2(0.0);
+    }
+
+    // Spezifischer Durchfluss (m^2/s, pro Meter Gewaesserbreite) - die
+    // Groesse, die in erodeDeposit.comp die Transportkapazitaet treibt.
+    float discharge = length(vec2(netX, netY)) / u_pipe_length;
+
+    float waterVolume = max(water * cellArea, 1e-12);
+    vec4 fractions = u_dt * f / waterVolume;
+
+    imageStore(waterOut, coord, vec4(newWater, 0.0, 0.0, 0.0));
+    imageStore(velocityOut, coord, vec4(velocity, 0.0, 0.0));
+    imageStore(dischargeOut, coord, vec4(discharge, 0.0, 0.0, 0.0));
+    imageStore(outflowFractionOut, coord, fractions);
+}

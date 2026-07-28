@@ -2,7 +2,7 @@
 Path: gui/OldManagers/navigation_manager.py
 
 Funktionsweise: Zentrale Tab-Navigation und Parameter-Persistierung
-- Tab-Reihenfolge: main_menu → terrain ⇆ geology ⇆ weather ⇆ water ⇆ biome ⇆ settlement ⇆ overview
+- Tab-Reihenfolge: main_menu → terrain ⇆ geology ⇆ erosion ⇆ weather ⇆ water ⇆ biome ⇆ settlement ⇆ overview
 - Automatische Parameter-Speicherung vor Tab-Wechsel
 - Window-Geometrie Persistierung
 - Graceful Cleanup und Resource-Management
@@ -44,6 +44,9 @@ class NavigationManager(QObject):
             "main_menu",
             "terrain",
             "geology",
+            # Erosion sitzt zwischen Geology und Weather - dieselbe Reihenfolge
+            # wie in der Pipeline (siehe CALCULATOR_GRAPH).
+            "erosion",
             "weather",
             "water",
             "biome",

@@ -20,6 +20,10 @@ DEFAULT_BASE_COST: Dict[str, float] = {
     "terrain": 1.0,
     "geology": 1.2,
     "weather": 0.8,
+    # Erosion ist der mit Abstand teuerste Generator: mehrere tausend
+    # Simulationsschritte in EINER LOD-Runde (siehe
+    # core/erosion_generator.py).
+    "erosion": 3.0,
     "water": 1.5,
     "biome": 1.0,
     "settlement": 0.6,

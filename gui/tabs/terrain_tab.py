@@ -98,28 +98,43 @@ class TerrainTab(BaseMapTab):
             self.logger.error(f"Parameter control creation failed: {e}")
 
     def _create_terrain_parameters(self):
-        """Erstellt Terrain Parameter Controls"""
-        terrain_group = QGroupBox("Terrain Parameters")
-        terrain_group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-        terrain_layout = QVBoxLayout()
-
-        # Parameter-Definitionen aus value_default.TERRAIN
-        parameter_configs = [
+        """
+        Erstellt Terrain Parameter Controls, unterteilt in "Shape" (Kartengröße/
+        -ausdehnung, Höhe, Redistribution, Seed) und "Noise Detail" (die 4
+        Rausch-Parameter, die miteinander interagieren - siehe
+        [[project-terrain-review]] 5.3) statt einer einzigen flachen Liste.
+        """
+        shape_configs = [
             ("map_size", "Map Size", TERRAIN.MAPSIZE),
+            ("map_distance_km", "Map Distance (km)", TERRAIN.MAP_DISTANCE_KM),
             ("amplitude", "Height Amplitude", TERRAIN.AMPLITUDE),
+            ("redistribute_power", "Height Redistribution", TERRAIN.REDISTRIBUTE_POWER),
+            ("map_seed", "Map Seed", TERRAIN.MAP_SEED),
+        ]
+        noise_detail_configs = [
             ("octaves", "Detail Octaves", TERRAIN.OCTAVES),
             ("frequency", "Base Frequency", TERRAIN.FREQUENCY),
             ("persistence", "Detail Persistence", TERRAIN.PERSISTENCE),
             ("lacunarity", "Frequency Scaling", TERRAIN.LACUNARITY),
-            ("redistribute_power", "Height Redistribution", TERRAIN.REDISTRIBUTE_POWER),
-            ("map_seed", "Map Seed", TERRAIN.MAP_SEED)
         ]
+
+        shape_group = self._build_parameter_group("Shape", shape_configs)
+        self.control_panel.layout().addWidget(shape_group)
+
+        noise_detail_group = self._build_parameter_group("Noise Detail", noise_detail_configs)
+        self.control_panel.layout().addWidget(noise_detail_group)
+
+    def _build_parameter_group(self, title: str, parameter_configs) -> QGroupBox:
+        """Baut eine QGroupBox mit Slidern für die übergebenen (key, label, config)-Tupel."""
+        group = QGroupBox(title)
+        group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        layout = QVBoxLayout()
 
         for param_key, label, config in parameter_configs:
             if param_key == "map_seed":
                 # Seed Parameter mit RandomSeedButton
                 seed_layout = self._create_seed_parameter(param_key, label, config)
-                terrain_layout.addLayout(seed_layout)
+                layout.addLayout(seed_layout)
             else:
                 # Standard Parameter Slider
                 slider = ParameterSlider(
@@ -138,10 +153,10 @@ class TerrainTab(BaseMapTab):
                 )
 
                 self.parameter_sliders[param_key] = slider
-                terrain_layout.addWidget(slider)
+                layout.addWidget(slider)
 
-        terrain_group.setLayout(terrain_layout)
-        self.control_panel.layout().addWidget(terrain_group)
+        group.setLayout(layout)
+        return group
 
     def _create_seed_parameter(self, param_key: str, label: str, config: Dict):
         """Erstellt Seed Parameter mit RandomSeedButton"""
@@ -221,22 +236,32 @@ class TerrainTab(BaseMapTab):
         return controls_widget
 
     def _create_display_mode_controls(self):
-        """Erstellt Height/Slope Display Mode Controls"""
+        """Erstellt Terrain-Heightmap/Heightmap-Combined/Slope Display Mode Controls"""
         layout = QHBoxLayout()
 
         # Display Mode Button Group
         self.display_mode_group = QButtonGroup()
 
-        height_radio = QRadioButton("Height")
+        # "Height" zeigte bisher fälschlich get_terrain_data_combined()
+        # (das Ergebnis NACH Geology-Tektonik + Water-Erosion/Sedimentation),
+        # nicht Terrains eigene, unveränderte Heightmap - siehe
+        # [[project-terrain-review]]. Jetzt zwei getrennte Optionen: die reine
+        # Terrain-Rohform (Default) und explizit das kombinierte Endergebnis.
+        height_radio = QRadioButton("Terrain Heightmap")
         height_radio.setChecked(True)
         height_radio.toggled.connect(lambda checked: self._on_display_mode_changed("height", checked))
         self.display_mode_group.addButton(height_radio, 0)
+
+        combined_radio = QRadioButton("Heightmap Combined")
+        combined_radio.toggled.connect(lambda checked: self._on_display_mode_changed("combined", checked))
+        self.display_mode_group.addButton(combined_radio, 2)
 
         slope_radio = QRadioButton("Slope")
         slope_radio.toggled.connect(lambda checked: self._on_display_mode_changed("slope", checked))
         self.display_mode_group.addButton(slope_radio, 1)
 
         layout.addWidget(height_radio)
+        layout.addWidget(combined_radio)
         layout.addWidget(slope_radio)
 
         return layout
@@ -355,24 +380,35 @@ class TerrainTab(BaseMapTab):
 
             # Daten basierend auf Display-Mode holen
             if self.current_display_mode == "height":
-                # Kombiniert (Geology-Tektonik + Water-Erosion/-Sedimentation),
-                # nicht die unbearbeitete Terrain-Rohausgabe - siehe
-                # DataLODManager.get_terrain_data_combined()
-                data = self.data_lod_manager.get_terrain_data_combined("heightmap")
+                # Terrains eigene, unveränderte Heightmap - wird von Geology/
+                # Water nie mutiert (siehe get_terrain_data_combined() für
+                # das kombinierte Endergebnis, separat unter "combined").
+                # data_type "heightmap" (reine Terrain-Rohform) vs.
+                # "heightmap_combined" (Endergebnis) ist das Fast-Path-Signal
+                # für base_tab.py's 3D-Mesh-Aufbau: nur "heightmap_combined"
+                # wird direkt fürs Mesh verwendet, "heightmap" löst dort immer
+                # einen Re-Fetch der kombinierten Karte aus, damit die rohe
+                # Terrain-Form nicht fälschlich das 3D-Mesh verformt.
+                data = self.data_lod_manager.get_terrain_data("heightmap")
                 data_type = "heightmap"
+                display_data = data
+            elif self.current_display_mode == "combined":
+                # Finales Ergebnis NACH Geology-Tektonik + Water-Erosion/
+                # -Sedimentation - siehe DataLODManager.get_terrain_data_combined().
+                data = self.data_lod_manager.get_terrain_data_combined("heightmap")
+                data_type = "heightmap_combined"
                 display_data = data
             elif self.current_display_mode == "slope":
                 data = self.data_lod_manager.get_terrain_data("slopemap")
                 data_type = "slopemap"
-                # slopemap ist (H,W,2) dx/dy-Gradient - MapDisplay2D kann nur
-                # echte 2D-Bilder zeichnen. Für die Anzeige auf eine
-                # Steigungs-Magnitude in Grad reduzieren (dieselbe Umrechnung
-                # wie in _update_statistics()); die rohen (H,W,2)-Daten bleiben
-                # für Change-Detection/Statistics unverändert.
-                display_data = None
-                if data is not None and hasattr(data, 'shape') and len(data.shape) == 3:
-                    slope_magnitude = np.sqrt(data[:, :, 0] ** 2 + data[:, :, 1] ** 2)
-                    display_data = np.degrees(np.arctan(slope_magnitude)).astype(np.float32)
+                # slopemap ist (H,W,2) dx/dy-Gradient - MapDisplay2D._render_
+                # slopemap() faerbt es jetzt direkt als Kompass-Farbrad
+                # (Hangausrichtung=Hue, Steilheit=Saettigung, siehe
+                # compute_slope_compass_rgb()), braucht also die rohen
+                # Vektor-Daten unveraendert statt einer vorab auf Grad
+                # reduzierten Magnitude (die die Richtungsinformation verwarf).
+                display_data = data if data is not None and hasattr(data, 'shape') and len(data.shape) == 3 \
+                    else None
             else:
                 return
 
@@ -404,7 +440,7 @@ class TerrainTab(BaseMapTab):
     def _update_statistics(self, data, data_type: str):
         """Aktualisiert Terrain Statistics basierend auf aktuellen Daten"""
         try:
-            if data_type == "heightmap" and hasattr(data, 'shape'):
+            if data_type in ("heightmap", "heightmap_combined") and hasattr(data, 'shape'):
                 # Height Statistics
                 height_min = float(np.min(data))
                 height_max = float(np.max(data))

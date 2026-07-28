@@ -3357,8 +3357,11 @@ class SettlementGenerator:
             # String-LOD-Pfad ist nur noch für ungenutzten Legacy-Code relevant).
             self.data_lod_manager.set_calculator_output("terrain.redistribution", lod, {"heightmap": heightmap})
             self.data_lod_manager.set_calculator_output("terrain.slope", lod, {"slopemap": slopemap})
+            # water.manning_flow (GEMALTE Klassifikation), nicht
+            # water.flow_network (Zentrallinie) - siehe
+            # core/water_generator.py._calc_manning_flow().
             self.data_lod_manager.set_calculator_output(
-                "water.flow_network", lod, {"water_biomes_map": water_map})
+                "water.manning_flow", lod, {"water_biomes_map": water_map})
             self.data_lod_manager.set_calculator_output(
                 "biome.integrate_layers", lod, {"biome_map": biome_map})
 
@@ -3469,9 +3472,9 @@ class SettlementGenerator:
 
         return settlement_data
 
-    def _is_final_lod(self, lod_level: int) -> bool:
+    def _is_final_lod(self, calculator_id: str, lod_level: int) -> bool:
         """
-        Prüft, ob lod_level die letzte/finale Runde für die aktuelle Kartengröße
+        Prüft, ob lod_level die letzte/finale Runde für DIESEN Calculator-Lauf
         ist - gemeinsame Grundlage für ALLE 10 Settlement-Calculator-Knoten
         (siehe [[project-settlement-scale-invariance]]), nicht nur
         settlement.plot_nodes wie zuvor. WICHTIG: alle 10 Knoten MÜSSEN
@@ -3480,18 +3483,27 @@ class SettlementGenerator:
         vorgelagerter Knoten (dessen Output er liest) es noch nicht ist, und
         ein leeres Platzhalter-Ergebnis als echte Daten lesen.
 
-        DataLODManager.get_max_lod_for_map_size() fällt IMMER auf den
-        hartkodierten Default 7 zurück (self.lod_hub.lod_config wird nirgends
-        in der Live-App via set_lod_config() gesetzt - geprüft, kein einziger
-        Aufruf existiert außerhalb von data_lod_manager.py selbst). Für jede
-        Kartengröße mit "echtem" Max-LOD < 7 (z.B. 128px -> 3) würde das ohne
-        diesen Workaround NIE als final erkannt - Ursache des ursprünglichen
-        "keine Plotnodes/-kerne/Voronoi sichtbar"-Bugs, siehe
-        [[project-settlement-physics-lab-parity]]. Fix: die tatsächliche
-        Ziel-Kartengröße stattdessen aus der bereits vollständig generierten
-        Terrain-Heightmap ablesen (terrain.redistribution läuft immer deutlich
-        schneller durch seine eigene LOD-Progression als Settlement).
+        Liest das Ziel-LOD aus DataLODManager.get_calculator_target_lod() (von
+        GenerationOrchestrator.request_generation() für jeden Calculator-Knoten
+        gesetzt, sobald der Request gestellt wird - stabil über den gesamten
+        Lauf, unabhängig vom Fortschritt anderer Generatoren).
+
+        Frühere Version leitete "final" stattdessen aus der GERADE
+        VERFÜGBAREN (noch wachsenden) Terrain-Heightmap-Größe ab
+        (calculate_max_lod_for_size(aktuelle_heightmap.shape[0])) - das verglich
+        de facto jede Zwischen-Runde mit sich selbst und erkannte JEDE Runde
+        fälschlich als "final" (z.B. Runde 1 mit einer LOD-1-großen Heightmap:
+        max_lod_for_size(32px) == 1 == lod_level, "final" also sofort wahr),
+        wodurch PlotPhysicsSystem (bis zu 100 Iterationen) bei jeder LOD-Runde
+        statt nur einmal am Ende komplett neu lief. Fallback auf die alte
+        Heightmap-Ableitung bleibt für Aufrufe außerhalb von
+        GenerationOrchestrator (z.B. Standalone-Tests) erhalten, für die nie
+        ein Ziel-LOD gesetzt wurde.
         """
+        target = self.data_lod_manager.get_calculator_target_lod(calculator_id)
+        if target is not None:
+            return lod_level >= target
+
         from gui.OldManagers.data_lod_manager import calculate_max_lod_for_size
         full_heightmap = self.data_lod_manager.get_terrain_data("heightmap")
         if full_heightmap is not None:
@@ -3503,13 +3515,17 @@ class SettlementGenerator:
     def _get_prepared_settlement_inputs(self, lod_level: int) -> Dict[str, Any]:
         """
         Holt alle Settlement-Dependencies (Terrain/Water-Outputs) für dieses LOD.
-        water_map wird bewusst direkt aus water.flow_network's water_biomes_map
+        water_map wird bewusst direkt aus water.manning_flow's water_biomes_map
         gelesen (Calculator-Graph-Ebene), nicht aus der zusammengesetzten
         Domain-Ebene (DataLODManager.get_water_data_lod('water_map')) - funktional
         äquivalent für die reine Wasser-Präsenz-Prüfung in
         TerrainSuitabilityAnalyzer.calculate_water_proximity() (prüft nur
         `water_map > 0`), aber verfügbar sobald DIESER EINE Water-Knoten fertig
         ist, ohne auf die vollständige Water-Generator-Assemblierung zu warten.
+        water.manning_flow (nicht water.flow_network) liefert die GEMALTE
+        Klassifikation in tatsaechlicher Flussbreite - Siedlungsnaehe soll sich
+        an der echten Gewaesserflaeche orientieren, nicht an der ein Pixel
+        breiten Zentrallinie (siehe core/water_generator.py._calc_manning_flow()).
 
         Setzt außerdem self.scale_factor/self.area_scale_factor aus der
         tatsächlichen finalen Heightmap-Größe (siehe
@@ -3528,7 +3544,7 @@ class SettlementGenerator:
         heightmap = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
         slopemap = self.data_lod_manager.get_calculator_output("terrain.slope", "slopemap", lod_level)
         water_map = self.data_lod_manager.get_calculator_output(
-            "water.flow_network", "water_biomes_map", lod_level)
+            "water.manning_flow", "water_biomes_map", lod_level)
 
         missing = [name for name, value in (
             ("heightmap", heightmap), ("slopemap", slopemap), ("water_map", water_map)
@@ -3551,7 +3567,7 @@ class SettlementGenerator:
         Calculator-Knoten außerhalb von settlement.* hängt von hier ab, es
         entsteht also keine Wartezeit für irgendetwas anderes.
         """
-        if not self._is_final_lod(lod_level):
+        if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(
                 calculator_id, lod_level, {"combined_suitability_map": None})
             return
@@ -3564,7 +3580,7 @@ class SettlementGenerator:
 
     def _calc_settlements(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.settlements' (#29) - siehe _is_final_lod()."""
-        if not self._is_final_lod(lod_level):
+        if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"settlement_list": []})
             return
         self._update_progress("Settlement Placement", 15, "Placing settlements based on suitability...")
@@ -3581,7 +3597,7 @@ class SettlementGenerator:
         """Calculator-Node 'settlement.city_boundary' (NEU) - terrain-cost-gewichtete
         Stadtgrenze je Settlement, Grundlage fuer die Trennung Stadt-Innen (spaeteres
         Block-System) vs. Landschaft (LandscapeVoronoiSystem). Siehe _is_final_lod()."""
-        if not self._is_final_lod(lod_level):
+        if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(
                 calculator_id, lod_level, {"city_mask": None, "city_cost_map": None})
             return
@@ -3613,7 +3629,7 @@ class SettlementGenerator:
         bereits dokumentiert auf reines Slope-Cost-Pathfinding zurück.
         Siehe _is_final_lod().
         """
-        if not self._is_final_lod(lod_level):
+        if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roads": []})
             return
         self._update_progress("Road Building", 25, "Creating road networks between settlements...")
@@ -3628,7 +3644,7 @@ class SettlementGenerator:
 
     def _calc_roadsites(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.roadsites' (#31) - siehe _is_final_lod()."""
-        if not self._is_final_lod(lod_level):
+        if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roadsite_list": []})
             return
         self._update_progress("Roadsite Placement", 40, "Placing roadsites along roads...")
@@ -3641,7 +3657,7 @@ class SettlementGenerator:
 
     def _calc_civ_influence(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.civ_influence' (#32) - siehe _is_final_lod()."""
-        if not self._is_final_lod(lod_level):
+        if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"civ_map": None})
             return
         self._update_progress("Civilization Mapping", 50, "Creating civilization influence map...")
@@ -3660,7 +3676,7 @@ class SettlementGenerator:
 
     def _calc_landmarks(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.landmarks' (#33) - siehe _is_final_lod()."""
-        if not self._is_final_lod(lod_level):
+        if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"landmark_list": []})
             return
         self._update_progress("Landmark Placement", 65, "Placing landmarks in wilderness areas...")
@@ -3677,7 +3693,7 @@ class SettlementGenerator:
         Dijkstra-Anbindung jedes Landmarks an den nächstgelegenen Punkt des
         Hauptstraßennetzes (Nutzer-Vorgabe: kein Zufallsmechanismus in Phase 1,
         das dekorative Zusatz-Wegenetz kommt erst in Phase 2). Siehe _is_final_lod()."""
-        if not self._is_final_lod(lod_level):
+        if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"landmark_roads": []})
             return
         self._update_progress("Landmark Roads", 68, "Connecting landmarks to road network...")
@@ -3695,7 +3711,7 @@ class SettlementGenerator:
         """Calculator-Node 'settlement.outer_roads' (NEU) - 2-3 Außenverbindungen
         von Siedlungen zur Kartengrenze an plausiblen Positionen (nicht
         Bergspitze/Meer, siehe calculate_outer_connections()). Siehe _is_final_lod()."""
-        if not self._is_final_lod(lod_level):
+        if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"outer_roads": []})
             return
         self._update_progress("Outer Roads", 27, "Connecting settlements to map border...")
@@ -3726,7 +3742,7 @@ class SettlementGenerator:
         keine echte Wartezeit für irgendetwas anderes. Siehe _is_final_lod()
         (jetzt von allen 10 Settlement-Knoten geteilt, nicht mehr nur diesem).
         """
-        if not self._is_final_lod(lod_level):
+        if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {
                 "plot_nodes": [], "plots": [], "plot_map": None, "plot_edges": {},
                 "plot_node_positions": [], "plot_cores": [], "wilderness_polygons": [],

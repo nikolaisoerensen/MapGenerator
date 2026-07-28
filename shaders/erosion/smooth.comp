@@ -1,0 +1,99 @@
+#version 430
+// Pass 7+8 des Feld-Erosionsmodells: Verdunstung und bedingte Glaettung.
+//
+// Formelgleich zu core/erosion_generator.py
+// HydraulicFieldSimulator._pass_evaporate() + _pass_smooth().
+//
+// Beide zusammen in einem Dispatch, weil sie unabhaengige Felder anfassen
+// (Wasser bzw. Gelaende) und keiner die Nachbarn des jeweils anderen liest -
+// eine Fusion ohne jede Wechselwirkung, anders als bei Fluss und Tiefe.
+//
+// DIE GLAETTUNG GLAETTET NICHT FLAECHIG. Sie greift nur, wo eine Zelle
+// gegenueber ZWEI GEGENUEBERLIEGENDEN Nachbarn in dieselbe Richtung abweicht -
+// also auf Ein-Pixel-Graten und Ein-Pixel-Rinnen. Ein echter Hang hat auf der
+// einen Seite einen hoeheren und auf der anderen einen tieferen Nachbarn, die
+// Vorzeichen sind entgegengesetzt, er bleibt unangetastet. Genau diese
+// Bedingung ist der Unterschied zwischen "Gitterartefakte entfernen" und "die
+// Landschaft weichzeichnen".
+//
+// UMVERTEILEN STATT ERSETZEN: das Vorbild schreibt den geglaetteten Wert
+// einfach zurueck, was Material erzeugt bzw. vernichtet (gemessen der einzige
+// nicht erhaltende Pass des Modells). Hier wird der herausgenommene
+// Hoehenunterschied auf die acht Nachbarn verteilt. Auf der GPU heisst das:
+// jede Zelle berechnet ihr EIGENES Delta und holt sich zusaetzlich ein Achtel
+// des Deltas jedes Nachbarn - ein Gather ueber einen 5x5-Bereich, weil das
+// Delta eines Nachbarn wiederum dessen 3x3 braucht.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform readonly image2D heightIn;
+layout(r32f, binding = 1) uniform readonly image2D waterIn;
+layout(r32f, binding = 2) uniform writeonly image2D heightOut;
+layout(r32f, binding = 3) uniform writeonly image2D waterOut;
+
+uniform int u_size;
+uniform float u_evaporation_factor;   // 1 - Ke*dt, bereits ausgerechnet
+uniform float u_threshold;            // smoothing * smoothing_scale, 0 = aus
+
+float heightAt(ivec2 coord) {
+    return imageLoad(heightIn, clamp(coord, ivec2(0), ivec2(u_size - 1))).r;
+}
+
+// Der Hoehenunterschied, den die Glaettung dieser Zelle entzieht (0, wenn sie
+// kein Ein-Pixel-Grat/keine Ein-Pixel-Rinne ist). Identisch zur CPU-Fassung:
+// Mittengewicht 8 gegen 4x1 (Kanten) + 4x0.707 (Diagonalen).
+float smoothingDelta(ivec2 coord) {
+    if (u_threshold <= 0.0) {
+        return 0.0;
+    }
+    float here = heightAt(coord);
+    float dL = here - heightAt(coord + ivec2(-1, 0));
+    float dR = here - heightAt(coord + ivec2(1, 0));
+    float dT = here - heightAt(coord + ivec2(0, -1));
+    float dB = here - heightAt(coord + ivec2(0, 1));
+
+    bool horizontal = abs(dL) > u_threshold && abs(dR) > u_threshold && dL * dR > 0.0;
+    bool vertical = abs(dT) > u_threshold && abs(dB) > u_threshold && dT * dB > 0.0;
+    if (!horizontal && !vertical) {
+        return 0.0;
+    }
+
+    float edges = heightAt(coord + ivec2(-1, 0)) + heightAt(coord + ivec2(1, 0))
+                + heightAt(coord + ivec2(0, -1)) + heightAt(coord + ivec2(0, 1));
+    float diagonals = heightAt(coord + ivec2(-1, -1)) + heightAt(coord + ivec2(1, -1))
+                    + heightAt(coord + ivec2(-1, 1)) + heightAt(coord + ivec2(1, 1));
+    float averaged = (here * 8.0 + edges + diagonals * 0.707) / (8.0 + 4.0 * 1.707);
+    return averaged - here;
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= u_size || coord.y >= u_size) return;
+
+    imageStore(waterOut, coord,
+               vec4(imageLoad(waterIn, coord).r * u_evaporation_factor, 0.0, 0.0, 0.0));
+
+    float height = imageLoad(heightIn, coord).r;
+    if (u_threshold <= 0.0) {
+        imageStore(heightOut, coord, vec4(height, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    float delta = smoothingDelta(coord);
+
+    // Was die acht Nachbarn abgeben, kommt hier an - je ein Achtel ihres
+    // Deltas mit umgekehrtem Vorzeichen. Nachbarn ausserhalb der Karte tragen
+    // nichts bei; genau dort (und nur dort) ist der Pass nicht exakt
+    // erhaltend, was der CPU-Test als reinen Randeffekt ausweist.
+    float redistributed = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 neighbour = coord + ivec2(dx, dy);
+            if (neighbour.x < 0 || neighbour.x >= u_size
+                || neighbour.y < 0 || neighbour.y >= u_size) continue;
+            redistributed -= smoothingDelta(neighbour) / 8.0;
+        }
+    }
+
+    imageStore(heightOut, coord, vec4(height + delta + redistributed, 0.0, 0.0, 0.0));
+}

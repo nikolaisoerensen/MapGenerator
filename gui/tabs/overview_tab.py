@@ -114,8 +114,9 @@ class OverviewTab(BaseMapTab):
         self.layer_export.export_requested.connect(self.export_layers_to_disk)
         self.control_panel.layout().addWidget(self.layer_export)
 
-        # Parameter Summary
-        self.parameter_summary = ParameterSummaryWidget()
+        # Parameter Summary - liest die echten Slider-Werte der Generator-Tabs
+        # über den ParameterManager (siehe ParameterSummaryWidget-Docstring).
+        self.parameter_summary = ParameterSummaryWidget(self.parameter_manager)
         self.control_panel.layout().addWidget(self.parameter_summary)
 
     def setup_data_monitoring(self):
@@ -201,6 +202,7 @@ class OverviewTab(BaseMapTab):
             "geology": {},
             "settlement": {},
             "weather": {},
+            "erosion": {},
             "water": {},
             "biome": {}
         }
@@ -258,6 +260,7 @@ class OverviewTab(BaseMapTab):
             "geology": ["rock_map", "hardness_map"],
             "settlement": ["settlement_list", "civ_map"],
             "weather": ["temp_map", "precip_map"],
+            "erosion": ["erosion_map", "sedimentation_map", "sediment_load_map"],
             "water": ["water_map", "soil_moist_map", "water_biomes_map"],
             "biome": ["biome_map"]
         }
@@ -447,6 +450,18 @@ class OverviewTab(BaseMapTab):
         Parameter: view_type (str) - Art der Composite-Darstellung
         """
         if not self.world_data_complete:
+            return
+
+        # render_*_view() unten rufen self.map_display auf, das hier nie
+        # zugewiesen wird (Composite-Multi-Panel-Rendering war nie an ein
+        # echtes Display-Objekt angebunden - ruft u.a. display_super_biomes()/
+        # overlay_elevation_contours()/display_multi_panel_analysis() auf, die
+        # auch auf keiner echten MapDisplay2D/3D-Klasse existieren). Bisher
+        # sonst bei jedem data_updated-Signal (siehe on_data_updated()) erneut
+        # als ERROR geloggt, sobald alle Generatoren fertig sind - hier still
+        # überspringen statt der Feature-Attrappe hinterherzulaufen.
+        if not hasattr(self, 'map_display') or self.map_display is None:
+            self.logger.debug("Composite view rendering skipped: no map_display wired up yet")
             return
 
         if view_type is None:
@@ -1258,11 +1273,22 @@ class ParameterSummaryWidget(QGroupBox):
     """
     Funktionsweise: Widget für Parameter-Summary aller Generatoren
     Aufgabe: Zeigt zusammengefasste Parameter für Export und Reproduzierbarkeit
+
+    Braucht den ParameterManager, um die TATSÄCHLICH eingestellten Werte der
+    Generator-Tabs zu lesen (get_tab_parameters()). Vorher gab dieses Widget
+    hartkodierte Platzhalter aus - beim Umbau auf echte Werte (2026-07-27)
+    wurde der Manager zunächst nicht durchgereicht, wodurch
+    get_all_parameters() bei jedem Daten-Update in einen AttributeError lief.
     """
 
-    def __init__(self):
+    def __init__(self, parameter_manager=None):
         super().__init__("Parameter Summary")
+        self.parameter_manager = parameter_manager
         self.setup_ui()
+
+    def set_parameter_manager(self, parameter_manager):
+        """Nachträgliches Setzen, falls das Widget vor dem Manager existiert."""
+        self.parameter_manager = parameter_manager
 
     def setup_ui(self):
         """Erstellt UI für Parameter-Summary"""
@@ -1286,33 +1312,43 @@ class ParameterSummaryWidget(QGroupBox):
         Funktionsweise: Aktualisiert Parameter-Summary mit allen Generator-Parametern
         Aufgabe: Sammelt Parameter von allen Tabs für Export
         """
-        # Würde normalerweise Parameter von allen Tabs sammeln
-        # Für jetzt Placeholder-Text
-        summary_text = "PARAMETER SUMMARY\n"
-        summary_text += "=" * 30 + "\n\n"
-        summary_text += "Terrain: map_size=256, amplitude=100, octaves=6\n"
-        summary_text += "Geology: sedimentary_hardness=30, igneous_hardness=80\n"
-        summary_text += "Settlement: settlements=8, landmarks=5\n"
-        summary_text += "Weather: air_temp_entry=15, solar_power=20\n"
-        summary_text += "Water: erosion_strength=1.0, manning_coefficient=0.03\n"
-        summary_text += "Biome: edge_softness=1.0, sea_level=0\n"
+        lines = ["PARAMETER SUMMARY", "=" * 30, ""]
 
-        self.parameter_text.setPlainText(summary_text)
+        all_parameters = self.get_all_parameters()
+        for generator, parameters in all_parameters.items():
+            if not parameters:
+                lines.append(f"{generator.capitalize()}: (noch nicht generiert)")
+                continue
+            values = ", ".join(f"{key}={value}" for key, value in sorted(parameters.items()))
+            lines.append(f"{generator.capitalize()}: {values}")
+
+        self.parameter_text.setPlainText("\n".join(lines))
+
+    # Reihenfolge der Generatoren in Summary und Export - entspricht der
+    # Pipeline-Reihenfolge, nicht der alphabetischen.
+    _GENERATOR_ORDER = ("terrain", "geology", "erosion", "weather", "water",
+                        "biome", "settlement")
 
     def get_all_parameters(self) -> Dict[str, Any]:
         """
-        Funktionsweise: Sammelt alle Parameter für Export
-        Return: dict mit allen Generator-Parametern
+        Funktionsweise: Sammelt die tatsächlich eingestellten Parameter aller
+        Generator-Tabs über den ParameterManager.
+        Return: dict generator -> parameter-dict (leeres dict pro Generator,
+            dessen Tab noch nicht registriert ist)
+
+        Bis 2026-07-27 gaben diese Methode und update_all_parameters()
+        hartkodierte Platzhalter zurück - der Parameter-Export schrieb dadurch
+        eine Datei mit sechs leeren Objekten, und die Summary zeigte
+        Parameter-Namen, die es teilweise gar nicht mehr gab (z.B.
+        `manning_coefficient`, seit dem Pipe-Modell-Umbau ohne Wirkung und
+        inzwischen ganz entfernt).
         """
-        # Würde normalerweise alle Parameter von anderen Tabs sammeln
-        # Für jetzt leerer dict als Fallback
+        if not self.parameter_manager:
+            return {generator: {} for generator in self._GENERATOR_ORDER}
+
         return {
-            "terrain": {},
-            "geology": {},
-            "settlement": {},
-            "weather": {},
-            "water": {},
-            "biome": {}
+            generator: dict(self.parameter_manager.get_tab_parameters(generator) or {})
+            for generator in self._GENERATOR_ORDER
         }
 
     @pyqtSlot()

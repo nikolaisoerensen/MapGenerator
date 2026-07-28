@@ -32,6 +32,7 @@ Einsatzgebiete:
   TerrainSuitabilityAnalyzer.calculate_water_proximity(), nicht im neuen Code -
   siehe docs/backlog.md Ticket #4).
 """
+import contextlib
 import logging
 import os
 import queue
@@ -73,12 +74,111 @@ def _compile_compute_program(source: str, name: str):
     return program
 
 
-# Uniform-Namen, die in den .comp-Dateien als "uniform int" deklariert sind (siehe
-# grep über shaders/**/*.comp). Alles andere wird als float behandelt.
-_INT_UNIFORM_NAMES = {
-    "u_biome_seed", "u_depth_tests", "u_height", "u_heightmap_size", "u_horizontal", "u_jump_distance",
-    "u_octaves", "u_radius", "u_seed", "u_shadowmap_size", "u_size", "u_target_size", "u_width",
-}
+# Uniform-Namen, die in den .comp-Dateien als "uniform int" deklariert sind.
+#
+# AUS DEN SHADER-QUELLEN ABGELEITET, nicht handgepflegt. Der Unterschied ist
+# nicht kosmetisch: die Liste war vorher eine Kopie, und eine Kopie driftet.
+# Das neue Uniform `u_variant` in shaders/erosion/thermalFlux.comp fehlte darin,
+# wurde deshalb mit glUniform1f statt glUniform1i gesetzt und riss den ganzen
+# Erosions-Dispatch mit GL_INVALID_OPERATION ab - sichtbar erst in der
+# laufenden App, weil GPU-Code headless nicht ausfuehrbar ist.
+#
+# Warum die Typunterscheidung ueberhaupt noetig ist: der GL-Typ darf NICHT aus
+# dem Python-Laufzeittyp geraten werden. Aufrufer uebergeben ganzzahlige
+# Parameter wie air_temp_entry=15 oft als Python-int, obwohl der GLSL-Uniform
+# float ist - glUniform1i auf eine float-Location wirft ebenfalls
+# GL_INVALID_OPERATION (das Symptom, das terrain.shadowRaycast und
+# weather.temperatureCalculation frueher bei JEDEM Aufruf zeigten).
+def _collect_int_uniform_names() -> set:
+    """Alle `uniform int u_xxx;`-Deklarationen aus saemtlichen .comp-Dateien."""
+    import re
+    pattern = re.compile(r"^\s*uniform\s+int\s+(\w+)\s*;", re.MULTILINE)
+    names = set()
+    for directory, _subdirs, files in os.walk(SHADERS_ROOT):
+        for filename in files:
+            if not filename.endswith(".comp"):
+                continue
+            path = os.path.join(directory, filename)
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    names.update(pattern.findall(handle.read()))
+            except OSError:
+                continue
+    return names
+
+
+_INT_UNIFORM_NAMES = _collect_int_uniform_names()
+
+# Fixed-Point-Skalierung fuer die Droplet-Erosions-Akkumulatoren (r32i-Images,
+# siehe _dispatch_droplet_erosion) - Mikrometer-Aufloesung. int32-Bereich /
+# 1e6 = +-2147m pro Zelle PRO RUNDE, riesige Sicherheitsmarge gegenueber dem
+# ueblichen cap_per_step (0.05-wenige Meter), auch bei vielen ueberlappenden
+# Partikel-Pinseln in derselben Runde.
+DROPLET_FIXED_POINT_SCALE = 1e6
+
+
+# =============================================================================
+# GL-RESSOURCEN-LEBENSDAUER
+# =============================================================================
+# Jede Textur/jedes SSBO, das eine der _upload_*/_create_*-Hilfsfunktionen
+# unten anlegt, wird automatisch in der aktuell offenen Allokations-Kapsel
+# registriert und beim Verlassen der Kapsel freigegeben - AUCH wenn der
+# Dispatch mit einer Exception abbricht.
+#
+# Vorher gab jeder Dispatcher seine Ressourcen selbst frei, mit den
+# glDeleteTextures-Aufrufen ganz am Ende der Funktion und ohne try/finally.
+# Jede Exception dazwischen (Shader-Compile-Fehler, GL-Fehler, VRAM-OOM bei
+# grosser map_size) liess damit saemtliche bereits allozierten GL-Objekte
+# dauerhaft zurueck. Genau dieser Fall ist eingeplant: core/water_generator.py
+# faengt GPU-Fehler ab und faellt auf CPU zurueck - bei einem
+# reproduzierbaren GPU-Fehler leakte also JEDER LOD JEDES Generierungslaufs
+# erneut VRAM, bis die Anwendung neu gestartet wurde.
+#
+# Die Kapsel wird zentral in GPUWorker._handle_request() geoeffnet (einziger
+# Aufrufpfad aller Dispatcher) - dadurch gilt die Garantie auch fuer kuenftig
+# ergaenzte Dispatcher, ohne dass dort etwas beachtet werden muesste.
+# Thread-lokal, weil die Hilfsfunktionen prinzipiell aus jedem Thread
+# aufrufbar sind; in der Praxis laeuft alles im GPUWorker-Thread.
+_gl_allocations = threading.local()
+
+
+def _track_gl_resource(kind: str, resource_id):
+    """Registriert eine frisch angelegte GL-Ressource in der offenen Kapsel.
+    Ausserhalb einer Kapsel (z.B. direkter Aufruf aus einem Test) passiert
+    nichts - die Hilfsfunktionen bleiben eigenstaendig nutzbar."""
+    scope = getattr(_gl_allocations, "scope", None)
+    if scope is not None:
+        scope.append((kind, resource_id))
+    return resource_id
+
+
+@contextlib.contextmanager
+def _gl_allocation_scope():
+    """Gibt beim Verlassen ALLE in ihr angelegten GL-Ressourcen frei, auch im
+    Fehlerfall. Verschachtelung wird unterstuetzt (die aeussere Kapsel wird
+    waehrenddessen beiseitegelegt und danach wiederhergestellt), damit ein
+    Dispatcher, der intern eine weitere Kapsel oeffnet, die Ressourcen der
+    aeusseren nicht vorzeitig einzieht."""
+    previous = getattr(_gl_allocations, "scope", None)
+    scope = []
+    _gl_allocations.scope = scope
+    try:
+        yield scope
+    finally:
+        _gl_allocations.scope = previous
+        textures = [rid for kind, rid in scope if kind == "texture"]
+        buffers = [rid for kind, rid in scope if kind == "buffer"]
+        try:
+            if textures:
+                gl.glDeleteTextures(len(textures), textures)
+            if buffers:
+                gl.glDeleteBuffers(len(buffers), buffers)
+        except Exception as cleanup_error:
+            # Aufraeumen darf einen bereits laufenden Fehler nie verdecken -
+            # der urspruengliche Fehler propagiert weiter, das Scheitern des
+            # Aufraeumens wird nur protokolliert.
+            logging.getLogger(__name__).warning(
+                f"GL-Ressourcen-Freigabe fehlgeschlagen: {cleanup_error}")
 
 
 def _set_uniforms(program, values: dict):
@@ -109,7 +209,7 @@ def _create_texture_2d(width, height, internal_format):
     gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal_format, width, height, 0, gl.GL_RED, gl.GL_FLOAT, None)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
-    return texture_id
+    return _track_gl_resource("texture", texture_id)
 
 
 def _upload_texture_2d(data: np.ndarray, internal_format):
@@ -121,7 +221,7 @@ def _upload_texture_2d(data: np.ndarray, internal_format):
     gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal_format, width, height, 0, gl.GL_RED, gl.GL_FLOAT, data)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
-    return texture_id
+    return _track_gl_resource("texture", texture_id)
 
 
 def _upload_texture_2d_rg(data: np.ndarray, internal_format):
@@ -133,7 +233,7 @@ def _upload_texture_2d_rg(data: np.ndarray, internal_format):
     gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal_format, width, height, 0, gl.GL_RG, gl.GL_FLOAT, data)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
-    return texture_id
+    return _track_gl_resource("texture", texture_id)
 
 
 def _read_texture_data(texture_id, width, height) -> np.ndarray:
@@ -152,6 +252,61 @@ def _read_texture_data_rg(texture_id, width, height) -> np.ndarray:
     r = np.frombuffer(r_data, dtype=np.float32).reshape((height, width))
     g = np.frombuffer(g_data, dtype=np.float32).reshape((height, width))
     return np.stack([r, g], axis=-1).copy()
+
+
+def _create_texture_2d_int(width, height):
+    """Allokiert eine mit 0 initialisierte r32i-Integer-Textur (Fixed-Point-
+    Akkumulator fuer Droplet-Erosion, siehe _dispatch_droplet_erosion) -
+    analog zu _create_texture_2d, aber GL_INT statt GL_FLOAT: imageAtomicAdd
+    ist in GLSL 430 Core nur fuer Integer-Bildformate nativ verfuegbar (Float-
+    Atomics auf Images brauchen eine nicht garantierte Treiber-Extension),
+    daher werden Erosions-/Ablagerungs-Betraege hier fixed-point-kodiert
+    akkumuliert statt direkt als Float."""
+    texture_id = gl.glGenTextures(1)
+    gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+    zeros = np.zeros((height, width), dtype=np.int32)
+    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_R32I, width, height, 0, gl.GL_RED_INTEGER, gl.GL_INT, zeros)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
+    return _track_gl_resource("texture", texture_id)
+
+
+def _create_ssbo(data: np.ndarray) -> int:
+    """Legt ein Shader-Storage-Buffer-Objekt an und laedt `data` hoch - erste
+    SSBO-Nutzung in dieser Codebase (bisher nur image2D-Texturen). Fuer den
+    Droplet-Erosions-Partikelzustand (_dispatch_droplet_erosion) ist ein SSBO
+    das inhaltlich richtige Werkzeug fuer ein Array beliebiger Partikel-
+    Structs (kein Zwang, es in Texturen zu pressen) - GLSL-430-Core-nativ
+    (`layout(std430, binding=N) buffer`), keine Extension noetig."""
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    buffer_id = gl.glGenBuffers(1)
+    gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, buffer_id)
+    gl.glBufferData(gl.GL_SHADER_STORAGE_BUFFER, data.nbytes, data, gl.GL_DYNAMIC_COPY)
+    gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, 0)
+    return _track_gl_resource("buffer", buffer_id)
+
+
+def _upload_texture_2d_rgba(data: np.ndarray, internal_format):
+    """Lädt ein (height, width, 4) float32-numpy-Array als 4-Kanal-GPU-Textur hoch
+    (Pipe-Modell-Umbau 2026-07-25, siehe PipeFlowSimulator - Fluss-Zustand
+    f=(f_L,f_R,f_T,f_B) braucht 4 Kanäle, RG reicht dafür nicht mehr)."""
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    height, width = data.shape[:2]
+    texture_id = gl.glGenTextures(1)
+    gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal_format, width, height, 0, gl.GL_RGBA, gl.GL_FLOAT, data)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
+    return _track_gl_resource("texture", texture_id)
+
+
+def _read_texture_data_rgba(texture_id, width, height) -> np.ndarray:
+    """Liest alle 4 Kanäle einer RGBA32F-Textur als (h,w,4) float32-Array -
+    anders als GL_RG (siehe _read_texture_data_rg) wird GL_RGBA von PyOpenGLs
+    Auto-Sizing korrekt erkannt, ein Aufruf genügt."""
+    gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+    data = gl.glGetTexImage(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, gl.GL_FLOAT)
+    return np.frombuffer(data, dtype=np.float32).reshape((height, width, 4)).copy()
 
 
 def _dispatch_compute(program, work_groups_x, work_groups_y):
@@ -190,7 +345,6 @@ def _gaussian_blur(worker: "GPUWorker", data: np.ndarray, sigma: float) -> np.nd
     gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
 
     result = _read_texture_data(tex_out, size, size)
-    gl.glDeleteTextures(3, [tex_in, tex_mid, tex_out])
     return result
 
 
@@ -208,7 +362,6 @@ def _dispatch_noise_generation(worker: "GPUWorker", inputs: dict, parameters: di
     work_groups = (size + 15) // 16
     _dispatch_compute(program, work_groups, work_groups)
     result = _read_texture_data(output_texture, size, size)
-    gl.glDeleteTextures(1, [output_texture])
     return {"success": True, "noise": result}
 
 
@@ -236,7 +389,6 @@ def _dispatch_shadow_raycast(worker: "GPUWorker", inputs: dict, parameters: dict
     work_groups = (shadowmap_size + 7) // 8
     _dispatch_compute(program, work_groups, work_groups)
     result = _read_texture_data(shadow_tex, shadowmap_size, shadowmap_size)
-    gl.glDeleteTextures(2, [height_tex, shadow_tex])
     return {"success": True, "shadowmap": result}
 
 
@@ -380,179 +532,372 @@ def _dispatch_jump_flood_lakes(worker: "GPUWorker", inputs: dict, parameters: di
         jump_distance //= 2
 
     seed_id_map = _read_texture_data(read_tex, size, size).astype(np.int32)
-    gl.glDeleteTextures(3, [height_tex, state_a, state_b])
 
     lake_map, valid_lakes = _classify_lake_basins_vectorized(heightmap, seed_id_map, volume_threshold)
     return {"success": True, "lake_map": lake_map, "valid_lakes": valid_lakes}
 
 
-def _compute_steepest_descent_texture(worker: "GPUWorker", height_tex, size: int):
-    """Dispatcht steepestDescent.comp und gibt die Richtungs-TEXTUR zurück (kein Readback -
-    wird von _dispatch_steepest_descent() und _dispatch_flow_network() gemeinsam genutzt,
-    um bei Letzterer einen unnötigen Readback+Reupload-Umweg zu vermeiden."""
-    program = worker.get_program("water", "steepestDescent")
-    direction_tex = _create_texture_2d(size, size, gl.GL_R32F)
-    gl.glBindImageTexture(0, height_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-    gl.glBindImageTexture(1, direction_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
-    gl.glUseProgram(program)
-    _set_uniforms(program, {"u_size": size})
-    work_groups = (size + 15) // 16
-    _dispatch_compute(program, work_groups, work_groups)
-    return direction_tex
+def _dispatch_pipe_flow_network(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
+    """
+    Virtuelles-Rohre-Hydraulikmodell (siehe core/water_generator.py
+    PipeFlowSimulator für die volle Herleitung/Formeln, identisch hier
+    portiert) - ersetzt _dispatch_steepest_descent/_dispatch_flow_network
+    (D8-basiert, bis 2026-07-25). Zwei Shader-Pässe PRO Iteration
+    (pipeFluxUpdate.comp dann pipeDepthUpdate.comp, siehe deren Docstrings)
+    - Tiefe-Update braucht den GERADE berechneten Fluss derselben Iteration,
+    kann nicht mit dem Fluss-Update fusioniert werden (dieselbe Lehre wie
+    ErosionSedimentationSystem._transport_sediment_optimized()s
+    Gather-nicht-Scatter-Fix aus der letzten Runde).
 
+    Geschwindigkeit/Durchfluss (v_x,v_y,discharge_map) werden NICHT jede
+    Iteration auf GPU berechnet (reine Diagnosegrößen, keine
+    Rückkopplung auf die Simulation selbst) - stattdessen einmalig NACH der
+    letzten Iteration aus dem finalen Tiefe-/Fluss-Zustand per numpy
+    abgeleitet (identische Formel wie PipeFlowSimulator._pipe_step_cpu,
+    nur einmal statt pro Schritt angewendet).
 
-def _dispatch_steepest_descent(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
-    heightmap = inputs["heightmap"]
-    size = heightmap.shape[0]
+    edge_outflow/evaporated_volume sind auf diesem Pfad Näherungen (finaler
+    Zustand * Gesamtzeit, nicht über jede Iteration einzeln aufsummiert wie
+    im CPU-Pfad) - für die Massenbilanz-Kernaussage (wie viel Wasser die
+    Karte über Rand und Verdunstung verlässt) ausreichend, aber nicht
+    bit-identisch zum CPU-Pfad. GPU-Pfad ist per CLAUDE.md ohnehin nicht
+    headless testbar, Live-Abgleich empfohlen.
 
-    height_tex = _upload_texture_2d(heightmap, gl.GL_R32F)
-    direction_tex = _compute_steepest_descent_texture(worker, height_tex, size)
-
-    result = _read_texture_data(direction_tex, size, size)
-    gl.glDeleteTextures(2, [height_tex, direction_tex])
-    flow_directions = np.rint(result).astype(np.int8)
-    return {"success": True, "flow_directions": flow_directions}
-
-
-def _dispatch_flow_network(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
+    Regen UND Verdunstung werden als RATEN pro Sekunde übergeben und im
+    Shader mit dt multipliziert (2026-07-27, identisch zum CPU-Pfad) - vorher
+    war der Regen ein fester Zuwachs pro SCHRITT, wodurch die gesamte
+    Wassermenge an der Iterationszahl hing.
+    """
     heightmap = inputs["heightmap"]
     precip_map = inputs["precip_map"]
-    rain_threshold = inputs["rain_threshold"]
-    max_iterations = max(1, int(inputs["max_iterations"]))
+    potential_evaporation = inputs["potential_evaporation"]
+    previous_depth = inputs.get("previous_depth")
+    previous_flux = inputs.get("previous_flux")
+    meters_per_pixel = float(inputs["meters_per_pixel"])
+    dt_seconds = float(inputs["dt_seconds"])
+    n_steps = max(1, int(inputs["n_steps"]))
+    pipe_area = float(inputs["pipe_cross_section_area"])
+    rain_rate_scale = float(inputs["rain_to_depth_rate"])
+    evaporation_rate_scale = float(inputs["evaporation_to_depth_rate"])
     size = heightmap.shape[0]
 
-    initial_water = np.where(precip_map > rain_threshold, precip_map, 0.0).astype(np.float32)
+    # Zuwachs/Verlust PRO SCHRITT - im Shader wird nicht noch einmal mit dt
+    # multipliziert, die Umrechnung passiert hier einmalig.
+    rain_map = (precip_map.astype(np.float32) * rain_rate_scale * dt_seconds)
+    evaporation_map = (np.maximum(0.0, potential_evaporation).astype(np.float32)
+                       * evaporation_rate_scale * dt_seconds)
+    depth0 = previous_depth.astype(np.float32) if previous_depth is not None \
+        else np.zeros((size, size), dtype=np.float32)
+    flux0 = previous_flux.astype(np.float32) if previous_flux is not None \
+        else np.zeros((size, size, 4), dtype=np.float32)
 
     height_tex = _upload_texture_2d(heightmap, gl.GL_R32F)
-    direction_tex = _compute_steepest_descent_texture(worker, height_tex, size)
-    initial_tex = _upload_texture_2d(initial_water, gl.GL_R32F)
-    accum_a = _upload_texture_2d(initial_water, gl.GL_R32F)
-    accum_b = _create_texture_2d(size, size, gl.GL_R32F)
+    evaporation_tex = _upload_texture_2d(evaporation_map, gl.GL_R32F)
+    rain_tex = _upload_texture_2d(rain_map, gl.GL_R32F)
+    depth_a = _upload_texture_2d(depth0, gl.GL_R32F)
+    depth_b = _create_texture_2d(size, size, gl.GL_R32F)
+    flux_a = _upload_texture_2d_rgba(flux0, gl.GL_RGBA32F)
+    flux_b = _create_texture_2d(size, size, gl.GL_RGBA32F)
 
-    program = worker.get_program("water", "flowAccumulation")
+    flux_program = worker.get_program("water", "pipeFluxUpdate")
+    depth_program = worker.get_program("water", "pipeDepthUpdate")
     work_groups = (size + 15) // 16
-    read_tex, write_tex = accum_a, accum_b
-    for _ in range(max_iterations):
-        gl.glBindImageTexture(0, direction_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-        gl.glBindImageTexture(1, initial_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-        gl.glBindImageTexture(2, read_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-        gl.glBindImageTexture(3, write_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
-        gl.glUseProgram(program)
-        _set_uniforms(program, {"u_size": size})
+
+    depth_read, depth_write = depth_a, depth_b
+    flux_read, flux_write = flux_a, flux_b
+
+    for _ in range(n_steps):
+        # Pass 1: Fluss-Update (braucht Nachbarn AKTUELLE Tiefe + eigenen
+        # vorherigen Fluss - siehe pipeFluxUpdate.comp).
+        gl.glBindImageTexture(0, height_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(1, depth_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(2, rain_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(3, flux_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RGBA32F)
+        gl.glBindImageTexture(4, flux_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RGBA32F)
+        gl.glUseProgram(flux_program)
+        _set_uniforms(flux_program, {
+            "u_size": size, "u_dt": dt_seconds, "u_pipe_area": pipe_area,
+            "u_gravity": 9.81, "u_pipe_length": meters_per_pixel,
+        })
         gl.glDispatchCompute(work_groups, work_groups, 1)
         gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
-        read_tex, write_tex = write_tex, read_tex
 
-    flow_accumulation = _read_texture_data(read_tex, size, size)
-    gl.glDeleteTextures(5, [height_tex, direction_tex, initial_tex, accum_a, accum_b])
-    return {"success": True, "flow_accumulation": flow_accumulation}
+        # Pass 2: Tiefe-Update (braucht den GERADE berechneten Fluss aus
+        # Pass 1 - siehe pipeDepthUpdate.comp).
+        gl.glBindImageTexture(0, depth_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(1, rain_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(2, flux_write, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RGBA32F)
+        gl.glBindImageTexture(3, evaporation_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(4, depth_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+        gl.glUseProgram(depth_program)
+        _set_uniforms(depth_program, {"u_size": size, "u_dt": dt_seconds, "u_pipe_length": meters_per_pixel})
+        gl.glDispatchCompute(work_groups, work_groups, 1)
+        gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
+
+        depth_read, depth_write = depth_write, depth_read
+        flux_read, flux_write = flux_write, flux_read
+
+    final_depth = _read_texture_data(depth_read, size, size)
+    final_flux = _read_texture_data_rgba(flux_read, size, size)
+
+    f_l, f_r, f_t, f_b = final_flux[:, :, 0], final_flux[:, :, 1], final_flux[:, :, 2], final_flux[:, :, 3]
+    in_from_left = np.pad(f_r, 1, mode='constant')[1:-1, 0:-2]
+    in_from_right = np.pad(f_l, 1, mode='constant')[1:-1, 2:]
+    in_from_top = np.pad(f_b, 1, mode='constant')[0:-2, 1:-1]
+    in_from_bottom = np.pad(f_t, 1, mode='constant')[2:, 1:-1]
+
+    flux_x_net = 0.5 * (in_from_left - f_l + f_r - in_from_right)
+    flux_y_net = 0.5 * (in_from_top - f_t + f_b - in_from_bottom)
+    d_avg = np.maximum(final_depth, 1e-4)
+    velocity_x = (flux_x_net / (meters_per_pixel * d_avg)).astype(np.float32)
+    velocity_y = (flux_y_net / (meters_per_pixel * d_avg)).astype(np.float32)
+    discharge_map = np.sqrt(flux_x_net ** 2 + flux_y_net ** 2).astype(np.float32)
+
+    edge_outflow = float(dt_seconds * n_steps * (
+        float(f_l[:, 0].sum()) + float(f_r[:, -1].sum()) +
+        float(f_t[0, :].sum()) + float(f_b[-1, :].sum())
+    ))
+    # Naeherung wie edge_outflow: die tatsaechlich verdunstete Menge des
+    # letzten Schritts (durch den vorhandenen Wasserstand begrenzt) auf alle
+    # Schritte hochgerechnet.
+    cell_area = meters_per_pixel * meters_per_pixel
+    evaporated_volume = float(np.minimum(final_depth, evaporation_map).sum()) * cell_area * n_steps
+
+    return {
+        "success": True,
+        "water_depth": final_depth,
+        "velocity_x": velocity_x,
+        "velocity_y": velocity_y,
+        "discharge_map": discharge_map,
+        "edge_outflow": edge_outflow,
+        "evaporated_volume": evaporated_volume,
+        "depth_state": final_depth,
+        "flux_state": final_flux,
+    }
 
 
-def _dispatch_manning_flow(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
-    flow_accumulation = inputs["flow_accumulation"]
-    slopemap = inputs["slopemap"]
+def _dispatch_thermal_erosion(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
+    """
+    Böschungswinkel-Erosion (siehe core/water_generator.py
+    ThermalErosionSystem für die volle Herleitung/identische Formeln). Zwei
+    Shader-Pässe PRO Iteration (thermalErosionFlux.comp dann
+    thermalErosionApply.comp) - Anwenden braucht den GERADE berechneten
+    Fluss derselben Iteration, dieselbe Begründung wie bei
+    pipeFluxUpdate.comp/pipeDepthUpdate.comp. Massenbilanz ist strukturell
+    exakt (jede transportierte Einheit ist einer Quelle/einem Ziel
+    zugeordnet, kein Renormierungs-Schritt nötig wie beim Sedimenttransport).
+    """
     heightmap = inputs["heightmap"]
+    hardness_map = inputs["hardness_map"]
+    meters_per_pixel = float(inputs["meters_per_pixel"])
+    iterations = max(1, int(inputs["iterations"]))
+    transfer_rate = float(inputs["transfer_rate"])
+    thermal_strength = float(inputs["thermal_strength"])
+    repose_min = float(inputs["repose_angle_min_deg"])
+    repose_max = float(inputs["repose_angle_max_deg"])
+    hardness_min = float(inputs["hardness_reference_min"])
+    hardness_max = float(inputs["hardness_reference_max"])
+    cap_relief_fraction = float(inputs["cap_relief_fraction"])
+    cap_min_m = float(inputs["cap_min_m"])
     size = heightmap.shape[0]
 
-    program = worker.get_program("water", "manningFlowCalculation")
-    flow_tex = _upload_texture_2d(flow_accumulation, gl.GL_R32F)
-    slope_tex = _upload_texture_2d_rg(slopemap, gl.GL_RG32F)
-    height_tex = _upload_texture_2d(heightmap, gl.GL_R32F)
-    speed_tex = _create_texture_2d(size, size, gl.GL_R32F)
-    cross_tex = _create_texture_2d(size, size, gl.GL_R32F)
+    relief = float(heightmap.max() - heightmap.min())
+    cap_per_step = max(cap_min_m, cap_relief_fraction * relief)
 
-    gl.glBindImageTexture(0, flow_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-    gl.glBindImageTexture(1, slope_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RG32F)
-    gl.glBindImageTexture(2, height_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-    gl.glBindImageTexture(3, speed_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
-    gl.glBindImageTexture(4, cross_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
-
-    gl.glUseProgram(program)
-    _set_uniforms(program, {
-        "u_size": size, "u_manning_n": inputs["manning_n"], "u_depth_tests": inputs["depth_tests"],
-    })
-    work_groups = (size + 15) // 16
-    _dispatch_compute(program, work_groups, work_groups)
-
-    flow_speed = _read_texture_data(speed_tex, size, size)
-    cross_section = _read_texture_data(cross_tex, size, size)
-    gl.glDeleteTextures(5, [flow_tex, slope_tex, height_tex, speed_tex, cross_tex])
-    return {"success": True, "flow_speed": flow_speed, "cross_section": cross_section}
-
-
-def _dispatch_stream_power_erosion(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
-    flow_accumulation = inputs["flow_accumulation"]
-    flow_speed = inputs["flow_speed"]
-    hardness_map = inputs["hardness_map"]
-    size = flow_accumulation.shape[0]
-
-    program = worker.get_program("water", "streamPowerErosion")
-    flow_tex = _upload_texture_2d(flow_accumulation, gl.GL_R32F)
-    speed_tex = _upload_texture_2d(flow_speed, gl.GL_R32F)
+    height_a = _upload_texture_2d(heightmap, gl.GL_R32F)
+    height_b = _create_texture_2d(size, size, gl.GL_R32F)
+    accum_a = _upload_texture_2d_rg(np.zeros((size, size, 2), dtype=np.float32), gl.GL_RG32F)
+    accum_b = _create_texture_2d(size, size, gl.GL_RG32F)
     hardness_tex = _upload_texture_2d(hardness_map, gl.GL_R32F)
-    erosion_tex = _create_texture_2d(size, size, gl.GL_R32F)
+    flux_tex = _create_texture_2d(size, size, gl.GL_RGBA32F)
 
-    gl.glBindImageTexture(0, flow_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-    gl.glBindImageTexture(1, speed_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-    gl.glBindImageTexture(2, hardness_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-    gl.glBindImageTexture(3, erosion_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
-
-    gl.glUseProgram(program)
-    _set_uniforms(program, {"u_size": size, "u_erosion_strength": inputs["erosion_strength"]})
+    flux_program = worker.get_program("water", "thermalErosionFlux")
+    apply_program = worker.get_program("water", "thermalErosionApply")
     work_groups = (size + 15) // 16
-    _dispatch_compute(program, work_groups, work_groups)
 
-    erosion_map = _read_texture_data(erosion_tex, size, size)
-    gl.glDeleteTextures(4, [flow_tex, speed_tex, hardness_tex, erosion_tex])
-    return {"success": True, "erosion_map": erosion_map}
+    height_read, height_write = height_a, height_b
+    accum_read, accum_write = accum_a, accum_b
 
-
-def _dispatch_sediment_transport(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
-    erosion_map = inputs["erosion_map"]
-    flow_speed = inputs["flow_speed"]
-    flow_directions = inputs["flow_directions"]
-    capacity_factor = inputs["capacity_factor"]
-    settling_velocity = inputs["settling_velocity"]
-    iterations = max(1, int(inputs["iterations"]))
-    size = erosion_map.shape[0]
-
-    # Transport-Kapazitaet ist iterationsunabhaengig - vektorisiert vorab in numpy statt
-    # als eigener Shader-Pass (siehe ErosionSedimentationSystem._transport_sediment_optimized()).
-    transport_capacity = np.where(flow_speed > 0.1, capacity_factor * np.power(flow_speed, 2.5), 0.0).astype(np.float32)
-
-    erosion_tex = _upload_texture_2d(erosion_map, gl.GL_R32F)
-    speed_tex = _upload_texture_2d(flow_speed, gl.GL_R32F)
-    direction_tex = _upload_texture_2d(flow_directions, gl.GL_R32F)
-    capacity_tex = _upload_texture_2d(transport_capacity, gl.GL_R32F)
-    zero_state = np.zeros((size, size, 2), dtype=np.float32)
-    state_a = _upload_texture_2d_rg(zero_state, gl.GL_RG32F)
-    state_b = _create_texture_2d(size, size, gl.GL_RG32F)
-
-    program = worker.get_program("water", "sedimentTransport")
-    work_groups = (size + 15) // 16
-    read_tex, write_tex = state_a, state_b
     for _ in range(iterations):
-        gl.glBindImageTexture(0, erosion_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-        gl.glBindImageTexture(1, speed_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-        gl.glBindImageTexture(2, direction_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-        gl.glBindImageTexture(3, capacity_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
-        gl.glBindImageTexture(4, read_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RG32F)
-        gl.glBindImageTexture(5, write_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RG32F)
-        gl.glUseProgram(program)
-        _set_uniforms(program, {"u_size": size, "u_settling_velocity": settling_velocity})
+        gl.glBindImageTexture(0, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(1, hardness_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(2, flux_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RGBA32F)
+        gl.glUseProgram(flux_program)
+        _set_uniforms(flux_program, {
+            "u_size": size, "u_meters_per_pixel": meters_per_pixel,
+            "u_transfer_rate": transfer_rate, "u_thermal_strength": thermal_strength,
+            "u_repose_angle_min_deg": repose_min, "u_repose_angle_max_deg": repose_max,
+            "u_hardness_reference_min": hardness_min, "u_hardness_reference_max": hardness_max,
+            "u_cap_per_step": cap_per_step,
+        })
         gl.glDispatchCompute(work_groups, work_groups, 1)
         gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
-        read_tex, write_tex = write_tex, read_tex
 
-    # .r (sediment_load, hier nicht benötigt) und .g (sedimentation_map) getrennt lesen -
-    # GL_RG als glGetTexImage-Format wird von PyOpenGLs Auto-Sizing nicht erkannt, GL_GREEN
-    # (Einzelkanal wie GL_RED) dagegen schon.
-    gl.glBindTexture(gl.GL_TEXTURE_2D, read_tex)
-    raw = gl.glGetTexImage(gl.GL_TEXTURE_2D, 0, gl.GL_GREEN, gl.GL_FLOAT)
-    sedimentation_map = np.frombuffer(raw, dtype=np.float32).reshape((size, size)).copy()
+        gl.glBindImageTexture(0, flux_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RGBA32F)
+        gl.glBindImageTexture(1, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(2, accum_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RG32F)
+        gl.glBindImageTexture(3, height_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(4, accum_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RG32F)
+        gl.glUseProgram(apply_program)
+        _set_uniforms(apply_program, {"u_size": size})
+        gl.glDispatchCompute(work_groups, work_groups, 1)
+        gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
 
-    gl.glDeleteTextures(6, [erosion_tex, speed_tex, direction_tex, capacity_tex, state_a, state_b])
-    return {"success": True, "sedimentation_map": sedimentation_map}
+        height_read, height_write = height_write, height_read
+        accum_read, accum_write = accum_write, accum_read
+
+    final_accum = _read_texture_data_rg(accum_read, size, size)
+
+    return {
+        "success": True,
+        "thermal_erosion_map": final_accum[:, :, 0],
+        "thermal_deposition_map": final_accum[:, :, 1],
+    }
+
+
+def _dispatch_droplet_erosion(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
+    """
+    GPU-Fassung der Droplet-basierten hydraulischen Erosion (siehe
+    core/water_generator.py DropletErosionSystem fuer die CPU-Referenz und den
+    vollen Formel-Hintergrund; Plan "Water: GPU-Shader fuer Droplet-Erosion",
+    2026-07-25).
+
+    Lockstep-Wellen + Fixed-Point-Integer-Atomics: anders als jeder andere
+    GPU-Pass dieser Codebase (ein Thread pro Gitterzelle, trivial parallel)
+    hat ein Partikel-pro-Thread-Dispatch viele Threads, die gleichzeitig
+    UEBERLAPPENDE Bereiche derselben Hoehen-/Akkumulator-Textur schreiben,
+    waehrend sich der Erosions-Pinsel jedes Partikels ueber das Gitter bewegt.
+    GLSL 430 Core hat kein natives Float-Atomic-Add auf Images (nur Integer-
+    Atomics) - Erosions-/Ablagerungs-Betraege werden deshalb fixed-point-
+    kodiert (DROPLET_FIXED_POINT_SCALE) in r32i-Texturen akkumuliert
+    (dropletErosionStep.comp), dann NACH einem glMemoryBarrier von
+    dropletErosionApply.comp in die Hoehen-Textur der naechsten Runde
+    aufgeloest - so viele Runden, wie resolve_pixel_geometry() fuer diese
+    Aufloesung ergibt (Lebensweg in Metern), jede Partikel geht genau
+    einen Lebenszeit-Schritt pro Runde (Lockstep, kein freies Durchlaufen).
+
+    BEWUSSTE Abweichung vom CPU-Pfad (siehe dropletErosionStep.comp-Header):
+    CPU verarbeitet Partikel strikt sequentiell, hier sehen sich Partikel
+    derselben Runde erst NACH dem Runden-Barrier. Volle Determinismus/
+    Reproduzierbarkeit bleibt trotzdem erhalten (Summation ist kommutativ,
+    Thread-Reihenfolge ist egal). Massenerhaltung wird - wie auf dem CPU-Pfad -
+    bewusst NICHT erzwungen (Nutzer-Vorgabe: "ich will das wie Sebastian
+    Lague"): terminate() verwirft die Restfracht eines Partikels bei
+    Kartenrand/Max-Lebenszeit/Null-Richtung, identisch zur Referenz.
+
+    Alle Konstanten (Traegheit, Verdunstung, Pinsel-Radius etc.) werden direkt
+    von DropletErosionSystem uebernommen statt dupliziert, damit CPU und GPU
+    bei kuenftigen Kalibrierungen automatisch in Sync bleiben.
+    """
+    from core.water_generator import DropletErosionSystem
+
+    heightmap = inputs["heightmap"]
+    hardness_map = inputs["hardness_map"]
+    spawn_positions = np.asarray(inputs["spawn_positions"], dtype=np.float64)
+    meters_per_pixel = float(inputs["meters_per_pixel"])
+    erosion_strength = float(inputs["erosion_strength"])
+    capacity_factor = float(inputs["capacity_factor"])
+    deposit_speed = float(inputs["deposit_speed"])
+    size = heightmap.shape[0]
+    num_droplets = spawn_positions.shape[0]
+
+    # cap_per_step und initial_water kommen vom Aufrufer
+    # (DropletErosionSystem.simulate_erosion_sedimentation) - eine Quelle fuer
+    # CPU- und GPU-Pfad. Der Deckel muss ueber alle Durchgaenge konstant
+    # bleiben und darf nicht pro Durchgang aus dem inzwischen veraenderten
+    # Relief neu abgeleitet werden.
+    cap_per_step = float(inputs["cap_per_step"])
+    initial_water = float(inputs["initial_water"])
+
+    # Lebensweg und Pinselradius sind in METERN definiert und werden hier in
+    # Pixel umgerechnet - ueber dieselbe Funktion wie der CPU-Pfad, damit
+    # beide garantiert dieselbe Partikelgeometrie verwenden (siehe
+    # DropletErosionSystem.resolve_pixel_geometry()).
+    max_steps, erode_radius_px = DropletErosionSystem.resolve_pixel_geometry(meters_per_pixel)
+
+    # Partikel-Anfangszustand (posX,posY,dirX,dirY,speed,water,sediment,alive) -
+    # identische Defaults wie DropletErosionSystem._walk_one_droplet()s
+    # lokale Startwerte.
+    particle_data = np.zeros((num_droplets, 8), dtype=np.float32)
+    particle_data[:, 0] = spawn_positions[:, 0]
+    particle_data[:, 1] = spawn_positions[:, 1]
+    particle_data[:, 4] = DropletErosionSystem.DROPLET_INITIAL_SPEED
+    particle_data[:, 5] = initial_water
+    particle_data[:, 7] = 1.0  # alive
+
+    height_a = _upload_texture_2d(heightmap, gl.GL_R32F)
+    height_b = _create_texture_2d(size, size, gl.GL_R32F)
+    accum_a = _upload_texture_2d_rg(np.zeros((size, size, 2), dtype=np.float32), gl.GL_RG32F)
+    accum_b = _create_texture_2d(size, size, gl.GL_RG32F)
+    hardness_tex = _upload_texture_2d(hardness_map, gl.GL_R32F)
+    erosion_fixed_tex = _create_texture_2d_int(size, size)
+    deposit_fixed_tex = _create_texture_2d_int(size, size)
+    particle_ssbo = _create_ssbo(particle_data)
+
+    step_program = worker.get_program("water", "dropletErosionStep")
+    apply_program = worker.get_program("water", "dropletErosionApply")
+
+    step_work_groups = (num_droplets + 63) // 64
+    apply_work_groups = (size + 15) // 16
+
+    height_read, height_write = height_a, height_b
+    accum_read, accum_write = accum_a, accum_b
+
+    step_uniforms_base = {
+        "u_num_droplets": num_droplets, "u_size": size,
+        "u_erosion_strength": erosion_strength, "u_capacity_factor": capacity_factor,
+        "u_deposit_speed": deposit_speed, "u_cap_per_step": cap_per_step,
+        "u_inertia": DropletErosionSystem.DROPLET_INERTIA,
+        "u_sediment_min_capacity": DropletErosionSystem.DROPLET_SEDIMENT_MIN_CAPACITY_M,
+        "u_erode_speed": DropletErosionSystem.DROPLET_ERODE_SPEED,
+        "u_evaporate_speed": DropletErosionSystem.DROPLET_EVAPORATE_SPEED,
+        "u_gravity": DropletErosionSystem.DROPLET_GRAVITY,
+        "u_min_water": DropletErosionSystem.DROPLET_MIN_WATER,
+        "u_erode_radius": erode_radius_px,
+        "u_hardness_reference": DropletErosionSystem.DROPLET_ERODE_CAP_HARDNESS_REFERENCE,
+        "u_hardness_min_factor": DropletErosionSystem.DROPLET_ERODE_CAP_HARDNESS_MIN_FACTOR,
+        "u_hardness_max_factor": DropletErosionSystem.DROPLET_ERODE_CAP_HARDNESS_MAX_FACTOR,
+        "u_hardness_exponent": DropletErosionSystem.DROPLET_ERODE_CAP_HARDNESS_EXPONENT,
+        "u_fixed_point_scale": DROPLET_FIXED_POINT_SCALE,
+    }
+
+    for step in range(max_steps):
+        gl.glBindImageTexture(0, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(1, hardness_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(2, erosion_fixed_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_WRITE, gl.GL_R32I)
+        gl.glBindImageTexture(3, deposit_fixed_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_WRITE, gl.GL_R32I)
+        gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 0, particle_ssbo)
+        gl.glUseProgram(step_program)
+        _set_uniforms(step_program, {
+            **step_uniforms_base,
+            "u_is_final_step": 1 if step == max_steps - 1 else 0,
+        })
+        gl.glDispatchCompute(step_work_groups, 1, 1)
+        gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | gl.GL_SHADER_STORAGE_BARRIER_BIT)
+
+        gl.glBindImageTexture(0, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(1, erosion_fixed_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_WRITE, gl.GL_R32I)
+        gl.glBindImageTexture(2, deposit_fixed_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_WRITE, gl.GL_R32I)
+        gl.glBindImageTexture(3, accum_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RG32F)
+        gl.glBindImageTexture(4, height_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(5, accum_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RG32F)
+        gl.glUseProgram(apply_program)
+        _set_uniforms(apply_program, {
+            "u_size": size, "u_fixed_point_scale": DROPLET_FIXED_POINT_SCALE,
+        })
+        gl.glDispatchCompute(apply_work_groups, apply_work_groups, 1)
+        gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
+
+        height_read, height_write = height_write, height_read
+        accum_read, accum_write = accum_write, accum_read
+
+    final_accum = _read_texture_data_rg(accum_read, size, size)
+
+    return {
+        "success": True,
+        "erosion_map": final_accum[:, :, 0].astype(np.float32),
+        "sedimentation_map": final_accum[:, :, 1].astype(np.float32),
+    }
 
 
 def _dispatch_soil_moisture(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
@@ -620,7 +965,6 @@ def _dispatch_atmospheric_evaporation(worker: "GPUWorker", inputs: dict, paramet
     _dispatch_compute(program, work_groups, work_groups)
 
     evaporation_map = _read_texture_data(output_tex, size, size)
-    gl.glDeleteTextures(5, [temp_tex, wind_tex, humid_tex, biomes_tex, output_tex])
     return {"success": True, "evaporation_map": evaporation_map}
 
 
@@ -646,7 +990,8 @@ def _dispatch_temperature_calculation(worker: "GPUWorker", inputs: dict, paramet
     gl.glUseProgram(program)
     _set_uniforms(program, {
         "u_width": width, "u_height": height, "u_target_size": int(inputs["lod_level"]),
-        "u_air_temp_entry": inputs["air_temp_entry"], "u_solar_power": inputs["solar_power"],
+        "u_air_temp_entry": inputs["air_temp_entry"],
+        "u_ground_temp_baseline": inputs["ground_temp_baseline"],
         "u_altitude_cooling": inputs["altitude_cooling"], "u_seed_offset": seed_offset,
     })
     work_groups_x = (width + 15) // 16
@@ -654,7 +999,6 @@ def _dispatch_temperature_calculation(worker: "GPUWorker", inputs: dict, paramet
     _dispatch_compute(program, work_groups_x, work_groups_y)
 
     temperature_field = _read_texture_data(output_tex, width, height)
-    gl.glDeleteTextures(3, [height_tex, shadow_tex, output_tex])
     return {"success": True, "temperature_field": temperature_field}
 
 
@@ -668,7 +1012,6 @@ def _dispatch_pressure_noise(worker: "GPUWorker", width: int, height: int, seed_
     work_groups_y = (height + 15) // 16
     _dispatch_compute(program, work_groups_x, work_groups_y)
     result = _read_texture_data(output_tex, width, height)
-    gl.glDeleteTextures(1, [output_tex])
     return result
 
 
@@ -687,7 +1030,6 @@ def _run_vec2_pass(program, field: np.ndarray, width: int, height: int,
     gl.glDispatchCompute(work_groups_x, work_groups_y, 1)
     gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
     result = _read_texture_data_rg(tex_out, width, height)
-    gl.glDeleteTextures(2, [tex_in, tex_out])
     return result
 
 
@@ -824,8 +1166,6 @@ def _run_scalar_pass(program, field: np.ndarray, width: int, height: int,
     gl.glDispatchCompute(work_groups_x, work_groups_y, 1)
     gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
     result = _read_texture_data(tex_out, width, height)
-    gl.glDeleteTextures(1, [tex_in])
-    gl.glDeleteTextures(1, [tex_out])
     return result
 
 
@@ -854,7 +1194,6 @@ def _dispatch_atmospheric_moisture(worker: "GPUWorker", inputs: dict, parameters
         humid_map = _run_scalar_pass(
             transport_program, humid_map, width, height, work_groups_x, work_groups_y,
             {"u_dt": 0.5}, extra_tex_bindings=[(1, wind_tex, gl.GL_RG32F)])
-    gl.glDeleteTextures(1, [wind_tex])
 
     for _ in range(2):
         humid_map = _run_scalar_pass(
@@ -891,7 +1230,6 @@ def _dispatch_precipitation_calculation(worker: "GPUWorker", inputs: dict, param
     _dispatch_compute(program, work_groups_x, work_groups_y)
 
     precipitation_field = _read_texture_data(output_tex, width, height)
-    gl.glDeleteTextures(5, [humid_tex, temp_tex, wind_tex, height_tex, output_tex])
     return {"success": True, "precipitation_field": precipitation_field}
 
 
@@ -916,7 +1254,6 @@ def _dispatch_climate_classification(worker: "GPUWorker", inputs: dict, paramete
     _dispatch_compute(program, work_groups_x, work_groups_y)
 
     climate_map = np.rint(_read_texture_data(output_tex, width, height)).astype(np.uint8)
-    gl.glDeleteTextures(3, [temp_tex, precip_tex, output_tex])
     return {"success": True, "climate_map": climate_map}
 
 
@@ -948,9 +1285,6 @@ def _dispatch_supersampling(worker: "GPUWorker", inputs: dict, parameters: dict)
     _dispatch_compute(program, work_groups_x, work_groups_y)
 
     biome_map_super = np.rint(_read_texture_data(output_tex, super_width, super_height)).astype(np.uint8)
-    gl.glDeleteTextures(1, [biome_tex])
-    gl.glDeleteTextures(len(prob_texs), prob_texs)
-    gl.glDeleteTextures(1, [output_tex])
     return {"success": True, "biome_map_super": biome_map_super}
 
 
@@ -995,7 +1329,6 @@ def _dispatch_ocean_connectivity(worker: "GPUWorker", inputs: dict, parameters: 
         read_tex, write_tex = write_tex, read_tex
 
     ocean_mask = _read_texture_data(read_tex, width, height) > 0.5
-    gl.glDeleteTextures(3, [height_tex, state_a, state_b])
     return {"success": True, "ocean_mask": ocean_mask}
 
 
@@ -1058,24 +1391,291 @@ def _dispatch_terrain_cost_flood(worker: "GPUWorker", inputs: dict, parameters: 
         jump_distance //= 2
 
     result_state = _read_texture_data_rg(read_tex, size, size)
-    gl.glDeleteTextures(3, [slope_tex, state_a, state_b])
 
     nearest_seed_map = np.rint(result_state[..., 0]).astype(np.int32)
     cost_map = result_state[..., 1].astype(np.float32)
     return {"success": True, "nearest_seed_map": nearest_seed_map, "cost_map": cost_map}
 
 
+def _dispatch_hydraulic_field(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
+    """
+    Vollstaendiger Feld-Erosionslauf auf der GPU - siehe
+    core/erosion_generator.py HydraulicFieldSimulator fuer das Modell und die
+    verifizierbare CPU-Referenz. Sieben Shader-Passes pro Schritt, alle in
+    shaders/erosion/:
+
+        pipeFlux         Regen + Fluss-Update (K-Skalierung)
+        pipeDepth        Wasserhoehe, Geschwindigkeit, Durchfluss, Abfluss-Anteile
+        erodeDeposit     Loesen bzw. Ablagern
+        sedimentTransport Fracht mit den Wasserfluessen mitbewegen
+        thermalFlux      Boeschungs-Ausfluss je Zelle
+        thermalApply     Boeschungs-Ausfluss anwenden und akkumulieren
+        smooth           Verdunstung + bedingte Glaettung
+
+    WARUM DIE GANZE SCHLEIFE HIER LAEUFT und nicht Schritt fuer Schritt vom
+    Aufrufer getrieben wird: ein Lauf besteht aus mehreren tausend Schritten.
+    Jeder einzelne ueber die Worker-Queue zu schicken hiesse, pro Schritt zu
+    synchronisieren - der gesamte Gewinn der GPU ginge in der Latenz verloren.
+    Der Zustand bleibt deshalb ueber den ganzen Lauf in den Texturen.
+
+    Zurueckgelesen wird nur alle `check_interval` Schritte, und zwar genau eine
+    Hoehenkarte: sie traegt sowohl das Konvergenzkriterium (mittlere Aenderung
+    pro Schritt, relativ zum Relief) als auch die Live-Vorschau. Bei 512 px
+    sind das 1 MB je Pruefung - gegenueber der Rechenzeit vernachlaessigbar,
+    und es haelt das Abbruchkriterium bit-fuer-bit identisch zum CPU-Pfad,
+    statt es auf der GPU ein zweites Mal zu implementieren.
+    """
+    heightmap = inputs["heightmap"]
+    erodibility = inputs["erodibility"]
+    tan_repose = inputs["tan_repose"]
+    size = int(heightmap.shape[0])
+
+    dt = float(inputs["dt"])
+    meters_per_pixel = float(inputs["meters_per_pixel"])
+    max_steps = max(1, int(inputs["max_steps"]))
+    check_interval = max(1, int(inputs["check_interval"]))
+    convergence_threshold = float(inputs["convergence_threshold"])
+    relief = float(inputs["relief"])
+    progress = inputs.get("progress_callback")
+
+    fixed_point_scale = float(inputs["fixed_point_scale"])
+
+    # WICHTIG: alle Texturen, die im ERSTEN Schritt GELESEN werden, muessen
+    # explizit mit Nullen hochgeladen werden. _create_texture_2d() allokiert
+    # nur - der Inhalt ist undefiniert. Der CPU-Pfad startet von einer
+    # trockenen, frachtfreien Karte; ein GPU-Lauf, der stattdessen auf
+    # zufaelligem VRAM-Inhalt startet, rechnet etwas voellig anderes (im
+    # schlimmsten Fall mit NaN, das sich dann durch alle Felder frisst).
+    # Derselbe Grund, aus dem _dispatch_pipe_flow_network seine depth0/flux0
+    # hochlaedt statt sie zu allokieren.
+    zeros = np.zeros((size, size), dtype=np.float32)
+    height_a = _upload_texture_2d(heightmap.astype(np.float32), gl.GL_R32F)
+    height_b = _create_texture_2d(size, size, gl.GL_R32F)
+    water_a = _upload_texture_2d(zeros, gl.GL_R32F)
+    water_b = _create_texture_2d(size, size, gl.GL_R32F)
+    sediment_a = _upload_texture_2d(zeros, gl.GL_R32F)
+    sediment_b = _create_texture_2d(size, size, gl.GL_R32F)
+    flux_a = _upload_texture_2d_rgba(np.zeros((size, size, 4), dtype=np.float32), gl.GL_RGBA32F)
+    flux_b = _create_texture_2d(size, size, gl.GL_RGBA32F)
+    thermal_a = _upload_texture_2d_rg(np.zeros((size, size, 2), dtype=np.float32), gl.GL_RG32F)
+    thermal_b = _create_texture_2d(size, size, gl.GL_RG32F)
+
+    velocity_tex = _create_texture_2d(size, size, gl.GL_RG32F)
+    discharge_tex = _create_texture_2d(size, size, gl.GL_R32F)
+    fractions_tex = _create_texture_2d(size, size, gl.GL_RGBA32F)
+    outflow_tex = _create_texture_2d(size, size, gl.GL_RGBA32F)
+    erodibility_tex = _upload_texture_2d(erodibility.astype(np.float32), gl.GL_R32F)
+    tan_repose_tex = _upload_texture_2d(tan_repose.astype(np.float32), gl.GL_R32F)
+    export_tex = _create_texture_2d_int(1, 1)
+
+    flux_program = worker.get_program("erosion", "pipeFlux")
+    depth_program = worker.get_program("erosion", "pipeDepth")
+    erode_program = worker.get_program("erosion", "erodeDeposit")
+    transport_program = worker.get_program("erosion", "sedimentTransport")
+    thermal_flux_program = worker.get_program("erosion", "thermalFlux")
+    thermal_apply_program = worker.get_program("erosion", "thermalApply")
+    smooth_program = worker.get_program("erosion", "smooth")
+    groups = (size + 15) // 16
+
+    def barrier():
+        gl.glMemoryBarrier(gl.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
+
+    height_read, height_write = height_a, height_b
+    water_read, water_write = water_a, water_b
+    sediment_read, sediment_write = sediment_a, sediment_b
+    flux_read, flux_write = flux_a, flux_b
+    thermal_read, thermal_write = thermal_a, thermal_b
+
+    reference = heightmap.astype(np.float64).copy()
+    converged = False
+    steps_taken = 0
+    # Fortschritts-Buchhaltung - identisch zum CPU-Pfad, damit der Nutzer auf
+    # beiden Wegen dieselbe Zahl sieht (siehe
+    # HydraulicFieldSimulator.convergence_progress).
+    from core.erosion_generator import HydraulicFieldSimulator
+    target_rate = convergence_threshold * relief
+    initial_rate = None
+    progress_fraction = 0.0
+    report_interval = HydraulicFieldSimulator.PROGRESS_REPORT_INTERVAL
+
+    for step in range(1, max_steps + 1):
+        # --- Pass 1: Regen + Fluss --------------------------------------
+        gl.glBindImageTexture(0, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(1, water_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(2, flux_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RGBA32F)
+        gl.glBindImageTexture(3, water_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(4, flux_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RGBA32F)
+        gl.glUseProgram(flux_program)
+        _set_uniforms(flux_program, {
+            "u_size": size, "u_dt": dt, "u_pipe_area": float(inputs["pipe_area"]),
+            "u_gravity": float(inputs["gravity"]), "u_pipe_length": meters_per_pixel,
+            "u_rain_per_step": float(inputs["rain_per_step"]),
+        })
+        gl.glDispatchCompute(groups, groups, 1)
+        barrier()
+        water_read, water_write = water_write, water_read
+        flux_read, flux_write = flux_write, flux_read
+
+        # --- Pass 2: Wasserhoehe, Geschwindigkeit, Anteile ---------------
+        gl.glBindImageTexture(0, water_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(1, flux_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RGBA32F)
+        gl.glBindImageTexture(2, water_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(3, velocity_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RG32F)
+        gl.glBindImageTexture(4, discharge_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(5, fractions_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RGBA32F)
+        gl.glUseProgram(depth_program)
+        _set_uniforms(depth_program, {
+            "u_size": size, "u_dt": dt, "u_pipe_length": meters_per_pixel,
+            "u_min_depth_for_velocity": float(inputs["min_depth_for_velocity"]),
+        })
+        gl.glDispatchCompute(groups, groups, 1)
+        barrier()
+        water_read, water_write = water_write, water_read
+
+        # --- Pass 3: Loesen / Ablagern -----------------------------------
+        gl.glBindImageTexture(0, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(1, water_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(2, sediment_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(3, discharge_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(4, erodibility_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(5, height_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(6, sediment_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+        gl.glUseProgram(erode_program)
+        _set_uniforms(erode_program, {
+            "u_size": size, "u_pipe_length": meters_per_pixel,
+            "u_capacity_kc": float(inputs["capacity_kc"]),
+            "u_dissolve_ks": float(inputs["dissolve_ks"]),
+            "u_deposit_kd": float(inputs["deposit_kd"]),
+            "u_reference_discharge": float(inputs["reference_discharge"]),
+            "u_threshold_discharge": float(inputs["threshold_discharge"]),
+            "u_discharge_exponent": float(inputs["discharge_exponent"]),
+            "u_capacity_reference": float(inputs["capacity_reference"]),
+            "u_min_slope_factor": float(inputs["min_slope_factor"]),
+        })
+        gl.glDispatchCompute(groups, groups, 1)
+        barrier()
+        height_read, height_write = height_write, height_read
+        sediment_read, sediment_write = sediment_write, sediment_read
+
+        # --- Pass 4: Sedimenttransport -----------------------------------
+        gl.glBindImageTexture(0, sediment_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(1, fractions_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RGBA32F)
+        gl.glBindImageTexture(2, sediment_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(3, export_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_WRITE, gl.GL_R32I)
+        gl.glUseProgram(transport_program)
+        _set_uniforms(transport_program, {
+            "u_size": size, "u_fixed_point_scale": fixed_point_scale,
+        })
+        gl.glDispatchCompute(groups, groups, 1)
+        barrier()
+        sediment_read, sediment_write = sediment_write, sediment_read
+
+        # --- Pass 5+6: Boeschungswinkel ----------------------------------
+        if float(inputs["thermal_strength"]) > 0.0:
+            gl.glBindImageTexture(0, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+            gl.glBindImageTexture(1, tan_repose_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+            gl.glBindImageTexture(2, outflow_tex, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RGBA32F)
+            gl.glUseProgram(thermal_flux_program)
+            _set_uniforms(thermal_flux_program, {
+                "u_size": size, "u_pipe_length": meters_per_pixel,
+                "u_transfer_rate": float(inputs["transfer_rate"]),
+                "u_thermal_strength": float(inputs["thermal_strength"]),
+                "u_gather_cap": float(inputs["gather_cap"]),
+                "u_variant": int(inputs["thermal_variant"]),
+            })
+            gl.glDispatchCompute(groups, groups, 1)
+            barrier()
+
+            gl.glBindImageTexture(0, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+            gl.glBindImageTexture(1, outflow_tex, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RGBA32F)
+            gl.glBindImageTexture(2, thermal_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_RG32F)
+            gl.glBindImageTexture(3, height_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+            gl.glBindImageTexture(4, thermal_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_RG32F)
+            gl.glUseProgram(thermal_apply_program)
+            _set_uniforms(thermal_apply_program, {"u_size": size})
+            gl.glDispatchCompute(groups, groups, 1)
+            barrier()
+            height_read, height_write = height_write, height_read
+            thermal_read, thermal_write = thermal_write, thermal_read
+
+        # --- Pass 7: Verdunstung + Glaettung ------------------------------
+        gl.glBindImageTexture(0, height_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(1, water_read, 0, gl.GL_FALSE, 0, gl.GL_READ_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(2, height_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+        gl.glBindImageTexture(3, water_write, 0, gl.GL_FALSE, 0, gl.GL_WRITE_ONLY, gl.GL_R32F)
+        gl.glUseProgram(smooth_program)
+        _set_uniforms(smooth_program, {
+            "u_size": size,
+            "u_evaporation_factor": float(inputs["evaporation_factor"]),
+            "u_threshold": float(inputs["smoothing_threshold"]),
+        })
+        gl.glDispatchCompute(groups, groups, 1)
+        barrier()
+        height_read, height_write = height_write, height_read
+        water_read, water_write = water_write, water_read
+
+        steps_taken = step
+
+        if step % check_interval == 0:
+            current = _read_texture_data(height_read, size, size).astype(np.float64)
+            # Dasselbe Kriterium wie der CPU-Pfad - importiert statt nachgebaut,
+            # damit beide nicht auseinanderlaufen koennen.
+            rate = HydraulicFieldSimulator.change_rate(
+                current, reference, check_interval, dt)
+            if initial_rate is None:
+                initial_rate = rate
+            # Monoton wie im CPU-Pfad - siehe dortige Begruendung.
+            progress_fraction = max(progress_fraction,
+                                    HydraulicFieldSimulator.convergence_progress(
+                                        initial_rate, rate, target_rate))
+
+            if rate < target_rate:
+                converged = True
+                if progress is not None:
+                    progress(step, max_steps, current.copy(), 1.0)
+                break
+            if step % report_interval == 0 and progress is not None:
+                progress(step, max_steps, current.copy(), progress_fraction)
+            reference = current
+
+    final_height = _read_texture_data(height_read, size, size)
+    sediment = _read_texture_data(sediment_read, size, size)
+    water = _read_texture_data(water_read, size, size)
+    velocity = _read_texture_data_rg(velocity_tex, size, size)
+    thermal = _read_texture_data_rg(thermal_read, size, size)
+
+    gl.glBindTexture(gl.GL_TEXTURE_2D, export_tex)
+    raw_export = gl.glGetTexImage(gl.GL_TEXTURE_2D, 0, gl.GL_RED_INTEGER, gl.GL_INT)
+    exported = float(np.frombuffer(raw_export, dtype=np.int32)[0]) / fixed_point_scale
+
+    return {
+        "success": True,
+        "height": final_height,
+        "sediment": sediment,
+        "water": water,
+        "velocity": velocity,
+        "thermal_erosion": thermal[:, :, 0].copy(),
+        "thermal_deposition": thermal[:, :, 1].copy(),
+        "steps_taken": steps_taken,
+        "converged": converged,
+        "sediment_exported": exported,
+    }
+
+
 DISPATCH_TABLE = {
     ("terrain", "noiseGeneration"): _dispatch_noise_generation,
     ("terrain", "shadowRaycast"): _dispatch_shadow_raycast,
     ("water", "jumpFloodLakes"): _dispatch_jump_flood_lakes,
-    ("water", "steepestDescent"): _dispatch_steepest_descent,
-    ("water", "steepestDescentFlow"): _dispatch_flow_network,
-    ("water", "manningFlowCalculation"): _dispatch_manning_flow,
-    ("water", "streamPowerErosion"): _dispatch_stream_power_erosion,
+    ("water", "pipeFlowNetwork"): _dispatch_pipe_flow_network,
     ("water", "soilMoistureGaussian"): _dispatch_soil_moisture,
-    ("water", "sedimentTransport"): _dispatch_sediment_transport,
+    ("water", "thermalErosion"): _dispatch_thermal_erosion,
+    ("water", "dropletErosion"): _dispatch_droplet_erosion,
     ("water", "atmosphericEvaporation"): _dispatch_atmospheric_evaporation,
+    # Feld-Erosion (eigener Generator seit 2026-07-28, siehe
+    # core/erosion_generator.py). Sobald dieser Eintrag existiert, meldet
+    # HydraulicFieldSimulator.has_gpu_path() True und die
+    # Aufloesungs-Begrenzung des CPU-Pfads greift nicht mehr.
+    ("erosion", "hydraulicField"): _dispatch_hydraulic_field,
     ("weather", "temperatureCalculation"): _dispatch_temperature_calculation,
     ("weather", "windFieldCFD"): _dispatch_wind_field_cfd,
     ("weather", "atmosphericMoisture"): _dispatch_atmospheric_moisture,
@@ -1158,8 +1758,18 @@ class GPUWorker(threading.Thread):
             self._handle_request(*request)
 
     def _handle_request(self, category, operation, inputs, parameters, done_event, result_box):
+        """
+        Einziger Aufrufpfad aller Dispatcher - hier wird die GL-Allokations-
+        Kapsel geoeffnet (siehe _gl_allocation_scope()). Jede Textur/jedes
+        SSBO, das der Dispatch anlegt, wird beim Verlassen freigegeben, auch
+        wenn er mit einer Exception abbricht. Die Dispatcher lesen ihre
+        Ergebnisse vorher ohnehin per _read_texture_data*() in eigene
+        numpy-Arrays zurueck (jeweils mit .copy()), die Freigabe hier ist
+        also der spaetestmoegliche und zugleich sicherste Zeitpunkt.
+        """
         try:
-            result_box["result"] = DISPATCH_TABLE[(category, operation)](self, inputs, parameters)
+            with _gl_allocation_scope():
+                result_box["result"] = DISPATCH_TABLE[(category, operation)](self, inputs, parameters)
         except Exception as e:
             result_box["error"] = e
         finally:
@@ -1264,17 +1874,35 @@ class ShaderManager(QObject):
             return result["noise"]
         return self._cpu_fallback_noise(size, octaves, frequency, persistence, lacunarity, seed)
 
-    def process_shadow_raycast(self, heightmap, sun_elevation, sun_azimuth, shadowmap_size=64):
-        """GPU-beschleunigte Shadow-Raycast-Berechnung mit CPU-Fallback."""
+    def process_shadow_raycast(self, heightmap, sun_elevation, sun_azimuth, shadowmap_size=64,
+                                max_distance=128.0, step_size=0.5, height_scale=1.0):
+        """
+        GPU-beschleunigte Shadow-Raycast-Berechnung mit CPU-Fallback.
+        max_distance/step_size/height_scale waren bisher nicht Teil dieser
+        Signatur - der GPU-Dispatch (_dispatch_shadow_raycast) und der
+        CPU-Fallback (_cpu_fallback_shadow_raycast) fielen dadurch beide auf
+        ihre je EIGENEN, voneinander abweichenden Default-Werte zurück
+        (GPU: max_distance=100.0/step_size=1.0, CPU-Fallback: dieselben
+        Defaults - beide wichen vom eigentlichen CPU-Hauptpfad in
+        core/terrain_generator.py's ShadowCalculator._raycast_shadow_cpu ab,
+        step_size=0.5/max_distance=128). Sichtbar unterschiedliche Schatten
+        je nachdem, welcher Pfad gerade aktiv war - siehe
+        [[project-terrain-review]] 4b. Defaults hier entsprechen jetzt dem
+        CPU-Hauptpfad, ShadowCalculator._calculate_gpu_shadows() übergibt
+        außerdem explizit dieselben Werte.
+        """
         result = self.request_shader_operation(
             "terrain", "shadowRaycast",
             {"heightmap": heightmap, "sun_elevation": sun_elevation,
-             "sun_azimuth": sun_azimuth, "shadowmap_size": shadowmap_size},
+             "sun_azimuth": sun_azimuth, "shadowmap_size": shadowmap_size,
+             "max_distance": max_distance, "step_size": step_size, "height_scale": height_scale},
             {}
         )
         if result.get("success"):
             return result["shadowmap"]
-        return self._cpu_fallback_shadow_raycast(heightmap, sun_elevation, sun_azimuth, shadowmap_size)
+        return self._cpu_fallback_shadow_raycast(
+            heightmap, sun_elevation, sun_azimuth, shadowmap_size,
+            max_distance=max_distance, step_size=step_size, height_scale=height_scale)
 
     def _cpu_fallback_noise(self, size, octaves, frequency, persistence, lacunarity, seed):
         """
@@ -1315,6 +1943,9 @@ class ShaderManager(QObject):
         elev_rad = np.radians(sun_elevation)
         azim_rad = np.radians(sun_azimuth)
 
+        # Y-Vorzeichen: siehe core/terrain_generator.py._raycast_shadow_cpu()
+        # (Zeile height-1 = Norden, verifiziert über prevailing_wind_direction,
+        # kein Minus nötig).
         sun_dir_x = np.cos(elev_rad) * np.sin(azim_rad)
         sun_dir_y = np.cos(elev_rad) * np.cos(azim_rad)
         sun_dir_z = np.sin(elev_rad)

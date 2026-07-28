@@ -122,6 +122,10 @@ class GeneratorType(Enum):
     """Generator-Typen für Dependency-Management"""
     TERRAIN = "terrain"
     GEOLOGY = "geology"
+    # Erosion sitzt zwischen Geology und Weather - die Reihenfolge hier
+    # entspricht der Pipeline-Reihenfolge, weil mehrere Schleifen ueber
+    # GeneratorType iterieren und die Reihenfolge dort die Anzeige praegt.
+    EROSION = "erosion"
     WEATHER = "weather"
     WATER = "water"
     BIOME = "biome"
@@ -288,8 +292,19 @@ class GenerationStateTracker:
 class GenerationOrchestrator(QObject):
     """
     Funktionsweise: Zentrale Orchestrierung aller Map-Generation mit homogener Signal-Architektur für alle Tabs
-    Aufgabe: Koordiniert alle 6 Generatoren mit einheitlichen Signals für StandardOrchestratorHandler-Integration
+    Aufgabe: Koordiniert alle Generatoren mit einheitlichen Signals für StandardOrchestratorHandler-Integration
     """
+
+    # Wie lange ein Generator KEIN Lebenszeichen geben darf, bevor er als
+    # hängend gilt (Sekunden). Gemessen wird die Inaktivität, nicht die
+    # Gesamtlaufzeit - siehe check_generation_timeouts().
+    #
+    # 120 s statt der früheren 300 s Gesamtlaufzeit: weil jetzt jedes
+    # Fortschritts-Signal die Uhr zurücksetzt, darf die Schwelle deutlich
+    # enger sein und trotzdem einen mehrere Minuten laufenden Erosionslauf
+    # ungestört durchlassen. Ein echter Hänger fällt dadurch schneller auf als
+    # vorher.
+    INACTIVITY_TIMEOUT_S = 120.0
 
     # Harmonisierte Signals mit numerischen LODs
     generation_completed = pyqtSignal(str, dict)  # (result_id, result_data)
@@ -346,18 +361,29 @@ class GenerationOrchestrator(QObject):
                 "low_impact": ["redistribute_power"]
             },
             GeneratorType.GEOLOGY: {
-                "high_impact": ["sedimentary_hardness", "igneous_hardness", "metamorphic_hardness"],
-                "medium_impact": ["ridge_warping", "bevel_warping"],
-                "low_impact": ["metamorph_foliation", "igneous_flowing"]
+                # Aktualisiert für das 3D-Gesteinsstapel-Rework (siehe
+                # core/geology_generator.py) - Tilt/Fold/Fault verschieben den
+                # ganzen Schichtstapel und damit den Ausbiss, daher high_impact;
+                # Intrusion/Metamorphic/Foliation wirken lokaler bzw. rein
+                # visuell.
+                "high_impact": ["sedimentary_hardness", "igneous_hardness", "metamorphic_hardness",
+                                "tilt_intensity", "tilt_direction", "fold_intensity", "fault_intensity"],
+                "medium_impact": ["fold_detail", "fault_detail", "fault_edge_softness",
+                                   "intrusion_density", "intrusion_size"],
+                "low_impact": ["intrusion_detail", "metamorphic_overprint_intensity", "foliation_detail"]
             },
             GeneratorType.WEATHER: {
-                "high_impact": ["air_temp_entry", "solar_power", "altitude_cooling"],
+                "high_impact": ["air_temp_entry", "ground_temp_offset", "altitude_cooling"],
                 "medium_impact": ["thermic_effect", "wind_speed_factor"],
                 "low_impact": ["terrain_factor"]
             },
             GeneratorType.WATER: {
-                "high_impact": ["lake_volume_threshold", "rain_threshold", "erosion_strength", "river_abundance"],
-                "medium_impact": ["manning_coefficient", "sediment_capacity_factor"],
+                # rain_threshold/manning_coefficient sind 2026-07-27 entfernt
+                # (wirkungslos seit dem Pipe-Modell-Umbau, siehe
+                # gui/config/value_default.py WATER).
+                "high_impact": ["lake_volume_threshold", "erosion_strength", "river_abundance",
+                                "thermal_erosion_strength"],
+                "medium_impact": ["sediment_capacity_factor", "settling_velocity"],
                 "low_impact": ["evaporation_base_rate", "diffusion_radius"]
             },
             GeneratorType.BIOME: {
@@ -408,6 +434,11 @@ class GenerationOrchestrator(QObject):
         # Aktive Requests je Generator (für Cancel/Timeout/Signal-Payload) -
         # ersetzt das bisherige DependencyQueue+processing_requests-Duo
         self.active_requests_by_generator: Dict[str, GenerationRequest] = {}
+
+        # Zeitpunkt des letzten LEBENSZEICHENS je Generator - Grundlage des
+        # Timeouts (siehe check_generation_timeouts). Ein Fortschritts-Signal
+        # oder ein abgeschlossener Knoten zaehlt als Lebenszeichen.
+        self._last_activity_by_generator: Dict[str, float] = {}
 
         self.state_tracker = GenerationStateTracker()
 
@@ -585,6 +616,14 @@ class GenerationOrchestrator(QObject):
         # ALLE Calculator-Knoten dieses Generators (siehe CalculatorDispatcher.
         # request()) - ersetzt das bisherige DependencyQueue.add_request()
         self.calculator_dispatcher.request(gen_type_enum.value, target_lod)
+
+        # Denselben Ziel-Wert auch im DataLODManager hinterlegen (siehe
+        # set_calculator_target_lod()) - Executoren wie SettlementGenerator.
+        # _is_final_lod() brauchen einen stabilen "das hier ist die letzte
+        # Runde"-Wert, der NICHT aus der gerade wachsenden Zwischenauflösung
+        # eines anderen Generators abgeleitet werden muss.
+        for cid in self._calculator_ids_for(gen_type_enum.value):
+            self.data_lod_manager.set_calculator_target_lod(cid, target_lod)
         self.state_tracker.set_request_queued(internal_request)
 
         # Queue-Status-Update emittieren
@@ -638,7 +677,16 @@ class GenerationOrchestrator(QObject):
         timed_out_generators = []
 
         for generator_name, request in list(self.active_requests_by_generator.items()):
-            if current_time - request.timestamp <= 300:  # 5 Minuten Timeout
+            # Gemessen wird die INAKTIVITAET, nicht die Gesamtlaufzeit. Ein
+            # Timeout soll "meldet sich nicht mehr" bedeuten, nicht "dauert
+            # lange": der Erosions-Generator rechnet regulaer mehrere Minuten
+            # an EINEM Knoten (mehrere tausend Simulationsschritte) und meldet
+            # dabei laufend Fortschritt. Mit der alten Messung ab dem
+            # Anforderungs-Zeitpunkt wurde er nach 5 Minuten abgebrochen und
+            # riss alles Nachgelagerte mit.
+            last_seen = self._last_activity_by_generator.get(
+                generator_name, request.timestamp)
+            if current_time - last_seen <= self.INACTIVITY_TIMEOUT_S:
                 continue
             calc_ids = self._calculator_ids_for(generator_name)
             still_pending = any(
@@ -669,8 +717,28 @@ class GenerationOrchestrator(QObject):
                 if thread.calculator_id not in calc_ids:
                     continue
                 if thread.isRunning():
-                    thread.terminate()
-                    thread.wait(3000)
+                    # KEIN thread.terminate() mehr - CalculatorThread hängt bei
+                    # GPU-Operationen oft in shader_manager.py's GPUWorker.
+                    # submit() in einem blockierenden threading.Event.wait()
+                    # (fremder, nativer Wait über den einzelnen, seriellen
+                    # GPU-Worker-Thread - siehe dortige Doku zum Lock-Zweck).
+                    # QThread.terminate() reißt den OS-Thread an beliebiger
+                    # Stelle ab, auch mitten in einem solchen nativen
+                    # Sync-Primitive - in der Praxis reproduzierbar als
+                    # "Windows fatal exception: access violation"-Absturz der
+                    # GESAMTEN App beobachtet (nicht nur ein sauber beendeter
+                    # Thread), ausgelöst z.B. durch einen Map-Seed-Wechsel
+                    # während laufender GPU-Dispatches. Der Thread bleibt
+                    # deshalb bewusst weiter in calculator_threads/
+                    # in_flight_calculators eingetragen und räumt sich beim
+                    # natürlichen Abschluss über den bereits verbundenen
+                    # calculator_completed-Handler (on_calculator_completed(),
+                    # robust gegen bereits abgebrochene Requests) selbst auf.
+                    self.logger.warning(
+                        f"Calculator-Thread {thread.calculator_id} läuft nach "
+                        f"Timeout weiter (vermutlich GPU-Warteschlange) - wird "
+                        f"nicht hart terminiert, räumt sich selbst auf")
+                    continue
                 del self.calculator_threads[thread_key]
                 self.in_flight_calculators.discard(thread.calculator_id)
 
@@ -682,6 +750,28 @@ class GenerationOrchestrator(QObject):
         if request:
             self.active_request_mapping.pop(request.request_id, None)
             self.state_tracker.set_request_failed(request, "Timeout")
+
+        # generation_completed emittieren (success=False) - OHNE das bleibt
+        # der anfragende Tab (base_tab.py.generation_active, siehe
+        # on_generation_completed()) für immer auf "aktiv" hängen, weil nur
+        # dieses Signal generation_active zurücksetzt. Bug-Report: nach einem
+        # hängenden Terrain-Generate-Klick (Map Seed während laufender GPU-
+        # Dispatches geändert) blieb der [GENERIEREN]-Button dauerhaft mit
+        # "Generation already active" blockiert - selbst NACH einem
+        # erfolgreichen Timeout-Cleanup hier gab es keinen Weg zurück zu
+        # "nicht aktiv" außer einem App-Neustart. Request-ID: die des
+        # abgebrochenen Requests, falls noch bekannt, sonst ein synthetischer
+        # Platzhalter (der Wert wird von on_generation_completed() ohnehin
+        # nicht ausgewertet, nur generator_type/success zählen).
+        request_id = request.request_id if request else f"{generator_name}_timeout"
+        result_data = {
+            "generator_type": generator_name,
+            "success": False,
+            "data": None,
+            "source_tab": request.source_tab if request else generator_name,
+            "timestamp": time.time(),
+        }
+        self.generation_completed.emit(request_id, result_data)
 
         self.logger.info(f"Cleaned up timed-out generator: {generator_name}")
         self.emit_queue_status_update()
@@ -827,16 +917,25 @@ class GenerationOrchestrator(QObject):
             parent=self
         )
         thread.calculator_completed.connect(self.on_calculator_completed)
-        # Hinweis: ansonsten kein generelles Progress-Signal verdrahtet - die
-        # _calc_*-Methoden rufen zwar self._update_progress() intern auf, das
-        # war aber schon im alten GenerationThread nie an ein Qt-Signal
-        # angebunden (progress_callback dort war ebenfalls nie an eine
-        # calculate_*-Methode übergeben) - vorbestehende Lücke, keine
-        # Regression durch diesen Umbau. EINZIGE Ausnahme (bewusst eng
-        # begrenzt, siehe [[project-settlement-plot-physics-rebuild]] Teil F):
-        # settlement.plot_nodes bekommt einen echten Live-Callback, damit die
-        # bis zu 100 Physik-Iterationen im Settlement-Tab sichtbar mitlaufen -
-        # kein genereller Umbau der Progress-Infrastruktur für alle Generatoren.
+        # Fortschritt innerhalb eines Knotens an das bestehende
+        # generation_progress-Signal weiterreichen (2026-07-27) - dessen
+        # Verbraucher (map_editor._on_generation_progress,
+        # BaseMapTab.on_generation_progress) existieren seit langem, es gab
+        # nur nie einen Produzenten. Siehe CalculatorThread.calculator_progress.
+        thread.calculator_progress.connect(self.on_generation_progress)
+        # Fortschritt ist zugleich ein LEBENSZEICHEN: ein Generator, der sich
+        # meldet, haengt nicht - er rechnet nur lange. Ohne diese Buchung mass
+        # der Timeout die Zeit seit dem ANFORDERN und brach den
+        # Erosions-Generator nach 5 Minuten ab, obwohl er ordentlich lief
+        # (Nutzer-Log 2026-07-28: "Generation for 'erosion' timed out",
+        # danach kippten weather/water/biome/settlement hinterher).
+        thread.calculator_progress.connect(
+            lambda _progress, _message, name=CALCULATOR_GRAPH[calculator_id].generator:
+                self._note_activity(name))
+        # Zusätzlich (siehe [[project-settlement-plot-physics-rebuild]] Teil F):
+        # settlement.plot_nodes bekommt einen echten Live-Snapshot-Callback,
+        # damit die bis zu 100 Physik-Iterationen im Settlement-Tab sichtbar
+        # mitlaufen.
         if calculator_id == "settlement.plot_nodes":
             thread.settlement_plot_live_update.connect(self.settlement_plot_live_update.emit)
 
@@ -860,6 +959,7 @@ class GenerationOrchestrator(QObject):
             self.calculator_threads.pop(thread_key, None)
 
         generator_name = CALCULATOR_GRAPH[calculator_id].generator
+        self._note_activity(generator_name)
 
         if success:
             self.calculator_dispatcher.mark_completed(calculator_id, lod_level)
@@ -898,6 +998,22 @@ class GenerationOrchestrator(QObject):
         if not all(self.calculator_dispatcher.completed_lod[cid] >= lod_level for cid in calc_ids):
             return  # noch nicht alle Knoten dieser Runde fertig
 
+        target_lod = max((self.calculator_dispatcher.target_lod[cid] for cid in calc_ids), default=0)
+
+        if generator_name in ("settlement", "erosion") and lod_level < target_lod:
+            # Settlement- und Erosion-Knoten liefern an Zwischen-LODs nur
+            # leere Platzhalter bzw. Nullkarten (siehe deren _is_final_lod() -
+            # beide rechnen bewusst NUR am finalen LOD). Ein Assemble-Versuch hier würde nur an den
+            # fehlenden echten Outputs scheitern (assemble_settlement_data
+            # erwartet vollständige Calculator-Outputs) - vorher durch einen
+            # Bug maskiert, der _is_final_lod() bei JEDER Runde fälschlich
+            # "final" melden ließ. Zwischen-Runden-UI-Updates ergeben für
+            # Settlement ohnehin keinen Sinn, da sich an Zwischen-LODs nichts
+            # sichtbar ändert.
+            self.logger.debug(
+                f"settlement: Zwischen-LOD {lod_level} übersprungen (nur Platzhalter, kein Assemble)")
+            return
+
         generator_type = GeneratorType(generator_name)
         generator_instance = self.get_generator_instance(generator_type)
         parameters = self._active_parameters.get(generator_name, {})
@@ -908,6 +1024,7 @@ class GenerationOrchestrator(QObject):
         complete_setters = {
             "terrain": self.data_lod_manager.set_terrain_data_complete_lod,
             "geology": self.data_lod_manager.set_geology_data_complete_lod,
+            "erosion": self.data_lod_manager.set_erosion_data_complete_lod,
             "weather": self.data_lod_manager.set_weather_data_complete_lod,
             "water": self.data_lod_manager.set_water_data_complete_lod,
             "biome": self.data_lod_manager.set_biome_data_complete_lod,
@@ -918,7 +1035,6 @@ class GenerationOrchestrator(QObject):
 
         request = self.active_requests_by_generator.get(generator_name)
         request_id = request.request_id if request else f"{generator_name}_{lod_level}"
-        target_lod = max((self.calculator_dispatcher.target_lod[cid] for cid in calc_ids), default=0)
 
         if lod_level >= target_lod:
             # Finale Completion - komplette Ziel-LOD-Progression abgeschlossen
@@ -939,6 +1055,11 @@ class GenerationOrchestrator(QObject):
         else:
             # Zwischen-LOD - sofortige UI-Updates mit bestem verfügbarem LOD
             self.lod_progression_completed.emit(request_id, lod_level)
+
+    def _note_activity(self, generator_name: str):
+        """Lebenszeichen eines Generators vermerken - siehe
+        check_generation_timeouts()."""
+        self._last_activity_by_generator[generator_name] = time.time()
 
     def on_generation_progress(self, progress: int, message: str):
         """
@@ -972,6 +1093,13 @@ class GenerationOrchestrator(QObject):
                 "temp_map": self.data_lod_manager.get_weather_data("temp_map"),
                 "precip_map": self.data_lod_manager.get_weather_data("precip_map"),
                 "humid_map": self.data_lod_manager.get_weather_data("humid_map")
+            }
+        elif generator_type == "erosion":
+            return {
+                "erosion_map": self.data_lod_manager.get_erosion_data("erosion_map"),
+                "sedimentation_map": self.data_lod_manager.get_erosion_data("sedimentation_map"),
+                "sediment_load_map": self.data_lod_manager.get_erosion_data("sediment_load_map"),
+                "water_depth_map": self.data_lod_manager.get_erosion_data("water_depth_map"),
             }
         elif generator_type == "water":
             return {
@@ -1009,9 +1137,12 @@ class GenerationOrchestrator(QObject):
                 # ohne diese Injektion bleibt self.data_lod_manager auf dem
                 # Generator None und jeder Calculator-Aufruf schlägt fehl.
                 # shader_manager injizieren, wo der jeweilige Generator-Konstruktor das
-                # unterstützt (Terrain/Weather/Water/Biome/Settlement) - Geology hat
-                # bisher KEINE Shader-Anbindung implementiert (siehe Shader-Inventur),
-                # ihr Konstruktor kennt den Parameter noch nicht.
+                # unterstützt (Terrain/Weather/Water/Biome/Settlement/Geology) - Geologys
+                # 3D-Gesteinsstapel-Rework (siehe core/geology_generator.py) nimmt den
+                # Parameter strukturell entgegen, hat aber noch KEINE echten
+                # Shader-Operationen hinterlegt (siehe Geology-Review-Doku) - jede
+                # _calc_*-Methode fällt deshalb weiterhin immer auf CPU zurück, bis ein
+                # künftiger GPU-Umsetzungsschritt echte Operationen registriert.
                 if generator_type == GeneratorType.TERRAIN:
                     from core.terrain_generator import BaseTerrainGenerator
                     self._generator_instances[generator_type.value] = BaseTerrainGenerator(
@@ -1019,7 +1150,11 @@ class GenerationOrchestrator(QObject):
                 elif generator_type == GeneratorType.GEOLOGY:
                     from core.geology_generator import GeologySystemGenerator
                     self._generator_instances[generator_type.value] = GeologySystemGenerator(
-                        data_lod_manager=self.data_lod_manager)
+                        data_lod_manager=self.data_lod_manager, shader_manager=self.shader_manager)
+                elif generator_type == GeneratorType.EROSION:
+                    from core.erosion_generator import ErosionSystemGenerator
+                    self._generator_instances[generator_type.value] = ErosionSystemGenerator(
+                        data_lod_manager=self.data_lod_manager, shader_manager=self.shader_manager)
                 elif generator_type == GeneratorType.WEATHER:
                     from core.weather_generator import WeatherSystemGenerator
                     self._generator_instances[generator_type.value] = WeatherSystemGenerator(
@@ -1138,6 +1273,12 @@ class GenerationOrchestrator(QObject):
 
             if target_lod is not None:
                 self.calculator_dispatcher.request(affected_type.value, target_lod)
+                # Siehe request_generation() - derselbe Ziel-Wert muss auch hier
+                # gespiegelt werden, sonst bleibt DataLODManager.get_calculator_target_lod()
+                # für downstream-invalidierte Generatoren (z.B. Settlement nach
+                # einer Terrain-map_size-Änderung) auf dem alten/fehlenden Stand.
+                for cid in self._calculator_ids_for(affected_type.value):
+                    self.data_lod_manager.set_calculator_target_lod(cid, target_lod)
 
             self.logger.info(f"Invalidated {affected_type.value} due to {generator_type.value} changes")
 
@@ -1203,8 +1344,19 @@ class GenerationOrchestrator(QObject):
                 if thread.calculator_id not in calc_ids:
                     continue
                 if thread.isRunning():
-                    thread.terminate()
-                    thread.wait(3000)
+                    # KEIN thread.terminate() mehr - siehe ausführliche
+                    # Begründung in cleanup_timed_out_generator(). Der Thread
+                    # bleibt bewusst in calculator_threads/in_flight_calculators
+                    # eingetragen und räumt sich beim natürlichen Abschluss
+                    # über den bereits verbundenen calculator_completed-Handler
+                    # (on_calculator_completed(), robust gegen bereits
+                    # abgebrochene Requests - pop(..., None)/discard()) selbst
+                    # auf.
+                    self.logger.warning(
+                        f"Calculator-Thread {thread.calculator_id} läuft nach "
+                        f"Abbruch-Anfrage weiter (vermutlich GPU-Warteschlange) - "
+                        f"wird nicht hart terminiert, räumt sich selbst auf")
+                    continue
                 del self.calculator_threads[thread_key]
                 self.in_flight_calculators.discard(thread.calculator_id)
 
@@ -1227,12 +1379,20 @@ class GenerationOrchestrator(QObject):
         if hasattr(self, 'timeout_check_timer'):
             self.timeout_check_timer.stop()
 
-        # Alle Threads stoppen
+        # Alle Threads stoppen - KEIN thread.terminate() mehr, siehe
+        # ausführliche Begründung in cleanup_timed_out_generator()/
+        # cancel_generation() (reproduzierbarer Access-Violation-Absturz bei
+        # GPU-blockierten Threads). Beim App-Shutdown reicht der bloße
+        # bounded wait: shader_manager.py's GPUWorker.submit() hat ohnehin
+        # ein eigenes 30s-Timeout, ein noch laufender Thread beendet sich
+        # spätestens dann von selbst.
         with QMutexLocker(self.thread_mutex):
             for thread in self.calculator_threads.values():
                 if thread.isRunning():
-                    thread.terminate()
-                    thread.wait(3000)  # 3s Timeout
+                    if not thread.wait(3000):  # 3s Timeout
+                        self.logger.warning(
+                            f"Calculator-Thread {thread.calculator_id} lief beim "
+                            f"Shutdown weiter - wird nicht hart terminiert")
             self.calculator_threads.clear()
 
         self.in_flight_calculators.clear()
@@ -1263,6 +1423,17 @@ class CalculatorThread(QThread):
     # Teil F, GenerationOrchestrator.settlement_plot_live_update) - trägt einen
     # Snapshot-Payload (object), gesetzt via generator_instance.live_plot_callback.
     settlement_plot_live_update = pyqtSignal(object)
+    # Fortschritt innerhalb EINES Calculator-Knotens (progress, message) -
+    # wird vom Orchestrator an sein generation_progress-Signal weitergereicht,
+    # das map_editor.py und base_tab.py bereits auswerten.
+    #
+    # Die _calc_*-Methoden riefen self._update_progress() schon immer auf, das
+    # war aber an keiner Stelle angebunden: weder das alte GenerationThread
+    # noch dieser Thread setzten je einen progress_callback auf der
+    # Generator-Instanz. Sämtliche Progress-Aufrufe in core/*_generator.py
+    # liefen dadurch ins Leere - ausgerechnet bei Water, dem mit Abstand
+    # teuersten Generator, gab es also überhaupt keine Rückmeldung.
+    calculator_progress = pyqtSignal(int, str)
 
     def __init__(self, generator_instance, calculator_id: str, lod_level: int, parent=None):
         super().__init__(parent)
@@ -1273,6 +1444,14 @@ class CalculatorThread(QThread):
     def run(self):
         """Funktionsweise: Thread-Execution für einen einzelnen Calculator-Knoten"""
         try:
+            # Progress-Callback für die Dauer dieses Knotens setzen (gleiches
+            # Muster wie live_plot_callback unten, inkl. Aufräumen im finally).
+            # Qt liefert das Signal automatisch per QueuedConnection an den
+            # GUI-Thread aus, da Sender und Empfänger in unterschiedlichen
+            # Threads leben.
+            if hasattr(self.generator_instance, "progress_callback"):
+                self.generator_instance.progress_callback = self._emit_progress
+
             # Live-Fortschritts-Callback nur für settlement.plot_nodes (siehe
             # settlement_plot_live_update oben) - self.settlement_plot_live_update.emit
             # läuft hier zwar im Worker-Thread, Qt liefert die verbundene Ziel-
@@ -1297,6 +1476,14 @@ class CalculatorThread(QThread):
         finally:
             if self.calculator_id == "settlement.plot_nodes" and hasattr(self.generator_instance, "live_plot_callback"):
                 self.generator_instance.live_plot_callback = None
+            if hasattr(self.generator_instance, "progress_callback"):
+                self.generator_instance.progress_callback = None
 
     def _emit_live_plot_update(self, snapshot):
         self.settlement_plot_live_update.emit(snapshot)
+
+    def _emit_progress(self, phase: str, progress: int, message: str):
+        """Adapter zwischen der (phase, progress, message)-Signatur, die alle
+        core/*_generator.py-_update_progress()-Methoden benutzen, und dem
+        (progress, message)-Signal, das die GUI erwartet."""
+        self.calculator_progress.emit(int(progress), f"{phase}: {message}")
