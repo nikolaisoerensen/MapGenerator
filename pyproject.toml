@@ -1,0 +1,27 @@
+[project]
+name = "map-generator"
+version = "0.1.0"
+description = "A procedural map generation tool with LOD-based terrain, geology, water, weather, and biome systems"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "PyQt6>=6.7",
+    "PyOpenGL>=3.1",
+    "opensimplex>=0.4",
+    "Pillow>=10.0",
+    "matplotlib>=3.8",
+    "pandas>=2.0",
+    "scikit-image>=0.25",
+    "memory-profiler>=0.61",
+    "shapely>=2.1",
+    "psutil>=7.0",
+    "colorlog>=6.10",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["core*", "gui*", "shaders*", "docs*"]

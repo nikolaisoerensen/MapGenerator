@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import QApplication, QMainWindow
 from PyQt6.QtCore import QTimer
 
 import matplotlib
-matplotlib.use("Qt5Agg")
+matplotlib.use("QtAgg")
 
 from .logging_setup import logger
 from .scene import SceneMixin
