@@ -2737,6 +2737,17 @@ class DataLODManager(QObject):
         self._calculator_data = {}  # {f"lod_{level}_{calculator_id}_{output_key}": value}
         self._current_calculator_lods = {}  # {calculator_id: höchstes abgeschlossenes LOD}
         self._calculator_target_lod = {}  # {calculator_id: angefragtes Ziel-LOD, siehe set_calculator_target_lod()}
+        # Laufender Rueckkopplungs-Durchgang (siehe FEEDBACK_PASSES in
+        # gui/OldManagers/calculator_graph.py). Der Orchestrator setzt ihn vor
+        # jedem Knoten; die Generatoren lesen daran ab, ob es ueberhaupt einen
+        # VORIGEN Durchgang gibt, dessen Werte sie benutzen duerfen.
+        #
+        # Ohne diese Angabe muesste ein Knoten "gibt es meinen eigenen Output
+        # schon?" als Ersatzfrage stellen - und die beantwortet sich bei einer
+        # ZWEITEN Generierung mit demselben Manager faelschlich mit ja. Genau
+        # das ist passiert: der Wasserkreislauf startete beim zweiten Lauf warm
+        # und lieferte das Dreifache (Reset-Test: 2299 gegen 6598).
+        self._feedback_pass = 1
 
         # === CACHE-MANAGEMENT (LOD-ERWEITERT) ===
         self._cache_timestamps = {}  # {f"{generator}_{lod}_{key}": timestamp}
@@ -3170,6 +3181,17 @@ class DataLODManager(QObject):
         bereits hier bereit, sobald der Request gestellt wurde.
         """
         self._calculator_target_lod[calculator_id] = target_lod
+
+    def set_feedback_pass(self, feedback_pass: int):
+        """Welcher Rueckkopplungs-Durchgang laeuft gerade (1 = der erste)."""
+        self._feedback_pass = max(1, int(feedback_pass))
+
+    def get_feedback_pass(self) -> int:
+        """
+        Laufender Rueckkopplungs-Durchgang. 1 heisst: es gibt keinen vorigen,
+        alle Rueckkopplungs-Eingaben muessen auf ihre Platzhalter fallen.
+        """
+        return self._feedback_pass
 
     def get_calculator_target_lod(self, calculator_id: str) -> Optional[int]:
         """Angefragtes Ziel-LOD eines Calculator-Knotens, None falls nie gesetzt."""

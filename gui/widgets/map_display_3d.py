@@ -73,7 +73,8 @@ Kommunikationskanäle:
 
 import numpy as np
 import matplotlib.pyplot as plt
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QSlider, QLabel
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QCheckBox, QSlider, QLabel, \
+    QApplication
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 import OpenGL.GL as gl
@@ -411,6 +412,36 @@ class MapDisplay3D(QOpenGLWidget):
         # gedachten Betrachter der 2D-Karte.
         self.camera_azimuth = 180.0  # Rotation um Z-Achse
         self.fov = CanvasSettings.CANVAS_3D["fov"]
+
+        # BLICKPUNKT als eigener Zustand (2026-07-28). Vorher blickte
+        # _update_view_matrix() fest auf [0, terrain_center_y, 0], die Kamera
+        # konnte sich also nur um die Kartenmitte drehen und war an sie
+        # gefesselt. Sobald der Blickpunkt beweglich ist, ergeben sich Panning
+        # (Blickpunkt verschieben) und Fliegen (Blickpunkt UND Auge
+        # verschieben) aus derselben Groesse.
+        #
+        # y wird in _calculate_auto_scaling() auf die Gelaendemitte gesetzt,
+        # sobald eine Heightmap vorliegt.
+        self.camera_target = [0.0, 0.0, 0.0]
+        # Ob der Nutzer den Blickpunkt schon selbst bewegt hat. Siehe
+        # _calculate_auto_scaling(): eine neue Heightmap darf die Kamera nur
+        # dann nachzentrieren, wenn sie noch unberuehrt ist.
+        self._camera_target_touched = False
+
+        # Flugmodus: gedrueckte Tasten, ausgewertet von einem Timer statt
+        # direkt im keyPressEvent. Sonst haengt die Fluggeschwindigkeit an der
+        # Tastenwiederholrate des Betriebssystems, und mehrere gleichzeitig
+        # gedrueckte Tasten (vorwaerts + aufsteigen) funktionieren nicht.
+        self._pressed_keys = set()
+        self.flight_timer = QTimer()
+        self.flight_timer.timeout.connect(self._advance_flight)
+
+        # Meter pro Sekunde in Render-Einheiten. 10 Einheiten = Kantenlaenge
+        # der Karte, ein Flug quer ueber die Karte dauert damit rund 3 s.
+        self.flight_speed = 3.5
+
+        # Tastatur-Ereignisse erreichen ein Widget nur mit Fokus-Politik.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # Rendering-Daten
         self.heightmap = None
@@ -851,6 +882,13 @@ class MapDisplay3D(QOpenGLWidget):
         mid_height = (float(self.heightmap.min()) + float(self.heightmap.max())) / 2.0
         self.terrain_center_y = mid_height * self.terrain_height_scale
 
+        # Blickpunkt nur nachziehen, solange ihn niemand bewegt hat. Sonst
+        # wuerde jede neue Heightmap die Kamera aus der Position reissen, in
+        # die der Nutzer sich gerade geflogen hat - und genau waehrend eines
+        # Laufs trudeln laufend neue Heightmaps ein (Live-Vorschau).
+        if not self._camera_target_touched:
+            self.camera_target = [0.0, self.terrain_center_y, 0.0]
+
     def _load_shader_from_file(self, filepath):
         """
         Funktionsweise: Lädt Shader-Code aus Datei - ERWEITERT mit Debug-Logging
@@ -1153,8 +1191,73 @@ class MapDisplay3D(QOpenGLWidget):
             fov=self.fov,
             aspect=aspect_ratio,
             near=0.1,
-            far=100.0
+            # 2026-07-28 von 100 auf 2000 angehoben, zusammen mit der
+            # Zoom-Obergrenze: sobald man den Blickpunkt wegfliegen kann,
+            # verschwand das Gelaende ab 100 Einheiten schlicht hinter der
+            # Far-Plane. Die Near-Plane bleibt bei 0.1, das Verhaeltnis
+            # 0.1:2000 ist fuer einen 24-Bit-Tiefenpuffer unkritisch.
+            far=2000.0
         )
+
+    # Die View-Matrix wird am Ende von _update_view_matrix() in ihrer X-Zeile
+    # NEGIERT (Ost-West-Korrektur, dort ausfuehrlich begruendet). Bildschirm-
+    # rechts entspricht deshalb NICHT cross(forward, up), sondern dessen
+    # Gegenrichtung. Jede seitliche Bewegung - Panning wie Strafen - muss
+    # dieses Vorzeichen mitnehmen, sonst laeuft sie spiegelverkehrt zu dem,
+    # was der Nutzer auf dem Bildschirm sieht.
+    SCREEN_RIGHT_SIGN = -1.0
+
+    def _eye_offset(self):
+        """Vektor vom Blickpunkt zum Auge, aus Distanz/Elevation/Azimut."""
+        elevation_rad = math.radians(self.camera_elevation)
+        azimuth_rad = math.radians(self.camera_azimuth)
+        horizontal = self.camera_distance * math.cos(elevation_rad)
+        return [horizontal * math.sin(azimuth_rad),
+                self.camera_distance * math.sin(elevation_rad),
+                horizontal * math.cos(azimuth_rad)]
+
+    def _forward(self):
+        """
+        Die ECHTE Blickrichtung (vom Auge zum Blickpunkt), normiert.
+
+        W/S fliegen hier entlang - mit Free Look (linke Maustaste) laesst sich
+        die Neigung frei einstellen, man fliegt also dorthin, wo man hinsieht,
+        wie ein Spectator im Shooter. Eine waagerechte Variante gab es hier
+        kurzzeitig, solange die Neigung noch fest bei 55 Grad stand; mit
+        beweglicher Neigung waere sie nur noch verwirrend.
+        """
+        offset = self._eye_offset()
+        length = math.sqrt(sum(component * component for component in offset)) or 1.0
+        return [-component / length for component in offset]
+
+    def _screen_axes(self):
+        """
+        Die beiden Achsen der Bildebene (rechts, hoch) in Weltkoordinaten -
+        die Ebene, in der Panning und Auf-/Abschweben stattfinden ("orthogonal
+        zur Blickrichtung").
+        """
+        offset = self._eye_offset()
+        length = math.sqrt(sum(component * component for component in offset)) or 1.0
+        # Blickrichtung = vom Auge zum Blickpunkt.
+        forward = [-component / length for component in offset]
+
+        world_up = [0.0, 1.0, 0.0]
+        right = [forward[1] * world_up[2] - forward[2] * world_up[1],
+                 forward[2] * world_up[0] - forward[0] * world_up[2],
+                 forward[0] * world_up[1] - forward[1] * world_up[0]]
+        right_length = math.sqrt(sum(c * c for c in right)) or 1.0
+        right = [c / right_length for c in right]
+
+        # up AUS DEM UNGESPIEGELTEN right berechnen. Wendet man
+        # SCREEN_RIGHT_SIGN vorher an, kippt es ueber das Kreuzprodukt in die
+        # Hoch-Achse durch und die zeigt nach UNTEN - gemessen y = -0.57,
+        # Leertaste senkte die Kamera statt sie zu heben. Die Spiegelung
+        # betrifft ausschliesslich die Links/Rechts-Achse.
+        up = [right[1] * forward[2] - right[2] * forward[1],
+              right[2] * forward[0] - right[0] * forward[2],
+              right[0] * forward[1] - right[1] * forward[0]]
+
+        return [c * self.SCREEN_RIGHT_SIGN for c in right], up
 
     def _update_view_matrix(self):
         """
@@ -1167,12 +1270,9 @@ class MapDisplay3D(QOpenGLWidget):
 
         # Camera-Position berechnen (relativ zum vertikalen Terrain-Zentrum,
         # nicht zum Welt-Ursprung - reale Höhen liegen nie bei Y=0)
-        eye_x = self.camera_distance * math.cos(elevation_rad) * math.sin(azimuth_rad)
-        eye_y = self.terrain_center_y + self.camera_distance * math.sin(elevation_rad)
-        eye_z = self.camera_distance * math.cos(elevation_rad) * math.cos(azimuth_rad)
-
-        eye = [eye_x, eye_y, eye_z]
-        target = [0, self.terrain_center_y, 0]  # Blick zum Terrain-Zentrum
+        offset = self._eye_offset()
+        target = list(self.camera_target)
+        eye = [target[0] + offset[0], target[1] + offset[1], target[2] + offset[2]]
         up = [0, 1, 0]  # Y ist oben
 
         self.view_matrix = _create_lookat_matrix(eye, target, up)
@@ -1927,29 +2027,185 @@ class MapDisplay3D(QOpenGLWidget):
         Funktionsweise: Handler für Mouse-Press Events
         Aufgabe: Startet Camera-Rotation und Vertex-Selection
         """
+        # Fokus holen, sonst erreichen WASD/Leertaste dieses Widget nie -
+        # die Tasten landen sonst beim zuletzt angeklickten Bedienelement.
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
         self.last_mouse_pos = event.pos()
+
+    # Grenzen der Neigung. Bei genau +-90 Grad steht die Blickrichtung parallel
+    # zur Hoch-Achse (0,1,0), das Kreuzprodukt in _create_lookat_matrix() wird
+    # zu null und das Bild kippt weg - deshalb kurz davor abfangen.
+    ELEVATION_LIMIT_DEG = 85.0
 
     def mouseMoveEvent(self, event):
         """
-        Funktionsweise: Handler für Mouse-Move Events für Fixed-Axis Camera-Controls
-        Aufgabe: Implementiert Azimuth-Rotation um Z-Achse (feste Elevation)
+        Funktionsweise: Handler für Mouse-Move Events
+        Aufgabe: Drei Gesten, siehe unten
+
+        LINKE Maustaste       Free Look - Azimut UND Neigung, Drehung um die
+                              EIGENE Position, wie ein Spectator im Shooter
+        MITTLERE Maustaste    Panning in der Bildebene
+        RECHTE Maustaste      die frühere Linksklick-Geste: Azimut-Drehung UM
+                              DEN BLICKPUNKT, also um das Gelände herumgehen
         """
         if self.last_mouse_pos is None:
             return
 
         dx = event.pos().x() - self.last_mouse_pos.x()
+        dy = event.pos().y() - self.last_mouse_pos.y()
 
-        if event.buttons() & Qt.MouseButton.LeftButton:
-            # Nur Azimuth-Rotation (um Z-Achse)
-            self.camera_azimuth += dx * self.mouse_sensitivity
+        if event.buttons() & Qt.MouseButton.MiddleButton:
+            self._pan(dx, dy)
 
-            # Normalisiere Azimuth auf 0-360°
-            self.camera_azimuth = self.camera_azimuth % 360.0
+        elif event.buttons() & Qt.MouseButton.LeftButton:
+            # Free Look. Maus nach unten = nach unten schauen, also groessere
+            # Elevation (die Kamera steht dann steiler ueber dem Blickpunkt).
+            self._rotate_in_place(dx * self.mouse_sensitivity,
+                                  dy * self.mouse_sensitivity)
 
-            self.camera_changed.emit(self.camera_elevation, self.camera_azimuth, self.camera_distance)
+        elif event.buttons() & Qt.MouseButton.RightButton:
+            # Alte Linksklick-Geste: der BLICKPUNKT bleibt stehen, das Auge
+            # wandert um ihn herum.
+            self.camera_azimuth = (
+                self.camera_azimuth + dx * self.mouse_sensitivity) % 360.0
+            self.camera_changed.emit(
+                self.camera_elevation, self.camera_azimuth, self.camera_distance)
             self.update()
 
         self.last_mouse_pos = event.pos()
+
+    def _rotate_in_place(self, delta_azimuth, delta_elevation):
+        """
+        Dreht die Kamera um die EIGENE Position: das Auge bleibt stehen, der
+        Blickpunkt wandert.
+
+        Das ist der Unterschied zur Rechtsklick-Geste, bei der es umgekehrt
+        ist. Beides braucht denselben Trick - Auge merken, Winkel aendern,
+        Blickpunkt so nachziehen, dass das Auge wieder dort landet.
+        """
+        offset = self._eye_offset()
+        eye = [self.camera_target[axis] + offset[axis] for axis in range(3)]
+
+        self.camera_azimuth = (self.camera_azimuth + delta_azimuth) % 360.0
+        self.camera_elevation = max(
+            -self.ELEVATION_LIMIT_DEG,
+            min(self.ELEVATION_LIMIT_DEG, self.camera_elevation + delta_elevation))
+
+        new_offset = self._eye_offset()
+        self.camera_target = [eye[axis] - new_offset[axis] for axis in range(3)]
+        self._camera_target_touched = True
+
+        self.camera_changed.emit(
+            self.camera_elevation, self.camera_azimuth, self.camera_distance)
+        self.update()
+
+    def _pan(self, dx, dy):
+        """
+        Verschiebt den BLICKPUNKT in der Bildebene (Shift + linke Maustaste).
+
+        Der Versatz skaliert mit `camera_distance`: aus der Nähe soll dieselbe
+        Mausbewegung fein verschieben, aus der Ferne grob - sonst ist Panning
+        entweder herausgezoomt zäh oder herangezoomt unbrauchbar hektisch.
+        """
+        right, up = self._screen_axes()
+        self._camera_target_touched = True
+        scale = self.camera_distance * 0.0022
+        for axis in range(3):
+            # dy invertiert: Bildschirm-y zeigt nach unten, die Welt-Hochachse
+            # nach oben. Ohne das zieht die Karte in die falsche Richtung.
+            self.camera_target[axis] += (-dx * right[axis] + dy * up[axis]) * scale
+
+        self.camera_changed.emit(self.camera_elevation, self.camera_azimuth, self.camera_distance)
+        self.update()
+
+    # --- Flugmodus -----------------------------------------------------------
+    #
+    # W/S  vorwaerts/rueckwaerts entlang der echten Blickrichtung
+    # A/D  seitwaerts strafen
+    # Leer aufsteigen, Shift absinken - beides orthogonal zur Blickrichtung
+    #
+    # Gedreht wird ausschliesslich mit der Maus: links um die EIGENE Position
+    # (Free Look), rechts um den BLICKPUNKT (die alte Geste). Dass beides
+    # nebeneinander moeglich ist, ist der Grund, warum der Blickpunkt
+    # ueberhaupt eigener Zustand werden musste.
+    _FLIGHT_KEYS = frozenset({
+        Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D,
+        Qt.Key.Key_Space, Qt.Key.Key_Shift,
+    })
+    FLIGHT_TICK_MS = 16  # ~60 Hz
+
+    def keyPressEvent(self, event):
+        if event.key() in self._FLIGHT_KEYS and not event.isAutoRepeat():
+            self._pressed_keys.add(event.key())
+            if not self.flight_timer.isActive():
+                self.flight_timer.start(self.FLIGHT_TICK_MS)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() in self._FLIGHT_KEYS and not event.isAutoRepeat():
+            self._pressed_keys.discard(event.key())
+            if not self._pressed_keys:
+                self.flight_timer.stop()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        # Ohne das fliegt die Kamera weiter, wenn das Fenster den Fokus
+        # verliert waehrend eine Taste gedrueckt ist - das keyReleaseEvent
+        # kommt dann nie an.
+        self._pressed_keys.clear()
+        self.flight_timer.stop()
+        super().focusOutEvent(event)
+
+    def _advance_flight(self):
+        """Ein Zeitschritt des Flugmodus, aus den gedrueckten Tasten."""
+        if not self._pressed_keys:
+            self.flight_timer.stop()
+            return
+
+        seconds = self.FLIGHT_TICK_MS / 1000.0
+        self._camera_target_touched = True
+        keys = self._pressed_keys
+        moved = False
+
+        forward_input = ((Qt.Key.Key_W in keys) - (Qt.Key.Key_S in keys))
+        if forward_input:
+            forward = self._forward()
+            step = forward_input * self.flight_speed * seconds
+            for axis in range(3):
+                self.camera_target[axis] += forward[axis] * step
+            moved = True
+
+        # Shift ist reiner Abwaerts-Schub - das Panning haengt seit
+        # 2026-07-28 an der mittleren Maustaste, nicht mehr an Shift.
+        vertical_input = ((Qt.Key.Key_Space in keys) - (Qt.Key.Key_Shift in keys))
+        if vertical_input:
+            _, up = self._screen_axes()
+            step = vertical_input * self.flight_speed * seconds
+            for axis in range(3):
+                self.camera_target[axis] += up[axis] * step
+            moved = True
+
+        # A/D STRAFEN seitwaerts, sie drehen nicht. Gedreht wird ausschliesslich
+        # mit der Maus (links: um die eigene Position, rechts: um den
+        # Blickpunkt) - so wie in einem Shooter.
+        strafe_input = ((Qt.Key.Key_D in keys) - (Qt.Key.Key_A in keys))
+        if strafe_input:
+            # `right` aus _screen_axes() traegt SCREEN_RIGHT_SIGN bereits und
+            # ist gegen die echte View-Matrix belegt (siehe Panning-Test).
+            right, _ = self._screen_axes()
+            step = strafe_input * self.flight_speed * seconds
+            for axis in range(3):
+                self.camera_target[axis] += right[axis] * step
+            moved = True
+
+        if moved:
+            self.camera_changed.emit(
+                self.camera_elevation, self.camera_azimuth, self.camera_distance)
+            self.update()
 
     def wheelEvent(self, event):
         """
@@ -1962,9 +2218,13 @@ class MapDisplay3D(QOpenGLWidget):
         zoom_factor = 1.1 if event.angleDelta().y() > 0 else 1 / 1.1
         new_distance = self.camera_distance * zoom_factor
 
-        # Zoom-Grenzen
+        # Zoom-Grenzen. Obergrenze 2026-07-28 von 50 auf 400 angehoben: seit
+        # der Blickpunkt beweglich ist, kann man weit von der Karte wegfliegen,
+        # und 50 Einheiten (5 Kartenbreiten) waren dafuer zu eng. Die
+        # Untergrenze bleibt - naeher als 2 Einheiten schneidet die Near-Plane
+        # ins Gelaende.
         min_distance = 2.0
-        max_distance = 50.0
+        max_distance = 400.0
         self.camera_distance = max(min_distance, min(max_distance, new_distance))
 
         self.camera_changed.emit(self.camera_elevation, self.camera_azimuth, self.camera_distance)
@@ -1978,6 +2238,12 @@ class MapDisplay3D(QOpenGLWidget):
         self.camera_distance = CanvasSettings.CANVAS_3D["camera_distance"]
         self.camera_elevation = 55.0
         self.camera_azimuth = 180.0  # siehe __init__-Kommentar
+        # Blickpunkt zurueck auf die Kartenmitte - das ist die Rettungsleine,
+        # wenn man sich im Flugmodus verirrt hat.
+        self.camera_target = [0.0, self.terrain_center_y, 0.0]
+        self._camera_target_touched = False
+        self._pressed_keys.clear()
+        self.flight_timer.stop()
 
         self.camera_changed.emit(self.camera_elevation, self.camera_azimuth, self.camera_distance)
         self.update()
@@ -2016,8 +2282,14 @@ class MapDisplay3DWidget(QWidget):
         self.control_layout = QHBoxLayout()
         self.control_widgets = {}
 
-        # Camera-Reset Button (immer sichtbar)
+        # Camera-Reset Button (immer sichtbar) - die Rettungsleine, wenn man
+        # sich im Flugmodus verirrt hat.
+        #
+        # NoFocus wie beim [GENERIEREN]-Knopf: ein fokussierter QPushButton
+        # verschluckt die Leertaste, und die gehoert im Flugmodus der Kamera
+        # (siehe MapDisplay3D.keyPressEvent).
         self.reset_camera_button = QPushButton("Reset Camera")
+        self.reset_camera_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.control_layout.addWidget(self.reset_camera_button)
 
         self.control_layout.addStretch()

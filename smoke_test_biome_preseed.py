@@ -23,14 +23,25 @@ def check(label, condition):
 
 
 def run_calculator_graph_sanity():
-    """biome.preseed_hint muss registriert sein, keine Zyklen (nur von
-    terrain.* abhängig), water.soil_moisture muss jetzt auch von
-    weather.temperature abhängen."""
+    """biome.preseed_hint muss registriert sein und zyklenfrei bleiben,
+    water.soil_moisture muss auch von weather.temperature abhaengen.
+
+    Die Zusicherung lautete bis 2026-07-28 woertlich "nur terrain.*". Das war
+    eine zu enge Formulierung des eigentlichen Ziels: der Vorab-Schaetzwert
+    darf nicht von water.* oder biome.* abhaengen, sonst entsteht genau der
+    Zyklus, den er aufloesen soll (Bodenfeuchte braucht den Biomtyp, Biomtyp
+    braucht die Bodenfeuchte). erosion.slope ist unbedenklich - die Erosion
+    laeuft vor Water und Biome - und fachlich noetig, weil der Schaetzwert die
+    Steilheit bewertet und die erst durch die Erosion entsteht.
+    """
     ok = check("biome.preseed_hint im CALCULATOR_GRAPH registriert",
                "biome.preseed_hint" in CALCULATOR_GRAPH)
     preseed_deps = set(CALCULATOR_GRAPH["biome.preseed_hint"].depends_on)
-    ok &= check(f"preseed_hint deps={preseed_deps} (nur terrain.*, kein water./biome.-Zyklus)",
-                preseed_deps == {"terrain.redistribution", "terrain.slope"})
+    ok &= check(f"preseed_hint deps={preseed_deps} - kein water./biome.-Zyklus",
+                not any(dep.startswith(("water.", "biome."))
+                        for dep in preseed_deps))
+    ok &= check("preseed_hint benutzt den Slope NACH der Erosion",
+                "erosion.slope" in preseed_deps)
     soil_deps = set(CALCULATOR_GRAPH["water.soil_moisture"].depends_on)
     # water.manning_flow ergaenzt (2026-07-27): water.soil_moisture liest die
     # GEMALTE Klassifikation von dort und die Zentrallinie von
@@ -57,7 +68,9 @@ def run_preseed_hint_ridge_test():
     dlm = DataLODManager()
     dlm.set_map_latitude(48.0)
     dlm.set_calculator_output("terrain.redistribution", 3, {"heightmap": heightmap})
-    dlm.set_calculator_output("terrain.slope", 3, {"slopemap": slopemap})
+    # erosion.slope, nicht terrain.slope: von dort liest _calc_preseed_hint()
+    # seit 2026-07-28 (Hangneigung auf dem erodierten Gelaende).
+    dlm.set_calculator_output("erosion.slope", 3, {"slopemap": slopemap})
 
     biome = BiomeClassificationSystem(data_lod_manager=dlm)
     biome._calc_preseed_hint("biome.preseed_hint", 3)

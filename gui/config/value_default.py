@@ -28,7 +28,21 @@ class TERRAIN:
     # der tatsächliche, live einstellbare Wert kommt seit
     # [[project-terrain-review]] über DataLODManager.get_map_distance_km(),
     # nicht mehr aus diesem statischen Import.
-    WORLD_SIZE_KM = 10.0
+    # Höhe der Talsohle in Metern. Zusammen mit AMPLITUDE legt sie die
+    # Höhenspanne JEDER Karte fest: der tiefste Punkt liegt exakt hier, der
+    # höchste exakt bei AMPLITUDE (siehe
+    # BaseTerrainGenerator._apply_redistribution). Nicht 0 m, damit die
+    # Talsohle Land bleibt und nicht mit dem Meeresspiegel zusammenfällt.
+    BASE_ELEVATION_M = 100.0
+
+    # 2026-07-28 von 10.0 auf 15.0 angehoben, zusammen mit der verdoppelten
+    # FREQUENCY (siehe dort): die Karte zeigt jetzt die vierfache Fläche, und
+    # 15 km trifft die dargestellte Landschaft besser als 10 km.
+    #
+    # Zur Einordnung: streng "die Welt setzt sich fort" wären 20 km. Mit 15 km
+    # ist jede Geländeform real rund ein Viertel kleiner als vorher - eine
+    # bewusste Entscheidung nach Augenschein, kein Rechenergebnis.
+    WORLD_SIZE_KM = 15.0
 
     MAPSIZE = {
         "min": MAPSIZEMIN, "max": MAPSIZEMAX, "default": 128, "step": 32,
@@ -80,12 +94,36 @@ class TERRAIN:
                         "mehr möglich) - bei den Standardwerten betrifft "
                         "das bereits Oktave 5 und höher."
     }
+    # Default 2026-07-28 von 0.037 auf 0.074 VERDOPPELT: die Karte zeigt jetzt
+    # den doppelten Weltausschnitt in x UND y, also die vierfache Fläche.
+    #
+    # Warum genau das Verdoppeln der Frequenz das leistet: die Rausch-
+    # Koordinaten laufen über `pixel_index * frequency * 64 / size`
+    # (terrain_generator.py, _calc_noise_generation). Das Weltfenster ist
+    # damit `[0, 64 * frequency)` - unabhängig von der Auflösung, das ist der
+    # Trick, der die LOD-Stufen deckungsgleich hält. Doppelte Frequenz =
+    # doppelt so breites Fenster AB DEMSELBEN URSPRUNG, die Welt setzt sich
+    # also nach rechts und unten fort, statt sich zu verändern.
+    #
+    #     alt   Fenster [0, 2.3680)
+    #     neu   Fenster [0, 4.7360)
+    #
+    # Gegenprobe gerechnet: das alte 256er Bild ist BIT-IDENTISCH mit dem
+    # linken oberen Viertel des neuen 512er Bildes (max. Abweichung 0.000e+00).
+    # Es ist wirklich dieselbe Welt, nur weiter herausgezoomt - kein neues
+    # Muster mit ähnlichem Charakter.
+    #
+    # Unberührt bleibt die Nyquist-Klemme in _max_safe_octaves(): bei 4
+    # Oktaven und Lacunarity 2.3 erlaubt die verdoppelte Frequenz weiterhin
+    # 5 Oktaven, es fällt also keine weg.
     FREQUENCY = {
-        "min": 0.001, "max": 0.1, "default": 0.037, "step": 0.001,
+        "min": 0.001, "max": 0.1, "default": 0.074, "step": 0.001,
         "description": "Grundfrequenz des Rausch-Musters - höhere Werte "
                         "erzeugen kleinere, dichter aufeinanderfolgende "
                         "Hügel/Täler, niedrigere Werte großflächigere "
-                        "Formationen."
+                        "Formationen. Verdoppeln zeigt den doppelten "
+                        "Weltausschnitt in beide Richtungen (vierfache "
+                        "Fläche), ab demselben Ursprung."
     }
     # Default 0.4 (statt vorher 0.68): bei 0.68 tragen selbst hochfrequente
     # Oktaven noch spürbar zur Gesamthöhe bei, was zusammen mit den vielen
@@ -664,21 +702,26 @@ class EROSION:
                         "steile Wände bleiben stehen."
     }
     HARDNESS_INFLUENCE = {
-        "min": 0.0, "max": 1.0, "default": 0.0, "step": 0.05,
+        "min": 0.0, "max": 1.0, "default": 0.05, "step": 0.05,
         "description": "Wie stark die Gesteinshärte aus Geology eingeht - auf "
                         "die Löserate UND den Böschungswinkel. 0 % ist exakt "
                         "das Verhalten des Vorbilds (das kein Gestein kennt), "
                         "100 % volle Kopplung: hartes Gestein löst langsamer "
                         "und hält steilere Wände."
     }
+    # ACHTUNG bei alten Werten: dieser Regler ist am 2026-07-28 UMGEDREHT
+    # worden. Vorher steuerte er die Schwelle direkt, also genau verkehrt -
+    # kleine Werte bedeuteten AGGRESSIVE Glättung. Ein gespeichertes Preset
+    # mit 0.05 hat damals das Gegenteil von heute bewirkt. Die Messreihe
+    # dazu steht in HydraulicFieldSimulator.smoothing_threshold().
     SMOOTHING = {
         "min": 0.0, "max": 1.0, "default": 0.0, "step": 0.05,
-        "description": "Glättet gezielt Ein-Pixel-Grate und -Rinnen, also "
-                        "Gitterartefakte - echte Hänge bleiben unangetastet. "
-                        "Startwert 0: gemessen kostet der Pass mehr echte "
-                        "Rinnen als er Artefakte entfernt (beta -0.419 -> "
-                        "-0.243 schon bei 0.1). Aufdrehen, wenn einzelne "
-                        "Pixelgrate stören."
+        "description": "Wie stark Ein-Pixel-Grate und -Rinnen geglättet "
+                        "werden, also Gitterartefakte - echte Hänge bleiben "
+                        "unangetastet. 0 = aus, 1 = maximal. Startwert "
+                        "bewusst sehr niedrig: ab etwa 0.3 kostet der Pass "
+                        "mehr echte Rinnen als er Artefakte entfernt, und "
+                        "die Schwemmebenen in den Talböden bleiben aus."
     }
     THERMAL_VARIANT = {
         "min": 0, "max": 1, "default": 0, "step": 1,

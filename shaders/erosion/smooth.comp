@@ -32,7 +32,15 @@ layout(r32f, binding = 3) uniform writeonly image2D waterOut;
 
 uniform int u_size;
 uniform float u_evaporation_factor;   // 1 - Ke*dt, bereits ausgerechnet
-uniform float u_threshold;            // smoothing * smoothing_scale, 0 = aus
+// Schwelle in Metern, gerechnet von HydraulicFieldSimulator.smoothing_threshold().
+//
+// KEIN Sonderfall fuer "aus" mehr: seit der Regler eine STAERKE ist (0 = aus,
+// 1 = maximal) bedeutet Schwelle 0 die MAXIMALE Glaettung, nicht keine. Die
+// frueheren `u_threshold <= 0.0`-Abfragen haben deshalb genau die staerkste
+// Einstellung stillgelegt - gemessen lieferte Staerke 1.0 bitgleich dasselbe
+// Ergebnis wie Staerke 0.0. "Aus" kommt jetzt als sehr hohe endliche Schwelle
+// an, die keine Nachbardifferenz erreicht; das braucht keine Fallunterscheidung.
+uniform float u_threshold;
 
 float heightAt(ivec2 coord) {
     return imageLoad(heightIn, clamp(coord, ivec2(0), ivec2(u_size - 1))).r;
@@ -42,9 +50,6 @@ float heightAt(ivec2 coord) {
 // kein Ein-Pixel-Grat/keine Ein-Pixel-Rinne ist). Identisch zur CPU-Fassung:
 // Mittengewicht 8 gegen 4x1 (Kanten) + 4x0.707 (Diagonalen).
 float smoothingDelta(ivec2 coord) {
-    if (u_threshold <= 0.0) {
-        return 0.0;
-    }
     float here = heightAt(coord);
     float dL = here - heightAt(coord + ivec2(-1, 0));
     float dR = here - heightAt(coord + ivec2(1, 0));
@@ -73,11 +78,6 @@ void main() {
                vec4(imageLoad(waterIn, coord).r * u_evaporation_factor, 0.0, 0.0, 0.0));
 
     float height = imageLoad(heightIn, coord).r;
-    if (u_threshold <= 0.0) {
-        imageStore(heightOut, coord, vec4(height, 0.0, 0.0, 0.0));
-        return;
-    }
-
     float delta = smoothingDelta(coord);
 
     // Was die acht Nachbarn abgeben, kommt hier an - je ein Achtel ihres

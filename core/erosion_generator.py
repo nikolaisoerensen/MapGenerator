@@ -554,7 +554,8 @@ class HydraulicFieldSimulator:
                     "diagonal_distance": self.DIAGONAL_DISTANCE,
                     "thermal_variant": 1 if cfg["thermal_variant"] == "flux" else 0,
                     "evaporation_factor": max(0.0, 1.0 - cfg["evaporation"] * dt),
-                    "smoothing_threshold": cfg["smoothing"] * state["smoothing_scale"],
+                    "smoothing_threshold": self.smoothing_threshold(
+                        cfg["smoothing"], state["smoothing_scale"]),
         }
 
         target_rate = cfg["convergence_threshold"] * state["relief"]
@@ -1213,6 +1214,47 @@ class HydraulicFieldSimulator:
 
     # --- Pass 8 -------------------------------------------------------
 
+    # Schwellenspanne des Glättungspasses, in Vielfachen der mittleren
+    # Nachbardifferenz (`smoothing_scale`). Siehe smoothing_threshold().
+    SMOOTHING_THRESHOLD_SPAN = 12.0
+
+    @classmethod
+    def smoothing_threshold(cls, strength, smoothing_scale):
+        """
+        Rechnet die STÄRKE des Glättungsreglers (0..1) in die Schwelle um, die
+        _pass_smooth() tatsächlich braucht.
+
+        Der Regler steuerte bis 2026-07-28 die Schwelle DIREKT - und damit
+        genau verkehrt herum: eine hohe Schwelle heisst WENIGER Glättung.
+        "Smoothing 0.05" bedeutete deshalb nicht "ganz sanft", sondern "alles
+        oberhalb einer sehr niedrigen Schwelle glätten", also die aggressivste
+        erreichbare Einstellung. Gemessen (512 px, Relief 3900 m, beta als
+        Mass für die fluviale Prägung, je negativer desto besser):
+
+            Schwelle    beta      hypso
+              aus      -0.484     0.456     <- Zielbild
+              0.01     -0.451     0.173
+              0.05     -0.385     0.161     <- war der "sanfte" Wert
+              1.00     -0.358     0.222
+              4.00     -0.397     0.214
+             12.00     -0.467     0.254     <- fast wie aus
+
+        Der brauchbare, wirklich sanfte Bereich liegt also bei Schwelle 4..12
+        - und war durch die 0..1-Klemme des Reglers ueberhaupt nicht
+        erreichbar. Deshalb hier die Umkehr: `strength` 0 = aus, 1 = maximale
+        Glättung, und dazwischen linear über die volle nutzbare Spanne.
+
+        Damit heisst 0.05 jetzt das, was man erwartet: Schwelle 11.4, also
+        Glättung aktiv, aber praktisch ohne Einfluss auf die Talbildung.
+        """
+        if strength <= 0.0 or smoothing_scale <= 0.0:
+            # "Aus" als ENDLICHE, sehr hohe Schwelle statt inf: der CPU-Pfad
+            # springt vorher raus, der GPU-Pfad bekommt den Wert aber als
+            # Uniform, und inf in einem glUniform1f ist unnötiges Risiko.
+            # Keine Nachbardifferenz erreicht das Tausendfache der mittleren.
+            return 1e3 * cls.SMOOTHING_THRESHOLD_SPAN * max(smoothing_scale, 1.0)
+        return cls.SMOOTHING_THRESHOLD_SPAN * (1.0 - strength) * smoothing_scale
+
     def _pass_smooth(self, state, cfg):
         """
         Bedingte Glättung - der Pass, der im Vorbild spürbar zur Optik
@@ -1235,6 +1277,9 @@ class HydraulicFieldSimulator:
         sie EINMAL und nicht pro Schritt bestimmt wird). `smoothing = 0`
         schaltet den Pass vollständig ab.
         """
+        # Nur das echte "aus" springt hier raus. Die Schwelle selbst darf 0
+        # sein - das ist seit der Umkehr des Reglers die STAERKSTE Einstellung,
+        # nicht die schwaechste (siehe smoothing_threshold()).
         if cfg["smoothing"] <= 0.0 or state["smoothing_scale"] <= 0.0:
             return
 
@@ -1245,7 +1290,7 @@ class HydraulicFieldSimulator:
         d_t = terrain - h_pad[0:-2, 1:-1]
         d_b = terrain - h_pad[2:, 1:-1]
 
-        threshold = cfg["smoothing"] * state["smoothing_scale"]
+        threshold = self.smoothing_threshold(cfg["smoothing"], state["smoothing_scale"])
 
         spike = (((np.abs(d_l) > threshold) & (np.abs(d_r) > threshold) & (d_l * d_r > 0.0)) |
                  ((np.abs(d_t) > threshold) & (np.abs(d_b) > threshold) & (d_t * d_b > 0.0)))
@@ -1514,6 +1559,37 @@ class ErosionSystemGenerator:
             "Erosion LOD %d: %d Schritte auf %dx%d, konvergiert=%s, Bilanzabweichung %.2f%%",
             lod_level, result["steps_taken"], simulation_size, simulation_size,
             result["converged"], 100.0 * result["mass_balance"])
+
+    def _calc_slope(self, calculator_id: str, lod_level: int) -> None:
+        """
+        Calculator-Node erosion.slope - die Hangneigung NACH der Erosion.
+
+        Warum es diesen Knoten zusaetzlich zu terrain.slope gibt: terrain.slope
+        rechnet auf dem unerodierten Gelaende und muss das auch, weil
+        geology.layer_thickness ihn braucht und Geology vor der Erosion laeuft.
+        Ihn hinter die Erosion zu haengen waere ein Zyklus - die Rechnung dazu
+        steht bei diesem Knoten in gui/OldManagers/calculator_graph.py.
+
+        Gerechnet wird mit demselben SlopeCalculator wie in Terrain, nur auf
+        der KOMBINIERTEN Heightmap: das ist die Karte inklusive Erosion,
+        Sedimentation und Boeschungsanteilen, also genau das Gelaende, auf dem
+        Biome und Settlement anschliessend ihre Entscheidungen treffen.
+        """
+        heightmap = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
+        if heightmap is None:
+            raise ValueError(
+                "erosion.slope: kombinierte Heightmap fuer LOD %d nicht "
+                "verfuegbar" % lod_level)
+
+        # Import hier statt oben: core/terrain_generator.py importiert seinerseits
+        # aus gui/config, ein Import auf Modulebene wuerde die Abhaengigkeiten
+        # dieses Moduls unnoetig verbreitern.
+        from core.terrain_generator import SlopeCalculator
+
+        slopemap = SlopeCalculator().calculate_slopes(
+            heightmap, self._current_parameters)
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"slopemap": slopemap})
 
     def _store_zero_result(self, calculator_id, lod_level, target_size):
         """Nullkarten fuer die Zwischenrunden - siehe _calc_hydraulic()."""

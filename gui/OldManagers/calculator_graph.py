@@ -127,6 +127,25 @@ _CALCULATOR_SPECS = [
                     "thermal_erosion_map", "thermal_deposition_map",
                     "sediment_load_map", "water_depth_map", "flow_velocity_map"]),
 
+    # Der Slope NACH der Erosion (2026-07-28).
+    #
+    # terrain.slope rechnet auf dem UNerodierten Gelaende - das muss so
+    # bleiben, weil geology.layer_thickness ihn braucht und Geology vor der
+    # Erosion laeuft. terrain.slope einfach hinter die Erosion zu haengen
+    # waere ein ZYKLUS, nachgerechnet:
+    #
+    #   terrain.slope           <- erosion.hydraulic   (die gewuenschte Kante)
+    #   erosion.hydraulic       <- geology.hardness
+    #   geology.hardness        <- ... <- geology.layer_thickness
+    #   geology.layer_thickness <- terrain.slope
+    #
+    # Deshalb ein ZWEITER Knoten statt eines verschobenen. Er rechnet mit
+    # demselben SlopeCalculator, nur auf der kombinierten (erodierten)
+    # Heightmap. Alles, was nach der Erosion kommt, liest ab hier diesen -
+    # sonst kennen Biome und Settlement die frisch eingeschnittenen Rinnen und
+    # Kaemme nicht, auf denen sie ihre Entscheidungen treffen.
+    CalculatorSpec("erosion.slope", "erosion", ["erosion.hydraulic"], ["slopemap"]),
+
     # --- Water (#15-#21, #22 erosion_feedback bewusst ausgeschlossen - siehe Docstring) ---
     #
     # ZWINGENDE REIHENFOLGE PRO LOD-RUNDE (Nutzer-Vorgabe 2026-07-27):
@@ -273,7 +292,7 @@ _CALCULATOR_SPECS = [
     # LOD 2 nutzt water.soil_moisture stattdessen die ECHTE biome_map der
     # Vorstufe (biome.integrate_layers bei lod_level-1).
     CalculatorSpec("biome.preseed_hint", "biome",
-                   ["terrain.redistribution", "terrain.slope"], ["preseed_biome_map"]),
+                   ["terrain.redistribution", "erosion.slope"], ["preseed_biome_map"]),
     CalculatorSpec("biome.base_classification", "biome",
                    ["terrain.redistribution", "weather.temperature", "weather.precipitation",
                     "water.soil_moisture"], ["base_biome_map"]),
@@ -294,12 +313,12 @@ _CALCULATOR_SPECS = [
     # die Naehe zu tatsaechlichen Gewaesserflaechen, also die FINALE gemalte
     # Klassifikation - siehe water.manning_flow-Kommentar oben.
     CalculatorSpec("settlement.suitability", "settlement",
-                   ["terrain.redistribution", "terrain.slope", "water.manning_flow"],
+                   ["terrain.redistribution", "erosion.slope", "water.manning_flow"],
                    ["combined_suitability_map"]),
     CalculatorSpec("settlement.settlements", "settlement",
                    ["settlement.suitability", "terrain.redistribution"], ["settlement_list"]),
     CalculatorSpec("settlement.city_boundary", "settlement",
-                   ["settlement.settlements", "terrain.redistribution", "terrain.slope"],
+                   ["settlement.settlements", "terrain.redistribution", "erosion.slope"],
                    ["city_mask", "city_cost_map"]),
     # settlement.city_blocks/settlement.landscape_voronoi (CityBlockSystem/
     # LandscapeVoronoiSystem) entfernt - vollständig durch settlement.plot_nodes
@@ -318,18 +337,18 @@ _CALCULATOR_SPECS = [
                    # Orchestrators aus diesem Graph ABGELEITET wurde statt von
                    # Hand gepflegt: die Handtabelle fuehrte biome bei
                    # settlement, der Graph nicht. Die Handtabelle hatte recht.
-                   ["settlement.settlements", "terrain.slope",
+                   ["settlement.settlements", "erosion.slope",
                     "biome.integrate_layers"], ["roads"]),
     CalculatorSpec("settlement.outer_roads", "settlement",
-                   ["settlement.settlements", "settlement.suitability", "terrain.slope"], ["outer_roads"]),
+                   ["settlement.settlements", "settlement.suitability", "erosion.slope"], ["outer_roads"]),
     CalculatorSpec("settlement.roadsites", "settlement", ["settlement.pathfinding"], ["roadsite_list"]),
     CalculatorSpec("settlement.civ_influence", "settlement",
-                   ["terrain.redistribution", "terrain.slope", "settlement.settlements",
+                   ["terrain.redistribution", "erosion.slope", "settlement.settlements",
                     "settlement.pathfinding", "settlement.roadsites"], ["civ_map"]),
     CalculatorSpec("settlement.landmarks", "settlement",
-                   ["settlement.civ_influence", "terrain.redistribution", "terrain.slope"], ["landmark_list"]),
+                   ["settlement.civ_influence", "terrain.redistribution", "erosion.slope"], ["landmark_list"]),
     CalculatorSpec("settlement.landmark_roads", "settlement",
-                   ["settlement.landmarks", "settlement.pathfinding", "terrain.slope"], ["landmark_roads"]),
+                   ["settlement.landmarks", "settlement.pathfinding", "erosion.slope"], ["landmark_roads"]),
     # settlement.plot_nodes (PlotPhysicsSystem, siehe [[project-settlement-plot-physics-rebuild]]) -
     # läuft NUR am finalen LOD (Guard innerhalb von _calc_plot_nodes selbst, kein
     # Dispatcher-Feature dafür vorhanden) - braucht city_mask (settlement.city_boundary,
@@ -362,8 +381,11 @@ CALCULATOR_GRAPH: Dict[str, CalculatorSpec] = {spec.calculator_id: spec for spec
 # Erosion-Umbau 2026-07-28 (Partikel- -> Feldverfahren, eigener Generator,
 # siehe core/erosion_generator.py): water.erosion_sedimentation und
 # water.thermal_erosion stillgelegt, dafuer erosion.hydraulic neu = netto -1
-# -> 38 aktive Knoten.
-assert len(CALCULATOR_GRAPH) == 38, f"Erwartet 38 aktive Calculators, gefunden {len(CALCULATOR_GRAPH)}"
+# -> 38 aktive Knoten. Am selben Tag kam erosion.slope dazu (Hangneigung NACH
+# der Erosion, siehe dortiger Kommentar - ein ZWEITER Slope-Knoten, weil ein
+# verschobener terrain.slope einen Zyklus ueber geology.layer_thickness
+# ergaebe) = netto +1 -> 39 aktive Knoten.
+assert len(CALCULATOR_GRAPH) == 39, f"Erwartet 39 aktive Calculators, gefunden {len(CALCULATOR_GRAPH)}"
 
 
 class CalculatorRoundScheduler:
@@ -421,6 +443,105 @@ class CalculatorRoundScheduler:
         return context
 
 
+# EIN-RUNDEN-BETRIEB (2026-07-28, Stufe 2 der LOD-Aufloesung)
+#
+# True  = die Pipeline laeuft GENAU EINMAL, direkt in der Zielaufloesung.
+# False = das fruehere Verhalten, LOD-Leiter von 32 px in Verdopplungen hoch.
+#
+# Warum: die Leiter war dafuer da, nach wenigen Sekunden eine grobe Vorschau zu
+# liefern. Diesen Gegenwert hat sie verloren - die Erosion rechnet ohnehin nur
+# noch in der letzten Runde (die groben LOD-1-Strukturen liessen sich einbacken
+# und durch keine Verfeinerung mehr entfernen), Settlement ebenso. Gleichzeitig
+# geht ein grosser Teil der behobenen Fehler auf sie zurueck: Erosion blieb auf
+# LOD 3 stehen waehrend alles andere LOD 5 anstrebte (fuenf gleichzeitige
+# Timeouts ohne Fehlermeldung), die zurueckgenommene LOD-Eviction, Regen pro
+# Schritt statt pro Sekunde, Konvergenz pro Schritt statt pro Sekunde,
+# Partikeldichte je LOD.
+#
+# WAS DAS AENDERT: acht Stellen im Code lesen `lod_level - 1`, also das
+# Ergebnis der VORIGEN Runde - die Leiter trug damit echte Rueckkopplungen:
+#
+#   weather_generator.py:768       Bodenfeuchte -> Verdunstung zurueck ins Wetter
+#   weather_generator.py:750/752/754, 810, 934   eigene Monatsschichten/Feuchte
+#   water_generator.py:3442        die ECHTE biome_map fuer die Austrocknung
+#   water_generator.py:3145/3148   Pipe-Zustand als Warmstart
+#
+# Der Speicher sucht ABWAERTS (get_calculator_output: range(lod, 0, -1)), diese
+# Stellen bekommen also sauber None statt versehentlich die eigene Runde. Jede
+# hat einen dokumentierten Fallback, weil LOD 1 noch nie eine Vorstufe hatte -
+# der Ein-Runden-Betrieb ist damit exakt der LOD-1-Codepfad in voller
+# Aufloesung. Wetter startet aus Rauschen statt aus geerbten Schichten, die
+# Bodenfeuchte-Kopplung faellt auf ihren 50%-Platzhalter, Water startet mit
+# trockener Karte.
+#
+# Diese Rueckkopplungen kommen in Stufe 3 als EXPLIZITE Schleife zurueck. Ihre
+# Zahl haengt dann an einem Regler statt zufaellig an der Zahl der
+# Aufloesungsstufen.
+#
+# Die Konstante bleibt als Schalter stehen: sie ist die Gegenprobe, mit der
+# sich beide Verhalten direkt vergleichen lassen.
+SINGLE_ROUND_PIPELINE = True
+
+
+# RUECKKOPPLUNGS-DURCHGAENGE (2026-07-28, Stufe 3 der LOD-Aufloesung)
+#
+# Weather, Water und Biome bilden einen echten KREIS im Modell:
+#
+#   Weather -> Water   (Regen speist den Kreislauf)
+#   Water   -> Biome   (Bodenfeuchte bestimmt den Biomtyp)
+#   Biome   -> Water   (der Biomtyp steuert die Austrocknung)
+#   Water   -> Weather (Bodenfeuchte verdunstet zurueck in die Luft)
+#
+# Eine lineare Reihenfolge kann das nicht ausdruecken. Die LOD-Leiter hat den
+# Kreis bisher aufgebrochen, indem jede Runde die Werte der vorigen benutzte -
+# die Zahl der Durchgaenge hing damit zufaellig an der Zahl der
+# Aufloesungsstufen. Hier ist sie eine Zahl.
+#
+# DEFAULT 1, ALSO KEINE RUECKKOPPLUNG - und das ist eine Messung, keine
+# Bequemlichkeit.
+#
+# GEMESSEN (128 px, Default-Parameter, Mittelwerte der ganzen Karte):
+#
+#     Passes   temp   precip   soil    Aenderung zum vorigen Lauf
+#        1     4.421  14.342   8.091   -
+#        2     0.712   2.313   2.811   temp  84%  precip  84%  soil 110%
+#        3     0.947   0.548   1.966   temp  62%  precip  81%  soil 119%
+#        4     0.639   0.386   1.780   temp  21%  precip  59%  soil 137%
+#        5     0.590   0.336   1.396   temp   8%  precip  52%  soil  51%
+#
+# Die Schleife KONVERGIERT NICHT. Sie trocknet monoton aus, und die Aenderung
+# je Durchgang liegt beim fuenften noch ueber 50%. Der Kreis ist als
+# MITKOPPLUNG verdrahtet, ohne rueckstellenden Term:
+#
+#     weniger Bodenfeuchte -> weniger Verdunstung -> weniger Luftfeuchte
+#     -> weniger Niederschlag -> weniger Bodenfeuchte
+#
+# Solange das so ist, waere jede Zahl groesser 1 willkuerlich: das Ergebnis
+# haengt dann daran, wie oft man gedreht hat, nicht am Modell. Ein Default von
+# 3 haette genau das ausgeliefert.
+#
+# Mit 1 ist der Zustand wohldefiniert und stabil: Wetter kennt die Bodenfeuchte
+# nicht, Water benutzt die Pre-Biome-Karte - dieselben Platzhalter, die frueher
+# in LOD 1 galten.
+#
+# WAS OFFEN BLEIBT: der Kreis braucht einen daempfenden Term (z.B. Verdunstung
+# aus offenem Wasser und Ozean-Zufuhr als feuchte Quelle, die nicht von der
+# Bodenfeuchte abhaengt), bevor man ihn schliessen kann. Der Mechanismus hier
+# ist fertig und getestet - er wartet nur auf ein Modell, das ihn vertraegt.
+#
+# EIGENER MESSFEHLER, festgehalten damit er nicht wiederholt wird: eine erste
+# Konvergenzmessung schien sauber einzuschwingen (temp 4.42 -> 2.16 -> 2.21 ->
+# 2.20). Sie lief aber, BEVOR die Lesestellen von "voriges LOD" auf "voriger
+# Durchgang" umgestellt waren - gemessen wurden also Wiederholungen OHNE
+# Rueckkopplung. Eine Messung am halb umgebauten Stand ist keine Messung.
+FEEDBACK_PASSES = 1
+
+# Die Generatoren, die den Kreis bilden. Alles, was NUR von ihnen abhaengt
+# (heute Settlement), laeuft erst nach dem letzten Durchgang - siehe
+# CalculatorDispatcher._generators_after_feedback().
+FEEDBACK_GENERATORS = ("weather", "water", "biome")
+
+
 class CalculatorDispatcher:
     """
     Globaler Runden-Scheduler über den KOMPLETTEN CALCULATOR_GRAPH (alle 6
@@ -461,6 +582,10 @@ class CalculatorDispatcher:
         self.completed_lod: Dict[str, int] = {cid: 0 for cid in CALCULATOR_GRAPH}
         self.target_lod: Dict[str, int] = {cid: 0 for cid in CALCULATOR_GRAPH}  # 0 = nicht angefragt
         self._next_round = 1  # Fortsetzungspunkt für wiederholte run_all_rounds()-Aufrufe
+        # Laufender Rueckkopplungs-Durchgang (siehe FEEDBACK_PASSES).
+        self._feedback_pass = 1
+        # Einmal ableiten statt bei jeder Bereitschaftspruefung neu.
+        self._after_feedback = set(self._generators_after_feedback())
 
     def request(self, generator: str, target_lod: int):
         """
@@ -485,6 +610,8 @@ class CalculatorDispatcher:
         ready = []
         for cid, spec in CALCULATOR_GRAPH.items():
             if self.target_lod[cid] < round_n:
+                continue
+            if self._is_held_back(cid):
                 continue
             if self.completed_lod[cid] >= round_n:
                 continue
@@ -515,6 +642,107 @@ class CalculatorDispatcher:
         self.completed_lod[calculator_id] = 0
         self._next_round = 1
 
+    @staticmethod
+    def _generators_after_feedback() -> List[str]:
+        """
+        Generatoren, die (transitiv) auf dem Rueckkopplungs-Block aufbauen,
+        aber nicht selbst dazugehoeren - heute nur Settlement.
+
+        ABGELEITET aus CALCULATOR_GRAPH statt als Liste gepflegt: derselbe
+        Fehlertyp wie beim Auto-Start, beim Dependency-Tree und bei den
+        Generator-Parametern hat in diesem Projekt schon vier Mal zugeschlagen.
+        Sie duerfen erst NACH dem letzten Durchgang rechnen, sonst treffen sie
+        ihre Entscheidungen auf einem Zwischenstand, der sich danach noch
+        aendert.
+        """
+        upstream = {}
+        for cid, spec in CALCULATOR_GRAPH.items():
+            upstream.setdefault(spec.generator, set()).update(
+                CALCULATOR_GRAPH[dep].generator
+                for dep in spec.depends_on if dep in CALCULATOR_GRAPH)
+
+        def haengt_am_kreis(generator, gesehen=None):
+            gesehen = gesehen if gesehen is not None else set()
+            for oben in upstream.get(generator, ()):
+                if oben in FEEDBACK_GENERATORS:
+                    return True
+                if oben not in gesehen:
+                    gesehen.add(oben)
+                    if haengt_am_kreis(oben, gesehen):
+                        return True
+            return False
+
+        return sorted(generator for generator in upstream
+                      if generator not in FEEDBACK_GENERATORS
+                      and haengt_am_kreis(generator))
+
+    def _is_held_back(self, calculator_id: str) -> bool:
+        """
+        Wartet dieser Knoten auf den letzten Rueckkopplungs-Durchgang?
+
+        Settlement (und alles Kuenftige hinter dem Kreis) soll GENAU EINMAL
+        laufen, und zwar auf dem eingeschwungenen Stand. Ohne diese Bremse
+        rechnet es im ersten Durchgang auf Zwischenwerten, die sich danach noch
+        aendern - gemessen lief es zweimal statt einmal, das erste Mal
+        vollstaendig umsonst.
+        """
+        if self._feedback_pass >= FEEDBACK_PASSES:
+            return False
+        return CALCULATOR_GRAPH[calculator_id].generator in self._after_feedback
+
+    def _nodes_of(self, generators) -> List[str]:
+        return [cid for cid, spec in CALCULATOR_GRAPH.items()
+                if spec.generator in generators]
+
+    def _begin_next_feedback_pass(self) -> bool:
+        """
+        Startet den naechsten Rueckkopplungs-Durchgang, falls noch einer
+        aussteht. Return: True, wenn etwas zurueckgesetzt wurde.
+
+        Die Knoten des Kreises werden auf "nicht gerechnet" zurueckgesetzt und
+        laufen erneut - diesmal lesen sie im Speicher die Werte des vorigen
+        Durchgangs vor, statt auf ihre Anfangs-Platzhalter zu fallen. Genau das
+        tat die LOD-Leiter nebenbei, nur ohne dass jemand die Zahl der
+        Durchgaenge bestimmen konnte.
+
+        Die nachgelagerten Generatoren werden ZUSAMMEN mit dem letzten
+        Durchgang zurueckgesetzt: sie haengen an Knoten des Kreises und koennen
+        deshalb ohnehin erst starten, wenn der fertig ist.
+        """
+        if self._feedback_pass >= FEEDBACK_PASSES:
+            return False
+
+        self._feedback_pass += 1
+        neu_zu_rechnen = list(FEEDBACK_GENERATORS)
+        if self._feedback_pass == FEEDBACK_PASSES:
+            neu_zu_rechnen += self._generators_after_feedback()
+
+        for cid in self._nodes_of(neu_zu_rechnen):
+            if self.target_lod[cid] > 0:
+                self.completed_lod[cid] = 0
+        self._next_round = 1
+        return True
+
+    def _start_round(self) -> int:
+        """
+        Die erste Runde, die ueberhaupt gerechnet wird.
+
+        Im Ein-Runden-Betrieb ist das das hoechste angefragte Ziel-LOD - alle
+        groeberen Stufen entfallen. Ohne ihn bleibt es bei 1, also der
+        vollstaendigen Leiter.
+
+        Bewusst das MAXIMUM ueber alle angefragten Knoten und nicht je Knoten
+        sein eigenes Ziel: get_ready_nodes() verlangt, dass jede Abhaengigkeit
+        dieselbe Runde erreicht hat. Ein Knoten mit niedrigerem Ziel wuerde
+        seine Abnehmer sonst dauerhaft blockieren. In der Praxis fragt der
+        Auto-Start ohnehin alle Generatoren mit demselben Ziel an, und
+        request() kann Ziele nur anheben, nie senken.
+        """
+        if not SINGLE_ROUND_PIPELINE:
+            return 1
+        requested = [lod for lod in self.target_lod.values() if lod > 0]
+        return max(requested) if requested else 1
+
     def get_pending_nodes(self) -> List[str]:
         """Alle angefragten, aber noch nicht auf ihr Ziel-LOD gebrachten Knoten."""
         return [
@@ -523,8 +751,24 @@ class CalculatorDispatcher:
         ]
 
     def is_fully_done(self) -> bool:
-        """True, wenn jeder angefragte Knoten sein Ziel-LOD erreicht hat."""
-        return len(self.get_pending_nodes()) == 0
+        """
+        True, wenn jeder angefragte Knoten sein Ziel-LOD erreicht hat UND kein
+        Rueckkopplungs-Durchgang mehr aussteht.
+
+        Der zweite Teil ist nicht kosmetisch: jeder Aufrufer - der synchrone
+        run_all_rounds() ebenso wie advance_calculator_dispatch() in der GUI -
+        benutzt diese Methode als Abbruchbedingung. Meldete sie schon nach dem
+        ersten Durchgang "fertig", fragte niemand mehr nach neuen Knoten, und
+        die Schleife in get_next_ready_batch() kaeme nie zum Zug (gemessen:
+        alle Generatoren liefen genau einmal, auch mit FEEDBACK_PASSES=3).
+        """
+        if self.get_pending_nodes():
+            return False
+        # Nur wenn ueberhaupt etwas angefragt wurde - sonst waere ein frisch
+        # gebauter Dispatcher nie "fertig".
+        if any(lod > 0 for lod in self.target_lod.values()):
+            return self._feedback_pass >= FEEDBACK_PASSES
+        return True
 
     @property
     def current_round(self) -> int:
@@ -547,19 +791,70 @@ class CalculatorDispatcher:
         alles gerade angeforderte bereits läuft/in einem Thread hängt, oder ein
         echtes Deadlock vorliegt, weil eine Abhängigkeit nie angefragt wurde).
         """
-        round_n = self._next_round
+        # Im Ein-Runden-Betrieb (siehe SINGLE_ROUND_PIPELINE) werden die
+        # Runden 1..Ziel-1 uebersprungen: gerechnet wird ausschliesslich in der
+        # Zielaufloesung. Die Startrunde wird hier bestimmt und nicht im
+        # Konstruktor, weil die Ziel-LODs erst durch request() feststehen.
+        hoechstes_ziel = max(self.target_lod.values(), default=0)
+        round_n = max(self._next_round, self._start_round())
+        # MUSS zurueckgeschrieben werden: der Aufrufer liest current_round und
+        # ruft damit mark_completed(cid, runde). Bliebe _next_round auf 1,
+        # waehrend hier bereits Runde 5 verteilt wird, markierte er die falsche
+        # Runde - die Knoten kaemen nie auf ihr Ziel-LOD und die Schleife
+        # liefe endlos (gemessen: 200 Durchlaeufe ohne Fortschritt).
+        self._next_round = round_n
         while True:
+            # Zurueckgehaltene Knoten zaehlen hier NICHT als offen. Sonst
+            # waere die Runde nie "vollstaendig erledigt", der naechste
+            # Durchgang wuerde nie angestossen und die Pipeline bliebe stehen -
+            # ein Deadlock ohne Fehlermeldung, also genau die Sorte, die dieses
+            # Projekt schon zweimal getroffen hat.
             still_pending_for_round = [
-                cid for cid, spec in CALCULATOR_GRAPH.items()
-                if self.target_lod[cid] >= round_n and self.completed_lod[cid] < round_n
+                cid for cid in CALCULATOR_GRAPH
+                if self.target_lod[cid] >= round_n
+                and self.completed_lod[cid] < round_n
+                and not self._is_held_back(cid)
             ]
 
             if not still_pending_for_round:
                 # Runde round_n ist (soweit überhaupt angefragt) vollständig erledigt
                 round_n += 1
                 self._next_round = round_n
-                if self.is_fully_done():
+
+                # BEWUSST get_pending_nodes() und NICHT is_fully_done():
+                # letzteres meldet erst "fertig", wenn auch alle
+                # Rueckkopplungs-Durchgaenge durch sind - und genau die sollen
+                # hier ja erst angestossen werden. Mit is_fully_done() an
+                # dieser Stelle entsteht ein Zirkelschluss: der Zweig wird nie
+                # betreten, der `continue` darunter zaehlt round_n endlos hoch,
+                # und der Aufruf kehrt nicht mehr zurueck (beim Bauen prompt
+                # passiert - der Prozess hing ohne jede Ausgabe).
+                if not [cid for cid in self.get_pending_nodes()
+                        if not self._is_held_back(cid)]:
+                    # Alle Knoten am Ziel - steht noch ein Durchgang aus? Dann
+                    # laeuft der Kreis Weather/Water/Biome erneut, diesmal mit
+                    # den Werten des vorigen Durchgangs statt mit Platzhaltern.
+                    if self._begin_next_feedback_pass():
+                        round_n = max(self._next_round, self._start_round())
+                        self._next_round = round_n
+                        continue
                     return []
+
+                # SCHRANKE. Oberhalb des hoechsten Ziel-LODs kann nie wieder
+                # etwas offen sein - ohne diese Zeile zaehlt die Schleife
+                # round_n endlos hoch, sobald die Abbruchbedingung darueber aus
+                # irgendeinem Grund nicht greift. Genau das ist beim Bauen
+                # dieser Rueckkopplung ZWEIMAL passiert (einmal ueber
+                # is_fully_done(), einmal ueber zurueckgehaltene Knoten in
+                # get_pending_nodes()) - beide Male hing der Prozess stumm.
+                # Ein Aufruf, der nicht zurueckkehrt, ist schlimmer als ein
+                # falsches Ergebnis: man sieht ihm nicht an, was fehlt.
+                if round_n > hoechstes_ziel + 1:
+                    raise RuntimeError(
+                        "get_next_ready_batch kommt nicht voran: Runde {}, "
+                        "Durchgang {}/{}, offen: {}".format(
+                            round_n, self._feedback_pass, FEEDBACK_PASSES,
+                            self.get_pending_nodes()[:5]))
                 continue
 
             return self.get_ready_nodes(round_n)

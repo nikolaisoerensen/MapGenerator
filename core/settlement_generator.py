@@ -3356,7 +3356,11 @@ class SettlementGenerator:
             # _get_prepared_settlement_inputs()/set_calculator_output() - der
             # String-LOD-Pfad ist nur noch für ungenutzten Legacy-Code relevant).
             self.data_lod_manager.set_calculator_output("terrain.redistribution", lod, {"heightmap": heightmap})
-            self.data_lod_manager.set_calculator_output("terrain.slope", lod, {"slopemap": slopemap})
+            # In erosion.slope spiegeln, weil die _calc_*-Methoden dieses
+            # Generators von dort lesen (siehe
+            # _get_prepared_settlement_inputs()).
+            self.data_lod_manager.set_calculator_output(
+                "erosion.slope", lod, {"slopemap": slopemap})
             # water.manning_flow (GEMALTE Klassifikation), nicht
             # water.flow_network (Zentrallinie) - siehe
             # core/water_generator.py._calc_manning_flow().
@@ -3542,7 +3546,10 @@ class SettlementGenerator:
         Reihenfolge je ändert, muss das hier erneut geprüft werden.
         """
         heightmap = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
-        slopemap = self.data_lod_manager.get_calculator_output("terrain.slope", "slopemap", lod_level)
+        # erosion.slope: Wegekosten und Baubarkeit muessen die tatsaechlichen
+        # Rinnen und Kaemme kennen, nicht das unerodierte Gelaende.
+        slopemap = self.data_lod_manager.get_calculator_output(
+            "erosion.slope", "slopemap", lod_level)
         water_map = self.data_lod_manager.get_calculator_output(
             "water.manning_flow", "water_biomes_map", lod_level)
 

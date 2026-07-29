@@ -195,6 +195,264 @@ def run_every_generator_is_reachable():
     return ok
 
 
+def run_feedback_loop_scheduling():
+    """
+    Der Rueckkopplungs-Block muss GENAU so oft laufen wie eingestellt - und
+    alles andere genau einmal.
+
+    Warum das eine eigene Zusicherung braucht: der teure Teil der Pipeline
+    (Erosion, 16-27 s) liegt VOR dem Kreis, der teure Teil danach
+    (Settlement, Plot-Physik) DAHINTER. Liefe einer von beiden mit, waere die
+    Rueckkopplung unbezahlbar - und Settlement wuerde ausserdem auf einem
+    Zwischenstand rechnen, der sich danach noch aendert.
+
+    Beim Bauen hing der Scheduler ZWEIMAL stumm in einer Endlosschleife (einmal
+    ueber is_fully_done(), einmal ueber zurueckgehaltene Knoten in
+    get_pending_nodes()). Deshalb hat get_next_ready_batch() jetzt eine harte
+    Schranke, und deshalb steht dieser Test hier.
+    """
+    import gui.OldManagers.calculator_graph as graph_module
+
+    original = graph_module.FEEDBACK_PASSES
+    ok = True
+    try:
+        for passes in (1, 2, 3):
+            graph_module.FEEDBACK_PASSES = passes
+            laeufe = {}
+            dispatcher = CalculatorDispatcher(
+                {cid: (lambda c, r: None) for cid in CALCULATOR_GRAPH})
+            for generator in {spec.generator for spec in CALCULATOR_GRAPH.values()}:
+                dispatcher.request(generator, 5)
+
+            schutz = 0
+            while not dispatcher.is_fully_done() and schutz < 500:
+                schutz += 1
+                ready = dispatcher.get_next_ready_batch()
+                if not ready:
+                    break
+                for cid in ready:
+                    laeufe[cid] = laeufe.get(cid, 0) + 1
+                    dispatcher.mark_completed(cid, dispatcher.current_round)
+
+            je_generator = {}
+            for cid, anzahl in laeufe.items():
+                je_generator.setdefault(CALCULATOR_GRAPH[cid].generator, set()).add(anzahl)
+
+            ok &= check("PASSES={}: die Pipeline wird fertig (kein Haenger)".format(passes),
+                        dispatcher.is_fully_done() and schutz < 500)
+            for generator in ("terrain", "geology", "erosion"):
+                ok &= check("PASSES={}: {} laeuft genau einmal {}".format(
+                    passes, generator, sorted(je_generator.get(generator, set()))),
+                    je_generator.get(generator) == {1})
+            for generator in graph_module.FEEDBACK_GENERATORS:
+                ok &= check("PASSES={}: {} laeuft {}x {}".format(
+                    passes, generator, passes, sorted(je_generator.get(generator, set()))),
+                    je_generator.get(generator) == {passes})
+            for generator in CalculatorDispatcher._generators_after_feedback():
+                ok &= check("PASSES={}: {} laeuft genau einmal, auf dem Endstand {}".format(
+                    passes, generator, sorted(je_generator.get(generator, set()))),
+                    je_generator.get(generator) == {1})
+    finally:
+        graph_module.FEEDBACK_PASSES = original
+
+    ok &= check("die Generatoren hinter dem Kreis sind ABGELEITET, nicht "
+                "eingetragen (gefunden: {})".format(
+                    CalculatorDispatcher._generators_after_feedback()),
+                CalculatorDispatcher._generators_after_feedback() == ["settlement"])
+    return ok
+
+
+def run_every_generator_gets_its_parameters():
+    """
+    JEDER Generator muss seine Parameter bekommen - nicht nur der, der die
+    Generierung ausgeloest hat.
+
+    Der Anlass (Nutzer-Log 2026-07-28): request_generation() setzt die
+    Parameter ausschliesslich am anfragenden Generator. Alle nachgelagerten
+    laufen ebenfalls, ueber invalidate_downstream_dependencies ->
+    CalculatorDispatcher.request(), bekommen dabei aber nichts. Solange der
+    Auto-Start beim Programmstart alle sieben einzeln anfragte, war das
+    gedeckt. Ohne ihn lief nach einem Klick im Terrain-Tab das Wetter mit
+    leeren Parametern und stieg mit KeyError 'altitude_cooling' aus.
+
+    Wieder dieselbe Fehlerform wie bei der fest verdrahteten Auto-Start-Liste
+    und dem handgepflegten Dependency-Tree: eine Stelle kennt nur einen
+    Generator, wo sie alle kennen muesste.
+    """
+    import ast as ast_module
+    import inspect
+    import textwrap
+
+    from gui import map_editor
+    from gui.OldManagers.generation_orchestrator import GeneratorType
+
+    ok = check("der Orchestrator kann Parameter setzen, ohne zu generieren",
+               hasattr(map_editor.MapEditorWindow, "_prime_all_generator_parameters"))
+
+    # Wird das Vorabfuellen beim Generieren auch wirklich aufgerufen?
+    trigger = ast_module.parse(textwrap.dedent(
+        inspect.getsource(map_editor.MapEditorWindow._generate_current_tab)))
+    aufgerufen = {node.attr for node in ast_module.walk(trigger)
+                  if isinstance(node, ast_module.Attribute)}
+    ok &= check("[GENERIEREN] fuellt vorher die Parameter aller Generatoren",
+                "_prime_all_generator_parameters" in aufgerufen)
+
+    # Und zwar ueber GeneratorType, nicht ueber eine Handliste - sonst faellt
+    # der naechste neue Generator wieder hinten runter.
+    primer = inspect.getsource(map_editor.MapEditorWindow._prime_all_generator_parameters)
+    ok &= check("die Liste kommt aus GeneratorType statt aus einem Literal",
+                "for generator_enum in GeneratorType" in primer)
+
+    # Gegenprobe am echten Objekt: erreicht prime_generator_parameters() die
+    # Generator-Instanz?
+    from gui.OldManagers.generation_orchestrator import GenerationOrchestrator
+
+    manager = DataLODManager()
+    orchestrator = GenerationOrchestrator(data_lod_manager=manager)
+    probe = {"altitude_cooling": 6.0, "map_size": 64}
+    gesetzt = orchestrator.prime_generator_parameters("weather", probe)
+    instanz = orchestrator.get_generator_instance(GeneratorType.WEATHER)
+    ok &= check("prime_generator_parameters erreicht die Weather-Instanz",
+                gesetzt and instanz is not None
+                and instanz._current_parameters.get("altitude_cooling") == 6.0)
+
+    # Und der Parameter, an dem es konkret gescheitert ist, muss auch im
+    # Default-Satz des Weather-Tabs stehen.
+    from gui.config.value_default import WEATHER
+    ok &= check("altitude_cooling steht in den Weather-Defaults",
+                hasattr(WEATHER, "ALTITUDE_COOLING"))
+    return ok
+
+
+def run_slope_is_recomputed_after_erosion():
+    """
+    Der Slope muss NACH der Erosion noch einmal gerechnet werden - sonst
+    treffen Biome und Settlement ihre Entscheidungen auf Haengen, die es so
+    gar nicht mehr gibt.
+
+    Warum ein ZWEITER Knoten und kein verschobener: geology.layer_thickness
+    braucht terrain.slope, und Geology laeuft vor der Erosion. Haengte man
+    terrain.slope hinter erosion.hydraulic, entstuende ein Zyklus
+
+        terrain.slope <- erosion.hydraulic <- geology.hardness
+                      <- ... <- geology.layer_thickness <- terrain.slope
+
+    Diese Zusicherung ist deshalb nicht Geschmack, sondern die Bedingung
+    dafuer, dass der Graph ueberhaupt aufloesbar bleibt.
+    """
+    ok = check("erosion.slope existiert", "erosion.slope" in CALCULATOR_GRAPH)
+    if not ok:
+        return False
+
+    ok &= check("erosion.slope haengt an erosion.hydraulic",
+                "erosion.hydraulic" in CALCULATOR_GRAPH["erosion.slope"].depends_on)
+    ok &= check("geology.layer_thickness bleibt auf terrain.slope "
+                "(sonst Zyklus, siehe Docstring)",
+                "terrain.slope" in CALCULATOR_GRAPH["geology.layer_thickness"].depends_on)
+
+    nach_erosion = [cid for cid, spec in CALCULATOR_GRAPH.items()
+                    if spec.generator in ("biome", "settlement")
+                    and "terrain.slope" in spec.depends_on]
+    ok &= check("kein Biome-/Settlement-Knoten haengt noch am alten Slope "
+                "(gefunden: {})".format(nach_erosion or "keiner"), not nach_erosion)
+
+    # Reihenfolge ueber den ECHTEN Dispatcher, nicht ueber die Kantenliste.
+    dispatcher = CalculatorDispatcher({cid: (lambda ctx: None) for cid in CALCULATOR_GRAPH})
+    for generator in {spec.generator for spec in CALCULATOR_GRAPH.values()}:
+        dispatcher.request(generator, 2)
+
+    erste_runde = {}
+    for round_n in range(1, 12):
+        while True:
+            ready = dispatcher.get_ready_nodes(round_n)
+            if not ready:
+                break
+            for cid in ready:
+                erste_runde.setdefault(cid, round_n)
+                dispatcher.mark_completed(cid, round_n)
+
+    ok &= check("die Pipeline laeuft mit dem neuen Knoten vollstaendig durch",
+                dispatcher.is_fully_done())
+    ok &= check("erosion.slope wird nie vor erosion.hydraulic bereit "
+                "(Runde {} gegen {})".format(
+                    erste_runde.get("erosion.slope"), erste_runde.get("erosion.hydraulic")),
+                erste_runde.get("erosion.slope", 0) >= erste_runde.get("erosion.hydraulic", 0))
+    for consumer in ("biome.preseed_hint", "settlement.suitability"):
+        ok &= check("{} wird nie vor erosion.slope bereit".format(consumer),
+                    erste_runde.get(consumer, 0) >= erste_runde.get("erosion.slope", 0))
+    return ok
+
+
+def run_the_two_slopemaps_actually_differ():
+    """
+    GEGENPROBE zur Verkabelung: erosion.slope muss die ERODIERTE Heightmap
+    lesen, nicht dieselbe wie terrain.slope.
+
+    Ohne diese Zusicherung bliebe der Reihenfolge-Test oben auch dann gruen,
+    wenn erosion.slope versehentlich terrain.redistribution liest - die Kanten
+    waeren richtig, das Ergebnis waere trotzdem der alte Zustand. Genau diese
+    Sorte "richtig verdrahtet, falsch gerechnet" ist in diesem Projekt schon
+    mehrfach vorgekommen.
+
+    Aufgebaut wird direkt auf dem Storage statt ueber einen vollen Lauf: der
+    Punkt ist die DATENQUELLE der beiden Knoten, nicht die Erosionsphysik.
+    """
+    from core.erosion_generator import ErosionSystemGenerator
+    from core.terrain_generator import BaseTerrainGenerator
+
+    size, lod = 64, 2
+    manager = DataLODManager()
+    manager.set_map_distance_km(10.0)
+
+    heightmap = _make_inputs(size)["heightmap"]
+    manager.set_calculator_output("terrain.redistribution", lod, {"heightmap": heightmap})
+
+    terrain = BaseTerrainGenerator(data_lod_manager=manager)
+    terrain.set_active_parameters({"map_size": size})
+    terrain._calc_slope("terrain.slope", lod)
+
+    # Eine deutliche, aber realistische Rinne quer durch die Karte - so sieht
+    # das Ergebnis eines Erosionslaufs an dieser Stelle aus.
+    rinne = np.zeros((size, size), dtype=np.float32)
+    rinne[:, size // 2 - 1:size // 2 + 2] = 120.0
+    zeros = np.zeros((size, size), dtype=np.float32)
+    manager.set_calculator_output("erosion.hydraulic", lod, {
+        "erosion_map": rinne,
+        "sedimentation_map": zeros.copy(),
+        "thermal_erosion_map": zeros.copy(),
+        "thermal_deposition_map": zeros.copy(),
+    })
+
+    erosion = ErosionSystemGenerator(data_lod_manager=manager)
+    erosion.set_active_parameters({"map_size": size})
+    erosion._calc_slope("erosion.slope", lod)
+
+    roh = manager.get_calculator_output("terrain.slope", "slopemap", lod)
+    erodiert = manager.get_calculator_output("erosion.slope", "slopemap", lod)
+
+    ok = check("beide Slopemaps liegen vor",
+               roh is not None and erodiert is not None)
+    if not ok:
+        return False
+
+    roh = np.asarray(roh, dtype=np.float64)
+    erodiert = np.asarray(erodiert, dtype=np.float64)
+    ok &= check("gleiche Form ({} gegen {})".format(roh.shape, erodiert.shape),
+                roh.shape == erodiert.shape)
+
+    unterschied = float(np.abs(erodiert - roh).max())
+    ok &= check("erosion.slope kennt die Rinne, terrain.slope nicht "
+                "(groesster Unterschied {:.4f})".format(unterschied),
+                unterschied > 1e-3)
+
+    # Und zwar GENAU DORT, wo die Rinne liegt - nicht irgendwo.
+    spalte = np.abs(erodiert - roh).max(axis=(0, 2)) if erodiert.ndim == 3         else np.abs(erodiert - roh).max(axis=0)
+    ok &= check("der Unterschied sitzt an der Rinne (Spalte {} von {})".format(
+        int(np.argmax(spalte)), size),
+        abs(int(np.argmax(spalte)) - size // 2) <= 2)
+    return ok
+
+
 def run_dependency_tree_matches_graph():
     """
     Der Dependency-Tree des Orchestrators muss aus CALCULATOR_GRAPH abgeleitet
@@ -569,6 +827,10 @@ if __name__ == "__main__":
     results = {
         "execution_order_and_rain_decoupling": run_execution_order_and_rain_decoupling(),
         "every_generator_is_reachable": run_every_generator_is_reachable(),
+        "feedback_loop_scheduling": run_feedback_loop_scheduling(),
+        "every_generator_gets_its_parameters": run_every_generator_gets_its_parameters(),
+        "slope_is_recomputed_after_erosion": run_slope_is_recomputed_after_erosion(),
+        "the_two_slopemaps_actually_differ": run_the_two_slopemaps_actually_differ(),
         "dependency_tree_matches_graph": run_dependency_tree_matches_graph(),
         "terrain_forming_generators_refresh_all_tabs":
             run_terrain_forming_generators_refresh_all_tabs(),

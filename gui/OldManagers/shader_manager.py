@@ -1838,6 +1838,24 @@ class ShaderManager(QObject):
             des aufrufenden Generators (aktuell nur durchgereicht)
         Returns: dict mit mindestens "success"; bei Fehler {"success": False}
         """
+        # ZUERST nachsehen, ob es diese Operation ueberhaupt gibt - VOR dem
+        # Absenden an den Worker.
+        #
+        # Vorher ging jede Anfrage blind in die Warteschlange, der Worker warf
+        # dann "Kein GPU-Dispatch registriert", und der Aufrufer fiel auf CPU
+        # zurueck. Bezahlt wurden trotzdem: Einreihen, Thread-Uebergabe, Warten
+        # auf den Worker und der Ausnahmepfad. Gemessen an
+        # geology.layer_thickness bei 256 px: 4.37 s von 4.4 s Gesamtdauer
+        # steckten im Warten auf den Lock, nicht im Rechnen - fuer zwei
+        # Operationen (layerThickness, tectonicDisplacement), die es gar nicht
+        # gibt.
+        #
+        # Schlimmer noch: der GPUWorker hat EINE gemeinsame Warteschlange. Eine
+        # ins Leere laufende Anfrage blockiert damit auch die echte GPU-Arbeit
+        # anderer Generatoren, die dahinter steht.
+        if (category, operation) not in DISPATCH_TABLE:
+            return {"success": False, "reason": "no_dispatch_registered"}
+
         worker = self._ensure_worker()
         if not worker.gpu_available:
             return {"success": False, "reason": "gpu_unavailable"}

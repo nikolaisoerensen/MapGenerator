@@ -30,7 +30,7 @@ Architecture:
 from PyQt6.QtWidgets import QMainWindow, QApplication, QTabWidget, QTabBar, QStackedWidget, QMenu, QLabel, \
     QComboBox, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QFileDialog, QSplitter, \
     QRadioButton, QButtonGroup
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PyQt6.QtCore import QTimer, Qt, pyqtSlot
 import logging
 from typing import Optional
@@ -153,6 +153,11 @@ class MapEditorWindow(QMainWindow):
         self.side_tab_widget = None
         self.tab_order = []  # lowercase tab names, Index == main_tab_bar/stack index
         self.tabs = {}
+        # Fertigkeits-Zustand je Generator, gespiegelt in der Tab-Beschriftung.
+        # Siehe _set_tab_state() - das ist der Ersatz fuer die grobe
+        # LOD-Vorschau: man sieht auf einen Blick, welcher Reiter schon etwas
+        # zu zeigen hat, waehrend der naechste noch rechnet.
+        self.tab_states = {}
         # Globale 2D/3D-Präferenz, tabübergreifend (User-Report: "beim Wechsel des
         # Tabs ist man vom 3D Modus wieder im 2D Modus") - jeder Tab hat zwar sein
         # eigenes current_view, aber ein frisch angezeigter Tab, der nie manuell
@@ -188,11 +193,22 @@ class MapEditorWindow(QMainWindow):
         # Start status monitoring
         self.status_update_timer.start(EditorConstants.STATUS_UPDATE_INTERVAL_MS)
 
-        # Auto-Start (Tracker #16 Task 8): alle 6 Generatoren sofort mit
-        # Default-Parametern anfragen, erst nachdem das Fenster fertig
-        # konstruiert ist und die Event-Loop läuft (QTimer.singleShot(0, ...),
-        # analog zum bereits etablierten Muster in generation_orchestrator.py).
-        QTimer.singleShot(0, self._auto_start_generation)
+        # KEIN Auto-Start mehr (2026-07-28). Hier stand bis dahin
+        # `QTimer.singleShot(0, self._auto_start_generation)`, was beim Öffnen
+        # des Editors sofort die gesamte Pipeline mit Default-Parametern
+        # anwarf.
+        #
+        # Das war sinnvoll, solange die LOD-Leiter nach wenigen Sekunden eine
+        # grobe Vorschau lieferte. Inzwischen rechnet die Erosion nur noch am
+        # finalen LOD und braucht dort zweistellige Sekunden - der Nutzer
+        # wartete also auf einen vollständigen Lauf, den er gar nicht bestellt
+        # hatte, und musste ihn abbrechen, um überhaupt einen Parameter
+        # einstellen zu können.
+        #
+        # Der Lauf startet jetzt ausschliesslich über [GENERIEREN] (bzw. Enter)
+        # oder "Regenerate All" (Ctrl+R). `_auto_start_generation()` bleibt als
+        # Methode bestehen - sie ist der Pfad, den beide benutzen.
+        self._mark_all_tabs_pending()
 
         self.logger.info("MapEditor window initialized successfully")
 
@@ -368,7 +384,21 @@ class MapEditorWindow(QMainWindow):
 
         self.generate_button = BaseButton("GENERIEREN", "primary")
         self.generate_button.clicked.connect(self._generate_current_tab)
+
+        # LEERTASTE FREIGEBEN (2026-07-28). Es gab nie einen Space-Shortcut im
+        # Projekt - die Leertaste generierte, weil Qt damit den FOKUSSIERTEN
+        # QPushButton ausloest, und das war nach jedem Klick dieser hier. Die
+        # 3D-Ansicht braucht die Leertaste aber zum Aufsteigen im Flugmodus.
+        #
+        # NoFocus nimmt der Leertaste den Empfaenger; Enter/Return kommt
+        # darunter als ausdruecklicher Shortcut zurueck, damit die Tastatur-
+        # Bedienung nicht ersatzlos verschwindet.
+        self.generate_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         footer_layout.addWidget(self.generate_button)
+
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.activated.connect(self._generate_current_tab)
 
         return footer
 
@@ -1043,11 +1073,61 @@ class MapEditorWindow(QMainWindow):
     # _setup_signals()) - die Pipeline-Status-Spalte blieb dadurch dauerhaft
     # auf "Unknown" stehen.
 
+    # --- Tab-Zustandsanzeige -------------------------------------------------
+    #
+    # Ersatz fuer die grobe LOD-Vorschau: statt dass alle Generatoren
+    # gleichzeitig ein unscharfes Bild zeigen, faerbt sich ein Reiter ein,
+    # sobald SEIN Generator fertig ist. Man kann sich dort umsehen, waehrend
+    # der naechste rechnet - und sieht, dass es sich lohnt hinzuschauen.
+    #
+    # Die Farbe sitzt auf dem Reiter-Text (QTabBar.setTabTextColor) statt in
+    # einem Stylesheet: ein Stylesheet auf der QTabBar wuerde das komplette
+    # Aussehen der Leiste uebernehmen und die vorhandene Gestaltung
+    # ueberschreiben, die Textfarbe wirkt gezielt auf genau einen Reiter.
+    TAB_STATE_COLOURS = {
+        "pending": None,          # Vorgabefarbe des Themes - noch nichts gerechnet
+        "running": "#c8922b",     # rechnet gerade
+        "ready": "#5fb96b",       # fertig, es gibt etwas zu sehen
+        "stale": "#8a8a8a",       # war fertig, ist durch eine Aenderung ungueltig
+        "failed": "#c4564b",
+    }
+
+    def _set_tab_state(self, generator_type: str, state: str):
+        """
+        Funktionsweise: Faerbt den Reiter eines Generators nach seinem Zustand
+        Parameter: generator_type (klein geschrieben), state - Schluessel aus
+            TAB_STATE_COLOURS
+        """
+        if not generator_type or self.main_tab_bar is None:
+            return
+        if generator_type not in self.tab_order:
+            return
+
+        self.tab_states[generator_type] = state
+        index = self.tab_order.index(generator_type)
+        colour = self.TAB_STATE_COLOURS.get(state)
+        # QColor() ohne Argument = "ungueltig" und bedeutet fuer
+        # setTabTextColor ausdruecklich "nimm die Vorgabe des Themes".
+        self.main_tab_bar.setTabTextColor(
+            index, QColor(colour) if colour else QColor())
+
+    def _mark_all_tabs_pending(self):
+        """Setzt alle Generator-Reiter auf 'noch nichts gerechnet'.
+
+        Wird beim Oeffnen des Editors aufgerufen, seit dort nicht mehr
+        automatisch generiert wird - sonst saehen die Reiter aus, als waere
+        bereits etwas fertig.
+        """
+        for generator_enum in GeneratorType:
+            self._set_tab_state(generator_enum.value, "pending")
+
     @pyqtSlot(str, int)
     def _on_generation_started(self, generator_type: str, lod_level: int):
         """Handle generation start events (ein LOD-Level beginnt)"""
         if not generator_type:
             return
+
+        self._set_tab_state(generator_type, "running")
 
         generation_key = f"{generator_type}_{lod_level}"
         self.active_generations.add(generation_key)
@@ -1070,6 +1150,8 @@ class MapEditorWindow(QMainWindow):
 
         if not generator_type:
             return
+
+        self._set_tab_state(generator_type, "ready" if success else "failed")
 
         generation_key = f"{generator_type}_{lod_level}"
         self.active_generations.discard(generation_key)
@@ -1133,6 +1215,13 @@ class MapEditorWindow(QMainWindow):
 
         # Notify affected tabs
         for affected_type in affected_generators:
+            # Was invalidiert wurde, ist nicht mehr aktuell - der Reiter darf
+            # nicht weiter als "fertig" leuchten. Ein Reiter, der noch nie
+            # gerechnet hat, bleibt auf "pending" statt auf "veraltet"
+            # zurueckzufallen.
+            if self.tab_states.get(affected_type) in ("ready", "running", "failed"):
+                self._set_tab_state(affected_type, "stale")
+
             if affected_type in self.tabs:
                 tab_instance = self.tabs[affected_type]
                 if hasattr(tab_instance, 'on_dependency_invalidated'):
@@ -1359,11 +1448,48 @@ class MapEditorWindow(QMainWindow):
         self.logger.info("Auto-Start: alle %d Generatoren mit Default-Parametern angefragt",
                          len(GeneratorType))
 
+    def _prime_all_generator_parameters(self):
+        """
+        Reicht jedem Generator die aktuellen Parameter SEINES Tabs durch, ohne
+        eine Generierung anzufragen.
+
+        Die Liste kommt aus GeneratorType, nicht von Hand - dieselbe Regel wie
+        beim Auto-Start und beim Dependency-Tree. Ein vergessener Eintrag hier
+        faellt sonst erst auf, wenn der betroffene Generator mitten im Lauf
+        ueber einen fehlenden Parameter stolpert.
+        """
+        if not self.generation_orchestrator:
+            return
+
+        for generator_enum in GeneratorType:
+            generator_type = generator_enum.value
+            tab_instance = self.tabs.get(generator_type)
+            if not tab_instance or not hasattr(tab_instance, 'get_current_parameters'):
+                continue
+            try:
+                parameters = tab_instance.get_current_parameters()
+            except Exception as error:  # noqa: BLE001 - Tab-Fehler darf den Lauf nicht kippen
+                self.logger.warning(
+                    "Parameter von %s nicht lesbar: %s", generator_type, error)
+                continue
+            self.generation_orchestrator.prime_generator_parameters(
+                generator_type, parameters)
+
     def _generate_current_tab(self):
         """Generate content for currently active tab"""
         if not self.generation_orchestrator:
             QMessageBox.warning(self, "Generation Unavailable", "No GenerationOrchestrator available")
             return
+
+        # ALLE Generatoren mit den aktuellen Tab-Parametern versorgen, bevor
+        # irgendetwas laeuft. Ein Klick im Terrain-Tab fragt nur Terrain an,
+        # zieht aber ueber die Abhaengigkeiten die gesamte Pipeline nach - und
+        # deren Generatoren bekommen von request_generation() keine Parameter.
+        #
+        # Solange der Auto-Start beim Programmstart alle sieben einzeln
+        # anfragte, war das gedeckt. Ohne ihn stieg das Wetter mit
+        # KeyError 'altitude_cooling' aus (Nutzer-Log 2026-07-28).
+        self._prime_all_generator_parameters()
 
         current_index = self.main_tab_bar.currentIndex()
         if 0 <= current_index < len(self.tab_order):

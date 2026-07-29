@@ -1364,42 +1364,70 @@ class BaseTerrainGenerator:
         self.logger.debug("Shadow calculation completed")
 
     def _apply_redistribution(self, heightmap: np.ndarray, redistribute_power: float,
-                               amplitude: float = None) -> np.ndarray:
+                               amplitude: float = None,
+                               base_elevation: float = None) -> np.ndarray:
         """
-        Funktionsweise: Wendet Power-Redistribution auf Heightmap an
-        Parameter: heightmap, redistribute_power, amplitude - theoretische Maximalhöhe
-        Returns: numpy.ndarray - Redistributed Heightmap
+        Funktionsweise: Power-Redistribution UND Festlegung der Höhenspanne
+        Parameter: heightmap, redistribute_power, amplitude - Gipfelhöhe in m,
+            base_elevation - Talsohle in m (Default: TERRAIN.BASE_ELEVATION_M)
+        Returns: numpy.ndarray - Heightmap, die von base_elevation bis amplitude reicht
 
-        Normalisiert gegen die theoretische Maximalhöhe (amplitude), nicht gegen
-        min/max der jeweils erzeugten Stichprobe: Contrast-Stretching gegen das
-        Sample-Minimum würde bei jedem redistribute_power-Wert wieder den vollen
-        Wertebereich ausnutzen und könnte die Landschaft nie absolut Richtung 0m
-        drücken - genau das soll ein hoher redistribute_power aber bewirken
-        (wenige hohe Gipfel, der Großteil der Fläche nahe der Talsohle).
-        Ohne amplitude (z.B. für bereits redistributierte/fremde Daten) fällt die
-        Funktion auf den alten Contrast-Stretch-Modus zurück.
+        DIE SPANNE IST GARANTIERT: der höchste Punkt liegt exakt bei
+        `amplitude`, der tiefste exakt bei `base_elevation`. `redistribute_power`
+        steuert weiterhin die VERTEILUNG dazwischen (hoch = wenige Gipfel, viel
+        Fläche nahe der Talsohle), nicht mehr die erreichte Höhe.
+
+        Vorher wurde gegen die THEORETISCHE Amplitude normiert, und das verlor
+        die Höhe an zwei Stellen (gemessen, Amplitude 4000 m, Default-Parameter):
+
+            Simplex-fBm erreicht real nur -0.681 .. +0.651 statt -1 .. +1
+                -> Gipfel schon bei 3302 m statt 4000 m
+            danach (3302/4000)^3.5 = 0.511
+                -> Gipfel bei 2044 m, Talsohle bei 6.5 m
+
+        Aus 4000 m eingestellter Amplitude wurden also 2044 m Berge - der Regler
+        log um fast die Hälfte. Der zweite Verlust ist der grössere und er
+        WÄCHST mit redistribute_power: je mehr Fläche man in die Ebene drücken
+        will, desto niedriger wurden zugleich die Gipfel, obwohl das zwei
+        verschiedene Dinge sind.
+
+        Der frühere Docstring begründete das Normieren gegen die theoretische
+        Amplitude damit, ein Contrast-Stretch könne "die Landschaft nie absolut
+        Richtung 0 m drücken". Das stimmt für einen Stretch NACH der Potenz -
+        hier wird aber DAVOR normiert und danach auf die Zielspanne abgebildet.
+        Die Potenz wirkt also unverändert auf die Verteilung; nur ihr
+        Nebeneffekt auf die Gipfelhöhe ist weg.
+
+        Preis dieser Entscheidung, bewusst in Kauf genommen: jede Karte reicht
+        jetzt von der Talsohle bis zur Amplitude. Ein Seed, dessen Rauschen
+        zufällig flacher ausfällt, ergibt keine flachere Landschaft mehr,
+        sondern dieselbe Spanne mit anderer Form.
         """
-        if redistribute_power == 1.0:
-            return heightmap
+        if amplitude is None or amplitude <= 0:
+            # Ohne Zielhöhe (Legacy-Aufrufer) bleibt nur die reine Potenz auf
+            # der vorhandenen Spanne - dann ist nichts zu garantieren.
+            low, high = float(heightmap.min()), float(heightmap.max())
+            if high - low < 1e-9:
+                return heightmap
+            normalized = (heightmap - low) / (high - low)
+            return (np.power(normalized, redistribute_power) * (high - low)
+                    + low).astype(np.float32)
 
-        if amplitude and amplitude > 0:
-            normalized = np.clip(heightmap / amplitude, 0.0, 1.0)
-            redistributed = np.power(normalized, redistribute_power)
-            result = redistributed * amplitude
-            return result.astype(np.float32)
+        if base_elevation is None:
+            from gui.config.value_default import TERRAIN
+            base_elevation = TERRAIN.BASE_ELEVATION_M
 
-        min_height = np.min(heightmap)
-        max_height = np.max(heightmap)
-        height_range = max_height - min_height
+        low, high = float(heightmap.min()), float(heightmap.max())
+        if high - low < 1e-9:
+            return np.full_like(heightmap, base_elevation, dtype=np.float32)
 
-        if height_range == 0:
-            return heightmap
-
-        # Fallback: Contrast-Stretch gegen die Stichprobe (altes Verhalten)
-        normalized = (heightmap - min_height) / height_range
+        # 1. auf die TATSÄCHLICHE Stichprobenspanne normieren (nicht auf die
+        #    theoretische) - das holt den ersten Verlust zurück
+        normalized = (heightmap - low) / (high - low)
+        # 2. Verteilung formen - unverändert der bisherige Mechanismus
         redistributed = np.power(normalized, redistribute_power)
-        result = redistributed * height_range + min_height
-
+        # 3. auf die Zielspanne abbilden - das holt den zweiten Verlust zurück
+        result = base_elevation + redistributed * (amplitude - base_elevation)
         return result.astype(np.float32)
 
     def _lod_level_to_size(self, lod_level: int, target_map_size: int) -> int:

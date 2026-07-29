@@ -18,7 +18,10 @@ Parameter Input:
 - terrain_factor (Einfluss von Terrain auf Wind und Temperatur)
 
 Dependencies (über DataLODManager):
-- heightmap_combined (von terrain_generator, post-erosion wenn verfügbar)
+- heightmap_combined (Terrain + Geology + Erosion, siehe
+  DataLODManager.get_calculator_combined_heightmap() - seit 2026-07-28
+  IMMER post-erosion, weil der Erosion-Generator vor Weather laeuft.
+  Weather selbst rechnet keinerlei Erosion.)
 - shadowmap (von terrain_generator für Sonneneinstrahlung)
 
 Output:
@@ -168,6 +171,28 @@ C_P_AIR = 1005.0                      # J/(kg*K), spezifische Wärmekapazität t
 # bestehende 3-Schicht-CFD-Gerüst unverändert.
 GROUND_HEAT_COLUMN_HEIGHT_M = 20.0    # m
 GROUND_HEAT_CAPACITY_PER_M2 = RHO_AIR * GROUND_HEAT_COLUMN_HEIGHT_M * C_P_AIR  # J/(m^2*K), = 24120
+# STRAHLUNGSRUECKSTELLUNG (Newtonsche Abkuehlung), Anteil je Zeitschritt.
+#
+# Der gekoppelte Loop hatte Waermequellen ohne Senke: der Boden heizt die Luft
+# (Schritt 2e) und Kondensation setzt Latentwaerme frei (Schritt 3), aber nichts
+# strahlt ab. Ueber 150 Schritte summiert sich das auf. Gemessen auf flachem
+# Gelaende, Kartenmittel gegen die eigene Klimatologie-Vorgabe:
+#
+#     Breite   Saat-T   Endergebnis   Drift
+#        0      26.1       32.8       +6.3
+#       20      23.2       29.3       +5.6
+#       40      12.6       15.3       +2.3
+#       60      -0.3        0.6       +0.4
+#
+# Die Drift ist dort am groessten, wo es warm und feucht ist - der Latentwaerme
+# folgend. Den Rand-Sponge gab es schon, aber der wirkt NUR im Randstreifen
+# (sponge_weight faellt zur Kartenmitte auf 0); im Inneren fehlte jede Senke.
+#
+# Zurueckgestellt wird zum SAATZUSTAND, nicht zu einer Konstanten: der enthaelt
+# bereits Klimatologie, Hoehenabkuehlung und Expositionsmuster. Die raeumliche
+# Struktur bleibt damit erhalten, nur die zeitliche Drift verschwindet.
+RADIATIVE_RELAX_RATE = 0.06
+
 GROUND_TEMP_SPREAD = 20.0             # °C, T_max-T_min am Boden, feste interne Spanne (kein Slider) - Startwert
 # Effektive Austausch-Zeitskala (siehe _run_coupled_atmosphere_simulation,
 # Boden-Luft-Wärmeübergang) - KEIN reales "Monat = X Sekunden"-Konzept,
@@ -340,6 +365,45 @@ class WeatherSystemGenerator:
         [-32.0, -22.0, -6.0, 0.0, -14.0, -26.0],  # 90°
     ], dtype=np.float64)
 
+    # Relative Feuchte [0-1], Zeilen = Breitengrad 0..90 in 10-Grad-Schritten,
+    # Spalten = dieselben 6 saisonalen Perioden wie _TEMP_CLIMATOLOGY_TABLE
+    # (Nordhalbkugel-Konvention, Suedhalbkugel spiegelt ueber denselben
+    # Spalten-Shift).
+    #
+    # ERSETZT die Kurve aus Runde 1. Deren Docstring gab selbst zu, dass sie
+    # "nicht Teil dieser Abstimmungsrunde" war - waehrend die Temperatur mit
+    # dem Nutzer abgestimmt wurde, blieb die Feuchte eine grobe
+    # cos(Breitengrad)-Naeherung zwischen 0.75 am Aequator und 0.45 am Pol.
+    # Gemessen ergab das:
+    #
+    #     Breite    0    10    20    30    40    50    60    70
+    #     Feuchte 0.750 0.745 0.732 0.710 0.680 0.643 0.600 0.553
+    #
+    # Zwei Defekte auf einmal: streng MONOTON (kein subtropischer
+    # Trockenguertel) und in jedem Monat IDENTISCH (min == max, also gar keine
+    # Jahreszeit, obwohl die Temperatur eine hat).
+    #
+    # Die neue Tabelle bildet die Zirkulation ab:
+    #   0-10 Grad   ITCZ, ganzjaehrig feucht, am Rand mit Monsun-Saison
+    #   20-30 Grad  Subtropenhoch, absinkende Luft - der Wuestenguertel
+    #   30-40 Grad  mediterran: nasser Winter, trockener Sommer (umgekehrt!)
+    #   50-70 Grad  Westwindzone, gleichmaessig feucht
+    #   80-90 Grad  hohe RELATIVE Feuchte bei kalter Luft - trotzdem wenig
+    #               Niederschlag, weil kalte Luft kaum Wasser haelt
+    _HUMIDITY_CLIMATOLOGY_TABLE = np.array([
+        # JanFeb MarApr MayJun JulAug SepOct NovDez
+        [0.80, 0.80, 0.80, 0.80, 0.80, 0.80],   # 0 Grad
+        [0.68, 0.70, 0.78, 0.85, 0.80, 0.70],   # 10 Grad  Monsun
+        [0.50, 0.48, 0.55, 0.65, 0.62, 0.53],   # 20 Grad  Wuestenguertel
+        [0.62, 0.58, 0.52, 0.48, 0.52, 0.60],   # 30 Grad  mediterran
+        [0.72, 0.68, 0.63, 0.60, 0.64, 0.70],   # 40 Grad
+        [0.80, 0.75, 0.70, 0.70, 0.74, 0.79],   # 50 Grad  Westwindzone
+        [0.83, 0.79, 0.72, 0.73, 0.78, 0.82],   # 60 Grad
+        [0.84, 0.82, 0.76, 0.75, 0.80, 0.84],   # 70 Grad
+        [0.85, 0.84, 0.80, 0.78, 0.82, 0.85],   # 80 Grad
+        [0.85, 0.85, 0.82, 0.80, 0.83, 0.85],   # 90 Grad
+    ], dtype=np.float64)
+
     def _climate_baseline(self, latitude_deg: float, month_index: int) -> Tuple[float, float]:
         """
         Realistische Klimatologie-Basiswerte (Temperatur °C, relative Feuchte
@@ -351,9 +415,9 @@ class WeatherSystemGenerator:
           (10 Breitengrad-Stützstellen × 6 Monats-Perioden, siehe Tabellen-
           Docstring oben) - abgestimmte Zwischenwerte statt einer reinen
           cos(Breitengrad)-Kurve zwischen nur zwei Extremen (Äquator/Pol).
-        - Feuchte: weiterhin die einfache Breitengrad-Kurve aus Runde 1
-          (grobe Näherung, feuchter am Äquator, trockener zu den Polen) -
-          nicht Teil dieser Abstimmungsrunde.
+        - Feuchte: bilineare Interpolation in _HUMIDITY_CLIMATOLOGY_TABLE
+          (2026-07-29). Vorher eine reine cos(Breitengrad)-Kurve ohne
+          subtropischen Trockenguertel und ohne jede Jahreszeit.
         Südhalbkugel (latitude_deg<0): Spalten-Index um 3 Perioden (=ein
         halbes Jahr) verschoben statt der Tabelle selbst - Sommer im Januar
         statt im Juli.
@@ -372,9 +436,12 @@ class WeatherSystemGenerator:
         temp_hi = self._TEMP_CLIMATOLOGY_TABLE[row_hi, col]
         temp_baseline = float(temp_lo + (temp_hi - temp_lo) * row_t)
 
-        lat_factor = float(np.cos(np.radians(abs_lat)))  # 1 am Äquator, 0 am Pol
-        EQUATOR_HUMID, POLE_HUMID = 0.75, 0.45
-        humid_baseline = POLE_HUMID + (EQUATOR_HUMID - POLE_HUMID) * lat_factor
+        # Feuchte jetzt aus derselben Art Tabelle wie die Temperatur, mit
+        # identischer bilinearer Interpolation (siehe
+        # _HUMIDITY_CLIMATOLOGY_TABLE).
+        humid_lo = self._HUMIDITY_CLIMATOLOGY_TABLE[row_lo, col]
+        humid_hi = self._HUMIDITY_CLIMATOLOGY_TABLE[row_hi, col]
+        humid_baseline = float(humid_lo + (humid_hi - humid_lo) * row_t)
 
         return temp_baseline, humid_baseline
 
@@ -541,7 +608,11 @@ class WeatherSystemGenerator:
             Akkumulationszustand, jeder Aufruf ist eigenständig.
 
         Args:
-            heightmap_combined: Post-Erosion Heightmap vom Water-Generator oder Original-Heightmap
+            heightmap_combined: Heightmap nach Geology UND Erosion. Die
+                Erosion kam bis 2026-07-28 aus dem Water-Generator und lag
+                damit HINTER Weather - das Wetter rechnete also auf dem
+                unerodierten Gelaende. Seit sie ein eigener Generator vor
+                Weather ist, stimmt der Name auch.
             shadowmap: Shadow-Map vom Terrain-Generator für Sonneneinstrahlung
             parameters: Alle Weather-Parameter aus ParameterManager
             lod_level: Numerisches LOD-Level (1-6+) für Progressive Enhancement
@@ -746,12 +817,26 @@ class WeatherSystemGenerator:
         # Felder werden gemeinsam benötigt - fehlt eines (z.B. alter Cache-
         # Eintrag ohne *_layers_monthly), wird komplett auf Noise-Seeding
         # zurückgefallen statt mit einem unvollständigen Zustand zu starten.
+        # VORIGER DURCHGANG, nicht voriges LOD (2026-07-28, siehe
+        # FEEDBACK_PASSES in gui/OldManagers/calculator_graph.py). Die
+        # Pipeline rechnet nur noch EINE Aufloesungsstufe; der Kreis
+        # Weather->Water->Biome->Weather wird stattdessen mehrfach
+        # durchlaufen und ueberschreibt dabei denselben Speicherplatz.
+        # Wer hier liest, BEVOR er selbst schreibt, bekommt damit genau
+        # den Stand des vorigen Durchgangs - im ersten Durchgang None,
+        # und dann greift derselbe Platzhalter-Zweig wie frueher bei
+        # LOD 1.
+        # Nur wenn es einen vorigen Durchgang GIBT. Ohne diese Bedingung waere
+        # der gelesene Wert bei einer zweiten Generierung der des vorigen
+        # LAUFS - das Ergebnis haenge dann daran, wie oft man schon generiert
+        # hat, nicht an den Parametern.
+        vorheriger_durchgang = self.data_lod_manager.get_feedback_pass() > 1
         prev_temp_layers_monthly = self.data_lod_manager.get_calculator_output(
-            "weather.temperature", "temp_map_layers_monthly", lod_level - 1) if lod_level > 1 else None
+            "weather.temperature", "temp_map_layers_monthly", lod_level)             if vorheriger_durchgang else None
         prev_wind_layers_monthly = self.data_lod_manager.get_calculator_output(
-            "weather.wind", "wind_map_layers_monthly", lod_level - 1) if lod_level > 1 else None
+            "weather.wind", "wind_map_layers_monthly", lod_level)             if vorheriger_durchgang else None
         prev_humid_layers_monthly = self.data_lod_manager.get_calculator_output(
-            "weather.humidity", "humid_map_layers_monthly", lod_level - 1) if lod_level > 1 else None
+            "weather.humidity", "humid_map_layers_monthly", lod_level)             if vorheriger_durchgang else None
         has_lod_inheritance = (prev_temp_layers_monthly is not None and prev_wind_layers_monthly is not None
                                and prev_humid_layers_monthly is not None)
 
@@ -765,7 +850,7 @@ class WeatherSystemGenerator:
         # None - _run_coupled_atmosphere_simulation fällt dann exakt auf den
         # alten pauschalen 50%-Platzhalter zurück.
         prev_soil_moist_map = self.data_lod_manager.get_calculator_output(
-            "water.soil_moisture", "soil_moist_map", lod_level - 1) if lod_level > 1 else None
+            "water.soil_moisture", "soil_moist_map", lod_level)             if vorheriger_durchgang else None
         soil_moisture_field = (self._interpolate_2d_bicubic(prev_soil_moist_map, target_size)
                                 if prev_soil_moist_map is not None else None)
 
@@ -807,7 +892,7 @@ class WeatherSystemGenerator:
             # PRO Monatsindex, dämpft "kippt bei jedem Lauf komplett in trocken
             # oder nass"-Verhalten.
             previous_humid_monthly = self.data_lod_manager.get_calculator_output(
-                "weather.humidity", "humid_map_monthly", lod_level - 1)
+                "weather.humidity", "humid_map_monthly", lod_level)                 if self.data_lod_manager.get_feedback_pass() > 1 else None
             if previous_humid_monthly is not None:
                 for m in range(6):
                     prev_m = previous_humid_monthly[m]
@@ -930,8 +1015,10 @@ class WeatherSystemGenerator:
         if hardness_map is not None and hardness_map.shape[0] != heightmap.shape[0]:
             hardness_map = self._interpolate_2d_bicubic(hardness_map, heightmap.shape[0])
 
+        # Eigener Stand des VORIGEN Durchgangs - gelesen bevor unten
+        # geschrieben wird, deshalb nie der eigene aktuelle Wert.
         previous_monthly = self.data_lod_manager.get_calculator_output(
-            calculator_id, "humid_map_monthly", lod_level - 1)
+            calculator_id, "humid_map_monthly", lod_level)             if self.data_lod_manager.get_feedback_pass() > 1 else None
 
         monthly_humid_maps = []
         for month_index in range(6):
@@ -1010,10 +1097,56 @@ class WeatherSystemGenerator:
         dt_scale folgt derselben Stabilitäts-Skalierung wie das bereits bestehende
         _transport_moisture_simple (dt*0.1).
         """
-        height, width = field.shape[:2]
+        return self._semi_lagrangian_advect_many(
+            (field,), u, v, y_idx, x_idx, dt_scale)[0]
+
+    def _semi_lagrangian_advect_many(self, fields, u: np.ndarray, v: np.ndarray,
+                                     y_idx: np.ndarray, x_idx: np.ndarray,
+                                     dt_scale: float = 0.1):
+        """
+        Advektiert MEHRERE Felder mit DEMSELBEN Geschwindigkeitsfeld in einem
+        Rutsch.
+
+        Der Grund ist gemessen: pro Schicht und Zeitschritt werden u, v, theta
+        und q alle vier mit demselben u_old/v_old rueckwaerts gesampelt (siehe
+        Aufrufstelle in _run_coupled_atmosphere_simulation). Die Quellkoordinaten
+        und die bilinearen Gewichte sind damit viermal identisch - vorher wurden
+        sie viermal neu gerechnet, weil jeder Aufruf fuer sich in scipys
+        map_coordinates ging.
+
+        Hier werden Ganzzahl-Indizes und Gewichte EINMAL bestimmt und dann auf
+        alle Felder angewandt. Gemessen bei 256 px, vier Felder:
+
+            vier Einzelaufrufe   8.46 ms
+            Gewichte geteilt     5.87 ms      -31 %
+
+        Das Ergebnis ist dasselbe: groesste Abweichung 4.8e-07 gegen
+        map_coordinates(order=1, mode='nearest'), also reine float32-Rundung.
+        Die Klemmung der Quellkoordinaten auf [0, n-1] entspricht dabei genau
+        dem 'nearest'-Rand von scipy.
+
+        Das Profil dahinter: die Advektion war mit 7.5 s von 18 s der groesste
+        Einzelposten des Wetters (1800 Aufrufe = 6 Doppelmonate x 25 Schritte
+        x 4 Felder x 3 Schichten).
+        """
+        height, width = fields[0].shape[:2]
         source_x = np.clip(x_idx - u * dt_scale, 0, width - 1)
         source_y = np.clip(y_idx - v * dt_scale, 0, height - 1)
-        return map_coordinates(field, [source_y, source_x], order=1, mode='nearest').astype(field.dtype)
+
+        x0 = np.floor(source_x).astype(np.intp)
+        y0 = np.floor(source_y).astype(np.intp)
+        x1 = np.minimum(x0 + 1, width - 1)
+        y1 = np.minimum(y0 + 1, height - 1)
+        weight_x = (source_x - x0).astype(np.float32)
+        weight_y = (source_y - y0).astype(np.float32)
+        inv_x = 1.0 - weight_x
+
+        results = []
+        for field in fields:
+            top = field[y0, x0] * inv_x + field[y0, x1] * weight_x
+            bottom = field[y1, x0] * inv_x + field[y1, x1] * weight_x
+            results.append((top * (1.0 - weight_y) + bottom * weight_y).astype(field.dtype))
+        return results
 
     def _run_coupled_atmosphere_simulation(self, heightmap: np.ndarray, shadowmap: np.ndarray,
                                           month_params: Dict[str, Any], target_size: int,
@@ -1219,8 +1352,32 @@ class WeatherSystemGenerator:
         effective_exposure = solar_exposure * (
             solar_absorption_factor if solar_absorption_factor is not None else 1.0)
         effective_exposure = np.clip(effective_exposure, 0.0, 1.0)
-        ground_temp_target = (ground_temp_min
-                               + (ground_temp_max - ground_temp_min) * effective_exposure).astype(np.float32)
+        # UM DIE TATSAECHLICHE MITTLERE EXPOSITION ZENTRIERT, nicht um 0.5.
+        #
+        # Vorher lautete die Formel T = Basis + SPREAD * (Exposition - 0.5).
+        # Sie unterstellt damit, dass eine Karte im Mittel halb besonnt ist -
+        # das gilt aber nur bei etwa 40 Grad Breite. Gemessen auf flachem
+        # Gelaende (mittlere Exposition aus der Shadowmap):
+        #
+        #     Breite   Exposition   daraus Versatz
+        #        0        0.806        +6.1 C
+        #       20        0.711        +4.2 C
+        #       40        0.531        +0.6 C
+        #       60        0.287        -4.3 C
+        #
+        # Die Klimatologie (_climate_baseline) enthaelt den Sonnenstand aber
+        # BEREITS - sie ist ja nach Breite und Monat tabelliert. Der Term hat
+        # ihn also ein zweites Mal aufaddiert. Gemessen wurde die Simulation
+        # dadurch am Aequator 11.4 C waermer als ihre eigene Vorgabe.
+        #
+        # Zentriert auf den Mittelwert gilt: das Kartenmittel der
+        # Bodentemperatur IST die Klimatologie, und die Spanne erzeugt nur
+        # noch, wofuer sie gedacht ist - den raeumlichen Unterschied zwischen
+        # Sonn- und Schatthang.
+        ground_temp_target = (
+            ground_temp_baseline
+            + effective_spread * (effective_exposure - float(np.mean(effective_exposure)))
+        ).astype(np.float32)
 
         # Hangflächen-Korrektur für den Boden-Luft-Wärmeübergang (dimensionsloses
         # Flächenverhältnis, KEINE absolute m²-Fläche nötig - kürzt sich in der
@@ -1395,8 +1552,10 @@ class WeatherSystemGenerator:
         # Ausgangszustand für den Sponge-Layer (siehe sponge_weight oben) -
         # der Rand-Puffer wird pro Zeitschritt zu DIESEM (noch unbeeinflussten)
         # Zustand hin gedämpft, nicht zu einem hart vorgegebenen Wert.
+        # theta_bg wird IMMER gebraucht - die Strahlungsrueckstellung unten
+        # wirkt flaechendeckend, nicht nur im Randstreifen.
+        theta_bg = [t.copy() for t in theta]
         if sponge_weight is not None:
-            theta_bg = [t.copy() for t in theta]
             u_bg = [x.copy() for x in u]
             v_bg = [x.copy() for x in v]
             q_bg = [x.copy() for x in q]
@@ -1414,10 +1573,11 @@ class WeatherSystemGenerator:
                 # Advektion gültigen Geschwindigkeitsfeld rückwärts-gesampelt -
                 # Standard-Semi-Lagrange-Konsistenz).
                 u_old, v_old = u[i], v[i]
-                u[i] = self._semi_lagrangian_advect(u_old, u_old, v_old, y_idx, x_idx)
-                v[i] = self._semi_lagrangian_advect(v_old, u_old, v_old, y_idx, x_idx)
-                theta[i] = self._semi_lagrangian_advect(theta[i], u_old, v_old, y_idx, x_idx)
-                q[i] = self._semi_lagrangian_advect(q[i], u_old, v_old, y_idx, x_idx)
+                # Ein Aufruf statt vier: alle vier Felder werden mit demselben
+                # u_old/v_old gesampelt, teilen sich also Quellkoordinaten und
+                # Gewichte (siehe _semi_lagrangian_advect_many, -31 % gemessen).
+                u[i], v[i], theta[i], q[i] = self._semi_lagrangian_advect_many(
+                    (u_old, v_old, theta[i], q[i]), u_old, v_old, y_idx, x_idx)
 
                 # 2a. Druckgradient - Relaxation statt hartem Reset (siehe
                 # PRESSURE_RELAX_RATE-Kommentar oben). t_real[i] wird hier
@@ -1636,6 +1796,15 @@ class WeatherSystemGenerator:
                     q[i] += (q_bg[i] - q[i]) * sponge_weight
                     u[i] += (u_bg[i] - u[i]) * sponge_weight
                     v[i] += (v_bg[i] - v[i]) * sponge_weight
+
+            # 7. Strahlungsrueckstellung, FLAECHENDECKEND (siehe
+            # RADIATIVE_RELAX_RATE). Die fehlende Waermesenke des Modells -
+            # ohne sie summieren Bodenwaerme und Latentwaerme ueber die
+            # Schritte auf und die Karte laeuft von ihrer eigenen Klimatologie
+            # weg.
+            if RADIATIVE_RELAX_RATE > 0.0:
+                for i in range(L.COUNT):
+                    theta[i] += (theta_bg[i] - theta[i]) * RADIATIVE_RELAX_RATE
 
         # --- Ergebnis zusammensetzen ---
         # heightmap-Anteil siehe Bug-Fix-Kommentar beim Haupt-Loop oben
@@ -1935,9 +2104,12 @@ class WeatherSystemGenerator:
         shadow_weighted = self._weighted_solar_exposure(shadowmap, sun_angles=sun_angles)
         ground_temp_baseline = parameters['ground_temp_baseline']
         effective_spread = GROUND_TEMP_SPREAD * parameters.get('sun_relevance_factor', 1.0)
-        ground_temp_min = ground_temp_baseline - effective_spread / 2.0
-        ground_temp_max = ground_temp_baseline + effective_spread / 2.0
-        ground_temp_target = ground_temp_min + (ground_temp_max - ground_temp_min) * shadow_weighted
+        # Dieselbe Zentrierung wie im gekoppelten Pfad oben - beide Pfade
+        # muessen dieselbe Bodentemperatur liefern, sonst haengt das Ergebnis
+        # daran, ob die 3-Schicht-Simulation durchlief oder auf den
+        # Einzelschicht-Fallback zurueckfiel.
+        ground_temp_target = (ground_temp_baseline + effective_spread
+                              * (shadow_weighted - float(np.mean(shadow_weighted))))
         solar_effect = ground_temp_target - parameters['air_temp_entry']
         temp_map += solar_effect
 

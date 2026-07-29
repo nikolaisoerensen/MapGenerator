@@ -307,17 +307,24 @@ def run_climatology_reference_table_match():
 
 
 def run_lod_inheritance_path_dependence():
-    """Weather-Rework Punkt F: LOD-Vererbung. calculate_weather_system()
-    ruft _calc_temperature() direkt auf (siehe dessen Docstring, "Standalone-
-    Convenience-Entry-Point... der Effekt ist identisch" zur echten GUI-
-    Pipeline) - ein schrittweiser LOD-1-dann-LOD-2-Aufbau auf demselben
-    DataLODManager nimmt daher automatisch den echten Vererbungspfad
-    (bikubisch hochskalierter Endzustand von LOD 1 als CFD-Startbedingung
-    für LOD 2), während ein direkter LOD-2-Sprung auf einem frischen
-    DataLODManager (keine LOD-1-Vorstufe vorhanden) auf das alte, rein
-    Noise-basierte Seeding zurückfällt. Beide Pfade müssen gültig bleiben,
-    sich aber messbar unterscheiden (Pfadabhängigkeit ist hier - anders als
-    bei Geology - ausdrücklich gewollt, siehe Plan-Verifikationsabschnitt)."""
+    """
+    UMGEDREHTE ZUSICHERUNG seit der LOD-Aufloesung (2026-07-28).
+
+    Frueher galt: ein schrittweiser Aufbau LOD 1 -> LOD 2 auf demselben
+    DataLODManager erbt den Endzustand der Vorstufe als CFD-Startbedingung und
+    muss sich deshalb MESSBAR von einem direkten LOD-2-Sprung unterscheiden -
+    "Pfadabhaengigkeit ist hier ausdruecklich gewollt".
+
+    Diese Vererbung war die LOD-Leiter. Sie ist weg: die Pipeline rechnet nur
+    noch eine Aufloesungsstufe, und der Zustand des vorigen Durchgangs wird
+    ausschliesslich innerhalb der Rueckkopplungsschleife weitergereicht
+    (FEEDBACK_PASSES, siehe calculator_graph.py).
+
+    Damit ist Pfadabhaengigkeit kein Ziel mehr, sondern ein Defekt: zweimal
+    dasselbe zu rechnen muss dasselbe ergeben, unabhaengig davon, was vorher
+    auf dem Manager stand. Genau das wird hier jetzt geprueft - plus die
+    Gegenprobe, dass die Vererbung innerhalb der Rueckkopplung noch wirkt.
+    """
     size = 48
     y = np.arange(size)[:, None] * np.ones((1, size))
     heightmap = (400.0 - np.abs(y - size / 2) * 8.0).astype(np.float32)
@@ -373,10 +380,33 @@ def run_lod_inheritance_path_dependence():
 
     temp_diff = np.abs(result_inherited.temp_map - result_fresh.temp_map).max()
     wind_diff = np.abs(result_inherited.wind_map - result_fresh.wind_map).max()
-    ok &= check(f"Vererbter vs. frischer LOD-2-Pfad unterscheidet sich messbar "
-                f"(max |delta_temp|={temp_diff:.4f}, max |delta_wind|={wind_diff:.4f}, "
-                f"erwartet > 0 - Pfadabhaengigkeit ist hier gewollt)",
-                temp_diff > 1e-6 or wind_diff > 1e-6)
+    ok &= check(f"KEINE Pfadabhaengigkeit mehr: derselbe LOD ergibt dasselbe, "
+                f"egal was vorher auf dem Manager stand "
+                f"(max |delta_temp|={temp_diff:.6f}, max |delta_wind|={wind_diff:.6f})",
+                temp_diff < 1e-6 and wind_diff < 1e-6)
+
+    # GEGENPROBE: die Vererbung ist nicht kaputt, sie ist nur umgezogen. Meldet
+    # der Manager einen zweiten Rueckkopplungs-Durchgang, MUSS der vorhandene
+    # Zustand einfliessen und ein anderes Ergebnis liefern. Ohne diese Probe
+    # wuerde die Zusicherung oben auch dann bestehen, wenn die Vererbung
+    # vollstaendig ausgebaut waere.
+    dlm_zweiter = DataLODManager()
+    dlm_zweiter.set_map_distance_km(20.0)
+    geo_zweiter = WeatherSystemGenerator(map_seed=7, data_lod_manager=dlm_zweiter)
+    try:
+        geo_zweiter.calculate_weather_system(heightmap, shadowmap, params, lod_level=2)
+        dlm_zweiter.set_feedback_pass(2)
+        result_pass2 = geo_zweiter.calculate_weather_system(
+            heightmap, shadowmap, params, lod_level=2)
+    except Exception as e:
+        print(f"[FAIL] zweiter Rueckkopplungs-Durchgang: {e}")
+        traceback.print_exc()
+        return False
+
+    pass_diff = float(np.abs(result_pass2.temp_map - result_fresh.temp_map).max())
+    ok &= check(f"Gegenprobe: im ZWEITEN Rueckkopplungs-Durchgang wirkt der "
+                f"Vorstand sehr wohl (max |delta_temp|={pass_diff:.4f} > 0)",
+                pass_diff > 1e-6)
     return ok
 
 
@@ -532,10 +562,10 @@ def run_biome_solar_absorption():
 
 
 def run_soil_moisture_coupling():
-    """Weather-Rework Punkt G: Bodenfeuchte-/Wasserflaechen-Kopplung ueber
-    vorheriges LOD. _calc_temperature() liest water.soil_moisture der
-    VORHERIGEN LOD-Stufe und ersetzt damit den alten pauschalen 50%-
-    Platzhalter in der Verdunstungs-Berechnung (core/weather_generator.py,
+    """Weather-Rework Punkt G: Bodenfeuchte-/Wasserflaechen-Kopplung ueber den
+    vorigen RUECKKOPPLUNGS-DURCHGANG (bis 2026-07-28: ueber die vorige
+    LOD-Stufe). _calc_temperature() liest water.soil_moisture und ersetzt damit
+    den alten pauschalen 50%-Platzhalter in der Verdunstungs-Berechnung (core/weather_generator.py,
     _run_coupled_atmosphere_simulation, evap_rate0/evap_rate). Ein LOD-1-
     Bodenfeuchte-Eintrag mit durchgehend hoher Feuchte (Sumpf/See-aehnlich,
     95%) muss bei sonst identischen Parametern zu spuerbar mehr Luftfeuchte
@@ -566,8 +596,14 @@ def run_soil_moisture_coupling():
         # _calc_temperature holt diesen Output direkt über get_calculator_output
         # ("water.soil_moisture", "soil_moist_map", lod_level-1), unabhaengig
         # davon, ob Water in diesem Test tatsaechlich lief.
+        # Seit der LOD-Aufloesung (2026-07-28) gibt es keine "vorige LOD-Stufe"
+        # mehr. Der Stand des vorigen RUECKKOPPLUNGS-DURCHGANGS liegt auf
+        # DEMSELBEN LOD, und _calc_temperature liest ihn nur, wenn der Manager
+        # meldet, dass ueberhaupt ein vorheriger Durchgang existiert - sonst
+        # waere es beim zweiten Lauf der Stand des vorigen LAUFS.
         soil_moist_map = np.full((32, 32), soil_value, dtype=np.float32)
-        dlm.set_calculator_output("water.soil_moisture", 1, {"soil_moist_map": soil_moist_map})
+        dlm.set_calculator_output("water.soil_moisture", 2, {"soil_moist_map": soil_moist_map})
+        dlm.set_feedback_pass(2)
 
         geo = WeatherSystemGenerator(map_seed=11, data_lod_manager=dlm)
         try:

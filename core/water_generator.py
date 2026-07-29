@@ -3142,10 +3142,21 @@ class HydrologySystemGenerator:
         if lake_map.shape[0] != inputs["heightmap"].shape[0]:
             lake_map = self._resize_nearest(lake_map, inputs["heightmap"].shape[0])
 
-        previous_depth = self.data_lod_manager.get_calculator_output(calculator_id, "depth_state", lod_level - 1)
+        # WARMSTART nur, wenn es wirklich einen vorigen Durchgang gibt.
+        #
+        # Frueher kam der Zustand aus der vorigen LOD-Runde. Ohne Leiter waere
+        # der naheliegende Ersatz "lies deinen eigenen letzten Output" - der
+        # ist aber bei einer ZWEITEN Generierung mit demselben Manager der des
+        # VORIGEN LAUFS, nicht des vorigen Durchgangs. Genau so gemessen: der
+        # Kreislauf startete beim zweiten Lauf warm und lieferte das Dreifache
+        # (Reset-Test 2299 gegen 6598). Die Durchgangsnummer trennt beides
+        # sauber - im ersten Durchgang startet der Kreislauf immer trocken.
+        erster_durchgang = self.data_lod_manager.get_feedback_pass() <= 1
+
+        previous_depth = None if erster_durchgang else             self.data_lod_manager.get_calculator_output(calculator_id, "depth_state", lod_level)
         if previous_depth is not None and previous_depth.shape[0] != target_size:
             previous_depth = self._interpolate_2d(previous_depth, target_size)
-        previous_flux = self.data_lod_manager.get_calculator_output(calculator_id, "flux_state", lod_level - 1)
+        previous_flux = None if erster_durchgang else             self.data_lod_manager.get_calculator_output(calculator_id, "flux_state", lod_level)
         if previous_flux is not None and previous_flux.shape[0] != target_size:
             previous_flux = np.stack(
                 [self._interpolate_2d(previous_flux[:, :, i], target_size) for i in range(4)], axis=-1)
@@ -3433,13 +3444,17 @@ class HydrologySystemGenerator:
             "weather.temperature", "temp_map", lod_level)
         if temp_map is not None:
             biome_hint_map = None
-            if lod_level > 1:
-                # Echte Biome-Klassifikation der VORSTUFE (analog zum
-                # Erosion-Vorstufen-Muster in _calc_erosion_sedimentation) -
-                # kein Zyklus, da hier die VORHERIGE LOD-Runde gelesen wird,
-                # nicht die aktuelle.
+            # Echte Biome-Klassifikation des VORIGEN Rueckkopplungs-Durchgangs
+            # (siehe FEEDBACK_PASSES in calculator_graph.py). Kein Zyklus: der
+            # Wert stammt aus einem abgeschlossenen Durchgang, nicht aus dem
+            # laufenden. Im ersten Durchgang bewusst None -> Pre-Biome unten;
+            # ohne diese Abfrage laege beim zweiten LAUF die Biome-Karte des
+            # vorigen Laufs vor und das Ergebnis haenge daran, wie oft man
+            # schon generiert hat.
+            biome_hint_map = None
+            if self.data_lod_manager.get_feedback_pass() > 1:
                 biome_hint_map = self.data_lod_manager.get_calculator_output(
-                    "biome.integrate_layers", "biome_map", lod_level - 1)
+                    "biome.integrate_layers", "biome_map", lod_level)
             if biome_hint_map is None:
                 # Allererste LOD-Runde (oder Biome wurde für die Vorstufe nie
                 # angefragt) - billiger Slope+Breitengrad-Schätzwert statt

@@ -477,7 +477,11 @@ class BiomeClassificationSystem:
         Klassifikation - dient nur als Kapazitäts-/Verdunstungs-Hinweis, nicht
         als sichtbare Anzeige.
         """
-        slopemap = self.data_lod_manager.get_calculator_output("terrain.slope", "slopemap", lod_level)
+        # erosion.slope, nicht terrain.slope: der Vorab-Biom-Schaetzwert
+        # bewertet Steilheit, und die entsteht erst durch die Erosion.
+        # terrain.slope kennt nur das unerodierte Rauschen.
+        slopemap = self.data_lod_manager.get_calculator_output(
+            "erosion.slope", "slopemap", lod_level)
         if slopemap is None:
             raise ValueError(f"biome.preseed_hint: slopemap für LOD {lod_level} nicht verfügbar")
 

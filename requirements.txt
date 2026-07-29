@@ -3,6 +3,14 @@ numpy==2.3.2
 scipy==1.16.1
 matplotlib==3.10.5
 opensimplex==0.4.5.1
+# numba schaltet den JIT-Pfad von opensimplex ein. Ohne es wird dessen
+# @njit-Dekorator zu einer Attrappe und noise2array laeuft als reine
+# Python-Schleife: gemessen 0.633 s je 256x256-Feld gegen 0.0012 s mit
+# numba, also Faktor 528 - bei identischem Code und identischen Zahlen.
+# Das war 36 % der gesamten Pipeline (14.1 s von 38.9 s bei 256 px),
+# davon geology.layer_thickness allein 6.1 s und weather.temperature 4.7 s.
+# Der erste Aufruf je Prozess kostet rund 2.5 s Kompilierung.
+numba==0.66.0
 PyOpenGL==3.1.9
 shapely==2.1.2
 scikit-image==0.26.0

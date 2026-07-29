@@ -807,6 +807,43 @@ class GenerationOrchestrator(QObject):
         self.logger.info(f"Cleaned up timed-out generator: {generator_name}")
         self.emit_queue_status_update()
 
+    def prime_generator_parameters(self, generator_type: str, parameters: Dict[str, Any]) -> bool:
+        """
+        Funktionsweise: Versorgt EINEN Generator mit Parametern, OHNE eine
+            Generierung anzufragen
+        Parameter: generator_type (klein geschrieben), parameters
+        Return: True, wenn die Instanz erreichbar war
+
+        WOZU: request_generation() setzt die Parameter nur an dem Generator,
+        der die Anfrage stellt. Alle nachgelagerten laufen ebenfalls (ueber
+        invalidate_downstream_dependencies -> CalculatorDispatcher.request),
+        bekommen dabei aber nie Parameter.
+
+        Solange der Auto-Start beim Programmstart alle sieben Generatoren
+        einzeln anfragte, fiel das nicht auf - jeder hatte seine Tab-Parameter
+        vom Start her. Seit der Auto-Start weg ist (2026-07-28, siehe
+        MapEditorWindow.__init__), lief nach einem Klick auf [GENERIEREN] im
+        Terrain-Tab das Wetter mit LEEREN Parametern und stieg mit
+        KeyError 'altitude_cooling' aus - im Log als "Calculator
+        'weather.temperature' failed at LOD 1".
+
+        Der Aufrufer ist MapEditorWindow, weil nur er die Tabs kennt.
+        """
+        try:
+            generator_enum = GeneratorType(generator_type)
+        except ValueError:
+            self.logger.warning("prime_generator_parameters: unbekannter Generator %s",
+                                generator_type)
+            return False
+
+        instance = self.get_generator_instance(generator_enum)
+        if instance is None:
+            return False
+
+        instance.set_active_parameters(parameters)
+        self._active_parameters[generator_type] = parameters
+        return True
+
     def _calculator_ids_for(self, generator_name: str) -> List[str]:
         """Alle Calculator-Knoten-IDs, die zu diesem Generator gehören."""
         return [cid for cid, spec in CALCULATOR_GRAPH.items() if spec.generator == generator_name]
@@ -941,6 +978,7 @@ class GenerationOrchestrator(QObject):
         """Synchron: löst Generator-Instanz + _calc_*-Methode auf und ruft sie direkt auf."""
         generator_name = CALCULATOR_GRAPH[calculator_id].generator
         generator_instance = self.get_generator_instance(GeneratorType(generator_name))
+        self.data_lod_manager.set_feedback_pass(self.calculator_dispatcher._feedback_pass)
         method = getattr(generator_instance, "_calc_" + calculator_id.split(".", 1)[1])
         method(calculator_id, lod_level)
 
@@ -973,6 +1011,11 @@ class GenerationOrchestrator(QObject):
             self.generation_started.emit(generator_name, lod_level)
 
         self.in_flight_calculators.add(calculator_id)
+
+        # Durchgangsnummer mitgeben, BEVOR der Thread startet - die
+        # Rueckkopplungs-Eingaben der Generatoren haengen daran (siehe
+        # DataLODManager.get_feedback_pass()).
+        self.data_lod_manager.set_feedback_pass(self.calculator_dispatcher._feedback_pass)
 
         thread = CalculatorThread(
             generator_instance=generator_instance,

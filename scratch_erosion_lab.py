@@ -35,6 +35,7 @@ import os
 import sys
 import time
 
+import math
 import numpy as np
 
 sys.path.insert(0, r"C:\Lokale Dateien\Projects\Python\MapGenerator")
@@ -156,9 +157,25 @@ def measure(terrain, meters_per_pixel):
 LAB_SEED = 424242
 
 
-def build_terrain(size=256, lod=4, terrain_overrides=None):
+def build_terrain(size=256, lod=None, terrain_overrides=None):
     """Gelaende aus dem ECHTEN Terrain-Generator mit den echten Defaults,
-    aber festem Seed (siehe LAB_SEED)."""
+    aber festem Seed (siehe LAB_SEED).
+
+    Das LOD wird aus `size` ABGELEITET und das Ergebnis geprueft.
+
+    Vorher stand hier `lod=4` fest, und LOD 4 ist immer 256 px - egal welche
+    map_size uebergeben wurde (_lod_level_to_size: 32, 64, 128, 256, ...).
+    `build_terrain(512)` lieferte also ein 256er Array, waehrend die
+    Meter-pro-Pixel fuer 512 gerechnet wurden. Jeder "512 px"-Sweep lief in
+    Wahrheit auf 256 px mit halbierter Zellgroesse - die Varianten waren
+    untereinander weiter vergleichbar, aber die BESCHRIFTUNG war falsch, und
+    daraus abgeleitete Aussagen ueber Aufloesungseffekte waren in Wirklichkeit
+    Aussagen ueber die Zellgroesse.
+
+    Die assert-Zeile unten ist der eigentliche Fix: ein Werkzeug, das
+    stillschweigend etwas anderes liefert als angefragt, macht jede damit
+    gewonnene Zahl wertlos.
+    """
     from gui.OldManagers.data_lod_manager import DataLODManager
     from gui.config.value_default import TERRAIN
     from core.terrain_generator import BaseTerrainGenerator
@@ -174,11 +191,19 @@ def build_terrain(size=256, lod=4, terrain_overrides=None):
 
     generator = BaseTerrainGenerator(data_lod_manager=manager)
     generator.set_active_parameters(parameters)
+
+    # LOD 1 = 32 px, danach Verdopplung - also log2(size/32) + 1.
+    if lod is None:
+        lod = int(round(math.log2(max(size, 32) / 32.0))) + 1
+
     for node in ("terrain.noise", "terrain.redistribution"):
         manager.set_calculator_target_lod(node, lod)
     generator._calc_noise("terrain.noise", lod)
     generator._calc_redistribution("terrain.redistribution", lod)
     heightmap = manager.get_calculator_output("terrain.redistribution", "heightmap", lod)
+    assert heightmap.shape == (size, size), (
+        "build_terrain({}) lieferte {} - LOD {} passt nicht zur Groesse".format(
+            size, heightmap.shape, lod))
     return heightmap.astype(np.float32), TERRAIN.MAP_DISTANCE_KM["default"] * 1000.0 / size
 
 
@@ -365,6 +390,64 @@ TERRAIN_VARIANTS = [
 
 def main():
     name = sys.argv[1] if len(sys.argv) > 1 else "standard"
+    if name == "glaettung4":
+        variants = [("Schwelle %.1f" % v, dict(smoothing=v))
+                    for v in (0.0, 2.0, 4.0)]
+        results, _ = run_variants(variants, size=512)
+        contact_sheet(results, "sweep_glaettung4.png")
+        return 0
+    if name == "glaettung3":
+        # Der Regler ist eine SCHWELLE: hoeher = weniger Glaettung. Also das
+        # obere Ende abtasten - dort liegt "Glaettung aktiv, aber sanft".
+        variants = [("Schwelle %.2f" % v, dict(smoothing=v))
+                    for v in (0.0, 0.5, 1.0)]
+        results, _ = run_variants(variants, size=512)
+        contact_sheet(results, "sweep_glaettung3.png")
+        return 0
+    if name == "glaettung2":
+        # Wieviel Glaettung vertraegt das Bild ueberhaupt? 0.05 schadet noch
+        # deutlich (beta -0.484 -> -0.385) UND verhindert die Konvergenz.
+        variants = [("Smoothing %.3f" % v, dict(smoothing=v))
+                    for v in (0.0, 0.01, 0.02, 0.05)]
+        results, _ = run_variants(variants, size=512)
+        contact_sheet(results, "sweep_glaettung2.png")
+        return 0
+    if name == "glaettung":
+        # Nach dem Amplituden-Fix liegt das Relief bei 3900 statt 2038 m, und
+        # gleichzeitig steht Smoothing wieder auf 0.05 statt 0. Beides trennen.
+        variants = [
+            ("Smoothing 0.00", dict(smoothing=0.0)),
+            ("Smoothing 0.05 (Default)", dict(smoothing=0.05)),
+            ("Smoothing 0.05, 16000 Schritte",
+             dict(smoothing=0.05, max_steps=16000)),
+            ("Smoothing 0.00, 16000 Schritte",
+             dict(smoothing=0.0, max_steps=16000)),
+        ]
+        results, _ = run_variants(variants, size=512)
+        contact_sheet(results, "sweep_glaettung.png")
+        return 0
+    if name == "nachpruefung":
+        # Nachpruefung nach dem build_terrain-Fix (siehe dortiger Docstring):
+        # alle frueheren "512 px"-Sweeps liefen in Wahrheit auf 256 px. Hier
+        # laufen die beiden Entscheidungen, aus denen Defaults geworden sind,
+        # bei ECHTEN 512 px und mit den ausgelieferten Terrain-Defaults noch
+        # einmal - halten sie nicht, muessen die Defaults zurueck.
+        base = dict(rainfall=5.0, deposition_rate=0.05)
+        variants = [
+            ("A: mit Boeschung+Glaettung",
+             dict(base, thermal_strength=0.3, smoothing=0.3)),
+            ("B: ohne beides (Default)",
+             dict(base, thermal_strength=0.0, smoothing=0.0)),
+            ("C: ohne beides, Schwelle 0.6",
+             dict(base, thermal_strength=0.0, smoothing=0.0,
+                  EROSION_THRESHOLD_DISCHARGE=0.6)),
+            ("D: ohne beides, Schwelle 0.2",
+             dict(base, thermal_strength=0.0, smoothing=0.0,
+                  EROSION_THRESHOLD_DISCHARGE=0.2)),
+        ]
+        results, _ = run_variants(variants, size=512)
+        contact_sheet(results, "nachpruefung_512.png")
+        return 0
     if name == "abnahme":
         # Abnahme: die AUSGELIEFERTEN Defaults, ohne jede Uebersteuerung.
         # Alles, was oben als Uebersteuerung gewonnen wurde, steht jetzt in
