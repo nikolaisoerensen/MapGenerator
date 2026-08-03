@@ -384,7 +384,7 @@ class WaterTab(BaseMapTab):
         Sammelt die aktuellen Werte aller Water-Parameter-Slider.
         Wird vom ParameterManager als zentrale Quelle für die Water-Parameter
         genutzt (register_tab()/get_tab_parameters() rufen diese Methode auf,
-        siehe gui/OldManagers/parameter_manager.py).
+        siehe managers/parameter_manager.py).
         """
         parameters = {}
         for param_name, slider in self.parameter_sliders.items():

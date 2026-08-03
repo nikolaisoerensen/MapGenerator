@@ -13,12 +13,12 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QScrollArea
 
 from gui.widgets.widgets import StatusIndicator
-from gui.OldManagers.calculator_graph import CALCULATOR_GRAPH
+from managers.calculator_graph import CALCULATOR_GRAPH
 
 # Aus GeneratorType abgeleitet statt fest verdrahtet: eine handgepflegte
 # Liste liess den Erosion-Generator 2026-07-28 lautlos aus der Anzeige fallen -
 # der Nutzer sah eine haengende Pipeline ohne den Knoten, auf den alles wartete.
-from gui.OldManagers.generation_orchestrator import GeneratorType
+from managers.generation_orchestrator import GeneratorType
 
 GENERATOR_ORDER = [generator.value for generator in GeneratorType]
 

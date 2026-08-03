@@ -145,7 +145,7 @@ Kanban-Board zu verschieben.
    - GPU-Anbindung (Ticket #40) umgesetzt, Stand 2026-07-09:
      `shaders/settlement/terrainCostFlood.comp` (JFA-Approximation von
      `_terrain_cost_voronoi()`) + `_dispatch_terrain_cost_flood()` in
-     `gui/OldManagers/shader_manager.py`, genutzt von sowohl
+     `managers/shader_manager.py`, genutzt von sowohl
      `CityBoundaryAnalyzer` als auch `LandscapeVoronoiSystem` über den
      gemeinsamen GPU→CPU-Fallback-Helper `_terrain_cost_voronoi_gpu_or_cpu()`.
      `SettlementGenerator` akzeptiert jetzt `shader_manager` (analog zu

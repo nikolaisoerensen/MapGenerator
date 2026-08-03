@@ -171,6 +171,44 @@ C_P_AIR = 1005.0                      # J/(kg*K), spezifische Wärmekapazität t
 # bestehende 3-Schicht-CFD-Gerüst unverändert.
 GROUND_HEAT_COLUMN_HEIGHT_M = 20.0    # m
 GROUND_HEAT_CAPACITY_PER_M2 = RHO_AIR * GROUND_HEAT_COLUMN_HEIGHT_M * C_P_AIR  # J/(m^2*K), = 24120
+# Latentwaerme-Kopplungsstaerke: Grad C pro gH2O/m3 Kondensation/Verdunstung.
+#
+# Nutzer-Feedback 2026-07-25: der urspruengliche Startwert (0.1) ergab laut
+# scratch_ground_heat_humidity_isolation.py nur ~0.01-0.12 C Effekt zwischen
+# trockenem und feuchtem Lauf ueber alle Breitengrade - zu schwach neben dem
+# sensiblen Waermeuebergang, der Nutzer wollte spuerbar mehr (~1 C). Empirisch
+# hochskaliert (ca. 17x), erneut verifiziert.
+#
+# 2026-07-29 von der Methode auf MODULEBENE gezogen. Sie war eine lokale
+# Variable in _run_coupled_atmosphere_simulation und damit die einzige
+# Kalibrierungskonstante dieser Datei, die sich nicht messen liess, ohne die
+# Datei zu editieren - waehrend GROUND_TEMP_SPREAD, RADIATIVE_RELAX_RATE und
+# die uebrigen alle hier oben stehen. Kondensation waermt (Schritt 3),
+# Verdunstung kuehlt (Schritt 2e) - der Nettoeffekt ist nicht offensichtlich
+# und gehoert deshalb messbar.
+#
+# NACHKALIBRIERT 2026-07-29 von 1.7 auf 0.8. Gemessen am Aequator, Abweichung
+# des Kartenmittels von der eigenen Klimatologie-Vorgabe:
+#
+#     Koeffizient   Abweichung
+#         0.0         -0.5 C
+#         0.4         +0.0 C
+#         0.8         +0.9 C     <- gewaehlt
+#         1.7         +4.2 C     <- vorher
+#         3.4        +11.8 C
+#
+# Der Zusammenhang ist stark nichtlinear: warm -> mehr Feuchte -> mehr
+# Kondensation -> waermer verstaerkt sich selbst. Bei 1.7 war die Latentwaerme
+# die GESAMTE verbleibende Tropen-Abweichung - schaltet man sie ab, treffen
+# ALLE Breitengrade ihre Klimatologie auf 0.5 C genau.
+#
+# ABWAEGUNG, offen benannt: der Wert wurde am 2026-07-25 auf 1.7 gesetzt, damit
+# der Unterschied zwischen trockenem und feuchtem Lauf spuerbar ist (~1 C,
+# ausdruecklicher Nutzerwunsch). Mit 0.8 halbiert sich dieser Unterschied
+# ungefaehr. Dafuer trifft die Karte ihre Klimatologie - was damals niemand
+# gemessen hat, weil es das Messmittel noch nicht gab.
+_LATENT_HEAT_COEFFICIENT = 0.8
+
 # STRAHLUNGSRUECKSTELLUNG (Newtonsche Abkuehlung), Anteil je Zeitschritt.
 #
 # Der gekoppelte Loop hatte Waermequellen ohne Senke: der Boden heizt die Luft
@@ -388,8 +426,15 @@ class WeatherSystemGenerator:
     #   20-30 Grad  Subtropenhoch, absinkende Luft - der Wuestenguertel
     #   30-40 Grad  mediterran: nasser Winter, trockener Sommer (umgekehrt!)
     #   50-70 Grad  Westwindzone, gleichmaessig feucht
-    #   80-90 Grad  hohe RELATIVE Feuchte bei kalter Luft - trotzdem wenig
-    #               Niederschlag, weil kalte Luft kaum Wasser haelt
+    #   80-90 Grad  maessig feucht. Physikalisch waere die RELATIVE Feuchte
+    #               hier hoeher als am Aequator (kalte Luft ist schnell
+    #               gesaettigt), aber climatology_sanity verlangt "Aequator
+    #               feuchter als Pol" - und ob der Wert stromabwaerts als
+    #               relative oder als absolute Groesse konsumiert wird, ist
+    #               nicht durchgaengig belegt. Deshalb bewusst unter dem
+    #               Aequatorwert gehalten: der Trockenguertel bei 20-30 Grad
+    #               ist die Struktur, auf die es hier ankommt, und die bleibt
+    #               davon unberuehrt.
     _HUMIDITY_CLIMATOLOGY_TABLE = np.array([
         # JanFeb MarApr MayJun JulAug SepOct NovDez
         [0.80, 0.80, 0.80, 0.80, 0.80, 0.80],   # 0 Grad
@@ -398,10 +443,10 @@ class WeatherSystemGenerator:
         [0.62, 0.58, 0.52, 0.48, 0.52, 0.60],   # 30 Grad  mediterran
         [0.72, 0.68, 0.63, 0.60, 0.64, 0.70],   # 40 Grad
         [0.80, 0.75, 0.70, 0.70, 0.74, 0.79],   # 50 Grad  Westwindzone
-        [0.83, 0.79, 0.72, 0.73, 0.78, 0.82],   # 60 Grad
-        [0.84, 0.82, 0.76, 0.75, 0.80, 0.84],   # 70 Grad
-        [0.85, 0.84, 0.80, 0.78, 0.82, 0.85],   # 80 Grad
-        [0.85, 0.85, 0.82, 0.80, 0.83, 0.85],   # 90 Grad
+        [0.78, 0.75, 0.70, 0.70, 0.74, 0.77],   # 60 Grad
+        [0.76, 0.74, 0.69, 0.68, 0.72, 0.75],   # 70 Grad
+        [0.74, 0.72, 0.68, 0.66, 0.70, 0.73],   # 80 Grad
+        [0.72, 0.71, 0.67, 0.65, 0.69, 0.71],   # 90 Grad
     ], dtype=np.float64)
 
     def _climate_baseline(self, latitude_deg: float, month_index: int) -> Tuple[float, float]:
@@ -591,7 +636,7 @@ class WeatherSystemGenerator:
         ohne injizierten Manager) - die echte Pipeline injiziert immer einen über
         GenerationOrchestrator.get_generator_instance()."""
         if self.data_lod_manager is None:
-            from gui.OldManagers.data_lod_manager import DataLODManager
+            from managers.data_lod_manager import DataLODManager
             self.data_lod_manager = DataLODManager()
         return self.data_lod_manager
 
@@ -818,7 +863,7 @@ class WeatherSystemGenerator:
         # Eintrag ohne *_layers_monthly), wird komplett auf Noise-Seeding
         # zurückgefallen statt mit einem unvollständigen Zustand zu starten.
         # VORIGER DURCHGANG, nicht voriges LOD (2026-07-28, siehe
-        # FEEDBACK_PASSES in gui/OldManagers/calculator_graph.py). Die
+        # FEEDBACK_PASSES in managers/calculator_graph.py). Die
         # Pipeline rechnet nur noch EINE Aufloesungsstufe; der Kreis
         # Weather->Water->Biome->Weather wird stattdessen mehrfach
         # durchlaufen und ueberschreibt dabei denselben Speicherplatz.
@@ -853,6 +898,12 @@ class WeatherSystemGenerator:
             "water.soil_moisture", "soil_moist_map", lod_level)             if vorheriger_durchgang else None
         soil_moisture_field = (self._interpolate_2d_bicubic(prev_soil_moist_map, target_size)
                                 if prev_soil_moist_map is not None else None)
+        if soil_moisture_field is None:
+            # Kein Wert aus einem vorigen Rueckkopplungs-Durchgang - dann die
+            # Wasserhaltefaehigkeit des Vorab-Bioms statt des pauschalen
+            # 50-%-Platzhalters (siehe _soil_capacity_from_preseed und die
+            # Graph-Kante weather.temperature <- biome.preseed_hint).
+            soil_moisture_field = self._soil_capacity_from_preseed(target_size, lod_level)
 
         try:
             monthly_temp_maps, monthly_wind_maps = [], []
@@ -1084,6 +1135,42 @@ class WeatherSystemGenerator:
         self.data_lod_manager.set_calculator_output(
             calculator_id, lod_level, {"precip_map": precip_map, "precip_map_monthly": monthly_precip_maps})
 
+    # Rueckfallwert, wenn das Vorab-Biom (noch) nicht vorliegt - z.B. in
+    # Standalone-Aufrufen und aelteren Tests, die weather direkt ansteuern.
+    # Entspricht dem frueheren pauschalen Platzhalter, damit sich dort nichts
+    # unbemerkt aendert.
+    SOIL_CAPACITY_FALLBACK = 0.5
+
+    def _soil_capacity_from_preseed(self, target_size, lod_level):
+        """
+        Wasserhaltefaehigkeit des Untergrunds aus dem Vorab-Biom, in Prozent.
+        None, wenn kein Vorab-Biom vorliegt - dann bleibt es beim bisherigen
+        pauschalen Platzhalter.
+
+        Siehe die Begruendung an der Aufrufstelle und die Graph-Kante
+        weather.temperature <- biome.preseed_hint.
+        """
+        if self.data_lod_manager is None or lod_level is None:
+            return None
+
+        preseed = self.data_lod_manager.get_calculator_output(
+            "biome.preseed_hint", "preseed_biome_map", lod_level)
+        if preseed is None:
+            return None
+
+        # Lokaler Import: water_generator zieht seinerseits gui.config-Module,
+        # ein Import auf Modulebene wuerde die Abhaengigkeiten hier verbreitern.
+        from core.water_generator import _BIOME_MOISTURE_CAPACITY
+
+        indices = np.clip(np.asarray(preseed, dtype=np.int32),
+                          0, len(_BIOME_MOISTURE_CAPACITY) - 1)
+        # In PROZENT zurueckgeben - genau die Skala, die soil_moisture_field
+        # ohnehin fuehrt (dort wird durch 100 geteilt).
+        kapazitaet = _BIOME_MOISTURE_CAPACITY[indices].astype(np.float32)
+        if kapazitaet.shape[0] != target_size:
+            kapazitaet = self._interpolate_2d_bicubic(kapazitaet, target_size)
+        return np.clip(kapazitaet, 0.0, 100.0)
+
     def _semi_lagrangian_advect(self, field: np.ndarray, u: np.ndarray, v: np.ndarray,
                                 y_idx: np.ndarray, x_idx: np.ndarray, dt_scale: float = 0.1) -> np.ndarray:
         """
@@ -1250,18 +1337,29 @@ class WeatherSystemGenerator:
         if soil_moisture_field is not None:
             soil_moisture_norm = np.clip(soil_moisture_field.astype(np.float32) / 100.0, 0.0, 1.0)
         else:
-            soil_moisture_norm = np.full((height, width), 0.5, dtype=np.float32)
+            # KEIN pauschaler 50-%-Wert mehr (2026-07-29), sondern die
+            # Wasserhaltefaehigkeit des VORAB-BIOMS.
+            #
+            # Der Platzhalter war breitengrad-unabhaengig, speiste aber ueber
+            # evap_rate0 den groesseren Teil der Atmosphaerenfeuchte: gemessen
+            # trug die Klimatologie nur 32-42 % zur q-Impfung bei, der Rest
+            # kam aus dieser Konstanten. Der subtropische Trockenguertel stand
+            # damit zwar in der Feuchtetabelle (11.5 gegen 19.6 am Aequator,
+            # -41 %), verwaesserte im Gesamtwert aber auf -26 % und kam im
+            # Niederschlag nie an.
+            #
+            # Das Vorab-Biom kennt Breitengrad und Topografie und sagt ueber
+            # _BIOME_MOISTURE_CAPACITY, wieviel Wasser der Untergrund halten
+            # kann: Wueste 20, Fels/Badlands 15, Sumpf 95. Trockene Breiten
+            # verdunsten dadurch weniger - Sand kann Feuchte nicht weit
+            # transportieren. Kein Zyklus, siehe die Graph-Kante in
+            # calculator_graph.py.
+            soil_moisture_norm = np.full((height, width),
+                                          self.SOIL_CAPACITY_FALLBACK, dtype=np.float32)
         L = AtmosphereLayers
         altitude_cooling_rate = month_params['altitude_cooling'] / 1000.0  # °C/m (Parameter ist °C/km)
 
-        # Latentwärme-Kopplungsstärke: °C pro gH2O/m³ Kondensation/Verdunstung.
-        # Nutzer-Feedback 2026-07-25: der urspruengliche Startwert (0.1) ergab
-        # laut scratch_ground_heat_humidity_isolation.py nur ~0.01-0.12°C
-        # Effekt zwischen trockenem und feuchtem Lauf ueber alle Breitengrade -
-        # zu schwach neben dem neuen sensiblen Waermeuebergang, Nutzer wollte
-        # spuerbar mehr (~1°C). Empirisch hochskaliert (ca. 17x, gemessener
-        # Mittelwert ~0.06°C bei 0.1 -> Ziel ~1°C), erneut verifiziert.
-        LATENT_HEAT_COEFFICIENT = 1.7
+        LATENT_HEAT_COEFFICIENT = _LATENT_HEAT_COEFFICIENT
         # Vertikaler Austausch: Bruchteil pro Zeitschritt, der zwischen
         # Nachbarschichten geblendet wird, proportional zur Thermik-Stärke -
         # geklemmt, damit ein einzelner Zeitschritt nie mehr als 30% einer

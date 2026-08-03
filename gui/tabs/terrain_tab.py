@@ -21,7 +21,9 @@ from gui.tabs.base_tab import BaseMapTab
 from gui.widgets.widgets import (
     ParameterSlider, RandomSeedButton
 )
-from gui.config.value_default import TERRAIN, get_parameter_config, validate_parameter_set
+from gui.config.value_default import (
+    TERRAIN, EROSION_FILTER, RIVER_NETWORK, get_parameter_config,
+    validate_parameter_set)
 
 class TerrainTab(BaseMapTab):
     """
@@ -113,9 +115,48 @@ class TerrainTab(BaseMapTab):
         ]
         noise_detail_configs = [
             ("octaves", "Detail Octaves", TERRAIN.OCTAVES),
-            ("frequency", "Base Frequency", TERRAIN.FREQUENCY),
+            ("feature_size_m", "Feature Size (m)", TERRAIN.FEATURE_SIZE_M),
             ("persistence", "Detail Persistence", TERRAIN.PERSISTENCE),
             ("lacunarity", "Frequency Scaling", TERRAIN.LACUNARITY),
+        ]
+        # ATEF-Erosionsfilter (SPEZIFIKATION §9). Die Parameter-Keys tragen den
+        # Praefix erosion_filter_, damit sie in _apply_erosion_filter() eindeutig
+        # von den Reglern der Feld-Erosion (class EROSION) zu unterscheiden sind.
+        #
+        # Wichtig fuer die Bedienung: dieser Filter erzeugt das Detail. Steht
+        # "Detail Octaves" oben hoch, ist der Untergrund schon detailreich und
+        # der Filter wirkt kaum noch - gemessen, siehe §9. 1-2 Oktaven sind hier
+        # richtig.
+        erosion_filter_configs = [
+            ("erosion_filter_strength", "Erosion Strength", EROSION_FILTER.STRENGTH),
+            ("erosion_filter_gully_size_m", "Gully Size (m)",
+             EROSION_FILTER.GULLY_SIZE_M),
+            ("erosion_filter_detail", "Gully Reach", EROSION_FILTER.DETAIL),
+            ("erosion_filter_gully_weight", "Gullies vs Sharpness",
+             EROSION_FILTER.GULLY_WEIGHT),
+            ("erosion_filter_ridge_rounding", "Ridge Rounding",
+             EROSION_FILTER.RIDGE_ROUNDING),
+            ("erosion_filter_crease_rounding", "Valley Rounding",
+             EROSION_FILTER.CREASE_ROUNDING),
+            ("erosion_filter_octaves", "Gully Octaves", EROSION_FILTER.OCTAVES),
+        ]
+
+        # Flussnetz-Skelett (SPEZIFIKATION §12). Laeuft NACH dem
+        # Erosionsfilter - dessen Ergebnis ist die Flaeche, in die die Taeler
+        # geschnitten werden.
+        river_configs = [
+            ("river_spacing_m", "Valley Spacing (m)", RIVER_NETWORK.SPACING_M),
+            ("river_incision_m", "Valley Depth (m)", RIVER_NETWORK.INCISION_M),
+            ("river_plateau_relief", "Plateau vs Mountains",
+             RIVER_NETWORK.PLATEAU_RELIEF),
+            ("river_valley_width", "Valley Width", RIVER_NETWORK.VALLEY_WIDTH),
+            ("river_valley_form", "Valley Shape", RIVER_NETWORK.VALLEY_FORM),
+            ("river_valley_steps", "Cliff Bands", RIVER_NETWORK.VALLEY_STEPS),
+            ("river_meander", "Meander", RIVER_NETWORK.MEANDER),
+            ("river_divide_blend", "Divide Softness",
+             RIVER_NETWORK.DIVIDE_BLEND),
+            ("river_cost_strength", "Rivers Follow Lowland",
+             RIVER_NETWORK.COST_STRENGTH),
         ]
 
         shape_group = self._build_parameter_group("Shape", shape_configs)
@@ -123,6 +164,13 @@ class TerrainTab(BaseMapTab):
 
         noise_detail_group = self._build_parameter_group("Noise Detail", noise_detail_configs)
         self.control_panel.layout().addWidget(noise_detail_group)
+
+        river_group = self._build_parameter_group("River Network", river_configs)
+        self.control_panel.layout().addWidget(river_group)
+
+        erosion_filter_group = self._build_parameter_group(
+            "Erosion Filter", erosion_filter_configs)
+        self.control_panel.layout().addWidget(erosion_filter_group)
 
     def _build_parameter_group(self, title: str, parameter_configs) -> QGroupBox:
         """Baut eine QGroupBox mit Slidern für die übergebenen (key, label, config)-Tupel."""
@@ -300,7 +348,7 @@ class TerrainTab(BaseMapTab):
         Sammelt die aktuellen Werte aller Terrain-Parameter-Slider.
         Wird vom ParameterManager als zentrale Quelle für die Terrain-Parameter
         genutzt (register_tab()/get_tab_parameters() rufen diese Methode auf,
-        siehe gui/OldManagers/parameter_manager.py).
+        siehe managers/parameter_manager.py).
         """
         parameters = {}
         for param_name, slider in self.parameter_sliders.items():

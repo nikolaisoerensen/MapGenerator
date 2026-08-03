@@ -31,9 +31,26 @@ class TERRAIN:
     # Höhe der Talsohle in Metern. Zusammen mit AMPLITUDE legt sie die
     # Höhenspanne JEDER Karte fest: der tiefste Punkt liegt exakt hier, der
     # höchste exakt bei AMPLITUDE (siehe
-    # BaseTerrainGenerator._apply_redistribution). Nicht 0 m, damit die
-    # Talsohle Land bleibt und nicht mit dem Meeresspiegel zusammenfällt.
-    BASE_ELEVATION_M = 100.0
+    # BaseTerrainGenerator._apply_redistribution).
+    #
+    # 2026-07-30 von 100.0 auf 0.0 gesetzt (Entscheidung des Nutzers). Der
+    # frühere Wert sollte verhindern, dass die Talsohle mit dem Meeresspiegel
+    # zusammenfällt, hatte aber einen schwereren Nebeneffekt: AMPLITUDE ist die
+    # GIPFELHÖHE und der Slider erlaubt ab 30 m. Für jedes amplitude < 100 wurde
+    # `(amplitude - base_elevation)` negativ und die Landschaft KIPPTE UM -
+    # Gipfel wurden Täler. Gemessen bei amplitude 30: Korrelation -0.998 gegen
+    # denselben Seed bei 4000 (mit abgeschaltetem Erosionsfilter; eingeschaltet
+    # hob dessen zweite Spannen-Abbildung die Inversion zufällig wieder auf und
+    # verdeckte den Fehler).
+    #
+    # Mit 0.0 ist das ausgeschlossen, weil AMPLITUDE bei 30 beginnt und damit
+    # immer über der Talsohle liegt. §1 und §4.7: kein Reglerstand darf ein
+    # unbrauchbares Ergebnis erzeugen.
+    #
+    # Der Meeresspiegel liegt entsprechend ebenfalls bei 0 m (siehe
+    # BIOME.SEA_LEVEL) - die Karte bleibt damit landseitig, ohne dass die
+    # Talsohle künstlich angehoben werden muss.
+    BASE_ELEVATION_M = 0.0
 
     # 2026-07-28 von 10.0 auf 15.0 angehoben, zusammen mit der verdoppelten
     # FREQUENCY (siehe dort): die Karte zeigt jetzt die vierfache Fläche, und
@@ -82,17 +99,55 @@ class TERRAIN:
     # Zyklen/Pixel) herunter, sodass ein zu hoher Slider-Wert kein kaputtes
     # Ergebnis mehr erzeugt - er hat ab diesem Punkt nur schlicht keine
     # sichtbare Wirkung mehr, siehe Beschreibung unten.
+    # Default 2026-07-30 von 4 auf 2 GESENKT, zusammen mit der Einführung des
+    # ATEF-Erosionsfilters (siehe EROSION_FILTER und SPEZIFIKATION §9). Der
+    # Filter erwartet einen GLATTEN Untergrund und liefert das Detail selbst;
+    # gemessen: mit 5 Oktaven Untergrund ist sein Ergebnis feinkörniges
+    # Gekrissel, mit 1 Oktave ein zusammenhängendes verästeltes Netz. Ein
+    # detailreicher Untergrund macht den Filter also nicht besser, sondern
+    # wirkungslos. §4.7: abhängige Defaults ziehen mit.
+    #
+    # Nebenbefund derselben Messung, unabhängig vom Filter: der glatte
+    # Untergrund hat auch für sich die besseren Kennzahlen (9 statt 187
+    # Senken, größtes Kanalnetz 1801 statt 157 px).
     OCTAVES = {
-        "min": 1, "max": 8, "default": 4, "step": 1,
+        "min": 1, "max": 8, "default": 2, "step": 1,
         "description": "Anzahl der übereinandergelegten Rausch-Schichten "
                         "unterschiedlicher Frequenz. Mehr Oktaven fügen "
                         "feinere Detailebenen hinzu, verlangsamen aber die "
-                        "Berechnung. Oktaven jenseits der aktuellen "
-                        "Frequency/Frequency-Scaling-Kombination werden "
-                        "automatisch ignoriert, sobald ihre Frequenz über "
-                        "0.5 Zyklen/Pixel liegt (kein sichtbarer Effekt "
-                        "mehr möglich) - bei den Standardwerten betrifft "
-                        "das bereits Oktave 5 und höher."
+                        "Berechnung. Bei eingeschaltetem Erosionsfilter "
+                        "gehören hier KLEINE Werte hin (1-2): der Filter "
+                        "erzeugt das Detail, und auf einem bereits "
+                        "detailreichen Untergrund wirkt er nicht mehr. "
+                        "Oktaven jenseits der aktuellen Frequency/"
+                        "Frequency-Scaling-Kombination werden automatisch "
+                        "ignoriert, sobald ihre Frequenz über 0.5 "
+                        "Zyklen/Pixel liegt."
+    }
+    # Groesse der Grundformen des Gelaendes in METERN - Hügel, Rücken, Becken,
+    # bevor der Erosionsfilter seine Rinnen hineinlegt.
+    #
+    # 2026-07-30 eingefuehrt, weil FREQUENCY denselben Fehler hatte wie die
+    # Rinnengroesse: die Formel `frequency * (64 / size)` in _calc_noise haengt
+    # nur an der PIXELZAHL, nicht an der realen Ausdehnung. Die Karte zeigte
+    # damit bei jedem map_distance_km dieselben 4.74 Zyklen - bei 5 km also
+    # 1064 m grosse Formen, bei 50 km 10638 m grosse. Zoomte man heraus, wurde
+    # die Landschaft mitvergroessert statt weiter zu gehen.
+    #
+    # Gemessen in smoke_test_terrain_scale_coupling.py: die Wellenzahl des
+    # Grundrauschens (4.7) zog die gemessene Rinnengroesse bei 5 km und 50 km
+    # jeweils zu sich hin - der Fehler war an beiden Stellen derselbe.
+    #
+    # Vorgabe 3150 m entspricht der bisherigen FREQUENCY von 0.074 bei den
+    # vorgegebenen 15 km (15000 / (0.074 * 64) = 3167 m) auf 0.5 % genau.
+    FEATURE_SIZE_M = {
+        "min": 200.0, "max": 30000.0, "default": 3150.0, "step": 50.0,
+        "suffix": "m",
+        "description": "Groesse der Grundformen des Gelaendes in Metern - "
+                        "Huegel, Ruecken und Becken, in die der Erosionsfilter "
+                        "danach seine Rinnen legt. Unabhaengig von Aufloesung "
+                        "und Kartenausschnitt: ein groesserer Ausschnitt zeigt "
+                        "MEHR Formen, nicht groessere."
     }
     # Default 2026-07-28 von 0.037 auf 0.074 VERDOPPELT: die Karte zeigt jetzt
     # den doppelten Weltausschnitt in x UND y, also die vierfache Fläche.
@@ -580,6 +635,221 @@ class WEATHER:
     CLIMATE_ZONE = "temperate"  # vorerst fix, siehe Backlog für spätere Auswahl
 
 
+# =============================================================================
+# HAUPTSCHALTER Flussnetz
+# =============================================================================
+# Legt ein Flussnetz-Skelett in das Gelände und blendet zwischen Talsohle und
+# umgebender Fläche (core/terrain_river_network.py, SPEZIFIKATION §12).
+# Läuft in BaseTerrainGenerator._calc_redistribution() NACH dem Erosionsfilter,
+# weil dessen Ergebnis die Fläche P ist, in die eingeschnitten wird.
+#
+# False lässt die Heightmap genau das, was der Erosionsfilter liefert.
+FLUSSNETZ_AKTIV = True
+
+
+class RIVER_NETWORK:
+    """
+    Regler des Flussnetzes (SPEZIFIKATION §12).
+
+    Drei davon tragen den Charakter einer Landschaft:
+        SPACING_M     Abstand der Täler
+        INCISION_M    wie tief sie unter die Umgebung schneiden
+        PLATEAU_RELIEF wie bewegt die Fläche ZWISCHEN den Tälern ist
+
+    Gemessene Beispiele (25 km Ausschnitt, docs/SPEZIFIKATION.md §12):
+        Alpen        3500 m / 1500 m / 100 %
+        Mittelgebirge 1400 m /  220 m /  55 %
+        Flachland    3000 m /   22 m /  80 %
+        Fjordland    4500 m / 1150 m /  28 %   <- die Hochebene
+        Vietnam      1100 m /  620 m /  85 %
+    """
+
+    SPACING_M = {
+        "min": 300.0, "max": 12000.0, "default": 2500.0, "step": 100.0,
+        "suffix": "m",
+        "description": "Abstand benachbarter Talsohlen in Metern. Kleine Werte "
+                        "ergeben ein dichtes, feinverästeltes Talnetz, große "
+                        "wenige große Täler. Bestimmt zusammen mit der "
+                        "Talbreite, wieviel Hochfläche zwischen den Tälern "
+                        "übrig bleibt."
+    }
+    INCISION_M = {
+        "min": 0.0, "max": 2500.0, "default": 400.0, "step": 10.0,
+        "suffix": "m",
+        "description": "Wie tief das größte Tal unter die umgebende Fläche "
+                        "schneidet. 0 lässt das Gelände unberührt. Kleinere "
+                        "Nebentäler schneiden entsprechend flacher."
+    }
+    PLATEAU_RELIEF = {
+        "min": 0.0, "max": 1.0, "default": 0.8, "step": 0.05,
+        "description": "Wie bewegt die Fläche ZWISCHEN den Tälern ist. Kleine "
+                        "Werte ergeben eine Hochebene (Fjordland), große ein "
+                        "Bergland mit Graten (Alpen). Der einzelne Regler, der "
+                        "diese beiden Landschaftstypen trennt."
+    }
+    VALLEY_WIDTH = {
+        "min": 0.15, "max": 1.0, "default": 0.55, "step": 0.05,
+        "description": "Talbreite als Anteil des Talabstands. Bei 0.5 reicht "
+                        "das Tal genau bis zur Mitte zwischen zwei Läufen und "
+                        "es bleibt keine Hochfläche übrig; kleinere Werte "
+                        "lassen eine stehen."
+    }
+    VALLEY_FORM = {
+        "min": 0.3, "max": 3.0, "default": 1.6, "step": 0.1,
+        "description": "Querschnitt des Tales. Unter 1 eine Schlucht mit Wand "
+                        "direkt am Fluss, 1 ein V-Tal, über 1 ein U-Tal mit "
+                        "flacher Sohle und steilen Flanken (glazial)."
+    }
+    VALLEY_STEPS = {
+        "min": 0, "max": 6, "default": 0, "step": 1,
+        "description": "Anzahl der Klippenbänder in der Talflanke. 0 ergibt "
+                        "eine glatte Flanke, höhere Werte ein Stufenprofil wie "
+                        "in Schichtstufenlandschaften."
+    }
+    # 2026-07-30 ergaenzt, nachdem der Nutzer am Bild zwei Dinge bemaengelt
+    # hat: alles kantig und facettiert, und die Laeufe schnurgerade.
+    MEANDER = {
+        "min": 0.0, "max": 0.5, "default": 0.18, "step": 0.02,
+        "description": "Seitliche Auslenkung der Flussläufe zwischen zwei "
+                        "Knoten, als Anteil des Knotenabstands. 0 ergibt "
+                        "gerade Strecken, höhere Werte gewundene Läufe. Die "
+                        "Zwischenpunkte folgen dabei dem Gelände, der Lauf "
+                        "schneidet also nicht mehr geradlinig durch alles."
+    }
+    DIVIDE_BLEND = {
+        "min": 0.0, "max": 1.0, "default": 0.75, "step": 0.05,
+        "description": "Wie weich das Tal in die Umgebung übergeht. 0 ergibt "
+                        "eine harte Kante an der Wasserscheide (facettiertes "
+                        "Bild), 1 einen glatten Übergang mit flacher Talsohle. "
+                        "Für scharfe Grate im Hochgebirge kleinere Werte."
+    }
+    COST_STRENGTH = {
+        "min": 0.0, "max": 8.0, "default": 2.5, "step": 0.5,
+        "description": "Wie stark die Flüsse hohes Gelände meiden. 0 lässt sie "
+                        "den kürzesten Weg nehmen, hohe Werte zwingen sie in "
+                        "die vorhandenen Senken der Landschaft."
+    }
+
+
+# =============================================================================
+# HAUPTSCHALTER ATEF-Erosionsfilter
+# =============================================================================
+# Der Filter aus shaders/terrain/ATEF_*.comp, portiert in
+# core/terrain_erosion_filter.py, angewandt in
+# BaseTerrainGenerator._calc_redistribution(). Ein Durchgang pro Pixel, keine
+# Iteration - siehe SPEZIFIKATION §9.
+#
+# False laesst die Heightmap genau das, was die Power-Redistribution liefert.
+EROSION_FILTER_AKTIV = True
+
+
+class EROSION_FILTER:
+    """
+    Regler des ATEF-Erosionsfilters (SPEZIFIKATION §9).
+
+    Alle Werte sind RELATIV zur Karte und zu ihrer Hoehenspanne, keine
+    Meterwerte - nach §4.4 der wichtigste Punkt an diesem Filter.
+
+    Kein Reglerstand kann die Hoehenspanne verlassen: _calc_redistribution()
+    bildet das Ergebnis nach dem Filter wieder auf
+    BASE_ELEVATION_M .. AMPLITUDE ab. Die Regler formen also die VERTEILUNG,
+    nicht die erreichte Hoehe - dieselbe Zusicherung wie bei
+    REDISTRIBUTE_POWER.
+    """
+
+    STRENGTH = {
+        "min": 0.0, "max": 0.6, "default": 0.22, "step": 0.01,
+        "description": "Wie stark die Erosion das Gelaende umformt. 0 laesst "
+                        "es unberuehrt. Wirkt auf alle Rinnen-Oktaven "
+                        "gleichzeitig und beeinflusst dadurch auch die "
+                        "Richtung der Rinnen."
+    }
+    # 2026-07-30 von einem Anteil der Kartenbreite auf METER umgestellt.
+    #
+    # Vorher hiess der Regler "Anteil der Kartenbreite", und damit hing die
+    # Groesse der Rinnen an der Kartenausdehnung: gemessen ergaben 5 / 15 / 50 km
+    # Ausdehnung Rinnen von 631 / 1893 / 6310 m - exakt proportional, Faktor 10
+    # ueber den Bereich (smoke_test_terrain_scale_coupling.py). Beim Herauszoomen
+    # wurden die Rinnen groesser statt zahlreicher, die Landschaft war also bei
+    # jedem Ausschnitt eine andere.
+    #
+    # Eine Rinne ist gegen die WIRKLICHKEIT bemessen, nicht gegen den
+    # Bildausschnitt - §4.4, "jede neue Konstante mit Einheit muss beantworten,
+    # gegen was sie bemessen ist". Die Umrechnung in den kartenrelativen Wert,
+    # den der Filter selbst braucht, macht
+    # BaseTerrainGenerator._erosion_filter_parameters().
+    #
+    # Vorgabe 2250 m = der frueherer Anteil 0.15 bei den vorgegebenen 15 km,
+    # damit sich die Standardkarte nicht mit dieser Umstellung veraendert.
+    GULLY_SIZE_M = {
+        "min": 100.0, "max": 20000.0, "default": 2250.0, "step": 50.0,
+        "suffix": "m",
+        "description": "Groesse der Erosionsrinnen in Metern, unabhaengig von "
+                        "Aufloesung und Kartenausschnitt. Kleine Werte ergeben "
+                        "viele feine Rinnen, grosse wenige breite Taeler. "
+                        "Wirkt waagerecht UND senkrecht. Werte unterhalb "
+                        "weniger Pixel werden automatisch angehoben, weil sie "
+                        "sonst nicht darstellbar waeren."
+    }
+    DETAIL = {
+        "min": 0.3, "max": 3.5, "default": 1.5, "step": 0.1,
+        "description": "Wie weit die feinen Rinnen von den Steilhaengen auf "
+                        "flacheres Gelaende hinauslaufen. Kleine Werte halten "
+                        "sie auf den steilen Flanken."
+    }
+    GULLY_WEIGHT = {
+        "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.05,
+        "description": "Rinnen gegen Kantenschaerfe. Bei 0 entstehen kaum "
+                        "Rinnen, dafuer werden Gipfel und Talsohlen "
+                        "geschaerft. Bei 1 volle Rinnen, dafuer bleiben "
+                        "Gipfel und Sohlen runder."
+    }
+    RIDGE_ROUNDING = {
+        "min": 0.0, "max": 1.0, "default": 0.1, "step": 0.05,
+        "description": "Rundung der Kaemme. 0 ergibt scharfe Grate, hohe "
+                        "Werte abgerundete Ruecken."
+    }
+    CREASE_ROUNDING = {
+        "min": 0.0, "max": 1.0, "default": 0.0, "step": 0.05,
+        "description": "Rundung der Talsohlen. 0 ergibt scharf eingeschnittene "
+                        "Kerben, hohe Werte weiche Mulden."
+    }
+    OCTAVES = {
+        "min": 1, "max": 7, "default": 5, "step": 1,
+        "description": "Anzahl der uebereinandergelegten Rinnen-Groessen. "
+                        "Oktaven, deren Rinnen feiner als zwei Pixel "
+                        "wuerden, werden automatisch weggelassen - bei "
+                        "kleiner Map Size wirkt der Regler deshalb nach oben "
+                        "nicht mehr."
+    }
+
+
+# =============================================================================
+# HAUPTSCHALTER Erosion
+# =============================================================================
+# False schaltet den gesamten Erosionslauf ab: core/erosion_generator.py
+# _calc_hydraulic() schreibt dann für JEDES LOD Nullkarten, statt nur für die
+# Zwischenrunden. Das Gelände bleibt damit exakt das unerodierte -
+# get_calculator_combined_heightmap() zieht erosion_map ab und addiert
+# sedimentation_map, beide null.
+#
+# Bewusst KEIN Slider und bewusst kein Entfernen des Knotens aus dem
+# CALCULATOR_GRAPH: der Knoten liefert weiter seine sieben Karten in der
+# richtigen Form und Größe, alle Kanten und alle Verbraucher (water.*, biome.*,
+# erosion.slope, die Anzeige-Layer) laufen unverändert. Fünf handgepflegte
+# Generatorlisten haben in diesem Projekt je einen Deadlock oder eine fehlende
+# Invalidierung verursacht (SPEZIFIKATION §4.5) - ein Knoten, der Nullen
+# liefert, ist der Weg, der das nicht wieder auslöst.
+#
+# Absichtlich AUS seit 2026-07-30: die Erosion wird durch den Skelett-Ansatz
+# ersetzt (Struktur vor Noise, SPEZIFIKATION §8) und soll später nur noch als
+# Feinschliff auf einem bereits entwässerten Gelände laufen. Bis dahin ist ihr
+# Beitrag laut §7 negativ - sie ERZEUGT die Becken, die sie auflösen soll.
+#
+# Zum Wiedereinschalten: hier auf True setzen. Sonst ist nichts zu tun.
+EROSION_AKTIV = False
+
+
 class EROSION:
     """
     Parameter für core/erosion_generator.py (Feld-Erosion, eigener Generator
@@ -592,7 +862,7 @@ class EROSION:
 
     KALIBRIERUNG 2026-07-28 gegen das Zielbild des Nutzers (dichte verästelte
     Entwässerung, scharfe Kämme, helle Talböden). Werkzeug:
-    scratch_erosion_lab.py - es rechnet Varianten auf der GPU, misst vier
+    tools/erosion_lab.py - es rechnet Varianten auf der GPU, misst vier
     Formkennzahlen und schreibt einen Kontaktabzug, der nebeneinander
     vergleichbar ist.
 
@@ -927,10 +1197,17 @@ class BIOME:
         "description": "Multiplikator dafür, wie stark die Temperatur die "
                         "Biom-Klassifikation beeinflusst."
     }
+    # Default 2026-07-30 von 10 auf 0 gesenkt, zusammen mit
+    # TERRAIN.BASE_ELEVATION_M = 0.0 (siehe dort). Die Talsohle liegt jetzt
+    # exakt bei 0 m; bliebe der Meeresspiegel bei 10 m, würde der untere Teil
+    # jeder Karte als Ozean klassifiziert - SPEZIFIKATION §1 führt die Karten
+    # aber ausdrücklich OHNE Meer. §4.7: abhängige Defaults ziehen mit.
     SEA_LEVEL = {
-        "min": 0, "max": 200, "default": 10, "step": 5, "suffix": "m",
+        "min": 0, "max": 200, "default": 0, "step": 5, "suffix": "m",
         "description": "Höhe des Meeresspiegels - alles darunter wird als "
-                        "Wasser/Küste klassifiziert."
+                        "Wasser/Küste klassifiziert. Bei 0 m fällt er mit der "
+                        "Talsohle zusammen, die Karte bleibt also vollständig "
+                        "Land."
     }
     BANK_WIDTH = {
         "min": 1, "max": 20, "default": 3, "step": 1, "suffix": "Pixel",

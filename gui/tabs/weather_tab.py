@@ -261,7 +261,7 @@ class WeatherTab(BaseMapTab):
         Erstellt GPU-Status-Anzeige. Korrektur (Weather-Review-Runde,
         docs/session_review_2026-07-22_weather.md): der ShaderManager bietet
         durchaus 4 Weather-GPU-Shader-Operationen an (Dispatch-Tabelle in
-        gui/OldManagers/shader_manager.py) - nur 3 davon werden im
+        managers/shader_manager.py) - nur 3 davon werden im
         Normalbetrieb praktisch nie erreicht, weil der gekoppelte 3-Schicht-
         Loop (_run_coupled_atmosphere_simulation) sie nur im Exception-
         Fallback-Pfad aufruft. Die Anzeige hier zeigt trotzdem ehrlich, ob
@@ -644,7 +644,7 @@ class WeatherTab(BaseMapTab):
         Sammelt die aktuellen Werte aller Weather-Parameter-Slider.
         Wird vom ParameterManager als zentrale Quelle für die Weather-Parameter
         genutzt (register_tab()/get_tab_parameters() rufen diese Methode auf,
-        siehe gui/OldManagers/parameter_manager.py).
+        siehe managers/parameter_manager.py).
         """
         parameters = {}
         for param_name, slider in self.parameter_sliders.items():

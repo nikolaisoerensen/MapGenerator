@@ -759,7 +759,7 @@ class GeologySystemGenerator:
 
     def _ensure_data_lod_manager(self):
         if self.data_lod_manager is None:
-            from gui.OldManagers.data_lod_manager import DataLODManager
+            from managers.data_lod_manager import DataLODManager
             self.data_lod_manager = DataLODManager()
         return self.data_lod_manager
 
@@ -931,7 +931,7 @@ class GeologySystemGenerator:
         return hashlib.md5(str(relevant).encode()).hexdigest()[:12]
 
     # -------------------------------------------------------------------
-    # Calculator-Knoten (siehe gui/OldManagers/calculator_graph.py)
+    # Calculator-Knoten (siehe managers/calculator_graph.py)
     # -------------------------------------------------------------------
 
     def _calc_layer_thickness(self, calculator_id: str, lod_level: int) -> None:

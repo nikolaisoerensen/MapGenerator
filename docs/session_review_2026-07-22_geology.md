@@ -18,8 +18,8 @@ Multiplikation mit Hillshade) als möglicher Ersatz für das jetzige Modell
 Codebasis: Haupt-Checkout (`C:\Lokale Dateien\Projects\Python\MapGenerator`,
 Branch `main`), analog zur Terrain-Runde. Recherche-Basis: voller Read von
 `core/geology_generator.py` (1517 Zeilen), `gui/tabs/geology_tab.py`,
-`gui/config/value_default.py` (GEOLOGY-Sektion), `gui/OldManagers/
-data_lod_manager.py` (Geology-Methoden), `gui/OldManagers/
+`gui/config/value_default.py` (GEOLOGY-Sektion), `managers/
+data_lod_manager.py` (Geology-Methoden), `managers/
 calculator_graph.py` und `generation_orchestrator.py`, vollständiger
 Shader-Verzeichnis-Scan, Vergleich mit dem Terrain-Skalierungs-Pattern aus
 `core/terrain_generator.py`.

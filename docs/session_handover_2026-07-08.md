@@ -35,13 +35,13 @@ core/settlement_generator.py               | 300 +++++++---
 core/terrain_generator.py                  | 175 +++---
 core/water_generator.py                    | 378 ++++++++----
 core/weather_generator.py                  | 194 ++++---
-gui/OldManagers/data_lod_manager.py        | 118 ++++
-gui/OldManagers/generation_orchestrator.py | 903 ++++++++++++-----------------
+managers/data_lod_manager.py        | 118 ++++
+managers/generation_orchestrator.py | 903 ++++++++++++-----------------
 gui/map_editor.py                          |  48 ++
 9 files changed, 1563 insertions(+), 1018 deletions(-)
 ```
 
-Plus neue, noch nicht getrackte Dateien: `gui/OldManagers/calculator_graph.py` (zentrale
+Plus neue, noch nicht getrackte Dateien: `managers/calculator_graph.py` (zentrale
 neue Graph-Definition), `docs/tickets.xlsx`, `docs/backlog.md`, dieses Handover-Dokument.
 Außerdem liegen ein paar Debug-Logs aus Smoke-Test-Läufen im Repo-Root
 (`smoke_test_*.log`, `test_geology_height_feedback.log`) — reine Nebenprodukte, können
@@ -64,7 +64,7 @@ Settlement-Phasen, die gar keine Biome-Daten brauchen, mussten trotzdem unnötig
 warten.
 
 **Architektur (siehe Memory `project-lod-lockstep-calculator-dispatch` für Details):**
-- `gui/OldManagers/calculator_graph.py` (neu): `CALCULATOR_GRAPH` — 34 einzeln
+- `managers/calculator_graph.py` (neu): `CALCULATOR_GRAPH` — 34 einzeln
   dispatchbare Rechenknoten über alle 6 Generatoren (aus
   `docs/generation_pipeline_dependencies.md` plus `geology.faceted_boundaries`, das dort
   nicht dokumentiert war). `CalculatorDispatcher` — globaler Runden-Scheduler mit echter
@@ -73,7 +73,7 @@ warten.
   Runde, sobald ihre Abhängigkeiten es zulassen (kein künstliches Warten auf den ganzen
   Generator). Bewiesen: Settlement-Phasen #28-#33 laufen vollständig OHNE dass Biome
   überhaupt angefragt wurde — nur `settlement.plot_nodes` (#34) braucht `biome_map`.
-- `gui/OldManagers/data_lod_manager.py`: neuer feingranularer Calculator-Storage
+- `managers/data_lod_manager.py`: neuer feingranularer Calculator-Storage
   (`set_calculator_output`/`get_calculator_output`/`get_calculator_completed_lod`),
   getrennt vom bisherigen Domain-Level-Storage (`_terrain_data`/`_geology_data`/etc.).
   Zusätzlich neue `get_calculator_combined_heightmap(lod_level)` (siehe Bugfix unten).
@@ -83,7 +83,7 @@ warten.
   Generators eine Runde fertig haben). Die alten öffentlichen Einstiegspunkte
   (`calculate_heightmap`/`calculate_geology`/etc.) sind jetzt dünne Standalone-Convenience-
   Wrapper für Legacy-Aufrufer/Tests.
-- `gui/OldManagers/generation_orchestrator.py`: `CalculatorThread` (ersetzt
+- `managers/generation_orchestrator.py`: `CalculatorThread` (ersetzt
   `GenerationThread`) läuft EINEN Rechenknoten pro Thread; `advance_calculator_dispatch()`
   treibt den Dispatcher an; `_maybe_assemble_generator()` ruft `assemble_*_data` auf,
   sobald ein Generator seine Runde komplett hat. Signal-Vertrag für die Tabs unverändert

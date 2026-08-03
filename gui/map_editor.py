@@ -36,12 +36,12 @@ import logging
 from typing import Optional
 
 from gui.config.gui_default import WindowSettings, EditorConstants
-from gui.OldManagers.data_lod_manager import DataLODManager
-from gui.OldManagers.generation_orchestrator import GenerationOrchestrator, GeneratorType
-from gui.OldManagers.navigation_manager import NavigationManager
+from managers.data_lod_manager import DataLODManager
+from managers.generation_orchestrator import GenerationOrchestrator, GeneratorType
+from managers.navigation_manager import NavigationManager
 from gui.widgets.widgets import ParameterSlider
-from gui.OldManagers.parameter_manager import ParameterManager
-from gui.OldManagers.shader_manager import ShaderManager
+from managers.parameter_manager import ParameterManager
+from managers.shader_manager import ShaderManager
 from gui.widgets.widgets import BaseButton, StatusIndicator, ProgressBar
 from gui.widgets.pipeline_status_panel import PipelineStatusPanel
 from gui.utils.progress_weighting import WeightedProgressCalculator
@@ -419,7 +419,7 @@ class MapEditorWindow(QMainWindow):
         hartkodierten Default), unabhängig vom tatsächlichen Ziel-LOD der
         laufenden Anfrage.
 
-        Der CalculatorDispatcher (gui/OldManagers/calculator_graph.py) führt
+        Der CalculatorDispatcher (managers/calculator_graph.py) führt
         bereits pro Knoten (Terrain/Geology/Weather/Water/Biome/Settlement,
         alle 34 Knoten) completed_lod/target_lod - ein einfaches Verhältnis
         über alle Knoten hinweg ist exakt "wie viele LOD-Runden von allen
@@ -1064,7 +1064,7 @@ class MapEditorWindow(QMainWindow):
     # Generation Event Handlers
     #
     # Signaturen richten sich exakt nach GenerationOrchestrator's echten
-    # pyqtSignal-Deklarationen (gui/OldManagers/generation_orchestrator.py):
+    # pyqtSignal-Deklarationen (managers/generation_orchestrator.py):
     #   generation_started    = pyqtSignal(str, int)   # (generator_type, lod_level)
     #   generation_completed  = pyqtSignal(str, dict)  # (request_id, result_data)
     #   generation_progress   = pyqtSignal(int, str)   # (progress, message) - global, kein generator_type

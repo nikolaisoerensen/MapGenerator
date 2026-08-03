@@ -107,32 +107,40 @@ class TerrainData:
             "fallback_used": self.fallback_used
         }
 
-    def detect_critical_changes(self, new_parameters: Dict[str, Any]) -> List[str]:
-        """
-        Funktionsweise: Erkennt signifikante Parameter-Änderungen für Cache-Invalidation
-        Parameter: new_parameters - Neue Parameter zum Vergleich
-        Returns: List[str] - Liste der kritischen Änderungen
-        """
-        if not self.parameters:
-            return ["initial_generation"]
-
-        critical_params = ["map_seed", "map_size", "amplitude", "octaves", "frequency"]
-        critical_changes = []
-
-        for param in critical_params:
-            if param in new_parameters and param in self.parameters:
-                if new_parameters[param] != self.parameters[param]:
-                    critical_changes.append(param)
-
-        return critical_changes
-
-    def get_invalidated_generators(self) -> List[str]:
-        """
-        Funktionsweise: Bestimmt welche nachgelagerten Generatoren invalidiert werden müssen
-        Returns: List[str] - Liste der zu invalidierenden Generatoren
-        """
-        # Terrain ist Basis-Generator - alle anderen hängen davon ab
-        return ["geology", "weather", "water", "biome", "settlement"]
+    # ENTFERNT 2026-07-30: detect_critical_changes() und
+    # get_invalidated_generators().
+    #
+    # Beide waren toter Code - eine repo-weite Suche (core/, gui/, descriptor.py,
+    # smoke_test_*, _old_*) fand ausser der jeweiligen Definition keinen
+    # Aufrufer. Beide waren zugleich handgepflegte Listen der Art, die
+    # SPEZIFIKATION §4.5 ausdruecklich verbietet, und beide waren schon falsch:
+    #
+    #   detect_critical_changes()   fuehrte fuenf Parameter als "kritisch" und
+    #       liess redistribute_power, persistence und lacunarity aus, seit
+    #       2026-07-30 zusaetzlich die sieben erosion_filter_*-Regler. Wer die
+    #       Liste liest und ihr glaubt, schliesst daraus, dass diese Regler das
+    #       Terrain nicht invalidieren - was falsch ist.
+    #   get_invalidated_generators()  fuehrte die nachgelagerten Generatoren
+    #       von Hand statt sie aus CALCULATOR_GRAPH abzuleiten.
+    #
+    # Gefaehrlich war nicht, dass sie nichts taten, sondern dass sie
+    # verbindlich aussahen.
+    #
+    # Die Invalidierung findet in GenerationOrchestrator.
+    # invalidate_downstream_dependencies() statt; die betroffenen Generatoren
+    # werden dort aus dem Knotengraphen abgeleitet
+    # (managers/calculator_graph.py), nicht aus einer Liste. Und weil
+    # _calculate_parameter_hash() den VOLLSTAENDIGEN Parametersatz hasht,
+    # wirkt jeder neue Regler, ohne irgendwo eingetragen zu werden - ein Hash
+    # ueber alles kann nichts vergessen, eine Liste schon.
+    #
+    # Nicht mit aufgeraeumt, weil ausserhalb dieser Aufgabe: auch
+    # validate_against_parameters() und get_validity_summary() weiter unten
+    # haben derzeit keinen Aufrufer. Sie stehen aber als Teil des
+    # "Validity-Methods"-Satzes im Klassen-Docstring und in descriptor.py und
+    # gehoeren zusammen mit den gleichnamigen Methoden von Geology/Weather
+    # betrachtet, nicht einzeln. is_valid() ist in Gebrauch
+    # (test_terrain_generator() und mehrere smoke_test_*).
 
     def _calculate_parameter_hash(self, parameters: Dict[str, Any]) -> str:
         """Berechnet MD5-Hash der Parameter für Cache-Validation"""
@@ -1161,7 +1169,7 @@ class BaseTerrainGenerator:
         injizierten Manager) - die echte Pipeline injiziert immer einen über
         GenerationOrchestrator.get_generator_instance()."""
         if self.data_lod_manager is None:
-            from gui.OldManagers.data_lod_manager import DataLODManager
+            from managers.data_lod_manager import DataLODManager
             self.data_lod_manager = DataLODManager()
         return self.data_lod_manager
 
@@ -1172,7 +1180,7 @@ class BaseTerrainGenerator:
             liefert das fertige TerrainData-Objekt. Die echte GUI-Pipeline
             (GenerationOrchestrator) ruft dieselben _calc_*-Methoden ab jetzt einzeln
             über den globalen CalculatorDispatcher auf (siehe
-            gui/OldManagers/calculator_graph.py, Tracker #16 LOD-Lockstep-Umbau) -
+            managers/calculator_graph.py, Tracker #16 LOD-Lockstep-Umbau) -
             der Effekt ist identisch, da beide Wege dieselben Methoden und denselben
             Storage nutzen.
         Parameter: parameters - Alle Terrain-Parameter (aus ParameterManager)
@@ -1283,8 +1291,27 @@ class BaseTerrainGenerator:
         persistence = parameters.get('persistence', 0.5)
         lacunarity = parameters.get('lacunarity', 2.0)
 
-        # Frequency für LOD-Größe anpassen
-        adjusted_frequency = frequency * (64 / size)  # Referenz: LOD 64
+        # Frequenz in Zyklen pro Pixel. Zwei Wege, und der erste ist der
+        # richtige:
+        #
+        # terrain_feature_size_m gibt die Groesse der Grundformen in METERN an.
+        # Daraus folgt die Zyklenzahl ueber die Karte als Kartenbreite geteilt
+        # durch Formgroesse, und daraus die Zyklen je Pixel. Damit haengt die
+        # Landschaft an der Wirklichkeit und nicht am Bildausschnitt: ein
+        # groesserer Ausschnitt zeigt MEHR Formen, nicht groessere.
+        #
+        # Der alte Weg `frequency * (64 / size)` haengt nur an der Pixelzahl.
+        # Gemessen (smoke_test_terrain_scale_coupling.py): die Karte zeigte bei
+        # jedem map_distance_km dieselben 4.74 Zyklen, die Formen waren also bei
+        # 5 km 1064 m und bei 50 km 10638 m gross. Er bleibt als
+        # Ueberschreibung erhalten, damit Labore und Altbestand weiterlaufen.
+        feature_size_m = parameters.get('feature_size_m')
+        if feature_size_m and feature_size_m > 0:
+            karte_m = float(self._ensure_data_lod_manager().get_map_distance_km()) * 1000.0
+            zyklen_ueber_karte = karte_m / float(feature_size_m)
+            adjusted_frequency = zyklen_ueber_karte / float(size)
+        else:
+            adjusted_frequency = frequency * (64 / size)  # Referenz: LOD 64
 
         # Oktaven, die die Nyquist-Grenze (0.5 Zyklen/Pixel) überschreiten, fügen
         # nur noch Aliasing statt echtem Detail hinzu - bei Default-Werten
@@ -1340,8 +1367,219 @@ class BaseTerrainGenerator:
         heightmap = self._apply_redistribution(
             heightmap, parameters.get('redistribute_power', 1.0), amplitude
         )
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"heightmap": heightmap})
+
+        outputs = {"heightmap": heightmap}
+        gefiltert = self._apply_erosion_filter(heightmap, amplitude)
+        if gefiltert is not None:
+            outputs["heightmap"] = gefiltert["heightmap"]
+            outputs["ridge_map"] = gefiltert["ridge_map"]
+
+        # Flussnetz NACH dem Erosionsfilter: dessen Ergebnis ist die Flaeche P,
+        # in die eingeschnitten wird (SPEZIFIKATION §12).
+        netz = self._apply_river_network(outputs["heightmap"], amplitude)
+        if netz is not None:
+            # Spanne erneut setzen: der Einschnitt drueckt die Talsohle unter
+            # die Talsohlenhoehe (gemessen -1260 m bei den Alpen, §12). Mit
+            # Potenz 1.0 ist das eine reine lineare Abbildung, die Form bleibt.
+            outputs["heightmap"] = self._apply_redistribution(
+                netz["heightmap"], 1.0, amplitude)
+            outputs["river_mask"] = netz["river_mask"]
+            outputs["river_order"] = netz["river_order"]
+
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, outputs)
         self.logger.debug("Heightmap generation + redistribution completed")
+
+    def _apply_river_network(self, P: np.ndarray, amplitude: float):
+        """
+        Flussnetz-Skelett in die Flaeche P schneiden (SPEZIFIKATION §12,
+        core/terrain_river_network.py).
+
+        Wie beim Erosionsfilter bewusst KEIN eigener Calculator-Knoten: das
+        Ergebnis ist die endgueltige Gelaendeform, und 20+ Lesestellen holen
+        die Heightmap ueber ("terrain.redistribution", "heightmap"). Sie alle
+        umzuhaengen ist das Risiko aus §4.5.
+
+        Der Hoehenbereich wird danach NICHT hier zurueckgebildet - das macht
+        _calc_redistribution ohnehin nach dem Erosionsfilter. Hier wird die
+        Spanne zum Schluss noch einmal gesetzt, weil der Einschnitt die
+        Talsohle unter die Talsohlenhoehe druecken kann.
+
+        Returns: None wenn das Netz aus ist oder die Karte fuer den
+        eingestellten Flussabstand zu klein ist.
+        """
+        from gui.config.value_default import FLUSSNETZ_AKTIV
+        if not FLUSSNETZ_AKTIV:
+            return None
+
+        from core.terrain_river_network import carve_river_network
+
+        parameters = self._current_parameters
+        size = int(P.shape[0])
+        km = float(self._ensure_data_lod_manager().get_map_distance_km())
+        meters_per_pixel = km * 1000.0 / float(size)
+
+        # Reglerwerte durchreichen; fehlt einer, gilt die Vorgabe des Moduls
+        # (§4.1: durchreichen, nicht doppelt pflegen).
+        netz_parameter = {}
+        for parameter_key, modul_key in (
+                ("river_spacing_m", "river_spacing_m"),
+                ("river_incision_m", "river_incision_m"),
+                ("river_valley_width", "valley_width_fraction"),
+                ("river_valley_form", "valley_form"),
+                ("river_valley_steps", "valley_steps"),
+                ("river_meander", "meander"),
+                ("river_divide_blend", "divide_blend"),
+                ("river_cost_strength", "cost_strength")):
+            if parameter_key in parameters:
+                netz_parameter[modul_key] = parameters[parameter_key]
+
+        # PLATEAU_RELIEF staucht das Relief der Flaeche ZWISCHEN den Taelern,
+        # laesst den Gipfel aber stehen. Das ist der Regler, der Hochebene von
+        # Bergland trennt (Fjordland 28% gegen Alpen 100%).
+        plateau = float(parameters.get("river_plateau_relief", 1.0))
+        if plateau < 1.0:
+            P = P * plateau + amplitude * (1.0 - plateau)
+
+        import time
+        start = time.time()
+        ergebnis = carve_river_network(
+            P.astype(np.float64), meters_per_pixel, float(amplitude),
+            int(parameters.get("map_seed", self.map_seed)), netz_parameter)
+        if ergebnis is None:
+            return None
+
+        self.logger.debug(
+            "River network: %d nodes, order up to %d, %dpx, %.2fs",
+            ergebnis["node_count"], ergebnis["max_order"], size,
+            time.time() - start)
+        return ergebnis
+
+    def _erosion_filter_parameters(self, size: int, map_distance_km: float) -> Dict[str, Any]:
+        """
+        Bildet die Regler des Terrain-Tabs auf die Parameter von
+        core/terrain_erosion_filter.py ab.
+
+        Eigene Methode, damit Messwerkzeuge denselben Weg gehen koennen wie die
+        App. §4.2 ist der teuerste Fehlertyp dieses Projekts - dreimal an einem
+        Tag wurde etwas anderes gemessen als lief.
+
+        Fehlt ein Regler, gilt die Vorgabe des Filters. Es wird KEIN zweiter
+        Satz Konstanten hier gefuehrt (§4.1: durchreichen, nicht doppelt
+        pflegen).
+        """
+        from core.terrain_erosion_filter import ATEF_DEFAULTS
+
+        parameters = self._current_parameters
+        filter_parameters: Dict[str, Any] = {}
+        for parameter_key, filter_key in (
+                ("erosion_filter_strength", "erosion_strength"),
+                ("erosion_filter_scale", "erosion_scale"),
+                ("erosion_filter_detail", "erosion_detail"),
+                ("erosion_filter_gully_weight", "erosion_gully_weight"),
+                ("erosion_filter_octaves", "erosion_octaves")):
+            if parameter_key in parameters:
+                filter_parameters[filter_key] = parameters[parameter_key]
+
+        # Die beiden Rundungen sind im Filter ein vec4; nur die ersten zwei
+        # Komponenten sind Regler, die hinteren zwei bleiben bei den Werten des
+        # Originals.
+        vorgabe = ATEF_DEFAULTS["erosion_rounding"]
+        filter_parameters["erosion_rounding"] = (
+            float(parameters.get("erosion_filter_ridge_rounding", vorgabe[0])),
+            float(parameters.get("erosion_filter_crease_rounding", vorgabe[1])),
+            vorgabe[2], vorgabe[3])
+
+        # RINNENGROESSE: der Regler steht in METERN, der Filter rechnet in
+        # Kartenanteilen. Hier ist die eine Stelle, an der die drei Skalenebenen
+        # (Aufloesung, reale Ausdehnung, Rinnengroesse) zusammengefuehrt werden.
+        #
+        # Ohne diese Umrechnung hing die Rinnengroesse an der Kartenausdehnung:
+        # 5 / 15 / 50 km ergaben 631 / 1893 / 6310 m Rinnen, Faktor 10 ueber den
+        # Bereich (smoke_test_terrain_scale_coupling.py, Lauf 2). Beim
+        # Herauszoomen wurden die Rinnen groesser statt zahlreicher.
+        #
+        # erosion_filter_scale (der rohe Anteil) bleibt als Ueberschreibung
+        # zulaessig und hat Vorrang - die Labore und der Paritaetstest gegen den
+        # Shader brauchen den Wert, den das Original benutzt.
+        if "erosion_scale" not in filter_parameters:
+            karte_m = max(float(map_distance_km) * 1000.0, 1.0)
+            groesse_m = float(parameters.get(
+                "erosion_filter_gully_size_m", 0.15 * karte_m))
+            anteil = groesse_m / karte_m
+
+            # Untergrenze: eine Rinne, die schmaler als drei Pixel wird, ist
+            # nicht mehr darstellbar und erzeugt nur Aliasing - dieselbe
+            # Ueberlegung wie _max_safe_octaves() fuer die Oktaven, nur fuer die
+            # Grundskala. Bewusst geometrisch (Pixel je Rinne) statt als fester
+            # Meterwert, damit sie nicht an einer bestimmten Kartengroesse haengt.
+            zell_skala = float(ATEF_DEFAULTS["erosion_cell_scale"])
+            kleinster_anteil = 3.0 / max(zell_skala * float(size), 1.0)
+            if anteil < kleinster_anteil:
+                self.logger.debug(
+                    "Erosion filter: gully size %.0f m raised to %.0f m - "
+                    "below three pixels at %d px / %.1f km",
+                    groesse_m, kleinster_anteil * karte_m, size, map_distance_km)
+                anteil = kleinster_anteil
+            filter_parameters["erosion_scale"] = min(anteil, 1.0)
+
+        return filter_parameters
+
+    def _apply_erosion_filter(self, heightmap: np.ndarray, amplitude: float):
+        """
+        ATEF-Erosionsfilter auf die fertig umverteilte Heightmap (SPEZIFIKATION
+        §9, Portierung in core/terrain_erosion_filter.py).
+
+        Absichtlich HIER und nicht als eigener Calculator-Knoten: der Filter
+        liefert die endgueltige Geländeform, und 20+ Lesestellen in
+        core/ und gui/ holen die Heightmap ueber
+        ("terrain.redistribution", "heightmap"). Sie alle auf einen neuen Knoten
+        umzuhaengen ist genau das Risiko, vor dem §4.5 warnt (fuenf
+        handgepflegte Listen haben je einen Deadlock oder eine fehlende
+        Invalidierung verursacht). So sehen Slope, Schatten, Geology, Weather,
+        Water, Biome, die 2D-Anzeige, die 3D-Ansicht und der Export den Filter
+        ohne eine einzige weitere Aenderung.
+
+        Die ridge_map (-1 in Kerben, +1 auf Kaemmen) wird als zweiter Output
+        desselben Knotens mitgespeichert - der Autor nennt sie ausdruecklich als
+        Entwaesserungs-Eingang. Sie ist noch NICHT als Anzeige-Layer registriert
+        und wird noch von niemandem gelesen.
+
+        Returns: None wenn der Filter aus ist, sonst dict mit heightmap und
+            ridge_map.
+        """
+        from gui.config.value_default import EROSION_FILTER_AKTIV
+        if not EROSION_FILTER_AKTIV:
+            return None
+
+        from core.terrain_erosion_filter import ATEF_DEFAULTS, filter_heightmap
+
+        size = int(heightmap.shape[0])
+        km = float(self._ensure_data_lod_manager().get_map_distance_km())
+        meters_per_pixel = km * 1000.0 / float(size)
+        filter_parameters = self._erosion_filter_parameters(size, km)
+
+        import time
+        start = time.time()
+        ergebnis = filter_heightmap(heightmap, meters_per_pixel, filter_parameters)
+        gefiltert = heightmap + ergebnis["height_delta"]
+
+        # Hoehenspanne wiederherstellen. §3.1 fuehrt "Hoehenspanne genau
+        # BASE_ELEVATION_M .. AMPLITUDE" als erfuellt, und ein Delta obendrauf
+        # reisst sie - gemessen wuchs das Relief um 6-8%. redistribute_power=1.0
+        # macht _apply_redistribution() zur reinen linearen Abbildung auf die
+        # Zielspanne, laesst die Form also unberuehrt.
+        #
+        # Zweiter Zweck: damit kann kein Reglerstand des Filters die Karte aus
+        # ihrem Hoehenbereich schieben (§1, §4.7).
+        gefiltert = self._apply_redistribution(gefiltert, 1.0, amplitude)
+
+        self.logger.debug(
+            "Erosion filter applied: %dpx, %d of %d octaves effective, %.2fs",
+            size, ergebnis["effective_octaves"],
+            filter_parameters.get("erosion_octaves",
+                                  ATEF_DEFAULTS["erosion_octaves"]),
+            time.time() - start)
+        return {"heightmap": gefiltert, "ridge_map": ergebnis["ridge_map"]}
 
     def _calc_slope(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'terrain.slope' (#3)"""

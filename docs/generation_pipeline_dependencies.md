@@ -8,7 +8,7 @@ verstreuten, teils veralteten/widersprüchlichen Dependency-Listen (siehe
 
 Es gibt **6 Top-Level-Generatoren** (Terrain, Geology, Weather, Water, Biome, Settlement),
 die zusammen **29 einzelne Calculator-Schritte** enthalten. Der aktuelle Orchestrator
-(`gui/OldManagers/generation_orchestrator.py`) kennt nur die 6-Knoten-Granularität und
+(`managers/generation_orchestrator.py`) kennt nur die 6-Knoten-Granularität und
 lässt jeden Generator unabhängig durch alle seine LOD-Stufen laufen (siehe
 ["Bekannte Probleme"](#bekannte-probleme-nicht-nur-dokumentation)) — dieses Dokument ist
 die Grundlage für einen künftigen Umbau auf echte Calculator-/LOD-Synchronisation.
@@ -59,7 +59,7 @@ die Grundlage für einen künftigen Umbau auf echte Calculator-/LOD-Synchronisat
 
 (29 tatsächliche Calculator + der kaputte Rückkopplungsschritt #22 = 30 Zeilen in der Tabelle,
 plus 5 neue Settlement-Knoten #35-#39 aus dem Settlement-Rework = 39 aktive Calculators in
-`gui/OldManagers/calculator_graph.py`.)
+`managers/calculator_graph.py`.)
 
 **Settlement-Rework (Ticket #4 in docs/backlog.md), Stand 2026-07-09:** #35 (Stadtgrenze),
 #36 (innerstädtische Blöcke) und #37 (Landschafts-Voronoi) hängen nur von `settlement_list`(29)
@@ -108,7 +108,7 @@ strikt sequenziell innerhalb ihres Generators:
 
 1. **`GenerationThread.run()` hatte keinen Dispatch-Fall für Biome/Settlement** — beide
    generierten über den Orchestrator nie etwas (`else`-Branch, `result = None`).
-   **Behoben 2026-07-08** in `gui/OldManagers/generation_orchestrator.py`.
+   **Behoben 2026-07-08** in `managers/generation_orchestrator.py`.
 2. **`heightmap_combined` ist ein reiner Passthrough zur rohen `heightmap`** —
    `DataLODManager.get_terrain_data_combined()` inkorporiert nie `erosion_map`/`sedimentation_map`,
    trotz des Namens und der Dokumentation in `descriptor.py`. Die Rückkopplungsmethode
@@ -195,7 +195,7 @@ gar nicht für die Ausführungs-Steuerung genutzt werden:
   (Tippfehler/Drift, wird nirgends real referenziert).
 - `descriptor.py` — reine Prosa-Dokumentation (keine ausführbaren Imports), beschreibt die
   Pipeline auf 6-Generator-Ebene, plus die (nicht implementierte) Erosion-Feedback-Absicht.
-- `gui/OldManagers/data_lod_manager.py:DATA_DEPENDENCY_MATRIX` — 28 von 29 Daten-Keys haben als
+- `managers/data_lod_manager.py:DATA_DEPENDENCY_MATRIX` — 28 von 29 Daten-Keys haben als
   einzige deklarierte Abhängigkeit `["heightmap_combined"]` (bis auf `hardness_map → rock_map`,
   der einzige korrekte Eintrag). Wird nur für Cache-Timestamp/Status-Bookkeeping genutzt, NICHT
   für Ausführungs-Gating.

@@ -76,12 +76,103 @@ sinnvoll - siehe MAX_CPU_RESOLUTION und die dortige Begründung. Der GPU-Pfad
 import logging
 
 import numpy as np
+from scipy import ndimage
 from scipy.ndimage import map_coordinates
 
 # Naturkonstante aus dem Wasser-Modell mitbenutzt statt dupliziert - dieselbe
 # Erdbeschleunigung treibt hier dieselbe Rohr-Gleichung (siehe
 # PipeFlowSimulator._pipe_step_cpu, formelgleich).
 from core.water_generator import GRAVITY, ThermalErosionSystem
+
+
+# =====================================================================
+# Geroutete Einzugsflaeche (Priority-Flood mit Epsilon)
+# =====================================================================
+
+def routed_drainage_area(surface, epsilon=1e-3):
+    """
+    Aufsummierte Einzugsflaeche in ZELLEN, aber ueber eine Route, die
+    garantiert am Kartenrand endet - auch aus einem abflusslosen Becken
+    heraus und ueber einen ebenen Seespiegel hinweg.
+
+    WARUM ES DAS BRAUCHT (gemessen 2026-07-30). `state["discharge"]` ist der
+    Betrag des lokalen Netto-Flusses zwischen Nachbarzellen. Er weiss nichts
+    davon, ob es von dieser Zelle aus ueberhaupt einen Weg von der Karte
+    hinaus gibt. Ergebnis auf dem Alpental-Zielgelaende: nur 20.5% der Karte
+    entwaessert bis zum Rand, 1160 geschlossene Senken, und laengeres Rechnen
+    macht es schlechter statt besser (8000 statt 6500 Schritte: Abfluss
+    20.5% -> 15.4%, Senken 1160 -> 1256). Dem Modell fehlte jeder Mechanismus,
+    der ein geschlossenes Becken auflaest.
+
+    Im Stream-Power-Gesetz steht an dieser Stelle die aufsummierte
+    Einzugsflaeche, nicht ein lokaler Fluss. Genau die traegt die Information
+    "es gibt einen Weg zum Meer": am Ueberlaufpunkt eines Beckens liegt die
+    gesamte Flaeche des Beckens an, dort schneidet sich die Rinne ein, der
+    Ueberlauf sinkt, das Becken laeuft aus - und die Rinne waechst rueckwaerts
+    ins Becken hinein. Das ist die Kette, die der Nutzer beschrieben hat.
+
+    VERFAHREN. Priority-Flood mit Epsilon (Barnes, Lehman, Mulla 2014). Vom
+    Rand aus wird die Karte in Reihenfolge steigender Hoehe geflutet; jede
+    Zelle bekommt als Hoehe `max(eigene, Elternhoehe + eps)` und als
+    Abflussziel die Zelle, von der sie geflutet wurde. Damit hat JEDE Zelle
+    einen strikt fallenden Weg zum Rand, ohne Sonderbehandlung fuer Ebenen -
+    ein reines Depression-Filling wuerde auf einem ebenen Seespiegel gar
+    keine Richtung liefern.
+
+    Die Reihenfolge, in der geflutet wird, ist zugleich die topologische
+    Ordnung: rueckwaerts durchlaufen summiert die Flaechen in einem Durchgang
+    auf, ohne Rekursion.
+
+    `surface` ist der WASSERSPIEGEL (Gelaende + Wasser), nicht das Gelaende.
+    Ein gefuelltes Becken hat dann einen ebenen Spiegel, dessen Ueberlauf an
+    der tatsaechlichen Stelle liegt, an der das Wasser austritt.
+    """
+    import heapq
+
+    hoehe, breite = surface.shape
+    anzahl = hoehe * breite
+    flach = np.ascontiguousarray(surface, dtype=np.float64).ravel()
+
+    gesetzt = np.zeros(anzahl, dtype=bool)
+    ziel = np.full(anzahl, -1, dtype=np.int64)
+    ordnung = np.empty(anzahl, dtype=np.int64)
+
+    haufen = []
+    for index in range(breite):
+        for i in (index, (hoehe - 1) * breite + index):
+            if not gesetzt[i]:
+                gesetzt[i] = True
+                heapq.heappush(haufen, (flach[i], i))
+    for zeile in range(hoehe):
+        for i in (zeile * breite, zeile * breite + breite - 1):
+            if not gesetzt[i]:
+                gesetzt[i] = True
+                heapq.heappush(haufen, (flach[i], i))
+
+    versatz = [(-1, -1), (-1, 0), (-1, 1), (0, -1),
+               (0, 1), (1, -1), (1, 0), (1, 1)]
+    anzahl_geflutet = 0
+    while haufen:
+        z, i = heapq.heappop(haufen)
+        ordnung[anzahl_geflutet] = i
+        anzahl_geflutet += 1
+        zeile, spalte = divmod(i, breite)
+        for dy, dx in versatz:
+            ny, nx = zeile + dy, spalte + dx
+            if 0 <= ny < hoehe and 0 <= nx < breite:
+                j = ny * breite + nx
+                if not gesetzt[j]:
+                    gesetzt[j] = True
+                    ziel[j] = i
+                    heapq.heappush(haufen, (max(flach[j], z + epsilon), j))
+
+    flaeche = np.ones(anzahl, dtype=np.float64)
+    for k in range(anzahl_geflutet - 1, -1, -1):
+        i = ordnung[k]
+        j = ziel[i]
+        if j >= 0:
+            flaeche[j] += flaeche[i]
+    return flaeche.reshape(surface.shape)
 
 
 class HydraulicFieldSimulator:
@@ -187,6 +278,39 @@ class HydraulicFieldSimulator:
     # (Steigung x normierte Geschwindigkeit x Tiefenfaktor) mal dieser
     # Bezugssäule. Sie hängt damit nur noch vom Zustand des Wassers ab, nicht
     # von der Diskretisierung.
+    # RELIEF-RELATIV seit 2026-07-29 (siehe capacity_reference_for()).
+    #
+    # Der Wert war eine absolute Bezugssaeule von 1 m. Damit hatte die Erosion
+    # ueber jeder Landschaft denselben Appetit - gemessen grub sie in ein
+    # Gelaende mit nur 400 m Relief ein 2117 m tiefes Loch, also das Fuenffache
+    # des gesamten vorhandenen Reliefs:
+    #
+    #     Amplitude   Relief vorher   max Abtrag   Relief nachher
+    #        500          400 m         2117 m        2278 m
+    #       4000         3900 m         1828 m        5236 m
+    #
+    # Der Amplituden-Regler war dadurch praktisch wirkungslos: aus 500 und
+    # 4000 m Eingang wurden 2278 und 5236 m Ausgang - das Ergebnis bestimmte
+    # die Erosion, nicht die Einstellung. Genau das blockierte einstellbare
+    # Landschaften von Flachland bis Hochgebirge.
+    #
+    # Derselbe Fehlertyp wie schon dreimal in dieser Datei: eine absolute
+    # Konstante, wo eine relative hingehoert (Regen pro Schritt statt pro
+    # Sekunde, Konvergenz pro Schritt statt pro Sekunde, die
+    # Glaettungsschwelle). Das Konvergenzkriterium und der Boeschungsdeckel
+    # sind hier laengst relief-relativ - nur die Kapazitaet war es nicht.
+    #
+    # Der Bruchteil ist so gewaehlt, dass sich bei dem Relief, gegen das
+    # kalibriert wurde (3900 m), NICHTS aendert: 1.0 m / 3900 m.
+    # Breite, ueber die der Abtrag einer Zelle verteilt wird, in Pixeln.
+    # 0 = aus (bisheriges Verhalten). Siehe die Begruendung in
+    # _pass_erode_deposit.
+    CHANNEL_WIDTH_SIGMA_PX = 0.0
+
+    CAPACITY_RELIEF_FRACTION = 1.0 / 3900.0
+
+    # Bezugsrelief der bisherigen Kalibrierung - nur noch fuer den Rueckfall,
+    # wenn kein Relief bekannt ist (Standalone-Aufrufe, Tests).
     CAPACITY_REFERENCE_M = 1.0
 
     # Bezugs-Durchfluss pro Meter Gewässerbreite (m²/s), bei dem eine Zelle
@@ -243,6 +367,62 @@ class HydraulicFieldSimulator:
     REFERENCE_SPECIFIC_DISCHARGE = 1.0  # m²/s
     DISCHARGE_EXPONENT = 2.0
 
+    # --- Geroutete Einzugsflaeche (Versuch 2026-07-30) ----------------
+    #
+    # Alle drei Konstanten gehoeren zu routed_drainage_area() am Modulkopf;
+    # dort steht die Messung, die den Mechanismus begruendet.
+    #
+    # DRAINAGE_ROUTING_INTERVAL = 0 schaltet ihn AUS, das ist der bisherige
+    # Zustand. Der Priority-Flood laeuft in Python und kostet bei 192 px etwa
+    # 0.4 s - deshalb nicht jeden Schritt. Das Entwaesserungsnetz aendert sich
+    # ohnehin viel langsamer als der Wasserstand.
+    DRAINAGE_ROUTING_INTERVAL = 0
+    #
+    # Kritische Einzugsflaeche in Zellen: darunter ist es ein Hang, darueber
+    # ein Gerinne. Sie uebernimmt die Rolle, die im lokalen Zweig
+    # EROSION_THRESHOLD_DISCHARGE hat - Abtrag erst oberhalb einer kritischen
+    # Schubspannung, geomorphologisch die Grenze Hang/Gerinne.
+    ROUTED_AREA_CRITICAL_CELLS = 40.0
+    #
+    # Flaechenexponent. 0.5 ist der ueblliche Wert fuer den spezifischen
+    # Durchfluss (q ~ A^0.5 bei etwa quadratischen Einzugsgebieten).
+    ROUTED_AREA_EXPONENT = 0.5
+    #
+    # Obergrenze des Faktors. Der lokale Zweig klemmt bei 1.0 und kann damit
+    # KEINE Gerinne-Hierarchie ausdruecken: ein Bach mit 50 Zellen Einzug und
+    # ein Hauptfluss mit 5000 bekommen dieselbe Kapazitaet. Eine hoehere
+    # Grenze ist der Sinn der Umstellung; sie muss endlich bleiben, weil die
+    # Kapazitaet sonst bei grossen Einzugsgebieten davonlaeuft.
+    ROUTED_FACTOR_CAP = 6.0
+    #
+    # Normiert den gerouteten Faktor auf den Mittelwert des lokalen, damit die
+    # Umstellung nur die VERTEILUNG aendert und nicht zugleich den
+    # Gesamtbetrag des Abtrags - siehe _pass_erode_deposit().
+    ROUTED_MATCH_LOCAL_MEAN = True
+
+    # --- Grabungsklemme (Versuch 2026-07-30) --------------------------
+    #
+    # Anteil des Abstands zum tiefsten Nachbarn, den eine Zelle in EINEM
+    # Schritt hoechstens abtragen darf. 0.0 schaltet sie aus, das ist der
+    # bisherige Zustand. Begruendung in _pass_erode_deposit().
+    # Gemessen 2026-07-30 auf beiden Zielgelaenden, CPU-Pfad, 128 px,
+    # 3000 Schritte:
+    #
+    #   Alpental          Abfluss  Senken  Netz  Becken  Relief
+    #     ohne Klemme      11.2%     512    126   12.9%   3636 m
+    #     Anteil 1.00      14.9%     338    196   10.9%   3401 m
+    #     Anteil 0.25      12.0%     334    187   11.1%   3401 m
+    #
+    #   Mittelgebirge     Abfluss  Senken  Netz  Becken
+    #     ohne Klemme      24.5%     107    173   15.5%
+    #     Anteil 1.00      24.7%      93    173   15.4%
+    #
+    # Voller Anteil ist besser als der gedrittelte, und das geringe
+    # Relief wird nicht schlechter - das ist das Abnahmekriterium aus
+    # der Spezifikation (eine Aenderung muss auf BEIDEN Zielgelaenden
+    # bestehen). beta bleibt bei -0.87, Massenbilanz 4e-16.
+    MAX_DIG_TO_NEIGHBOUR_FRACTION = 1.0
+
     # Schwelle, unter der ueberhaupt kein Material bewegt wird (m²/s).
     #
     # Ohne sie nagt die Erosion FLAECHIG statt in Rinnen. Gemessen bei 128 px,
@@ -268,7 +448,7 @@ class HydraulicFieldSimulator:
     # GERINNE (von fliessendem Wasser geformt). Sie wird abgezogen statt hart
     # abgeschnitten, damit es keinen Sprung im Kartenbild gibt.
     #
-    # NACHKALIBRIERT 2026-07-28 von 0.6 auf 0.4 (scratch_erosion_lab.py, Sweep
+    # NACHKALIBRIERT 2026-07-28 von 0.6 auf 0.4 (tools/erosion_lab.py, Sweep
     # "schwelle", 512 px, uebrige Werte auf dem neuen Stand). Gemessen ueber
     # beta, den Exponenten der Hangneigung-ueber-Einzugsgebiet-Beziehung - je
     # negativer, desto klarer fluvial geformt:
@@ -378,7 +558,7 @@ class HydraulicFieldSimulator:
         if self.shader_manager is None:
             return False
         try:
-            from gui.OldManagers.shader_manager import DISPATCH_TABLE
+            from managers.shader_manager import DISPATCH_TABLE
         except ImportError:
             return False
         return self.GPU_OPERATION in DISPATCH_TABLE
@@ -545,8 +725,9 @@ class HydraulicFieldSimulator:
                     "reference_discharge": self.REFERENCE_SPECIFIC_DISCHARGE,
                     "threshold_discharge": self.EROSION_THRESHOLD_DISCHARGE,
                     "discharge_exponent": self.DISCHARGE_EXPONENT,
-                    "capacity_reference": self.CAPACITY_REFERENCE_M,
+                    "capacity_reference": self.capacity_reference_for(state["relief"]),
                     "min_slope_factor": self.MIN_SLOPE_FACTOR,
+                    "max_dig_fraction": self.MAX_DIG_TO_NEIGHBOUR_FRACTION,
                     "transfer_rate": ThermalErosionSystem.TRANSFER_RATE,
                     "thermal_strength": cfg["thermal_strength"],
                     "gather_cap": max(ThermalErosionSystem.CAP_MIN_M,
@@ -649,6 +830,20 @@ class HydraulicFieldSimulator:
         return max(0.0, min(1.0,
                             math.log(initial_rate / current_rate)
                             / math.log(initial_rate / target_rate)))
+
+    @classmethod
+    def capacity_reference_for(cls, relief):
+        """
+        Die Bezugssaeule der Sedimentkapazitaet, in Metern - relief-relativ.
+
+        Wieviel Material fliessendes Wasser tragen kann, muss zur Groesse der
+        Landschaft passen. Ein Gebirge mit 4000 m Relief vertraegt einen
+        Abtrag, der eine 400-m-Huegellandschaft vollstaendig zerlegt. Siehe
+        die Messreihe bei CAPACITY_RELIEF_FRACTION.
+        """
+        if not relief or relief <= 0.0:
+            return cls.CAPACITY_REFERENCE_M
+        return float(relief) * cls.CAPACITY_RELIEF_FRACTION
 
     @staticmethod
     def change_rate(current, reference, interval, dt):
@@ -818,8 +1013,17 @@ class HydraulicFieldSimulator:
 
     def _step(self, state, cfg, dt):
         """Ein vollständiger Schritt. Mutiert `state` in place."""
+        state["step_index"] = state.get("step_index", 0) + 1
         self._pass_rain(state, cfg, dt)
         self._pass_flux_and_depth(state, dt)
+        if (self.DRAINAGE_ROUTING_INTERVAL > 0
+                and (state["step_index"] - 1) % self.DRAINAGE_ROUTING_INTERVAL == 0):
+            # Auf dem WASSERSPIEGEL, nicht auf dem Gelände - siehe
+            # routed_drainage_area(). Ein gefülltes Becken hat dann einen
+            # ebenen Spiegel, dessen Überlauf dort liegt, wo das Wasser
+            # tatsächlich austritt.
+            state["routed_area"] = routed_drainage_area(
+                state["terrain"] + state["water"])
         self._pass_erode_deposit(state, cfg, dt)
         self._pass_advect_sediment(state, dt)
         self._pass_thermal(state, cfg)
@@ -1002,10 +1206,36 @@ class HydraulicFieldSimulator:
         slope_erode = slope_true
         slope_carry = np.maximum(slope_true, self.MIN_SLOPE_FACTOR)
 
-        discharge = np.maximum(0.0, state["discharge"] - self.EROSION_THRESHOLD_DISCHARGE)
-        discharge_factor = np.minimum(1.0, (discharge / self.REFERENCE_SPECIFIC_DISCHARGE)
-                                      ** self.DISCHARGE_EXPONENT)
-        common = cfg["capacity_kc"] * discharge_factor * self.CAPACITY_REFERENCE_M
+        discharge = np.maximum(
+            0.0, state["discharge"] - self.EROSION_THRESHOLD_DISCHARGE)
+        discharge_factor = np.minimum(
+            1.0, (discharge / self.REFERENCE_SPECIFIC_DISCHARGE)
+            ** self.DISCHARGE_EXPONENT)
+
+        if state.get("routed_area") is not None:
+            # Geroutete Einzugsfläche statt lokalem Netto-Fluss. Sie trägt die
+            # Information "von hier gibt es einen Weg von der Karte hinaus",
+            # die dem lokalen Fluss fehlt - siehe routed_drainage_area().
+            ueberschuss = np.maximum(
+                0.0, state["routed_area"] - self.ROUTED_AREA_CRITICAL_CELLS)
+            geroutet = np.minimum(
+                self.ROUTED_FACTOR_CAP,
+                (ueberschuss / self.ROUTED_AREA_CRITICAL_CELLS)
+                ** self.ROUTED_AREA_EXPONENT)
+            if self.ROUTED_MATCH_LOCAL_MEAN:
+                # Auf den Mittelwert des lokalen Faktors normieren. Sonst
+                # aendert die Umstellung ZWEI Dinge gleichzeitig - die
+                # raeumliche Verteilung UND den Gesamtbetrag des Abtrags.
+                # Erster Versuch ohne diese Normierung: Relief 3636 -> 8927 m,
+                # weil der Deckel 6.0 einfach sechsmal so tief grub. Der
+                # Vergleich sagte dann nichts ueber das Signal aus.
+                mittel_geroutet = float(geroutet.mean())
+                if mittel_geroutet > 1e-12:
+                    geroutet = geroutet * (float(discharge_factor.mean())
+                                           / mittel_geroutet)
+            discharge_factor = geroutet
+        common = (cfg["capacity_kc"] * discharge_factor
+                  * self.capacity_reference_for(state["relief"]))
         capacity_erode = slope_erode * common
         capacity_carry = slope_carry * common
 
@@ -1020,8 +1250,59 @@ class HydraulicFieldSimulator:
         dissolved = np.maximum(0.0, capacity_erode - sediment) * cfg["dissolve_ks"] * state["erodibility"]
         deposited = np.maximum(0.0, sediment - capacity_carry) * cfg["deposit_kd"]
 
+        if self.MAX_DIG_TO_NEIGHBOUR_FRACTION > 0.0:
+            # KEINE ZELLE GRAEBT SICH UNTER IHREN TIEFSTEN NACHBARN.
+            #
+            # Dieselbe Klemme, die im Droplet-Modell der entscheidende Fix war
+            # (Plan 2: `min(..., -delta_height)`, dort durch eine
+            # Nachmultiplikation aufgehoben und deshalb die Ursache von 368
+            # Kratern). Im Feldmodell fehlte sie ganz.
+            #
+            # Sie ist einer Obergrenze "x Meter pro Schritt" vorzuziehen, weil
+            # die an der Schrittzahl haengt - genau der Fehlertyp, der in
+            # diesem Projekt schon zweimal behoben wurde (Regen pro Schritt
+            # statt pro Sekunde, Konvergenz pro Schritt statt pro Sekunde).
+            # Diese Klemme ist rein geometrisch, skalenfrei und braucht keine
+            # Kalibrierung.
+            #
+            # Wirkung nach Ort: auf einem Kamm ist der Abstand zum tiefsten
+            # Nachbarn gross, die Klemme greift nicht. In einem ebenen Becken
+            # ist er null - dort kann sich nichts weiter eintiefen, und genau
+            # dort entstanden die Senken.
+            tiefster_nachbar = ndimage.minimum_filter(
+                state["terrain"], size=3, mode="nearest")
+            spielraum = np.maximum(0.0, state["terrain"] - tiefster_nachbar)
+            dissolved = np.minimum(
+                dissolved, spielraum * self.MAX_DIG_TO_NEIGHBOUR_FRACTION)
+
         # Nie mehr ablagern als vorhanden ist.
         deposited = np.minimum(deposited, sediment)
+
+        # ---------------------------------------------------------------
+        # RINNENBREITE: den Abtrag raeumlich verteilen (experimentell, Default
+        # aus - CHANNEL_WIDTH_SIGMA_PX).
+        #
+        # Warum: gemessen erzeugt die fluviale Erosion selbst die Nadelgrate.
+        # Im Querschnitt einer 256er Karte wurden aus 15 Nadeln im rohen
+        # Gelaende 42 nach der Erosion. Ursache ist die Auflösung - unsere
+        # Erosion schneidet auf ZELLBREITE, ein echter Fluss hat eine Breite
+        # und senkt seine Umgebung mit. Zwei Rinnen nebeneinander lassen
+        # dadurch eine ein Pixel dicke Wand stehen.
+        #
+        # Abgrenzung zu zwei Dingen, die dasselbe NICHT loesen:
+        #   Boeschungserosion wirkt auf das ganze Gelaende und frisst es an
+        #     (Nutzer: "als ob Saeure druebergeschuettet wurde").
+        #   Der Glaettungspass mittelt das fertige Gelaende und loescht die
+        #     Verzweigung (gemessen beta -0.484 -> -0.243).
+        # Hier wird ausschliesslich der NEUE ABTRAG verteilt. Kaemme werden
+        # nicht angefasst, weil dort nichts abgetragen wird.
+        #
+        # MASSENERHALTUNG: uniform_filter erhaelt die Summe (bis auf den Rand,
+        # mode='nearest'), und dieselbe verteilte Menge geht in Gelaende UND
+        # Fracht - beide Seiten bleiben konsistent.
+        if self.CHANNEL_WIDTH_SIGMA_PX > 0.0:
+            fenster = max(3, int(round(self.CHANNEL_WIDTH_SIGMA_PX * 2.0)) | 1)
+            dissolved = ndimage.uniform_filter(dissolved, size=fenster, mode='nearest')
 
         state["terrain"] = terrain - dissolved + deposited
         state["sediment"] = sediment + dissolved - deposited
@@ -1503,6 +1784,23 @@ class ErosionSystemGenerator:
 
         target_size = int(heightmap.shape[0])
 
+        # Hauptschalter: value_default.EROSION_AKTIV = False laesst den Knoten
+        # bestehen und alle sieben Karten in richtiger Form liefern, nur eben
+        # als Nullen - das Gelaende bleibt dadurch exakt das unerodierte. Wird
+        # zur Laufzeit gelesen, nicht beim Import, damit ein Umstellen ohne
+        # Neustart der App wirkt.
+        from gui.config.value_default import EROSION_AKTIV
+        if not EROSION_AKTIV:
+            self._store_zero_result(calculator_id, lod_level, target_size)
+            self._last_run_info = {
+                "steps_taken": 0, "converged": True, "mass_balance": 0.0,
+                "simulation_resolution": 0,
+            }
+            self.logger.info(
+                "Erosion LOD %d uebersprungen: EROSION_AKTIV=False "
+                "(Nullkarten, Gelaende unveraendert)", lod_level)
+            return
+
         if not self._is_final_lod(calculator_id, lod_level):
             self._store_zero_result(calculator_id, lod_level, target_size)
             return
@@ -1568,7 +1866,7 @@ class ErosionSystemGenerator:
         rechnet auf dem unerodierten Gelaende und muss das auch, weil
         geology.layer_thickness ihn braucht und Geology vor der Erosion laeuft.
         Ihn hinter die Erosion zu haengen waere ein Zyklus - die Rechnung dazu
-        steht bei diesem Knoten in gui/OldManagers/calculator_graph.py.
+        steht bei diesem Knoten in managers/calculator_graph.py.
 
         Gerechnet wird mit demselben SlopeCalculator wie in Terrain, nur auf
         der KOMBINIERTEN Heightmap: das ist die Karte inklusive Erosion,
@@ -1658,7 +1956,7 @@ class ErosionSystemGenerator:
         if target is not None:
             return lod_level >= target
 
-        from gui.OldManagers.data_lod_manager import calculate_max_lod_for_size
+        from managers.data_lod_manager import calculate_max_lod_for_size
         full_heightmap = self.data_lod_manager.get_terrain_data("heightmap")
         if full_heightmap is not None:
             return lod_level >= calculate_max_lod_for_size(full_heightmap.shape[0])

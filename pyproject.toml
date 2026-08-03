@@ -1,22 +1,38 @@
 [project]
 name = "map-generator"
 version = "0.1.0"
-description = "A procedural map generation tool with LOD-based terrain, geology, water, weather, and biome systems"
+description = "A procedural map generation tool with terrain, geology, water, weather, and biome systems"
 requires-python = ">=3.12"
+
+# Untergrenzen, Stand 2026-07-30. Die exakt getesteten Versionen stehen in
+# requirements.txt; hier stehen bewusst nur Untergrenzen, damit das Paket
+# installierbar bleibt.
+#
+# Entfernt 2026-07-30: pandas und memory-profiler. Beide standen hier als
+# Abhaengigkeit, werden aber NIRGENDS importiert - eine Suche ueber core/,
+# gui/, managers/, tools/, tests/, scratch/ und main.py findet null Treffer.
+#
+# Ergaenzt: numba. Es wird ebenfalls nirgends direkt importiert, ist aber
+# echt gebraucht - opensimplex schaltet damit seinen JIT-Pfad ein, ohne es
+# laeuft noise2array 528x langsamer (Begruendung und Messwerte in
+# requirements.txt).
 dependencies = [
-    "numpy>=2.0",
-    "scipy>=1.13",
-    "PyQt6>=6.7",
-    "PyOpenGL>=3.1",
-    "opensimplex>=0.4",
-    "Pillow>=10.0",
-    "matplotlib>=3.8",
-    "pandas>=2.0",
-    "scikit-image>=0.25",
-    "memory-profiler>=0.61",
+    # Obergrenze, nicht Nachlaessigkeit: numba (neueste Version 0.66.0)
+    # verlangt NumPy <= 2.4. Mit numpy 2.5 schlaegt `import numba` fehl,
+    # opensimplex faengt das still ab und rechnet 213x langsamer.
+    # Ausfuehrlich in requirements.txt.
+    "numpy>=2.4,<2.5",
+    "scipy>=1.18",
+    "PyQt6>=6.11",
+    "PyOpenGL>=3.1.10",
+    "opensimplex>=0.4.5",
+    "numba>=0.66",
+    "Pillow>=12.0",
+    "matplotlib>=3.11",
+    "scikit-image>=0.26",
     "shapely>=2.1",
-    "psutil>=7.0",
-    "colorlog>=6.10",
+    "psutil>=7.2",
+    "colorlog>=6.12",
 ]
 
 [build-system]
@@ -24,4 +40,14 @@ requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["core*", "gui*", "shaders*", "docs*"]
+# managers* ergaenzt 2026-07-30: der Ordner hiess bis dahin gui/OldManagers
+# und war ueber gui* miterfasst. Nach dem Verschieben auf die oberste Ebene
+# waere er aus dem Paket gefallen - die App haette sich installieren lassen
+# und beim ersten Import von managers.data_lod_manager abgebrochen.
+#
+# docs* entfernt: docs/ hat kein __init__.py, ist also kein Paket und wurde
+# von dieser Zeile ohnehin nie erfasst.
+#
+# tools/, tests/ und scratch/ gehoeren bewusst NICHT ins Paket - Messwerkzeuge
+# und Einweg-Proben, die nur im Repo gebraucht werden.
+include = ["core*", "gui*", "managers*", "shaders*"]

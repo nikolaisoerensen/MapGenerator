@@ -1,0 +1,3 @@
+Senkrechte Luft- oder Satellitenaufnahme, 10-20 km Breite.
+Zeigen soll sie: Dichte des Talnetzes, Form der Kaemme,
+Anteil flacher Flaechen, Farbe/Bewuchs.

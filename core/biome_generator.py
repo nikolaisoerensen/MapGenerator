@@ -35,6 +35,7 @@ Output:
 """
 
 import numpy as np
+from scipy import ndimage
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 from collections import deque
 from typing import Dict, Any, List, Optional
@@ -108,7 +109,7 @@ class BiomeClassificationSystem:
         injizierten Manager) - die echte Pipeline injiziert immer einen über
         GenerationOrchestrator.get_generator_instance()."""
         if self.data_lod_manager is None:
-            from gui.OldManagers.data_lod_manager import DataLODManager
+            from managers.data_lod_manager import DataLODManager
             self.data_lod_manager = DataLODManager()
         return self.data_lod_manager
 
@@ -340,7 +341,7 @@ class BiomeClassificationSystem:
         CPU-Fallback mit optimierten NumPy-Vectorization und Multiprocessing
 
         Läuft über die einzeln aufrufbaren _calc_*-Methoden (siehe
-        gui/OldManagers/calculator_graph.py - Biome-Calculator-Knoten #23-#27 aus
+        managers/calculator_graph.py - Biome-Calculator-Knoten #23-#27 aus
         docs/generation_pipeline_dependencies.md). Die echte GUI-Pipeline
         (GenerationOrchestrator) ruft dieselben Methoden ab jetzt einzeln über den
         globalen CalculatorDispatcher auf (Tracker #16 LOD-Lockstep-Umbau) - der
@@ -502,24 +503,115 @@ class BiomeClassificationSystem:
 
         # Feuchte-Score: negativ=trockener, positiv=feuchter - Südhang senkt
         # den Score, Nordhang hebt ihn, stärker gewichtet je steiler der Hang.
-        moisture_score = -south_facing * np.clip(slope_magnitude, 0.0, 1.0) * 0.6
+        # ---------------------------------------------------------------
+        # FEUCHTE-SCORE
+        #
+        # Bis 2026-07-29 war das EINE Zeile: Hangausrichtung mal Steilheit.
+        # Zwei Folgen davon, beide gemessen:
+        #   - auf flachem Gelaende ist slope_magnitude null, also der Score
+        #     null, also immer die Basisklasse. Eine ebene Karte wurde
+        #     durchgehend einfarbig.
+        #   - kein Hoehen- oder Lagebezug ging ein. Sumpf und Bergwald koennen
+        #     so gar nicht entstehen, weil die Groessen, die sie definieren,
+        #     im Score nicht vorkamen.
+        #
+        # Alles Folgende liegt VOR der Wetteriteration bereits vor - der
+        # Knoten bleibt damit frei von water.*/weather.*-Abhaengigkeiten und
+        # loest weiterhin das Henne-Ei-Problem, fuer das er gebaut wurde.
+        # ---------------------------------------------------------------
+        aspect_score = -south_facing * np.clip(slope_magnitude, 0.0, 1.0) * 0.6
 
-        # Grobe Breitengrad-Basis-Zuordnung (Index in
-        # BaseBiomeClassifier.biome_definitions) - kein Gauß-Fit, reine
-        # Fallunterscheidung: Äquator-, gemäßigte und polare Zone, jeweils mit
-        # einem trockeneren/feuchteren Nachbar-Biom für den Hangausrichtungs-
-        # Ausschlag.
-        lat_norm = min(abs(latitude) / 90.0, 1.0)
-        if lat_norm < 0.35:
-            base_id, dry_id, wet_id = 9, 10, 8    # tropical_seasonal, savanna, tropical_rainforest
-        elif lat_norm < 0.7:
-            base_id, dry_id, wet_id = 3, 7, 4     # grassland, semi_arid, temperate_forest
+        heightmap = self.data_lod_manager.get_calculator_combined_heightmap(lod_level)
+        if heightmap is None or heightmap.shape[:2] != (height, width):
+            # Ohne Hoehendaten bleibt es beim reinen Hang-Score - kein harter
+            # Fehler, aber dann fehlen Sumpf und Hoehenguertel.
+            moisture_score = aspect_score
+            hoehe_ueber_sohle = None
+            hoehe_m = None
         else:
-            base_id, dry_id, wet_id = 1, 0, 2     # tundra, ice_cap, taiga
+            hoehe_m = np.asarray(heightmap, dtype=np.float32)
+
+            # HOEHE UEBER DER LOKALEN TALSOHLE. Der Schluessel gegen
+            # "einzelne Sumpfpixel": Talsohlen sind zusammenhaengende
+            # FLAECHEN, also ist auch diese Groesse zusammenhaengend. "Tief"
+            # ist hier relativ zur Umgebung, nicht absolut - ein Hochtal auf
+            # 2000 m ist fuer seinen Bach genauso Talsohle wie eine Ebene auf
+            # 100 m.
+            fenster = max(5, int(min(height, width) * 0.12) | 1)
+            sohle = ndimage.minimum_filter(hoehe_m, size=fenster, mode='nearest')
+            sohle = ndimage.uniform_filter(sohle, size=fenster, mode='nearest')
+            spanne = float(hoehe_m.max() - hoehe_m.min()) or 1.0
+            hoehe_ueber_sohle = np.clip((hoehe_m - sohle) / (0.25 * spanne), 0.0, 1.0)
+
+            # Tief ueber der Sohle = feucht (Wasser sammelt sich dort),
+            # hoch = trocken. Doppelt so stark gewichtet wie die
+            # Hangausrichtung, weil es der belastbarere Hinweis ist.
+            talnaehe_score = (0.5 - hoehe_ueber_sohle) * 1.2
+            moisture_score = aspect_score + talnaehe_score
+
+        # ---------------------------------------------------------------
+        # KLIMAZONEN nach Breitengrad - jetzt SIEBEN Baender statt drei.
+        #
+        # Die alte Dreiteilung (0-31 / 32-63 / 64-90 Grad) kannte den
+        # subtropischen TROCKENGUERTEL nicht: bei 20-30 Grad stand
+        # tropical_seasonal mit Feuchtekapazitaet 70, also feucht - genau die
+        # Zone, die trocken sein muesste. Gemessen war das der Grund, warum
+        # der Wuestenguertel im Niederschlag nie ankam.
+        #
+        # Je Band: (trocken, basis, feucht).
+        # ---------------------------------------------------------------
+        zonen = (
+            (10.0,  (9, 9, 8)),      # aequatorial: trop_seasonal / trop_rainforest
+            (20.0,  (10, 9, 8)),     # Monsun: savanna / trop_seasonal / rainforest
+            (33.0,  (6, 7, 10)),     # WUESTENGUERTEL: desert / semi_arid / savanna
+            (45.0,  (7, 5, 4)),      # subtropisch: semi_arid / mediterran / Wald
+            (58.0,  (7, 3, 4)),      # gemaessigt: semi_arid / grassland / Wald
+            (68.0,  (3, 2, 2)),      # boreal: grassland / taiga
+            (91.0,  (0, 1, 2)),      # polar: ice_cap / tundra / taiga
+        )
+        abs_lat = min(abs(latitude), 90.0)
+        for grenze, (dry_id, base_id, wet_id) in zonen:
+            if abs_lat < grenze:
+                break
 
         preseed_biome_map = np.full((height, width), base_id, dtype=np.uint8)
         preseed_biome_map[moisture_score < -0.15] = dry_id
         preseed_biome_map[moisture_score > 0.15] = wet_id
+
+        if hoehe_m is not None:
+            # ---------------------------------------------------------------
+            # HOEHENGUERTEL. Er ueberschreibt die Zone lokal - dieselbe Regel
+            # wie die Breite, nur senkrecht.
+            #
+            # Die Grenzen WANDERN mit dem Breitengrad: die Baumgrenze liegt am
+            # Aequator bei rund 3500 m, bei 60 Grad bei rund 700 m. Genau das
+            # fehlte bisher, und es ist der Grund, warum alpine und cliff nicht
+            # stimmen konnten - sie hingen an festen Hoehen.
+            baumgrenze = float(np.interp(abs_lat, [0, 30, 45, 60, 75, 90],
+                                          [3600, 3200, 2200, 900, 400, 0]))
+            bergwald_unten = baumgrenze * 0.45
+
+            bergwald = (hoehe_m >= bergwald_unten) & (hoehe_m < baumgrenze)
+            preseed_biome_map[bergwald] = 11        # montane_forest
+            preseed_biome_map[hoehe_m >= baumgrenze] = 1   # tundra (alpin)
+            preseed_biome_map[hoehe_m >= baumgrenze * 1.35] = 0   # ice_cap
+
+            # ---------------------------------------------------------------
+            # SUMPF. Nicht nur flach+tief+nass, sondern ausdruecklich AUCH
+            # breitengradabhaengig (Nutzer-Einwand 2026-07-29, und er stimmt):
+            # die grossen Moore liegen in Westsibirien, am Hudson Bay, in
+            # Finnland und Kanada. In kalten Zonen ist die Verdunstung klein
+            # gegenueber dem Niederschlag, das Wasser bleibt oben. Im
+            # Trockenguertel braeuchte es dafuer ein Vielfaches an Zufluss.
+            #
+            # Umgesetzt als Schwelle, die mit der Breite MILDER wird - kein
+            # Verbot, nur eine Gewichtung.
+            sumpf_schwelle = float(np.interp(abs_lat, [0, 20, 35, 50, 70, 90],
+                                              [0.06, 0.02, 0.02, 0.10, 0.14, 0.05]))
+            sumpfig = ((hoehe_ueber_sohle < sumpf_schwelle)
+                       & (slope_magnitude < 0.05)
+                       & (hoehe_m < baumgrenze * 0.6))
+            preseed_biome_map[sumpfig] = 12         # swamp
 
         self.data_lod_manager.set_calculator_output(
             calculator_id, lod_level, {"preseed_biome_map": preseed_biome_map})

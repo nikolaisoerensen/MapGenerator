@@ -1,5 +1,18 @@
 # MapGenerator — Project Notes for Claude Code
 
+## ZUERST LESEN: docs/SPEZIFIKATION.md
+
+Sie enthaelt das Oberziel, die Zielwerte je Komponente und die Invarianten, die
+bei JEDER Aenderung geprueft werden (CPU/GPU-Paritaet, Massenbilanz, Zeitbasen,
+Reihenfolge im Graph, Anzeige und Skalen, Reglerverhalten).
+
+Sie ist am 2026-07-29 entstanden, weil die Arbeit reaktiv geworden war: jeweils
+dem letzten Befund nachlaufend, ohne Zielbild pro Komponente. Ergebnis waren
+drei Messungen am falschen Codepfad an einem Tag und Aenderungen, die anderswo
+etwas kaputt machten, ohne dass es auffiel. Die Spezifikation ist das
+Gegenmittel - vor der Arbeit lesen, nach der Arbeit die Prueflisten abgehen.
+
+
 ## Git worktrees: changes are invisible until merged or tested in-place
 
 This project is frequently worked on via Claude Code sessions that run in an
@@ -44,7 +57,7 @@ since it requires no merge/commit decision at all.
 
 Most core generator logic (`core/*.py`) can be exercised headlessly via
 throwaway smoke-test scripts run through the shared venv — see prior session
-memory for established patterns (stubbing `gui.OldManagers.calculator_graph`
+memory for established patterns (stubbing `managers.calculator_graph`
 if missing on a given branch, building a minimal `FakeScheduler`, driving
 `BaseTerrainGenerator` → `WeatherSystemGenerator` → `HydrologySystemGenerator`
 → `BiomeClassificationSystem` end-to-end with real default parameters from
@@ -61,25 +74,54 @@ The sentence above used to say GLSL shaders needed the live app. That is
 and a fixed-point counter overflowing) — each found only after the user ran
 the program.
 
-`GPUWorker` in `gui/OldManagers/shader_manager.py` is deliberately built as an
+`GPUWorker` in `managers/shader_manager.py` is deliberately built as an
 *offscreen* worker: its own `QOffscreenSurface`, its own `QOpenGLContext`, no
 window. All it needs is a `QGuiApplication`, which a script can create:
 
 ```python
 from PyQt6.QtGui import QGuiApplication
 app = QGuiApplication([])                    # no window appears
-from gui.OldManagers.shader_manager import ShaderManager
+from managers.shader_manager import ShaderManager
 manager = ShaderManager()
 worker = manager._ensure_worker()
 assert worker.gpu_available                  # verified True on this machine
 result = manager.request_shader_operation("erosion", "hydraulicField", inputs, {})
 ```
 
-Working example: `smoke_test_erosion_gpu_parity.py` — it runs the full GPU
+Working example: `tests/smoke_test_erosion_gpu_parity.py` — it runs the full GPU
 erosion path and compares it against the CPU reference, single-step (tight
 tolerance) and over a long run (mass balance). Any new compute shader should
 get the same treatment; the static contract check
-(`smoke_test_erosion_gpu_contract.py`) catches naming and type mismatches, but
+(`tests/smoke_test_erosion_gpu_contract.py`) catches naming and type mismatches, but
 only an actual run catches wrong *results*.
 
 What still needs the live app: anything drawn into a visible widget.
+
+
+## Abhaengigkeiten: numpy ist bewusst NICHT die neueste Version
+
+`requirements.txt` pinnt `numpy==2.4.6`, obwohl 2.5.1 verfuegbar ist. Das ist
+kein vergessenes Update.
+
+`numba` (selbst auf der neuesten Version 0.66.0) verlangt NumPy <= 2.4. Mit
+numpy 2.5 schlaegt `import numba` fehl - und **opensimplex faengt das ab** und
+benutzt still seinen Attrappen-Dekorator statt des JIT. Es gibt keine
+Fehlermeldung, nur ein Programm, das deutlich laenger rechnet. Gemessen am
+2026-07-30, `noise2array` 256x256:
+
+| | Zeit |
+|---|---|
+| numpy 2.5.1, numba tot | 0.3831 s |
+| numpy 2.4.6, numba aktiv | 0.0018 s |
+
+Faktor 213 im heissen Pfad; die Rauscherzeugung machte frueher 36 % der
+gesamten Pipeline aus.
+
+Vor jedem `pip install --upgrade numpy` also pruefen:
+
+```
+.venv/Scripts/python.exe -c "import numba, numpy; print(numpy.__version__)"
+```
+
+Schlaegt der Import fehl, ist numpy zu neu und der JIT-Pfad ist weg.
+Begruendung und Messwerte ausfuehrlich in `requirements.txt`.

@@ -18,3 +18,6 @@ mprofile_*.dat
 
 # IDE
 .idea/
+
+# Laborausgaben (Bilder aus tools/*_lab.py)
+lab_output/

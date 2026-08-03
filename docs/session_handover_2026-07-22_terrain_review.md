@@ -24,8 +24,8 @@ core/biome_generator.py             |  24 +++--
 core/terrain_generator.py           | 177 ++++++++++++++++++------------------
 core/water_generator.py             |   6 +-
 core/weather_generator.py           |  12 ++-
-gui/OldManagers/data_lod_manager.py |  83 +++++++++++++++++
-gui/OldManagers/shader_manager.py   |  26 +++++-
+managers/data_lod_manager.py |  83 +++++++++++++++++
+managers/shader_manager.py   |  26 +++++-
 gui/config/value_default.py         |  32 ++++++-
 gui/tabs/base_tab.py                |  19 ++--
 gui/tabs/geology_tab.py             |   2 +-
@@ -186,7 +186,7 @@ wurde — kein Breaking Change für bestehende Tabs.
 
 ## Verifikation dieser Session
 Zwei Headless-Smoke-Test-Skripte über die geteilte `.venv`
-(`smoke_test_terrain_review_full.py`, erweitert um Teil-2-Checks, und neu
+(`tests/smoke_test_terrain_review_full.py`, erweitert um Teil-2-Checks, und neu
 `smoke_test_phaseB_heightmap_semantics.py`) — beide vollständig grün:
 - Delta-only-Semantik von `get_geology_height_delta()`/
   `get_water_height_delta()` (inkl. Teilverfügbarkeit: nur Erosion

@@ -2728,7 +2728,7 @@ class HydrologySystemGenerator:
         injizierten Manager) - die echte Pipeline injiziert immer einen über
         GenerationOrchestrator.get_generator_instance()."""
         if self.data_lod_manager is None:
-            from gui.OldManagers.data_lod_manager import DataLODManager
+            from managers.data_lod_manager import DataLODManager
             self.data_lod_manager = DataLODManager()
         return self.data_lod_manager
 
@@ -2795,7 +2795,7 @@ class HydrologySystemGenerator:
                 "weather.humidity", lod, {"humid_map": humid_map})
 
             # Läuft über die einzeln aufrufbaren _calc_*-Methoden (siehe
-            # gui/OldManagers/calculator_graph.py - Water-Calculator-Knoten #15-#21
+            # managers/calculator_graph.py - Water-Calculator-Knoten #15-#21
             # aus docs/generation_pipeline_dependencies.md, #22 erosion_feedback
             # bewusst ausgeschlossen - bekannt kaputt). Die echte GUI-Pipeline
             # (GenerationOrchestrator) ruft dieselben Methoden ab jetzt einzeln über
@@ -3041,7 +3041,7 @@ class HydrologySystemGenerator:
         if target is not None:
             return lod_level >= target
 
-        from gui.OldManagers.data_lod_manager import calculate_max_lod_for_size
+        from managers.data_lod_manager import calculate_max_lod_for_size
         full_heightmap = self.data_lod_manager.get_terrain_data("heightmap")
         if full_heightmap is not None:
             return lod_level >= calculate_max_lod_for_size(full_heightmap.shape[0])

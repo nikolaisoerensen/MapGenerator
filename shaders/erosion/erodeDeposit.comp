@@ -44,10 +44,34 @@ uniform float u_threshold_discharge;
 uniform float u_discharge_exponent;
 uniform float u_capacity_reference;
 uniform float u_min_slope_factor;
+// Anteil des Abstands zum tiefsten Nachbarn, den eine Zelle in EINEM Schritt
+// hoechstens abtragen darf. 0.0 schaltet die Klemme aus. Gegenstueck zu
+// HydraulicFieldSimulator.MAX_DIG_TO_NEIGHBOUR_FRACTION - dort steht die
+// Messung, die sie begruendet.
+uniform float u_max_dig_fraction;
 
 float surfaceAt(ivec2 coord) {
     ivec2 c = clamp(coord, ivec2(0), ivec2(u_size - 1));
     return imageLoad(heightIn, c).r + imageLoad(waterMap, c).r;
+}
+
+float terrainAt(ivec2 coord) {
+    return imageLoad(heightIn, clamp(coord, ivec2(0), ivec2(u_size - 1))).r;
+}
+
+// Minimum ueber das 3x3-Fenster EINSCHLIESSLICH der Mittenzelle, mit
+// Rand-Fortsetzung. Entspricht exakt
+// scipy.ndimage.minimum_filter(size=3, mode="nearest") im CPU-Pfad - die
+// Mittenzelle mitzunehmen ist wesentlich, sonst kann der Spielraum negativ
+// werden, wo die Zelle selbst die tiefste ist.
+float lowestInWindow(ivec2 coord) {
+    float tiefster = terrainAt(coord);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            tiefster = min(tiefster, terrainAt(coord + ivec2(dx, dy)));
+        }
+    }
+    return tiefster;
 }
 
 void main() {
@@ -86,6 +110,17 @@ void main() {
     // Zustand eines Wasserlaufs, der genau so viel traegt, wie er tragen kann.
     float dissolved = max(0.0, capacityErode - sediment) * u_dissolve_ks * erodibility;
     float deposited = min(max(0.0, sediment - capacityCarry) * u_deposit_kd, sediment);
+
+    // KEINE ZELLE GRAEBT SICH UNTER IHREN TIEFSTEN NACHBARN. Formelgleich zum
+    // CPU-Pfad (_pass_erode_deposit). Ohne sie entstehen abflusslose Senken -
+    // gemessen 512 gegen 338 mit Klemme, Entwaesserungsanteil 11.2% -> 14.9%.
+    if (u_max_dig_fraction > 0.0) {
+        // terrainAt() statt `height`: das wird erst weiter unten geladen, und
+        // eine Nutzung davor kompiliert nicht - ein Fehler, den erst die GPU
+        // meldet, also dort, wo ihn headless niemand sieht.
+        float spielraum = max(0.0, terrainAt(coord) - lowestInWindow(coord));
+        dissolved = min(dissolved, spielraum * u_max_dig_fraction);
+    }
 
     float height = imageLoad(heightIn, coord).r;
     imageStore(heightOut, coord, vec4(height - dissolved + deposited, 0.0, 0.0, 0.0));

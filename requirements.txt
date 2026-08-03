@@ -1,8 +1,54 @@
+# Exakte Versionen, Stand 2026-07-30 - alle auf dem zu diesem Zeitpunkt
+# neuesten verfuegbaren Stand (geprueft mit `pip list --outdated`, leer).
+#
+# Vier Pins standen vorher hinter dem, was tatsaechlich installiert war
+# (numpy 2.3.2 gegen 2.5.1, scipy 1.16.1 gegen 1.18.0, matplotlib 3.10.5
+# gegen 3.11.1, pillow 11.3.0 gegen 12.3.0, PyOpenGL 3.1.9 gegen 3.1.10,
+# colorlog 6.9.0 gegen 6.12.0). Wer die Umgebung daraus neu aufgebaut haette,
+# haette also eine ANDERE bekommen als die, gegen die gemessen wurde.
+#
+# Aktualisieren:
+#   .venv/Scripts/python.exe -m pip install --upgrade -r requirements.txt
+#   .venv/Scripts/python.exe -m pip list --outdated
+# Danach die Testreihe unten fahren.
+
+# --- GUI und Darstellung ---
 PyQt6==6.11.0
-numpy==2.3.2
-scipy==1.16.1
-matplotlib==3.10.5
+PyOpenGL==3.1.10
+
+# --- Rechnen ---
+#
+# numpy BEWUSST NICHT auf der neuesten Version (2.5.1), sondern auf der
+# neuesten, die numba akzeptiert. NICHT "vergessen zu aktualisieren".
+#
+# numba 0.66.0 ist seinerseits die neueste Version und verlangt NumPy <= 2.4.
+# Mit numpy 2.5.1 schlaegt `import numba` fehl - und opensimplex FAENGT DAS AB
+# und benutzt still seinen Attrappen-Dekorator statt des JIT. Gemessen am
+# 2026-07-30, noise2array 256x256:
+#
+#     numpy 2.5.1 (numba tot)   0.3831 s
+#     numpy 2.4.6 (numba aktiv) 0.0018 s      Faktor 213
+#
+# Es gibt keine Fehlermeldung, keinen Warnhinweis - nur ein Programm, das
+# 36 % laenger rechnet (siehe die Messwerte beim numba-Eintrag unten).
+#
+# Wieder anheben, sobald numba NumPy 2.5 unterstuetzt. Pruefen mit:
+#     .venv/Scripts/python.exe -c "import numba, numpy; print(numpy.__version__)"
+# Schlaegt der Import fehl, ist numpy zu neu.
+numpy==2.4.6
+scipy==1.18.0
+
+# scikit-image: nur fuer die Grauwert-Rekonstruktion (Priority-Flood).
+# core/terrain_river_network.py macht damit die Flaeche P senkenfrei,
+# tools/drainage_lab.py misst damit den Fuellbedarf.
+scikit-image==0.26.0
+
+# shapely: Polygon-Verschneidung im Settlement-Generator und im Biome-Labor.
+shapely==2.1.2
+
+# --- Rauschen ---
 opensimplex==0.4.5.1
+
 # numba schaltet den JIT-Pfad von opensimplex ein. Ohne es wird dessen
 # @njit-Dekorator zu einer Attrappe und noise2array laeuft als reine
 # Python-Schleife: gemessen 0.633 s je 256x256-Feld gegen 0.0012 s mit
@@ -10,10 +56,26 @@ opensimplex==0.4.5.1
 # Das war 36 % der gesamten Pipeline (14.1 s von 38.9 s bei 256 px),
 # davon geology.layer_thickness allein 6.1 s und weather.temperature 4.7 s.
 # Der erste Aufruf je Prozess kostet rund 2.5 s Kompilierung.
+#
+# Wird NIRGENDS direkt importiert - eine Textsuche nach "import numba" findet
+# nichts. Deshalb dieser Hinweis: ohne ihn sieht das Paket wie eine Altlast
+# aus und fliegt beim naechsten Aufraeumen raus.
 numba==0.66.0
-PyOpenGL==3.1.9
-shapely==2.1.2
-scikit-image==0.26.0
-pillow==11.3.0
+
+# --- Bilder ---
+# matplotlib: nur die Labore in tools/ und die Smoke-Tests, nicht die App.
+matplotlib==3.11.1
+# pillow: PNG-Export der Karten (gui/utils/map_export.py).
+pillow==12.3.0
+
+# --- Betrieb ---
+# psutil: Speicher-Diagnostik im Fehlerbehandler.
 psutil==7.2.2
-colorlog==6.9.0
+# colorlog: farbiges Log in main.py.
+colorlog==6.12.0
+
+# Pruefen, dass alles zusammenpasst:
+#   .venv/Scripts/python.exe tests/smoke_test_terrain_river_network.py
+#   .venv/Scripts/python.exe tests/smoke_test_terrain_erosion_filter.py
+#   .venv/Scripts/python.exe tests/smoke_test_terrain_scale_coupling.py
+#   .venv/Scripts/python.exe tests/smoke_test_erosion_hauptschalter.py
