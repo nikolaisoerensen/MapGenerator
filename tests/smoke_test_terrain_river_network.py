@@ -5,7 +5,7 @@ Prueft das Flussnetz-Skelett im Terrain-Aufbau
 (BaseTerrainGenerator._apply_river_network, core/terrain_river_network.py,
 SPEZIFIKATION §12).
 
-Sechs Zusicherungen. Die letzten drei sind Gegenproben - nach §5.1.4 prueft
+Sieben Zusicherungen. Die letzten drei sind Gegenproben - nach §5.1.4 prueft
 eine Zusicherung, die auch ohne die Aenderung haelt, nichts.
 
   1. Das Netz LAEUFT. river_mask existiert nur, wenn es lief.
@@ -55,11 +55,10 @@ def _bauen(size=256, netz_aktiv=True, overrides=None):
             parameters["erosion_filter_" + name.lower()] = \
                 getattr(EROSION_FILTER, name)["default"]
         for name, key in (("SPACING_M", "river_spacing_m"),
-                          ("INCISION_M", "river_incision_m"),
-                          ("PLATEAU_RELIEF", "river_plateau_relief"),
+                          ("INCISION_SHARE", "river_incision_share"),
+                          ("PLATEAU_FLATTEN", "river_plateau_flatten"),
                           ("VALLEY_WIDTH", "river_valley_width"),
                           ("VALLEY_FORM", "river_valley_form"),
-                          ("VALLEY_STEPS", "river_valley_steps"),
                           ("COST_STRENGTH", "river_cost_strength")):
             parameters[key] = getattr(RIVER_NETWORK, name)["default"]
         parameters.update(overrides or {})
@@ -154,14 +153,16 @@ def lauf():
     P_gefuellt = reconstruction(saat, P, method="erosion")
 
     tiefen = []
-    for wert in (0.0, 400.0, 1200.0):
+    for wert in (0.0, 0.25, 0.55):
+        # Direkter Modulaufruf - dort heisst der Schluessel ohne river_-Praefix
+        # (den setzt erst _apply_river_network um).
         r = carve_river_network(P, mpp_p, TERRAIN.AMPLITUDE["default"], SEED,
-                                {"river_incision_m": wert})
+                                {"incision_share": wert})
         z_roh = r["heightmap"].astype(np.float64)
         tiefe = float((P_gefuellt[r["river_mask"]]
                        - z_roh[r["river_mask"]]).mean())
         tiefen.append(tiefe)
-        print("   Regler %6.0f m -> Sohle %6.0f m unter P" % (wert, tiefe))
+        print("   Regler %5.2f -> Sohle %6.0f m unter P" % (wert, tiefe))
     monoton = tiefen[0] < tiefen[1] < tiefen[2]
     if not monoton:
         fehler.append("Talteife waechst nicht monoton mit dem Regler: %s"
@@ -173,11 +174,10 @@ def lauf():
     print("5. Wirkung jedes einzelnen Reglers:")
     proben = (
         ("river_spacing_m", RIVER_NETWORK.SPACING_M["min"]),
-        ("river_incision_m", RIVER_NETWORK.INCISION_M["max"]),
-        ("river_plateau_relief", RIVER_NETWORK.PLATEAU_RELIEF["min"]),
+        ("river_incision_share", RIVER_NETWORK.INCISION_SHARE["max"]),
+        ("river_plateau_flatten", RIVER_NETWORK.PLATEAU_FLATTEN["max"]),
         ("river_valley_width", RIVER_NETWORK.VALLEY_WIDTH["max"]),
         ("river_valley_form", RIVER_NETWORK.VALLEY_FORM["min"]),
-        ("river_valley_steps", 4),
         ("river_cost_strength", RIVER_NETWORK.COST_STRENGTH["max"]),
     )
     for name, wert in proben:
@@ -213,12 +213,40 @@ def lauf():
     print("6. Gleiches Netz bei 256 und 512 px (r=%+.3f) .. %s"
           % (r, "ok" if gleich else "FEHLER"))
 
+    # ---------- 7: keine Kanten am Lauf ----------
+    # Ein Fluss faellt stetig - jeder Sprung zwischen BENACHBARTEN Flusspixeln
+    # ist ein Fehler. Sie entstanden an den Zusammenfluessen: der
+    # Muendungsknoten wird vom tiefsten Zufluss nach unten gezogen, der andere
+    # Zufluss steht unmittelbar daneben noch auf seiner eigenen Hoehe.
+    # Gemessen 538 m; mit der Steigungsbegrenzung (max_gradient) 39 m.
+    print("7. Keine Kanten am Lauf:")
+    _, maske7, _ = _bauen(size=256)
+    z7, _, _ = _bauen(size=256)
+    zz = np.where(maske7, z7, np.nan)
+    spruenge = []
+    for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        a = zz[1:-1, 1:-1]
+        b = np.roll(np.roll(zz, -dy, 0), -dx, 1)[1:-1, 1:-1]
+        d = np.abs(a - b)
+        spruenge.append(d[np.isfinite(d)])
+    alle = np.concatenate(spruenge)
+    p99 = float(np.percentile(alle, 99))
+    groesster = float(alle.max())
+    # Bezogen auf die Hoehenspanne, nicht als fester Meterwert (§4.4).
+    grenze = 0.03 * TERRAIN.AMPLITUDE["default"]
+    ok7 = groesster < grenze
+    if not ok7:
+        fehler.append("groesster Sprung am Lauf %.0f m, Grenze %.0f m "
+                      "(3%% der Hoehenspanne)" % (groesster, grenze))
+    print("   p99 %.0f m, groesster %.0f m, Grenze %.0f m ....... %s"
+          % (p99, groesster, grenze, "ok" if ok7 else "FEHLER"))
+
     print()
     if fehler:
         for f in fehler:
             print("  FEHLER: %s" % f)
         return 1
-    print("Alle sechs Zusicherungen erfuellt.")
+    print("Alle sieben Zusicherungen erfuellt.")
     return 0
 
 

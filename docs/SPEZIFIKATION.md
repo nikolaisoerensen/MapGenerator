@@ -947,3 +947,525 @@ Was fehlt, ist die Kopplung von Talbreite UND Tiefe an das EINZUGSGEBIET je
 Punkt statt an die Strahler-Ordnung - dann waechst das Tal stetig von der
 Quelle zum Auslass, statt ueberall gleich breit zu sein, und die runden Kappen
 an den Quellen verschwinden von selbst.
+
+
+---
+
+## §14 Fahrplan und Festlegungen, 2026-07-30
+
+Entscheidungen des Nutzers nach der Durchsicht von §12/§13. Sie gelten, bis
+sie ausdruecklich geaendert werden.
+
+### Drei Schritte, in dieser Reihenfolge
+
+    1. Flussnetz         <- HIER STEHEN WIR
+    2. Erosionsfilter    (der bisherige "ATEF-Filter", so heisst er ab jetzt)
+    3. Echte Erosion     erst wenn 1 und 2 vollstaendig stimmen
+
+Schritt 3 wird NICHT angefasst, solange 1 und 2 nicht sitzen. `EROSION_AKTIV`
+bleibt False. Vor dem Wiedereinschalten soll ein **Auswahlfeld mit
+Regionsvorgaben** (Alpen, Fjordland, ...) da sein, das die Regler setzt, mit
+einem Klick auf- und zuklappbar fuer das Feintuning.
+
+### Festgelegt
+
+**Talsohle gehoert dem Fluss, Berge gehoeren dem Noise-Gelaende.** Das
+Einzugsgebiet bestimmt die STRAHLWEITE dieses Einflusses. Kein Tal darf wie
+ausgeschnitten wirken - der Uebergang ist die eigentliche Anforderung, nicht
+die Talform.
+
+**Hochebenen zurueckgestellt.** `PLATEAU_FLATTEN` Vorgabe 0.0 (voelles
+Relief). Der Regler hiess vorher PLATEAU_RELIEF und war umgekehrt gepolt.
+
+**Map Size Vorgabe 256.** Unter 30 Pixeln je Tal bricht die Entwaesserung ein
+(§13).
+
+**Auslass aus dem Seed.** Ein Winkel aus dem Map Seed legt die Himmelsrichtung
+fest, nicht mehr der tiefste Randpunkt. Vorher wanderte der Auslass bei jedem
+Regler, der das Gelaende beeinflusst. Geprueft ueber sieben Reglerstaende:
+Auslass identisch.
+
+**Fluesse werden vorerst NICHT zu Wasser.** Die Annahme ist, dass Wasser und
+Erosion die Mulden selbst finden, wenn die Taeler erst da sind. Offen bleibt
+der maeandrierende Fluss in flacher Landschaft, der nur ein kleiner Einschnitt
+in einem breiten Einflussgebiet ist.
+
+### OFFEN, aber festgehalten: Berechnung mit Rand
+
+Fuer Randeffekte (Weather, Auslasspunkte, spaeter Nachbarkacheln) soll die
+BERECHNETE Karte groesser sein als die dargestellte:
+
+    map_size 256  ->  gerechnet wird 256 + 2 x 10 % = rund 308 px
+
+Der Auslass ist genau so ein Randeffekt und gehoert dann AUSSERHALB des
+sichtbaren Bereichs. Betrifft alle Generatoren und ist deshalb ein eigener
+Umbau, noch nicht begonnen.
+
+### OFFEN: kleine Aufloesungen
+
+Statt der Warnung "unter 30 Pixeln je Tal" soll das Netz intern auf
+mindestens 256 px gerechnet und danach heruntergerechnet werden, damit kleine
+Kartengroessen dasselbe Bild liefern. Noch nicht umgesetzt.
+
+### Umgesetzt am 2026-07-30
+
+**Einzugsgebiet statt Strahler-Ordnung.** Ein Rueckwaertslauf summiert die
+Punkte flussaufwaerts; daraus Strahlweite (Exponent 0.4, hydraulische
+Geometrie) und Eintiefung (0.3). Die Strahler-Ordnung war eine STUFE und
+reichte nur bis 3-5 - alle Taeler gleich breit, Quellen mit runden Kappen.
+
+**Verzerrtes Abstandsfeld.** Der Abstand wird mit der lokalen Rauheit von P
+MULTIPLIZIERT (nicht addiert): wo das Gelaende lokal tiefer liegt, greift das
+Tal weiter aus. Der Talrand wandert dadurch mit dem Gelaende, statt eine
+Parallelkurve zum Lauf zu sein. Am Fluss selbst bleibt der Einfluss exakt
+100 %, weil eine Streckung bei d = 0 nichts aendert.
+
+Gemessen, 256 px, 15 km, gegen die Flaeche P:
+
+| | Terrain sichtbar | Abfluss |
+|---|---|---|
+| gleiche Breite ueberall (alt) | 5% | 92% |
+| Einzugsgebiet | 58% | 74% |
+| Einzugsgebiet + Verzerrung | 55% | 73% |
+
+Der Sprung von 5 % auf 58 % ist die Forderung "Berge gehoeren dem
+Noise-Gelaende". Der Abfluss zahlt dafuer 92 % -> 74 %, liegt aber weiter weit
+ueber den 7 % ohne Netz.
+
+### Noch nicht gut
+
+Die Talkoerper wirken weiterhin AUFGELEGT: breite dunkle Baender mit harter
+Kante. Dazu Querstreifen aus der Linienrasterung - z wird je ganzzahligem
+Pixel gesetzt, auf schraegen Linien kommen Nachbarpixel aus verschiedenen
+Stuetzstellen.
+
+Noch offen aus dem Nutzer-Vorschlag: der Abnahme-Verlauf vom Fluss weg soll
+zusaetzlich durch die vorhandene Noisemap moduliert werden - nicht additiv,
+sondern so, dass sich der Noise-Einfluss sanft mit der Entfernung aendert.
+Die Abstandsverzerrung ist ein erster Schritt in diese Richtung, aber sie
+wirkt auf die Talgrenze, noch nicht auf den Verlauf dazwischen.
+
+
+---
+
+## §15 Fluesse durch Berge: Diagnose 2026-07-30
+
+Nutzer-Befund an einer Hoehenlinienkarte: ein Nebenarm frisst sich quer durch
+einen 3100-m-Gipfel, statt daran vorbeizulaufen. Dazu Kanten an den
+Zusammenfluessen.
+
+### Gemessen
+
+Groesster Abtrag 3732 m - am HOECHSTEN PUNKT der Karte (3334 m, 100.
+Hoehenperzentil), wo z auf -397 m gedrueckt wird. 16 % aller Flusspixel haben
+ueber 1000 m Abtrag, 3.5 % ueber 2000 m. Das ist systematisch.
+
+### Die Ursache ist NICHT die Wegwahl
+
+Zwei Aenderungen wurden umgesetzt und einzeln geprueft:
+
+**Gerichtete Anstiegskosten.** Vorher hingen die Kantenkosten an der HOEHE und
+waren symmetrisch - ein Lauf auf einer Hochflaeche wurde so bestraft wie einer,
+der eine Wand hochklettert. Jetzt: Dijkstra laeuft vom Auslass nach aussen,
+jede Kantenrichtung ist flussaufwaerts, also laesst sich der Anstieg gerichtet
+und quadratisch bestrafen.
+
+**Mehrere Auslaesse.** Mit einem einzigen muss JEDER Punkt dorthin
+entwaessern, das Netz also jeden Ruecken ueberqueren. Jetzt drei, Richtungen
+gleichmaessig verteilt, Startwinkel aus dem Seed (damit bei jedem Lauf an
+derselben Stelle).
+
+Auf KNOTENEBENE gemessen wirkt beides deutlich: groesster erzwungener Anstieg
+1426 m -> 644 m, Summe 8829 m -> 2494 m.
+
+Im fertigen Gelaende kommt davon NICHTS an: max. Abtrag bleibt bei ~3700 m.
+
+### Die wirkliche Ursache
+
+Der KNOTEN-Baum meidet die Ruecken. Die VERDICHTETE LINIE zwischen zwei Knoten
+tut es nicht - sie laeuft geradeaus plus Maeander und schneidet dabei ueber
+alles, was dazwischen liegt. Bei 2500 m Knotenabstand ist das ein ganzer Berg.
+
+Jeder Stuetzpunkt der Linie nimmt sein z aus P an seiner eigenen Stelle;
+liegt er auf einem Gipfel, ist z dort hoch, und das Eintiefen drueckt ihn
+anschliessend bis unter das Niveau der Gegenseite.
+
+Die Glaettung an den Zusammenfluessen ist aus demselben Grund fast wirkungslos
+(Kante p99.5: 523 m ohne, 498 m mit sechs Durchlaeufen): was als "Kante an der
+Muendung" gemessen wird, ist ueberwiegend der Durchschnitt durch die Ruecken,
+nicht der Sprung des Einzugsgebiets.
+
+### Was zu tun ist
+
+Die verdichtete Linie zwischen zwei Knoten muss dem GELAENDE folgen statt
+geradeaus zu laufen - ein Weg geringster Kosten ueber das Hoehenfeld zwischen
+den beiden Knotenpositionen. Der Maeander kaeme dann aus dem Gelaende selbst,
+was zugleich der Nutzer-Vorgabe entspricht ("der fliesst dran vorbei oder
+hinab").
+
+Bis dahin bleiben Anstiegskosten und Mehrfach-Auslaesse drin: sie sind
+nachweislich richtig, nur nicht hinreichend.
+
+### Messfalle, wieder derselbe Typ
+
+Der Vorabtest mass den erzwungenen Anstieg auf KNOTENEBENE und zeigte eine
+klare Verbesserung. Das fertige Gelaende zeigte keine. Zwei verschiedene
+Groessen, und die erste ist fuer die Frage nicht die richtige - §5.2, Fall
+acht.
+
+
+---
+
+## §16 Gelaendefolgende Wegfuehrung, 2026-07-30
+
+Umsetzung der Diagnose aus §15: die Verbindung zwischen zwei Knoten laeuft
+nicht mehr geradeaus, sondern als WEG GERINGSTER KOSTEN ueber das Hoehenfeld
+(`skimage.graph.route_through_array`). Der Maeander entsteht dabei von selbst -
+der Lauf geht um den Berg herum statt hindurch.
+
+### Die richtige Messgroesse: UEBERHOEHUNG
+
+Zwei Messgroessen davor waren unbrauchbar und haben je eine falsche
+Schlussfolgerung getragen:
+
+* `max(P - z)` an Flusspixeln - in einem Gebirge liegt die Talsohle zurecht
+  tausende Meter unter den Gipfeln, der Wert sagt also nichts ueber
+  "durchgefressen".
+* der erzwungene Anstieg auf KNOTENEBENE - zeigte eine klare Verbesserung, die
+  im fertigen Gelaende nicht ankam (§15).
+
+Brauchbar ist: **wie hoch liegt der Lauf ueber dem tiefsten Punkt seiner
+Umgebung** (Minimumfilter mit der Breite eines Tals). Null hiesse "genau in der
+Talsohle".
+
+| Wegfuehrung | Ueberhoehung | p95 | Abfluss |
+|---|---|---|---|
+| geradeaus | 476 m | 1539 m | 67% |
+| gelaendefolgend, Kosten 2.5 | 352 m | 1118 m | 76% |
+| gelaendefolgend, Kosten 8 | 300 m | 884 m | 80% |
+
+Der hoechste Punkt des Netzes faellt von 3334 m (= Gipfelhoehe) auf 2611 m -
+das Netz laeuft nicht mehr ueber die Spitze. `cost_strength` Vorgabe deshalb
+von 2.5 auf 6.0 angehoben; sie wirkt jetzt an ZWEI Stellen, auf die
+Kantenkosten des Baumes und auf die Wegsuche dazwischen.
+
+### Keine Ueberschneidungen - im unterstuetzten Bereich
+
+Bereits gezeichnete Laeufe sind fuer spaetere Wege gesperrt
+(`separation_px`), ausser in der Umgebung des eigenen Elternknotens - dort
+muss der Nebenarm muenden. Die Kanten werden vom Auslass nach aussen
+abgearbeitet, der Hauptlauf hat also Vorrang. Dazu ein KORRIDOR um die gerade
+Verbindung (`corridor_fraction`): der Delaunay-Baum ist planar, gerade Kanten
+koennen sich nicht kreuzen, und der Korridor haelt den gesuchten Weg in diesem
+Korsett.
+
+| Aufloesung | Talabstand | Pixel je Tal | Ueberschneidungen |
+|---|---|---|---|
+| 256 px | 900 m | 15 | 5 |
+| 256 px | 1200 m | 20 | 5 |
+| 256 px | 2500 m | 43 | **0** |
+| 256 px | 3500 m | 60 | **0** |
+| 512 px | 900 m | 31 | 4 |
+| 512 px | 2500 m | 85 | **0** |
+
+Null ab etwa 40 Pixeln je Tal. Darunter bleiben einzelne Beruehrungen - das
+ist derselbe Bereich, vor dem `carve_river_network()` ohnehin warnt, aber die
+Grenze liegt hoeher als die dort genannten 30 Pixel.
+
+**NICHT GELOEST** fuer den dichten Bereich. Drei Versuche, alle gemessen und
+alle erfolglos:
+
+* groesseres Suchfenster (Fenster wuchs bis zur ganzen Karte): keine Wirkung
+* Korridor um die gerade Verbindung: 3-4 -> 5, also leicht schlechter
+* "nur fremde Aeste sperren, Muendung in den eigenen Hauptlauf erlauben" -
+  begrifflich richtiger, gemessen deutlich SCHLECHTER (5 -> 12), weil die Wege
+  dann an den Hauptlaeufen entlang abkuerzen und dabei fremde Aeste treffen.
+  Zurueckgenommen.
+
+Die Zahl steht als `crossings` im Rueckgabewert und wird bei > 0 als WARNING
+geloggt - sie ist damit sichtbar statt still.
+
+### Laufzeit
+
+256 px 0.3 s, 512 px rund 1 s bei dichtem Netz. Die Wegsuche laeuft je Kante
+auf einem kleinen Fenster, nicht auf der ganzen Karte.
+
+
+---
+
+## §17 Kanten an den Zusammenfluessen, geloest 2026-07-30
+
+Zweiter Nutzer-Befund aus §15. Nach der gelaendefolgenden Wegfuehrung (§16)
+war er endlich isoliert messbar - vorher war er von den Ruecken-Durchschnitten
+ueberdeckt.
+
+### Gemessen statt vermutet
+
+Messgroesse: Hoehensprung zwischen BENACHBARTEN Flusspixeln. Ein Fluss faellt
+stetig, jeder Sprung ist ein Fehler. Median 1.2 m, aber p99 176 m und
+groesster 574 m.
+
+Die Glaettung entlang des Baumes half kaum (p99 176 -> 149 ueber 15
+Durchlaeufe). Also nachgesehen, WAS dort aneinanderstoesst: der groesste
+Sprung lag zwischen zwei DIREKT AUFEINANDERFOLGENDEN Punkten desselben Laufs,
+nicht zwischen zwei Aesten.
+
+### Ursache
+
+Das Eintiefen zieht einen Muendungsknoten auf die Hoehe seines TIEFSTEN
+Zuflusses. Der andere Zufluss steht unmittelbar daneben noch auf seiner
+eigenen Hoehe - dazwischen ein Pixel. In der Natur hat sich ein Nebenarm auf
+dem Weg zur Muendung laengst eingeschliffen; hier fehlte jede Obergrenze fuer
+die Steigung.
+
+### Behoben: zweiter Durchlauf von der Muendung aufwaerts
+
+Nach dem Eintiefen (Mindestgefaelle, von den Quellen abwaerts) laeuft jetzt
+ein zweiter Durchlauf in die Gegenrichtung und begrenzt die STEIGUNG:
+
+    z[j] = min(z[j], z[eltern] + max_gradient * strecke)
+
+Der Sprung wird dadurch ueber eine Strecke verteilt statt auf einem Pixel zu
+stehen. Bricht die Monotonie nicht - die Obergrenze senkt nur, und sie liegt
+ueber dem Mindestgefaelle.
+
+| max_gradient | Sprung p99 | groesster | Ueberhoehung | Abfluss |
+|---|---|---|---|---|
+| aus | 181 m | 538 m | 321 m | 78% |
+| 0.30 | 25 m | 73 m | 321 m | 78% |
+| **0.12** | **10 m** | **39 m** | 321 m | 78% |
+| 0.06 | 6 m | 24 m | 321 m | 79% |
+
+Vorgabe 0.12 (12 %, ein steiler aber vorkommender Gebirgsbach). Ueberhoehung
+und Entwaesserung bleiben unberuehrt - die Aenderung kostet nichts.
+
+Als siebte Zusicherung in `tests/smoke_test_terrain_river_network.py`
+festgehalten, Grenze 3 % der Hoehenspanne statt eines festen Meterwerts (§4.4).
+
+### Nebenbefund
+
+Die Warnschwelle "Pixel je Tal" steht jetzt bei 40 statt 30: unterhalb davon
+brechen nicht nur die Entwaesserung, sondern auch die Kreuzungsfreiheit ein
+(§16).
+
+
+---
+
+## §18 Talrand: Auslaufen statt Abschneiden, 2026-07-30
+
+Der Nutzer-Wunsch, der sich durch mehrere Nachrichten zieht: der Effekt soll
+am Fluss 100 % sein und mit der Entfernung ABNEHMEN. Kein Tal, das wie
+ausgeschnitten wirkt.
+
+### Ursache
+
+`clip(distance / width, 0, 1)` gab dem Flusseinfluss einen EXAKTEN Radius:
+innerhalb wirkt er, ausserhalb gar nicht. Diese Grenze ist im Querschnitt als
+senkrechte Stufe zu sehen - an einer Stelle faellt das Gelaende von 1280 m auf
+-180 m innerhalb eines Pixels. Unabhaengig davon, wie weich das Querprofil
+selbst geformt ist.
+
+### Behoben
+
+Der Abstand wird ohne Obergrenze abgebildet:
+
+    u = 1 - exp(-t^a)        mit t = Abstand / Talbreite
+
+u erreicht die 1 nie, der Einfluss klingt also aus statt zu enden - und zwar
+ueberall beliebig oft differenzierbar, es gibt nirgends einen Knick.
+
+**Erst mit t^a/(1+t^a) versucht und VERWORFEN.** Die Form klingt zu langsam
+aus (bei dreifacher Talbreite noch 10 % Flusseinfluss); der sichtbare Anteil
+des Noise-Gelaendes fiel dadurch von 43 % auf 18 % - genau gegen die Vorgabe
+"die Berge gehoeren dem Noise-Gelaende". 1 - exp(-t^a) faellt bei doppelter
+Talbreite schon unter 2 %.
+
+| edge_softness | Terrain sichtbar | Kruemmung p99.5 | Abfluss |
+|---|---|---|---|
+| harter Schnitt | 48% | 2435 | 13% |
+| 6.0 | 44% | 1053 | 13% |
+| 3.0 | 40% | 742 | 72% |
+| **2.0 (Vorgabe)** | **35%** | **660** | **83%** |
+| 1.3 | 28% | 573 | 82% |
+
+Kruemmung = 99.5. Perzentil des Laplace-Operators, also ein Mass fuer den
+KNICK in der Oberflaeche. Ein Talrand mit harter Grenze ist ein Knick.
+
+Nebenbefund: der harte Schnitt liefert nur 13 % Entwaesserung, weil jenseits
+der Grenze reines P steht - mit allen seinen Senken.
+
+### Weiterhin offen
+
+Der Querschnitt zeigt: die Talsohlen sind immer noch BREITE FLACHE Boeden weit
+unter dem Umland, die Uebergaenge sind nur nicht mehr senkrecht. Der
+Band-Charakter kommt damit nicht mehr vom Rand, sondern von der flachen Sohle
+(valley_form 1.6 plus divide_blend 0.75 glaetten sie zusaetzlich). Das ist der
+naechste Punkt.
+
+
+---
+
+## §19 Flache Talsohlen, behoben 2026-07-30
+
+Der Querschnitt aus §18 zeigte breite EBENE Talboeden weit unter dem Umland -
+der Band-Charakter kam nicht mehr vom Rand, sondern von der Sohle. Zwei
+Ursachen, beide von mir selbst eingebaut.
+
+### 1. Die Glaettung wirkte auf BEIDE Enden
+
+`divide_blend` setzte smoothstep, w*w*(3-2w), auf den Mischfaktor. Die
+Ableitung ist dort an beiden Enden null - also auch AM FLUSS (w = 1), und
+damit wurde die Sohle eben. Eingebaut war es, um die Wasserscheide zu
+glaetten.
+
+Ersetzt durch `w^(1 + 2*divide_blend)`: Ableitung null bei w = 0
+(Wasserscheide, weich), aber ungleich null bei w = 1 (Sohle, echte Neigung).
+Seit §18 laeuft der Talrand ohnehin exponentiell aus, aussen wird also nichts
+mehr abgeschnitten.
+
+### 2. `edge_softness` formte die Sohle mit
+
+`1 - exp(-t^a)` verhaelt sich nahe am Fluss wie **t^a**. Bei a = 2 ist die
+Kurve dort FLACH: auf 30 % der Talbreite standen noch 84 % Flusseinfluss.
+
+| t (Abstand/Talbreite) | a = 2 | a = 1 |
+|---|---|---|
+| 0.1 | 0.98 | 0.82 |
+| 0.3 | 0.84 | 0.53 |
+| 0.5 | 0.59 | 0.33 |
+
+Vorgabe auf a = 1 gesenkt. Damit sind die beiden Rollen entkoppelt: die FORM
+des Querschnitts macht allein `valley_form`, das knickfreie Auslaufen nach
+aussen die Exponentialfunktion. Vorher formte ein Regler beides.
+
+### 3. Talform-Vorgabe von 1.6 auf 1.1
+
+1.6 ist ein ausgepraegtes U-Tal und hat per Definition eine flache Sohle. Das
+U-Tal bleibt einstellbar, es ist nur nicht mehr der Normalfall - es gehoert zu
+glazial ueberformten Landschaften (Wallis, Fjordland).
+
+### Ergebnis
+
+| | Sohlenneigung | Terrain sichtbar | Kruemmung | Abfluss |
+|---|---|---|---|---|
+| harter Schnitt (Ausgangslage) | 0.600 | 48% | 2386 | 13% |
+| U-Tal 1.6, a = 2 | 0.481 | 42% | 513 | 81% |
+| **Talform 1.1, a = 1** | **1.094** | 39% | 519 | 77% |
+
+Sohlenneigung mehr als verdoppelt, Kruemmung (der Knick am Talrand) weiterhin
+bei einem Fuenftel der Ausgangslage.
+
+Im Querschnitt: die Taeler laufen jetzt spitz zu, statt einen 2 km breiten
+ebenen Boden zu haben, und die Flanken folgen dem Noise-Gelaende deutlich
+enger.
+
+
+---
+
+## §20 Pipeline-Test ueber alle Outputs, 2026-07-30
+
+`tests/smoke_test_pipeline_outputs.py`. Faehrt alle 39 Knoten des
+CALCULATOR_GRAPH in topologischer Reihenfolge (aus dem Graphen abgeleitet, §4.5)
+und prueft jeden der 73 deklarierten Outputs auf FEHLT / NUR NULL / KONSTANT /
+NICHT-ENDLICH / OK. Zwei Durchgaenge: mit ShaderManager (GPU) und ohne (CPU).
+
+Angelegt, nachdem der Nutzer meldete, dass viele Anzeige-Schalter nichts mehr
+zeigen. Kein vorhandener Test haette das gefunden - sie pruefen je einen
+Generator.
+
+### Erster Lauf: 60 von 73 in Ordnung
+
+| Befund | Outputs |
+|---|---|
+| erosion.hydraulic/* alle NUR NULL | 7 - ERWARTET, EROSION_AKTIV steht auf False (§8) |
+| water.lake_detection/lake_map | KONSTANT auf GPU, OK auf CPU - **Paritaet verletzt** |
+| biome.climate_classification | KONSTANT auf GPU, OK auf CPU - **Paritaet verletzt** |
+| settlement.roadsites/roadsite_list | OK auf GPU, NUR NULL auf CPU - **Paritaet verletzt** |
+| settlement.city_boundary/city_cost_map | NICHT-ENDLICH (inf/nan) |
+| geology.intrusions/height_delta | NUR NULL auf beiden |
+| water.evaporation/evaporation_map | NUR NULL auf beiden |
+| settlement.plot_nodes/plots | NUR NULL auf beiden |
+
+Die drei Paritaets-Verletzungen sind der wertvollste Teil: sie waren nur
+sichtbar, weil beide Pfade im selben Lauf verglichen werden.
+
+### Die leeren Anzeigen haben ZWEI verschiedene Ursachen
+
+Getrennt nachgemessen:
+
+* **Erosion-Schalter**: leer, weil EROSION_AKTIV auf False steht. Kein Fehler,
+  sondern die Entscheidung aus §8. Faellt weg, sobald Schritt 3 des Fahrplans
+  (§14) dran ist.
+* **Slope und die Geology-Schalter**: die DATEN sind da. Nachgeprueft bis in
+  den Domain-Speicher, aus dem die Anzeige liest: heightmap (128,128),
+  slopemap (128,128,2), shadowmap (128,128) - alle vorhanden, assemble und
+  _save_to_data_manager laufen fehlerfrei. Der Fehler liegt also in der
+  DARSTELLUNG, nicht in der Berechnung. Die slopemap ist dreidimensional
+  (zwei Komponenten je Pixel); ein Zeichenweg, der ein 2D-Feld erwartet, kann
+  damit nichts anfangen.
+
+Das ist noch nicht behoben und braucht die laufende App (§4.6: Anzeige und
+Skalen sind nur dort pruefbar).
+
+
+## §21 Ring am Kartenrand: Randabfluss, gelöst 2026-08-04
+
+**Der Befund kam aus einem Bild des Nutzers.** Im Flussnetz lief ein durch­
+gehender Lauf am linken, unteren und rechten Kartenrand entlang bis zum einen
+Auslass – und stieg dafür sogar über die Rücken. Der Nutzer: *"wir wollen ja
+schon Täler in eine Richtung erzwingen aber nicht in dieser kreisrunden Form"*.
+
+**Ursache.** Mit einer festen, kleinen Zahl von Auslassen muss JEDER Knoten
+dorthin. Der Kartenrand ist im Delaunay-Graph eine durchgehende Kette – für
+einen Knoten in der gegenüberliegenden Ecke ist der Weg darauf entlang oft
+billiger als quer durchs Gebirge. Kein Regler konnte das abstellen: höheres
+`cost_strength` verteuert das Steigen, aber der Ring steigt ja gerade deshalb,
+weil er sonst noch teurer wäre.
+
+**Lösung: ein virtueller Wurzelknoten.** `spanning_tree()` hängt an ihn die
+Hauptauslasse gratis und JEDEN Randknoten zu einem festen Preis
+(`border_outflow`). Dijkstra entscheidet dann selbst: ein Randknoten verlässt
+die Karte an Ort und Stelle, sobald der Umweg zum Hauptauslass teurer ist als
+der Preis. Der Preis ist relativ angegeben (§4.4) – 1.0 heißt "so teuer wie ein
+Lauf über die halbe Karte".
+
+Das ist auch die physikalisch richtigere Aussage: aus einem 15-km-Fenster
+fließt Wasser an vielen Randstellen hinaus, nicht an einer.
+
+**Maß.** Ein Gesamtanteil "Flusslange im Randsaum" verschleiert den Befund –
+beklagt wurde EIN langer Lauf. Gemessen wird deshalb die längste
+zusammenhängende Kette flussabwärts, die den Randsaum nie verlässt, in Prozent
+einer Kantenlänge (256 px, 625 Punkte, Seed 20260730):
+
+| `border_outflow` | 6.0 | 3.0 | 2.0 | 1.5 | 1.0 | 0.5 |
+|---|---|---|---|---|---|---|
+| längster Randlauf | 212 % | 158 % | 107 % | 93 % | 61 % | 30 % |
+| Auslasse | 1 | 21 | 49 | 54 | 66 | 73 |
+
+6.0 entspricht dem Verhalten davor. Vorgabe ist **1.0**.
+
+### Zwei Fallen, beide teuer
+
+**Eine 0 in der Matrix ist für `scipy.sparse.csgraph` KEINE Kante.** Die
+Hauptauslasse waren zuerst mit Gewicht 0 an der Wurzel angehängt – also
+überhaupt nicht. Ergebnis: jeder Randknoten wurde Auslass, und der Regler war
+über seinen ganzen Bereich wirkungslos (81 Auslasse bei jedem Wert). Sie
+brauchen einen winzigen positiven Wert. Ebenso mussten die Hauptauslasse aus
+der Randliste entfernt werden, weil `csr_matrix` doppelte Einträge SUMMIERT.
+
+**Der Randsaum muss an `size` hängen, nicht an `size - 1`.** Die Punkte kommen
+in Metern aus `poisson_points` und laufen nach der Teilung durch mpp bis
+`size`. Mit der −1 lag der Streifen bei 256 und 512 px verschieden weit innen,
+andere Knoten fielen hinein – das Netz sprang zwischen den Auflösungen
+(r = +0.768 statt +0.990, Zusicherung 6 des Smoke-Tests). Nach der Korrektur
+r = +0.999, also besser als vor der ganzen Änderung.
+
+### Nebenwirkung: die Kante am Rand ist mit weg
+
+Zusicherung 7 (`Keine Kanten am Lauf`) war seit dem 2026-08-03 rot: größter
+Sprung 84 m gegen 54 m Grenze, lokalisiert auf (143,4)→(144,4) am linken
+Kartenrand. Dort lief der Auslauf zum Rand direkt neben einem anderen Ast
+vorbei, der noch auf 129 m stand, während der Auslauf schon bei 45 m war –
+zwei Läufe, die sich am Rand berühren. Mit dem Randabfluss verlässt dieser Ast
+die Karte an Ort und Stelle, statt am Rand entlangzulaufen. Größter Sprung
+jetzt **8 m**. Die Entwässerung stieg dabei von 51.1 % auf 57.1 %.

@@ -62,7 +62,11 @@ class TERRAIN:
     WORLD_SIZE_KM = 15.0
 
     MAPSIZE = {
-        "min": MAPSIZEMIN, "max": MAPSIZEMAX, "default": 128, "step": 32,
+        # Vorgabe 2026-07-30 von 128 auf 256 angehoben: unter 30 Pixeln je Tal
+        # bricht die Entwaesserung des Flussnetzes ein (gemessen 17 % bei
+        # 128 px gegen 87 % bei 256 px, SPEZIFIKATION §13). Bei 2500 m
+        # Talabstand und 15 km Karte sind 256 px die untere brauchbare Grenze.
+        "min": MAPSIZEMIN, "max": MAPSIZEMAX, "default": 256, "step": 32,
         "description": "Auflösung der Karte in Pixeln (Breite = Höhe). Größere "
                         "Werte zeigen mehr Detail, verlangsamen aber jede "
                         "nachfolgende Generierungsstufe."
@@ -84,7 +88,7 @@ class TERRAIN:
     # Default 4000m (statt vorher 2000m), damit die Farbskala (0-4000m, siehe
     # CanvasSettings.CANVAS_2D) beim Default-Seed auch tatsächlich ausgenutzt wird.
     AMPLITUDE = {
-        "min": 30, "max": 6000.0, "default": 4000.0, "step": 10, "suffix": "m",
+        "min": 30, "max": 6000.0, "default": 1800.0, "step": 10, "suffix": "m",
         "description": "Maximale Höhendifferenz der Landschaft in Metern - "
                         "bestimmt, wie hoch die Berge im Vergleich zu den "
                         "Tälern werden."
@@ -111,7 +115,7 @@ class TERRAIN:
     # Untergrund hat auch für sich die besseren Kennzahlen (9 statt 187
     # Senken, größtes Kanalnetz 1801 statt 157 px).
     OCTAVES = {
-        "min": 1, "max": 8, "default": 2, "step": 1,
+        "min": 1, "max": 8, "default": 3, "step": 1,
         "description": "Anzahl der übereinandergelegten Rausch-Schichten "
                         "unterschiedlicher Frequenz. Mehr Oktaven fügen "
                         "feinere Detailebenen hinzu, verlangsamen aber die "
@@ -200,7 +204,7 @@ class TERRAIN:
     # die Talsohle, seit _apply_redistribution() gegen amplitude statt gegen
     # das Sample-Min/Max normalisiert (siehe core/terrain_generator.py).
     REDISTRIBUTE_POWER = {
-        "min": 0.5, "max": 4.0, "default": 3.5, "step": 0.1,
+        "min": 0.5, "max": 4.0, "default": 2.0, "step": 0.1,
         "description": "Verzerrt die Höhenverteilung nach der Rausch-"
                         "Erzeugung - höhere Werte drücken den Großteil der "
                         "Landmasse näher zur Talsohle (mehr Ebenen, "
@@ -647,25 +651,41 @@ class WEATHER:
 FLUSSNETZ_AKTIV = True
 
 
+def flussnetz_auslaesse(map_distance_km: float) -> int:
+    """
+    Wieviele getrennte Flussnetze eine Karte dieser Groesse traegt.
+
+    Auf 15 x 15 km liegen keine drei unabhaengigen Flusssysteme - die feste
+    Drei bis 2026-07-30 ergab ein zerstueckeltes Bild. Die Zahl waechst jetzt
+    mit der Flaeche:
+
+        bis 25 km    1 Netz
+        25 - 50 km   2 Netze
+        ab 50 km     3 Netze
+
+    Mehrere Auslaesse bleiben wichtig, wo es sie gibt: mit nur einem muss JEDER
+    Punkt der Karte dorthin entwaessern, das Netz ueberquert also jeden Ruecken
+    dazwischen (§16). Auf kleinen Karten gibt es solche Ruecken selten.
+    """
+    if map_distance_km >= 50.0:
+        return 3
+    if map_distance_km >= 25.0:
+        return 2
+    return 1
+
+
 class RIVER_NETWORK:
     """
     Regler des Flussnetzes (SPEZIFIKATION §12).
 
     Drei davon tragen den Charakter einer Landschaft:
-        SPACING_M     Abstand der Täler
-        INCISION_M    wie tief sie unter die Umgebung schneiden
-        PLATEAU_RELIEF wie bewegt die Fläche ZWISCHEN den Tälern ist
-
-    Gemessene Beispiele (25 km Ausschnitt, docs/SPEZIFIKATION.md §12):
-        Alpen        3500 m / 1500 m / 100 %
-        Mittelgebirge 1400 m /  220 m /  55 %
-        Flachland    3000 m /   22 m /  80 %
-        Fjordland    4500 m / 1150 m /  28 %   <- die Hochebene
-        Vietnam      1100 m /  620 m /  85 %
+        SPACING_M        Abstand der Täler
+        INCISION_SHARE   wie tief sie schneiden, als Anteil der Höhenspanne
+        PLATEAU_FLATTEN  wie stark die Fläche zwischen den Tälern eingeebnet wird
     """
 
     SPACING_M = {
-        "min": 300.0, "max": 12000.0, "default": 2500.0, "step": 100.0,
+        "min": 300.0, "max": 12000.0, "default": 3000.0, "step": 100.0,
         "suffix": "m",
         "description": "Abstand benachbarter Talsohlen in Metern. Kleine Werte "
                         "ergeben ein dichtes, feinverästeltes Talnetz, große "
@@ -673,61 +693,90 @@ class RIVER_NETWORK:
                         "Talbreite, wieviel Hochfläche zwischen den Tälern "
                         "übrig bleibt."
     }
-    INCISION_M = {
-        "min": 0.0, "max": 2500.0, "default": 400.0, "step": 10.0,
-        "suffix": "m",
-        "description": "Wie tief das größte Tal unter die umgebende Fläche "
-                        "schneidet. 0 lässt das Gelände unberührt. Kleinere "
-                        "Nebentäler schneiden entsprechend flacher."
+    # 2026-07-30 von Metern auf einen ANTEIL DER HÖHENSPANNE umgestellt.
+    #
+    # Der Nutzer dazu: "wir wollen eigentlich nicht diese tiefe einstellen
+    # muessen. das wird doch automatisch durch die terrain-hoehe bestimmt."
+    # Genau richtig - 400 m Eintiefung bedeuten in einer 4000-m-Landschaft
+    # etwas anderes als in einer 200-m-Landschaft, und der Wert musste bei
+    # jeder Änderung der Amplitude nachgezogen werden. §4.4: eine absolute
+    # Größe, wo eine relative hingehört.
+    INCISION_SHARE = {
+        "min": 0.0, "max": 0.6, "default": 0.55, "step": 0.05,
+        "description": "Wie tief das größte Tal einschneidet, als Anteil der "
+                        "Höhenspanne. Passt sich damit von selbst an die "
+                        "Height Amplitude an. 0 lässt das Gelände unberührt; "
+                        "kleinere Nebentäler schneiden entsprechend flacher."
     }
-    PLATEAU_RELIEF = {
-        "min": 0.0, "max": 1.0, "default": 0.8, "step": 0.05,
-        "description": "Wie bewegt die Fläche ZWISCHEN den Tälern ist. Kleine "
-                        "Werte ergeben eine Hochebene (Fjordland), große ein "
-                        "Bergland mit Graten (Alpen). Der einzelne Regler, der "
-                        "diese beiden Landschaftstypen trennt."
+    # 0.0  Fläche zwischen den Tälern behält ihr volles Relief (Bergland)
+    # 0.9  Fläche zwischen den Tälern ist eingeebnet (Hochebene, Fjordland)
+    #
+    # Vorgabe 0.0: Hochebenen sind zurückgestellt, und für die Beurteilung des
+    # Übergangs Tal -> Noise-Gelände muss das Noise-Gelände da sein.
+    PLATEAU_FLATTEN = {
+        "min": 0.0, "max": 0.9, "default": 0.0, "step": 0.05,
+        "description": "Wie stark die Fläche ZWISCHEN den Tälern eingeebnet "
+                        "wird. 0 lässt ihr das volle Relief (Bergland wie in "
+                        "den Alpen), hohe Werte machen daraus eine Hochebene "
+                        "mit tief eingeschnittenen Trögen (Fjordland). Nach "
+                        "oben bei 0.9 begrenzt - eine exakt ebene Fläche hätte "
+                        "kein Gefälle mehr, dem ein Fluss folgen kann."
     }
     VALLEY_WIDTH = {
-        "min": 0.15, "max": 1.0, "default": 0.55, "step": 0.05,
+        "min": 0.15, "max": 1.0, "default": 0.8, "step": 0.05,
         "description": "Talbreite als Anteil des Talabstands. Bei 0.5 reicht "
                         "das Tal genau bis zur Mitte zwischen zwei Läufen und "
                         "es bleibt keine Hochfläche übrig; kleinere Werte "
                         "lassen eine stehen."
     }
     VALLEY_FORM = {
-        "min": 0.3, "max": 3.0, "default": 1.6, "step": 0.1,
+        "min": 0.3, "max": 3.0, "default": 1.3, "step": 0.1,
         "description": "Querschnitt des Tales. Unter 1 eine Schlucht mit Wand "
                         "direkt am Fluss, 1 ein V-Tal, über 1 ein U-Tal mit "
                         "flacher Sohle und steilen Flanken (glazial)."
     }
-    VALLEY_STEPS = {
-        "min": 0, "max": 6, "default": 0, "step": 1,
-        "description": "Anzahl der Klippenbänder in der Talflanke. 0 ergibt "
-                        "eine glatte Flanke, höhere Werte ein Stufenprofil wie "
-                        "in Schichtstufenlandschaften."
-    }
-    # 2026-07-30 ergaenzt, nachdem der Nutzer am Bild zwei Dinge bemaengelt
-    # hat: alles kantig und facettiert, und die Laeufe schnurgerade.
+    # VALLEY_STEPS (Klippenbänder) 2026-07-30 ENTFERNT. Der Nutzer: "cliff
+    # bands allgemein loeschen. das funktioniert nicht wie ich es haben will."
+    # Die Treppenfunktion erzeugte ebene Absätze, die zusätzlich die
+    # Entwässerung brachen (§17).
     MEANDER = {
         "min": 0.0, "max": 0.5, "default": 0.18, "step": 0.02,
         "description": "Seitliche Auslenkung der Flussläufe zwischen zwei "
-                        "Knoten, als Anteil des Knotenabstands. 0 ergibt "
-                        "gerade Strecken, höhere Werte gewundene Läufe. Die "
-                        "Zwischenpunkte folgen dabei dem Gelände, der Lauf "
-                        "schneidet also nicht mehr geradlinig durch alles."
+                        "Knoten. Seit die Wege dem Gelände folgen, entsteht "
+                        "der Mäander weitgehend von selbst - dieser Regler "
+                        "wirkt daher nur noch schwach."
     }
     DIVIDE_BLEND = {
         "min": 0.0, "max": 1.0, "default": 0.75, "step": 0.05,
         "description": "Wie weich das Tal in die Umgebung übergeht. 0 ergibt "
-                        "eine harte Kante an der Wasserscheide (facettiertes "
-                        "Bild), 1 einen glatten Übergang mit flacher Talsohle. "
-                        "Für scharfe Grate im Hochgebirge kleinere Werte."
+                        "eine harte Kante an der Wasserscheide, 1 einen "
+                        "glatten Übergang."
     }
     COST_STRENGTH = {
-        "min": 0.0, "max": 8.0, "default": 2.5, "step": 0.5,
+        "min": 0.0, "max": 12.0, "default": 6.0, "step": 0.5,
         "description": "Wie stark die Flüsse hohes Gelände meiden. 0 lässt sie "
-                        "den kürzesten Weg nehmen, hohe Werte zwingen sie in "
-                        "die vorhandenen Senken der Landschaft."
+                        "den kürzesten Weg nehmen, hohe Werte zwingen sie um "
+                        "die Berge herum statt hindurch."
+    }
+    # 2026-08-04 ergänzt. Der Nutzer im Bild: alle Flüsse liefen am Kartenrand
+    # entlang bis zum einen Auslass und stiegen dafür sogar über die Rücken -
+    # "aber nicht in dieser kreisrunden form". Der Rand ist eine durchgehende
+    # billige Kette von Delaunay-Kanten; ohne einen Ausweg ist der Weg darauf
+    # kürzer als der Weg quer durchs Gebirge.
+    #
+    # Gemessen als LÄNGSTE Kette, die den Randsaum nie verlässt, in Prozent
+    # einer Kantenlänge (256 px, 625 Punkte):
+    #     Regler     4.0    3.0    2.0    1.5    1.0    0.5
+    #     Randlauf   ...   158%   107%    93%    61%    30%
+    # Sehr hohe Werte entsprechen dem Verhalten davor.
+    BORDER_OUTFLOW = {
+        "min": 0.0, "max": 4.0, "default": 1.0, "step": 0.1,
+        "description": "Wie teuer es ist, die Karte an einer beliebigen "
+                        "Randstelle zu verlassen statt am Hauptauslass - "
+                        "gemessen an einem Lauf über die halbe Karte. Kleine "
+                        "Werte lassen viele kurze Flüsse direkt zum nächsten "
+                        "Rand laufen, große zwingen alles zum Hauptauslass und "
+                        "legen dabei einen Fluss um den Kartenrand herum."
     }
 
 
@@ -846,7 +895,15 @@ class EROSION_FILTER:
 # Feinschliff auf einem bereits entwässerten Gelände laufen. Bis dahin ist ihr
 # Beitrag laut §7 negativ - sie ERZEUGT die Becken, die sie auflösen soll.
 #
-# Zum Wiedereinschalten: hier auf True setzen. Sonst ist nichts zu tun.
+# 2026-07-30 wieder auf False (Nutzer-Entscheidung): die Erosion ist pausiert
+# und reicht Nullkarten durch, alles DAHINTER muss weiterlaufen.
+#
+# Zwischenzeitlich auf True gesetzt, weil der Erosion- und der Water-Tab leer
+# blieben. Das war eine Fehldiagnose: die leeren Water- und Geology-Anzeigen
+# kamen daher, dass SHADERS_ROOT nach dem Ordnerumzug ins Leere zeigte und
+# JEDE GPU-Operation still auf den CPU-Pfad zurueckfiel (siehe
+# tests/smoke_test_shader_paths.py). Nur der Erosion-Tab selbst ist von diesem
+# Schalter betroffen, und das ist beabsichtigt.
 EROSION_AKTIV = False
 
 

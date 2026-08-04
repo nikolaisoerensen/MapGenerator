@@ -45,8 +45,25 @@ from opensimplex import OpenSimplex
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QOffscreenSurface, QOpenGLContext, QSurfaceFormat
 
+# Diese Datei liegt in managers/, shaders/ liegt daneben in der Projektwurzel -
+# also GENAU EINE Ebene hoch.
+#
+# Stand bis 2026-07-30 zwei Ebenen (".." , ".."), weil die Datei damals unter
+# gui/OldManagers/ lag. Beim Verschieben nach managers/ blieb die Zaehlung
+# stehen, und SHADERS_ROOT zeigte auf ein Verzeichnis NEBEN dem Projekt. Der
+# Fehler war unsichtbar, weil jede GPU-Operation ihn abfaengt und still auf
+# den CPU-Pfad zurueckfaellt - im Log stand nur eine WARNING je Aufruf, das
+# Programm lief scheinbar normal weiter.
+#
+# Die assert-Zeile unten ist der eigentliche Fix: ein falscher Pfad soll beim
+# Import auffallen und nicht erst dadurch, dass alles zehnmal langsamer ist.
 SHADERS_ROOT = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "shaders")
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shaders")
+)
+assert os.path.isdir(SHADERS_ROOT), (
+    "SHADERS_ROOT zeigt auf %s - dort liegt kein shaders/-Verzeichnis. "
+    "Wurde managers/shader_manager.py verschoben, ohne die Ebenenzahl "
+    "anzupassen?" % SHADERS_ROOT
 )
 
 

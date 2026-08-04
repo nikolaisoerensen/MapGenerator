@@ -146,17 +146,19 @@ class TerrainTab(BaseMapTab):
         # geschnitten werden.
         river_configs = [
             ("river_spacing_m", "Valley Spacing (m)", RIVER_NETWORK.SPACING_M),
-            ("river_incision_m", "Valley Depth (m)", RIVER_NETWORK.INCISION_M),
-            ("river_plateau_relief", "Plateau vs Mountains",
-             RIVER_NETWORK.PLATEAU_RELIEF),
+            ("river_incision_share", "Valley Depth (share)",
+             RIVER_NETWORK.INCISION_SHARE),
+            ("river_plateau_flatten", "Plateau Flattening",
+             RIVER_NETWORK.PLATEAU_FLATTEN),
             ("river_valley_width", "Valley Width", RIVER_NETWORK.VALLEY_WIDTH),
             ("river_valley_form", "Valley Shape", RIVER_NETWORK.VALLEY_FORM),
-            ("river_valley_steps", "Cliff Bands", RIVER_NETWORK.VALLEY_STEPS),
             ("river_meander", "Meander", RIVER_NETWORK.MEANDER),
             ("river_divide_blend", "Divide Softness",
              RIVER_NETWORK.DIVIDE_BLEND),
             ("river_cost_strength", "Rivers Follow Lowland",
              RIVER_NETWORK.COST_STRENGTH),
+            ("river_border_outflow", "Border Outflow Cost",
+             RIVER_NETWORK.BORDER_OUTFLOW),
         ]
 
         shape_group = self._build_parameter_group("Shape", shape_configs)

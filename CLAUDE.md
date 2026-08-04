@@ -125,3 +125,30 @@ Vor jedem `pip install --upgrade numpy` also pruefen:
 
 Schlaegt der Import fehl, ist numpy zu neu und der JIT-Pfad ist weg.
 Begruendung und Messwerte ausfuehrlich in `requirements.txt`.
+
+
+## Beim Verschieben von Dateien: Pfade aus `__file__` mitzaehlen
+
+Am 2026-07-30 wanderte `shader_manager.py` von `gui/OldManagers/` nach
+`managers/`, also eine Ebene nach oben. Die Berechnung von `SHADERS_ROOT` ging
+weiterhin ZWEI Ebenen hoch und zeigte damit neben das Projekt. Die gesamte
+Pipeline rechnete danach ohne GPU.
+
+**Der Fehler war unsichtbar.** Jede GPU-Operation faengt ihren Fehler ab und
+faellt still auf den CPU-Pfad zurueck; im Log stand nur eine WARNING je
+Aufruf, das Programm lief scheinbar normal weiter. Alle Smoke-Tests blieben
+gruen, weil sie den CPU-Pfad benutzen.
+
+Die Pruefung nach dem Umzug hatte nur **Importe** getestet - und eine
+Pfadberechnung aus `__file__` ist beim Import unsichtbar. Ein Modul kann
+tadellos importieren und trotzdem auf ein Verzeichnis zeigen, das es nicht
+gibt.
+
+Nach jedem Verschieben deshalb zusaetzlich:
+
+1. Jede `os.path.dirname(...__file__...)`-Kette auflaesen und pruefen, dass
+   das Ziel noch im Projekt liegt.
+2. `tests/smoke_test_shader_paths.py` laufen lassen - er prueft `SHADERS_ROOT`
+   und die Existenz aller 31 per `get_program()` angeforderten Shader.
+3. Eine echte GPU-Operation fahren und dabei auf WARNINGs achten, nicht nur
+   auf den Rueckgabewert.

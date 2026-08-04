@@ -1423,22 +1423,31 @@ class BaseTerrainGenerator:
         netz_parameter = {}
         for parameter_key, modul_key in (
                 ("river_spacing_m", "river_spacing_m"),
-                ("river_incision_m", "river_incision_m"),
+                ("river_incision_share", "incision_share"),
                 ("river_valley_width", "valley_width_fraction"),
                 ("river_valley_form", "valley_form"),
-                ("river_valley_steps", "valley_steps"),
                 ("river_meander", "meander"),
                 ("river_divide_blend", "divide_blend"),
-                ("river_cost_strength", "cost_strength")):
+                ("river_cost_strength", "cost_strength"),
+                ("river_border_outflow", "border_outflow")):
             if parameter_key in parameters:
                 netz_parameter[modul_key] = parameters[parameter_key]
 
-        # PLATEAU_RELIEF staucht das Relief der Flaeche ZWISCHEN den Taelern,
-        # laesst den Gipfel aber stehen. Das ist der Regler, der Hochebene von
-        # Bergland trennt (Fjordland 28% gegen Alpen 100%).
-        plateau = float(parameters.get("river_plateau_relief", 1.0))
-        if plateau < 1.0:
-            P = P * plateau + amplitude * (1.0 - plateau)
+        # PLATEAU_FLATTEN ebnet die Flaeche ZWISCHEN den Taelern ein und laesst
+        # den Gipfel stehen - der Regler, der Hochebene von Bergland trennt.
+        # 0 = volles Relief (Bergland), hohe Werte = Hochebene.
+        #
+        # Nach oben begrenzt: bei exakt 1.0 waere P eine konstante Ebene, das
+        # Flussnetz faende kein Gefaelle und schaltete sich ab.
+        # Zahl der Auslaesse aus der Kartengroesse - auf 15 x 15 km liegen
+        # keine drei unabhaengigen Flusssysteme (Nutzer, 2026-07-30).
+        from gui.config.value_default import flussnetz_auslaesse
+        netz_parameter.setdefault("outlet_count", flussnetz_auslaesse(km))
+
+        flatten = float(np.clip(parameters.get("river_plateau_flatten", 0.0),
+                                0.0, 0.9))
+        if flatten > 0.0:
+            P = P * (1.0 - flatten) + amplitude * flatten
 
         import time
         start = time.time()
