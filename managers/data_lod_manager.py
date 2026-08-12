@@ -3155,9 +3155,70 @@ class DataLODManager(QObject):
         for candidate in range(lod_level, 0, -1):
             candidate_key = f"lod_{candidate}_{calculator_id}_{output_key}"
             if candidate_key in self._calculator_data:
-                return self._calculator_data[candidate_key]
+                return self._umtasten(self._calculator_data[candidate_key],
+                                      candidate, lod_level)
+
+        # AUCH NACH OBEN SUCHEN, DANN HERUNTERTASTEN.
+        #
+        # Bis 2026-08-06 wurde nur abwaerts gesucht. Das genuegte, solange alle
+        # Knoten auf demselben LOD liefen. Seit Terrain und Flussnetz auf der
+        # vollen Aufloesung rechnen und Wetter, Wasser, Biome und Siedlungen auf
+        # der halben, fragt ein nachgelagerter Knoten auf LOD 5 nach einer
+        # Heightmap, die auf LOD 6 geschrieben wurde - und bekam None.
+        #
+        # Jetzt wird auch aufwaerts gesucht und das Gefundene auf die Groesse
+        # des angefragten LOD gebracht. Damit ist der Aufloesungsunterschied
+        # eine Sache des Managers und nicht jedes einzelnen Generators.
+        hoechstes = self.get_max_lod_for_map_size() if hasattr(
+            self, "get_max_lod_for_map_size") else lod_level + 4
+        for candidate in range(lod_level + 1, int(hoechstes) + 2):
+            candidate_key = f"lod_{candidate}_{calculator_id}_{output_key}"
+            if candidate_key in self._calculator_data:
+                return self._umtasten(self._calculator_data[candidate_key],
+                                      candidate, lod_level)
 
         return None
+
+    def _umtasten(self, wert, quell_lod: int, lod_level: int):
+        """
+        Ein Feld auf die Groesse des angefragten LOD bringen.
+
+        Nur Rasterfelder werden angefasst - Listen, Objekte und Skalare gehen
+        unveraendert durch. Ganzzahlige Karten (Biom-Kennungen, Gesteinsarten)
+        werden mit dem NAECHSTEN Nachbarn abgetastet: eine Mittelung wuerde aus
+        den Kennungen 3 und 5 die Kennung 4 machen, also ein Biom erfinden, das
+        an dieser Stelle nicht vorkommt.
+        """
+        try:
+            import numpy as np
+            if not isinstance(wert, np.ndarray) or wert.ndim < 2:
+                return wert
+            ziel = self.get_map_size_for_lod(lod_level)
+            quelle = self.get_map_size_for_lod(quell_lod)
+            if ziel is None or quelle is None:
+                return wert
+
+            # NUR ANFASSEN, WENN DIE KONFIGURATION ZU DEN DATEN PASST.
+            #
+            # Ohne diese Probe zog die Umtastung jedes Feld auf eine Groesse,
+            # die aus einer LOD-Konfiguration stammte, welche mit den
+            # abgelegten Daten nichts zu tun hatte. Der Pipeline-Test setzt
+            # keine Konfiguration und sprang dadurch von 9 auf 40 Befunde -
+            # jedes Feld kam in falscher Groesse zurueck.
+            #
+            # Stimmt die erwartete Quellgroesse nicht mit der tatsaechlichen
+            # ueberein, weiss der Manager nicht, was er vor sich hat, und
+            # reicht unveraendert durch.
+            if wert.shape[0] != quelle or ziel == wert.shape[0]:
+                return wert
+
+            faktor = ziel / float(wert.shape[0])
+            from scipy import ndimage
+            ordnung = 0 if np.issubdtype(wert.dtype, np.integer) else 1
+            faktoren = [faktor, faktor] + [1.0] * (wert.ndim - 2)
+            return ndimage.zoom(wert, faktoren, order=ordnung, mode="nearest")
+        except Exception:                                # pragma: no cover
+            return wert
 
     def get_calculator_completed_lod(self, calculator_id: str) -> int:
         """
@@ -3266,6 +3327,26 @@ class DataLODManager(QObject):
         if terrain_data.shadowmap is not None:
             self.set_terrain_data_lod("shadowmap", terrain_data.shadowmap, lod_level, parameters)
             data_keys.append("shadowmap")
+
+        # WELTKARTE: river_mask/river_order/river_generation/region_map.
+        #
+        # Bis zum 2026-08-06 endete die Aufzaehlung bei shadowmap - und weil
+        # die Reiter ueber get_terrain_data() genau aus diesem Speicher lesen,
+        # waren weder Fluesse noch Regionen im Programm zu sehen. Die Daten
+        # waren berechnet und lagen im Calculator-Speicher; nur diese drei
+        # Zeilen fehlten dazwischen.
+        #
+        # Sie sind OPTIONAL - im alten Pfad (WELTKARTE_AKTIV = False) liefert
+        # terrain.redistribution sie nicht, und dann bleibt es beim bisherigen
+        # Verhalten.
+        for schluessel in ("river_mask", "river_order", "river_generation",
+                           "region_map", "klima_map", "seegrad",
+                           "ufer_region_a", "ufer_region_b", "see_eis",
+                           "kuesten_archetyp", "kuesten_staerke"):
+            wert = getattr(terrain_data, schluessel, None)
+            if wert is not None:
+                self.set_terrain_data_lod(schluessel, wert, lod_level, parameters)
+                data_keys.append(schluessel)
 
         # Cache und Metadaten
         self._update_cache_timestamp("terrain", lod_level, "complete", parameters)
@@ -3822,8 +3903,8 @@ class DataLODManager(QObject):
         # fehlten diese drei hier, obwohl settlement_tab.py sie schon länger
         # über get_settlement_data() abfragte, siehe SettlementData.__init__-
         # Kommentar und [[project-settlement-physics-lab-parity]]).
-        for key in ("settlement_list", "landmark_list", "roadsite_list", "roads", "plots", "plot_nodes",
-                    "landmark_roads", "outer_roads", "plot_edges",
+        for key in ("settlement_list", "landmark_list", "roadsite_list", "roads", "sea_roads", "plots",
+                    "plot_nodes", "landmark_roads", "plot_edges",
                     "plot_cores", "wilderness_polygons", "plot_node_positions"):
             value = getattr(settlement_data, key, None)
             if value:

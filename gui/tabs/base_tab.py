@@ -156,6 +156,11 @@ class BaseMapTab(QWidget):
             # Sub-Class spezifische Controls
             self.create_parameter_controls()
 
+            # DANACH, NICHT IN JEDEM REITER EINZELN. Die neun Reiter bauen ihre
+            # Regler auf drei verschiedene Weisen; die Sperre hier anzusetzen
+            # ist die einzige Stelle, an der sie garantiert alle erreicht.
+            self._stillgelegte_regler_sperren()
+
             self.logger.debug("UI setup completed successfully")
 
         except Exception as e:
@@ -506,6 +511,9 @@ class BaseMapTab(QWidget):
           3D-Ansicht sofort die richtigen Daten, sobald der Nutzer
           umschaltet, ohne erneut generieren zu müssen.
         """
+        import time as _time
+        _t_push_start = _time.time()
+
         current_display = self.get_current_display()
         if not current_display:
             return
@@ -521,11 +529,17 @@ class BaseMapTab(QWidget):
         # rohe Heightmap als 3D-Mesh keinen Sinn ergäbe) fallen weiterhin auf die
         # kombinierte Heightmap zurück.
         if self.current_view == "3d" and hasattr(current_display.display, 'update_heightmap'):
+            _t_fetch = _time.time()
             heightmap = data if layer_type in ("heightmap", "heightmap_combined") else (
                 self.data_lod_manager.get_terrain_data_combined("heightmap") if self.data_lod_manager else None
             )
+            print(f"DEBUG: _push_data_to_current_display({self.generator_type}.{layer_type}): "
+                  f"Heightmap-Fetch {_time.time()-_t_fetch:.3f}s")
             if heightmap is not None:
+                _t_uh = _time.time()
                 current_display.display.update_heightmap(heightmap, self.generator_type)
+                print(f"DEBUG: _push_data_to_current_display({self.generator_type}.{layer_type}): "
+                      f"update_heightmap-Aufruf gesamt {_time.time()-_t_uh:.3f}s")
             # Live "Map Distance"-Wert mitschicken (siehe [[project-terrain-review]]
             # 4f) - das 3D-Widget hat keinen eigenen data_lod_manager-Zugriff.
             if self.data_lod_manager and hasattr(current_display.display, 'set_world_size_km'):
@@ -578,6 +592,8 @@ class BaseMapTab(QWidget):
         # Winkelindex 3 (vorherige Default-Position des jetzt entfernten Shadow-
         # Angle-Sliders, siehe gui/tabs/terrain_tab.py).
         DEFAULT_SHADOW_ANGLE_INDEX = 3
+        print(f"DEBUG: _push_data_to_current_display({self.generator_type}.{layer_type}): "
+              f"gesamt bis Schatten-Block {_time.time()-_t_push_start:.3f}s")
         if (self.map_display_3d and self.data_lod_manager
                 and hasattr(self.map_display_3d.display, "update_shademap")):
             shadow_data = self.data_lod_manager.get_terrain_data("shadowmap")
@@ -743,9 +759,34 @@ class BaseMapTab(QWidget):
             # Display-Update bei relevanten Daten. Geländeformende Generatoren
             # lösen es in JEDEM Tab aus, nicht nur im eigenen - siehe
             # _TERRAIN_FORMING_GENERATORS.
-            if (generator_type == self.generator_type
-                    or generator_type in self._TERRAIN_FORMING_GENERATORS
-                    or data_key in getattr(self, 'display_data_keys', [])):
+            #
+            # NUR WENN DIESER TAB GERADE SICHTBAR IST (2026-08-11, Nutzerbefund
+            # via Pipeline-Log). Vorher redraw'te bei JEDEM Update eines
+            # terrain-formenden Generators JEDER der zehn Tabs synchron auf dem
+            # Hauptthread - gemessen 187s bei 1024px fuer Terrain allein, weil
+            # `data_updated` innerhalb von set_terrain_data_complete_lod()
+            # feuert (siehe generation_orchestrator._maybe_assemble_generator())
+            # und dabei alle zehn on_data_updated()-Handler synchron durchlief,
+            # bevor auch nur der naechste Calculator-Knoten dispatcht werden
+            # konnte. self.viewport_widget ist das Shell-eingehaengte Widget
+            # (siehe _create_viewport_container()) - nur die aktuell sichtbare
+            # Tab-Seite im gemeinsamen QStackedWidget liefert isVisible()==True,
+            # unabhaengig vom generator_type (der bei Terrain/Fluss bzw.
+            # Siedlungen Global/Regional mehrfach vorkommt, also selbst keine
+            # eindeutige Tab-Identitaet waere). update_display_mode() nutzt
+            # bereits einen Dirty-Check (display_update_manager.needs_update())
+            # statt hier selbst Zustand nachzuhalten: bleibt der Aufruf hier
+            # aus, bleibt auch mark_updated() aus, und needs_update() liefert
+            # beim naechsten Aufruf wieder True - der Tab holt sich seine
+            # aktuellen Daten also von selbst nach. map_editor.py._on_tab_changed()
+            # ruft update_display_mode() ohnehin bereits bei JEDEM Tab-Wechsel
+            # auf (QTimer.singleShot(0, tab_instance.update_display_mode)) -
+            # das deckt das Nachholen ab, ohne dass hier zusaetzlicher Code
+            # noetig waere.
+            if (self.viewport_widget is not None and self.viewport_widget.isVisible()
+                    and (generator_type == self.generator_type
+                         or generator_type in self._TERRAIN_FORMING_GENERATORS
+                         or data_key in getattr(self, 'display_data_keys', []))):
                 self.update_display_mode()
 
         except Exception as e:
@@ -782,6 +823,37 @@ class BaseMapTab(QWidget):
     # =============================================================================
     # EXTENSIBILITY INTERFACE FÜR SUB-CLASSES
     # =============================================================================
+
+    def _stillgelegte_regler_sperren(self):
+        """
+        Regler sperren, die im aktuellen Programmstand nichts bewirken.
+
+        Welche das sind, steht in gui/config/value_default.stillgelegte_regler()
+        - hergeleitet aus den Schaltern (WELTKARTE_AKTIV, EROSION_AKTIV) und
+        nicht fest verdrahtet, damit ein Umschalten sie sofort wieder freigibt.
+
+        Warum ueberhaupt: gemessen am 2026-08-06 bewirkten 49 von 109 Reglern
+        nichts. Der Nutzer stellt etwas ein, die Karte bleibt gleich, und er
+        kann nicht unterscheiden, ob das Absicht oder ein Fehler ist - das
+        untergraebt jede Beurteilung der Karte.
+        """
+        try:
+            from gui.config.value_default import stillgelegte_regler
+            gesperrt = stillgelegte_regler()
+        except Exception as fehler:                      # pragma: no cover
+            self.logger.debug("Sperrliste nicht verfuegbar: %s", fehler)
+            return
+
+        regler = getattr(self, "parameter_sliders", None) or {}
+        anzahl = 0
+        for schluessel, widget in regler.items():
+            grund = gesperrt.get(schluessel)
+            if grund and hasattr(widget, "stilllegen"):
+                widget.stilllegen(grund)
+                anzahl += 1
+        if anzahl:
+            self.logger.info("%s: %d von %d Reglern gesperrt (ohne Wirkung)",
+                             self.__class__.__name__, anzahl, len(regler))
 
     def create_parameter_controls(self):
         """MUSS von Sub-Classes implementiert werden - erstellt Parameter-UI-Controls"""

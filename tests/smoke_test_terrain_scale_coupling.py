@@ -55,6 +55,24 @@ import numpy as np
 
 sys.path.insert(0, r"C:\Lokale Dateien\Projects\Python\MapGenerator")
 
+# DER ALTE PFAD WIRD HIER GEPRUEFT, nicht die Weltkarte.
+#
+# Seit dem 2026-08-05 gibt es WELTKARTE_AKTIV. Steht er, liefert
+# _calc_redistribution das Regionengelaende statt Noise -> Potenz ->
+# Erosionsfilter -> Flussnetz - und dieser Test misst dann etwas voellig
+# anderes als das, was in seinem Namen steht. Beim ersten Lauf danach meldete
+# er prompt "Messgeraet unbrauchbar" und "flache Karte ergibt Spanne 1546".
+#
+# Deshalb wird der Schalter hier hart ausgeschaltet. Er gehoert in denselben
+# Rang wie FLUSSNETZ_AKTIV: ein Hauptschalter, den ein Test ueber den von ihm
+# geprueften Pfad selbst setzen muss.
+def _alten_pfad_erzwingen():
+    import gui.config.value_default as vd
+    vd.WELTKARTE_AKTIV = False
+
+
+_alten_pfad_erzwingen()
+
 SEED = 20260730
 
 

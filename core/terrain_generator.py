@@ -53,6 +53,46 @@ class TerrainData:
         self.slopemap: Optional[np.ndarray] = None
         self.shadowmap: Optional[np.ndarray] = None
 
+        # WELTKARTE: vier weitere Ausgaben von terrain.redistribution.
+        #
+        # Sie fehlten hier bis zum 2026-08-06, und das war der Grund, weshalb
+        # weder die Regionenfarben noch die Fluesse im Programm zu sehen waren.
+        # Der Weg ist zweistufig: ein _calc_-Knoten legt seine Ausgaben im
+        # CALCULATOR-Speicher ab, aber die Reiter lesen aus dem DOMAIN-Speicher
+        # (get_terrain_data), und dazwischen steht assemble_terrain_data() ->
+        # set_terrain_data_complete_lod(). Was dort nicht aufgezaehlt ist,
+        # existiert fuer die Anzeige nicht.
+        #
+        # Der Fehler war unsichtbar: die Reiter fragen ab, bekommen None und
+        # zeichnen einfach nur das Gelaende - kein Absturz, keine Warnung. Mein
+        # erster Test hat ihn nicht gefunden, weil er den Rueckgabewert von
+        # _weltkarte_heightmap() prüfte und danach direkt den Renderer, also
+        # genau um diese Stufe herum.
+        #
+        # Optional: der alte Pfad (WELTKARTE_AKTIV = False) liefert sie nicht.
+        self.river_mask: Optional[np.ndarray] = None
+        self.river_order: Optional[np.ndarray] = None
+        self.river_generation: Optional[np.ndarray] = None
+        self.region_map: Optional[np.ndarray] = None
+        # (3, H, W): Jahresmittel, Jahresspanne, Niederschlag - siehe
+        # _weltkarte_heightmap. Weich ueber die Regionsgrenzen gemischt.
+        self.klima_map: Optional[np.ndarray] = None
+        # Seegliederung (2026-08-11, docs/KLIMA_UND_SEE.md §2): seegrad 0 auf
+        # Land, 1..4+ auf See; ufer_region_a/b die bis zu zwei naechstgelegenen
+        # Regionen je Seezelle (core.terrain_weltkarte.seegliederung()).
+        self.seegrad: Optional[np.ndarray] = None
+        self.ufer_region_a: Optional[np.ndarray] = None
+        self.ufer_region_b: Optional[np.ndarray] = None
+        # Seetyp-Regeln (2026-08-11, docs/OFFENE_PUNKTE.md 3.6): bool, True wo
+        # die naechste Uferregion die Taiga ist.
+        self.see_eis: Optional[np.ndarray] = None
+        # Kuesten-Archetypen (2026-08-12, docs/OFFENE_PUNKTE.md 3.8): lokaler
+        # Index (0..2, -1 = keiner) INNERHALB der Region, ueber
+        # core.terrain_weltkarte.KUESTEN_ARCHETYPEN[region_name][index]
+        # nachschlagbar; kuesten_staerke die Blendstaerke (0..1) je Pixel.
+        self.kuesten_archetyp: Optional[np.ndarray] = None
+        self.kuesten_staerke: Optional[np.ndarray] = None
+
         # LOD metadata
         self.lod_level: int = 1
         self.actual_size: int = 32
@@ -215,11 +255,18 @@ class SimplexNoiseGenerator:
         # nachdem die alte "if False and"-Deaktivierung (aus einer Zeit, in der
         # shader_manager praktisch immer None war und der Shader selbst nur der
         # Platzhalter war) beide Voraussetzungen nicht mehr zutreffen.
-        if self._gpu_available() and offset_x == 0 and offset_y == 0:
+        # Der Versatz war bis 2026-08-04 ein GPU-Ausschlusskriterium: der Shader
+        # kannte ihn nicht, also fiel JEDER verschobene Ausschnitt still auf die
+        # CPU zurueck. Kein Fehler im Log, nur ein Programm, das ein Vielfaches
+        # laenger rechnet - dieselbe Falle wie beim SHADERS_ROOT-Umzug. Jetzt
+        # hat noiseGeneration.comp u_offset_x/u_offset_y, und die Zoom-Pyramide
+        # (Makro/Meso/Mikro auf dieselbe Weltstelle) laeuft auf der GPU.
+        if self._gpu_available():
             try:
                 result = self.shader_manager.process_noise_generation(
                     size=size, octaves=octaves, frequency=frequency,
-                    persistence=persistence, lacunarity=lacunarity, seed=self.seed
+                    persistence=persistence, lacunarity=lacunarity, seed=self.seed,
+                    offset_x=offset_x, offset_y=offset_y
                 )
                 if result is not None:
                     self.logger.debug("GPU noise generation successful")
@@ -512,6 +559,50 @@ def generate_seasonal_sun_angles(month_index: int, latitude: float,
             for h in _SEASONAL_DAYTIME_HOURS]
 
 
+# WIE FEIN DER SCHLAGSCHATTEN GERECHNET WIRD.
+#
+# Bis 2026-08-07 stand hier die feste Zahl 64 - unabhaengig von der
+# Kartengroesse. Der Schattenwurf wurde damit bei jeder Aufloesung gleich grob,
+# waehrend das Gelaende immer feiner wurde; GPU- und CPU-Pfad liefen dadurch
+# mit steigender Kartengroesse immer weiter auseinander (Korrelation 0.815 bei
+# 128 px, nur noch 0.507 bei 512).
+#
+# Jetzt ein VIERTEL der Kartenkante, mindestens 64. Der Schatten waechst also
+# mit der Karte mit. Vorschlag des Nutzers 2026-08-07.
+SCHATTEN_TEILER = 4
+SCHATTEN_MINDESTGITTER = 64
+
+# Soll der Schlagschatten ueber die GPU laufen?
+#
+# JA. Bei gleichem Gitter ist der Shader dem vektorisierten CPU-Weg deutlich
+# ueberlegen - gemessen 2026-08-07, reiner Raycast ueber 7 Sonnenstaende:
+#
+#   Gitter   CPU       GPU      Faktor
+#   128      0.13 s    0.02 s     8x
+#   256      1.14 s    0.02 s    51x
+#   512     21.17 s    0.07 s   304x
+#
+# Ein frueherer Vergleich am selben Tag hatte den GPU-Weg als nutzlos
+# ausgewiesen. Der war UNFAIR: die GPU rechnete auf 64 px, die CPU auf voller
+# Aufloesung - zwei verschiedene Arbeitsmengen. Mit gleichem Gitter stimmen
+# beide zu 99 % der Pixel ueberein; die Reste sind einzelne Randpixel des
+# Schlagschattens (GLSL-Textursampling gegen numpy-Bilinear).
+GPU_SCHATTEN = True
+
+
+# Bezugsrelief fuer die Gewichtung des Erosionsfilters (Meter).
+#
+# Eine Region mit diesem Relief bekommt Gewicht 1.0, doppelt so viel Relief
+# das Doppelte - geklemmt auf MIN..MAX, damit weder die Steppe (183 m) leer
+# ausgeht noch das Alpenland (1000 m) zerfranst.
+#
+# FEST und nicht aus dem Kartenmittel abgeleitet: eine Normierung auf das
+# jeweilige Bild waere derselbe Fehler, den die Hoehenskala schon einmal hatte.
+EROSION_BEZUGSRELIEF_M = 400.0
+EROSION_GEWICHT_MIN = 0.35
+EROSION_GEWICHT_MAX = 2.50
+
+
 class ShadowCalculator:
     """
     Funktionsweise: Berechnet Verschattung mit Raycasts für LOD-spezifische Sonnenwinkel
@@ -533,6 +624,12 @@ class ShadowCalculator:
         """
         self.shader_manager = shader_manager
         self.logger = logging.getLogger(self.__class__.__name__)
+
+        # DIE PIXELGROESSE IN METERN. Ohne sie ist "wie steil ist der Hang"
+        # nicht beantwortbar - siehe den Block bei _einfallswinkel(). 1.0 ist
+        # KEINE brauchbare Vorgabe, sondern der Zustand vor dem 2026-08-07;
+        # wer sie nicht setzt, bekommt eine Warnung.
+        self._meters_per_pixel = 0.0
 
         # 7 Sonnenwinkel für Tagesverlauf (elevation, azimuth in Grad)
         self.sun_angles = [
@@ -567,26 +664,88 @@ class ShadowCalculator:
             Verhalten (feste self.sun_angles-Tabelle, ein Tag für alle Monate).
         Returns: numpy.ndarray - Shadow-Map konstant 64x64
         """
-        # GPU-Fallback (Optimal) - ShaderManager.process_shadow_raycast() rechnet nur
-        # einen Sonnenwinkel pro Aufruf, daher hier über die LOD-Winkel loopen und wie
-        # im CPU-Pfad gewichtet kombinieren. Progressive Shadow-Enhancement (existing_
-        # shadows/existing_lod) wird hier nicht nachgebildet, da calculate_heightmap()
-        # sie in der aktuellen Pipeline nie mit gesetzten Werten aufruft.
-        if self._gpu_available():
-            try:
-                return self._calculate_gpu_shadows(heightmap, lod_level, sun_angles_override)
-            except Exception as e:
-                self.logger.warning(f"GPU shadow calculation failed: {e}")
+        if not self._meters_per_pixel:
+            self.logger.warning(
+                "ShadowCalculator: meters_per_pixel nicht gesetzt - Hangneigung "
+                "und Schattenlaenge werden falsch. set_meters_per_pixel() "
+                "aufrufen (siehe Kommentar bei _einfallswinkel).")
 
-        # CPU-Fallback (Gut)
+        # EIN ABLAUF FUER BEIDE PFADE (2026-08-07).
+        #
+        # Vorher gab es zwei getrennte Wege, die verschiedene GROESSEN
+        # lieferten: der Shader nur die Verschattung, die CPU zusaetzlich den
+        # Einfallswinkel. Jetzt ist die Aufteilung nach der Art der Rechnung
+        # gemacht statt nach dem Geraet:
+        #
+        #   SCHLAGSCHATTEN   Strahlverfolgung, teuer, GPU 300-mal schneller
+        #                    -> auf SCHATTEN_TEILER-tel der Kartenkante
+        #   EINFALLSWINKEL   rein oertlich, billig, kein Gewinn durch die GPU
+        #                    -> in voller Aufloesung, EINE Fassung fuer beide
+        #
+        # Damit ist die Paritaet Bauweise: der Einfallswinkel kann gar nicht
+        # mehr auseinanderlaufen, und der Schlagschatten benutzt auf beiden
+        # Wegen dieselben Grenzen (raycast_grenzen).
         try:
-            return self._calculate_cpu_shadows(heightmap, lod_level, existing_shadows, existing_lod,
-                                                sun_angles_override)
+            return self._sonnenexposition(heightmap, lod_level,
+                                          sun_angles_override)
         except Exception as e:
-            self.logger.warning(f"CPU shadow calculation failed: {e}")
+            self.logger.warning(f"Shadow calculation failed: {e}")
 
         # Simple-Fallback (Minimal)
         return self._calculate_simple_shadows(heightmap, lod_level)
+
+    def _sonnenexposition(self, heightmap: np.ndarray, lod_level: int,
+                          sun_angles_override=None) -> np.ndarray:
+        """
+        Schlagschatten mal Einfallswinkel, ueber die Sonnenstaende gewichtet.
+
+        Der Schlagschatten entsteht auf einem groeberen Gitter (siehe
+        SCHATTEN_TEILER) und wird hochskaliert - er hat ohnehin weiche Raender.
+        Der Einfallswinkel wird in voller Aufloesung gerechnet; er traegt die
+        feine Struktur, aus der spaeter die unregelmaessige Baumgrenze folgt.
+        """
+        size = heightmap.shape[0]
+        gitter = max(SCHATTEN_MINDESTGITTER, size // SCHATTEN_TEILER)
+        gitter = min(gitter, size)
+        mpp_voll = float(self._meters_per_pixel) or 1.0
+        mpp_gitter = mpp_voll * size / float(gitter)
+
+        grob = self._resize_2d(heightmap, gitter) if gitter != size else heightmap
+        grob = np.ascontiguousarray(grob, dtype=np.float32)
+
+        winkel, gewichte = self.get_sun_angles_for_lod(lod_level, sun_angles_override)
+        summe = float(sum(gewichte)) or 1.0
+
+        schatten = np.zeros((gitter, gitter), dtype=np.float64)
+        einfall = np.zeros((size, size), dtype=np.float64)
+        gpu = GPU_SCHATTEN and self._gpu_available()
+
+        for (elevation, azimuth), gewicht in zip(winkel, gewichte):
+            sx, sy, sz = self._sonnenrichtung(elevation, azimuth)
+            reichweite, schritt = self.raycast_grenzen(grob, mpp_gitter, sz)
+
+            teil = None
+            if gpu:
+                try:
+                    teil = self.shader_manager.process_shadow_raycast(
+                        grob, elevation, azimuth, gitter,
+                        max_distance=float(reichweite), step_size=float(schritt),
+                        height_scale=1.0 / max(mpp_gitter, 1e-6))
+                except Exception as fehler:
+                    self.logger.warning("GPU-Schatten fehlgeschlagen: %s", fehler)
+                    teil = None
+                    gpu = False
+            if teil is None:
+                teil = self._verschattung_cpu(grob, mpp_gitter, sx, sy, sz)
+
+            schatten += np.asarray(teil, dtype=np.float64) * gewicht
+            einfall += self._einfallswinkel(heightmap, mpp_voll, sx, sy, sz) * gewicht
+
+        schatten /= summe
+        einfall /= summe
+        if gitter != size:
+            schatten = self._resize_2d(schatten.astype(np.float32), size)
+        return (schatten * einfall).astype(np.float32)
 
     def get_sun_angles_for_lod(
             self, lod_level: int,
@@ -692,10 +851,28 @@ class ShadowCalculator:
         # ShaderManager-eigenen Defaults (max_distance=100.0, step_size=1.0) -
         # sonst unterschieden sich GPU- und CPU-Schatten sichtbar je nachdem,
         # welcher Pfad gerade aktiv war. Siehe [[project-terrain-review]] 4b.
+        # DER SHADER HAT DENSELBEN EINHEITENFEHLER (gefunden 2026-08-07).
+        #
+        # shadowRaycast.comp rechnet `currentHeight += sunDir.z * u_step_size`,
+        # also Meter plus Pixel - genau der Fehler, der auch im CPU-Pfad steckte.
+        # Gemessen: auf ebenem Wasser lieferte die GPU 0.411 statt der
+        # analytisch erwarteten 0.719, weil der Strahl praktisch waagerecht lief
+        # und jede Bodenwelle Schatten warf.
+        #
+        # ER LAESST SICH OHNE SHADER-AENDERUNG BEHEBEN: `u_height_scale`
+        # multipliziert beide Hoehen im Shader. Setzt man ihn auf 1/mpp, stehen
+        # die Hoehen in PIXELEINHEITEN, und der Vergleich mit `sunDir.z * step`
+        # (ebenfalls Pixel) stimmt wieder. Eine Zeile statt eines Shader-Umbaus,
+        # und der Shader bleibt fuer andere Aufrufer unveraendert.
+        mpp_schatten = (float(getattr(self, "_meters_per_pixel", 0.0)) or 1.0) \
+            * original_size / float(shadow_resolution)
+        hoehenskala = 1.0 / max(mpp_schatten, 1e-6)
+
         for (elevation, azimuth), weight in zip(sun_angles, sun_weights):
             shadow_map = self.shader_manager.process_shadow_raycast(
                 shadow_heightmap, elevation, azimuth, shadow_resolution,
-                max_distance=float(shadow_resolution * 2), step_size=0.5, height_scale=1.0
+                max_distance=float(shadow_resolution * 2), step_size=0.5,
+                height_scale=hoehenskala
             )
             if shadow_map is None:
                 raise RuntimeError("process_shadow_raycast returned no data")
@@ -706,7 +883,36 @@ class ShadowCalculator:
         if original_size != shadow_resolution:
             shadows = self._resize_2d(shadows, original_size)
 
-        return shadows
+        # DER EINFALLSWINKEL FEHLT DEM SHADER (2026-08-07).
+        #
+        # shadowRaycast.comp gibt nur 0.0 oder 1.0 zurueck - reine
+        # Verschattung. Der CPU-Pfad multiplizierte zusaetzlich mit dem
+        # Skalarprodukt aus Flaechennormale und Sonnenrichtung, und damit
+        # lieferten die beiden Pfade GRUNDVERSCHIEDENE Groessen: gemessen
+        # Landmittel 0.296 gegen 0.111, groesste Abweichung 0.86.
+        #
+        # Der Einfallswinkel wird deshalb HIER ergaenzt, in derselben Funktion,
+        # die auch der CPU-Pfad benutzt. Zwei Gruende dafuer, statt den Shader
+        # zu erweitern:
+        #
+        #   * Er ist eine rein oertliche Rechnung ohne Strahlverfolgung - auf
+        #     der CPU in Millisekunden erledigt, kein Gewinn durch die GPU.
+        #   * EINE Fassung fuer beide Pfade macht die Paritaet zur Bauweise
+        #     statt zur Zusicherung, die man nachtraeglich pruefen muss.
+        #
+        # Er wird in VOLLER Aufloesung gerechnet, waehrend die Verschattung vom
+        # Shader auf 64 px entsteht - der Schlagschatten ist also grob, die
+        # Hangbeleuchtung fein. Das ist vertretbar, weil der Schlagschatten
+        # ohnehin weiche Raender hat; die Hangbeleuchtung dagegen traegt die
+        # feine Struktur, die spaeter die Baumgrenze unregelmaessig macht.
+        mpp = float(getattr(self, "_meters_per_pixel", 0.0)) or 1.0
+        einfall = np.zeros_like(shadows, dtype=np.float64)
+        for (elevation, azimuth), weight in zip(sun_angles, sun_weights):
+            sx, sy, sz = self._sonnenrichtung(elevation, azimuth)
+            einfall += self._einfallswinkel(heightmap, mpp, sx, sy, sz) * weight
+        einfall /= total_weight
+
+        return (shadows * einfall).astype(np.float32)
 
     def _calculate_simple_shadows(self, heightmap: np.ndarray, lod_level: int) -> np.ndarray:
         """
@@ -797,26 +1003,153 @@ class ShadowCalculator:
         # zwischenzeitlicher Fix-Versuch (Y negiert) beruhte auf der falschen,
         # archivierten Konvention und wurde nach dieser Verifikation wieder
         # zurückgenommen.
-        elevation_rad = np.radians(sun_elevation)
-        azimuth_rad = np.radians(sun_azimuth)
+        sun_x, sun_y, sun_z = self._sonnenrichtung(sun_elevation, sun_azimuth)
 
-        sun_x = np.cos(elevation_rad) * np.sin(azimuth_rad)
-        sun_y = np.cos(elevation_rad) * np.cos(azimuth_rad)
-        sun_z = np.sin(elevation_rad)
+        # SEIT 2026-08-07 vektorisiert und in Metern gerechnet, siehe den
+        # Block bei _einfallswinkel(). Die alte Doppelschleife ueber alle
+        # Pixel steht darunter noch als _is_in_shadow_cpu /
+        # _calculate_slope_shading_cpu; sie wird nicht mehr aufgerufen und
+        # bleibt vorerst als Vergleichsmoeglichkeit stehen.
+        mpp = float(getattr(self, "_meters_per_pixel", 0.0)) or 1.0
+        shadow_map = (self._verschattung_cpu(heightmap, mpp, sun_x, sun_y, sun_z)
+                      * self._einfallswinkel(heightmap, mpp, sun_x, sun_y, sun_z))
+        return shadow_map.astype(np.float32)
 
-        # Optimierte Raycast-Berechnung
-        for y in range(height):
-            for x in range(width):
-                if self._is_in_shadow_cpu(heightmap, x, y, sun_x, sun_y, sun_z):
-                    shadow_map[y, x] = 0.0
-                else:
-                    # Slope-basierte Beleuchtung
-                    slope_factor = self._calculate_slope_shading_cpu(
-                        heightmap, x, y, sun_x, sun_y, sun_z
-                    )
-                    shadow_map[y, x] = slope_factor
+    # =========================================================================
+    # SONNENEXPOSITION - eine Stelle fuer beide Pfade (2026-08-07)
+    # =========================================================================
+    #
+    # WAS HIER FALSCH WAR, und es war dreimal derselbe Fehler:
+    #
+    #  1. `_calculate_slope_shading_cpu` bildete den Gradienten als
+    #     h[x+1] - h[x-1], also METER JE PIXEL. Bei 83 m/px erschien jeder Hang
+    #     um Faktor 83 zu steil: gemessen 86.5 Grad Median statt 11.1, und
+    #     98.8 % der Landflaeche galten als steiler als 60 Grad statt 0.7 %.
+    #     Die Flaechennormale kippte damit fast in die Waagerechte und das
+    #     Skalarprodukt mit der Sonne brach zusammen.
+    #
+    #  2. `_is_in_shadow_cpu` rechnete `ray_z = hoehe + sun_z * distance` -
+    #     METER plus PIXEL. Der Sonnenstrahl stieg also um sun_z Meter je
+    #     Pixel statt um sun_z * mpp. Die Sonne stand dadurch 83-mal zu tief,
+    #     und fast die ganze Karte lag im Schatten.
+    #
+    #  3. Der GPU-Shader liefert NUR die Verschattung (0 oder 1) und gar
+    #     keinen Einfallswinkel. Gemessen: Landmittel 0.296 auf der GPU gegen
+    #     0.111 auf der CPU, groesste Abweichung 0.86 auf einer 0..1-Skala.
+    #     Zwei verschiedene Groessen, und das Programm nimmt die GPU.
+    #
+    # Das Ergebnis war, dass Land DUNKLER war als Wasser (0.111 gegen 0.407) -
+    # bei derselben Sonne physikalisch unmoeglich.
+    #
+    # ES BRAUCHT DIE PIXELGROESSE. Ohne sie ist die Frage "wie steil ist der
+    # Hang" nicht beantwortbar; genau daran ist schon der Hangfehler vom
+    # 2026-07-09 gescheitert, der in drei Dateien steckte.
 
-        return shadow_map
+    def set_meters_per_pixel(self, meters_per_pixel: float):
+        """Wie gross ein Pixel in der Wirklichkeit ist. Siehe _einfallswinkel."""
+        self._meters_per_pixel = float(meters_per_pixel)
+
+    @staticmethod
+    def _sonnenrichtung(sun_elevation: float, sun_azimuth: float):
+        """Die Sonnenrichtung in der Konvention dieser Codebase.
+
+        Azimut 0 = Norden, 90 = Osten, im Uhrzeigersinn. Zeile height-1 ist
+        Norden (siehe die ausfuehrliche Herleitung in _raycast_shadow_cpu).
+        """
+        e = np.radians(sun_elevation)
+        a = np.radians(sun_azimuth)
+        return (np.cos(e) * np.sin(a), np.cos(e) * np.cos(a), np.sin(e))
+
+    @staticmethod
+    def raycast_grenzen(heightmap: np.ndarray, meters_per_pixel: float,
+                        sun_z: float):
+        """
+        Reichweite (Pixel) und Schrittweite fuer den Schattenstrahl.
+
+        EINE Stelle fuer beide Pfade. Vorher hatte der CPU-Weg Schrittweite 1.0
+        und eine geometrische Reichweite, der Shader 0.5 und die feste Grenze
+        2 * Kartenbreite - bei gleichem Gitter wichen die Ergebnisse dadurch um
+        bis zu 0.6 voneinander ab (gemessen 2026-08-07), obwohl beide dieselbe
+        Frage beantworten sollten.
+
+        DIE REICHWEITE FOLGT AUS DER GEOMETRIE: laenger als
+        Hoehenspanne / tan(Sonnenhoehe) kann ein Schlagschatten nicht sein. Die
+        feste Grenze von 2 * Kartenbreite war willkuerlich und der Grund, warum
+        der Schattenwurf so lange brauchte.
+        """
+        mpp = max(float(meters_per_pixel), 1e-6)
+        size = heightmap.shape[0]
+        spanne = float(np.ptp(heightmap)) or 1.0
+        reichweite = min(spanne / (max(sun_z, 1e-4) * mpp) + 2.0, 2.0 * size)
+        return reichweite, 0.5
+
+    @staticmethod
+    def _einfallswinkel(heightmap: np.ndarray, meters_per_pixel: float,
+                        sun_x: float, sun_y: float, sun_z: float) -> np.ndarray:
+        """
+        Der Kosinus des Einfallswinkels je Pixel, 0..1.
+
+        Die Flaechennormale aus dem Gradienten IN METERN JE METER - das ist der
+        Unterschied zur alten Fassung. Vektorisiert ueber die ganze Karte statt
+        Pixel fuer Pixel: der alte Weg brauchte 4.9 Millionen Aufrufe einer
+        Python-Funktion und war der groesste Einzelposten der Wetterrechnung.
+        """
+        mpp = max(float(meters_per_pixel), 1e-6)
+        gy, gx = np.gradient(heightmap.astype(np.float64), mpp)
+        # Normale (-dz/dx, -dz/dy, 1), normiert
+        laenge = np.sqrt(gx * gx + gy * gy + 1.0)
+        skalar = (-gx * sun_x - gy * sun_y + sun_z) / laenge
+        return np.maximum(skalar, 0.0)
+
+    @staticmethod
+    def _verschattung_cpu(heightmap: np.ndarray, meters_per_pixel: float,
+                          sun_x: float, sun_y: float, sun_z: float) -> np.ndarray:
+        """
+        Wer liegt im Schlagschatten? 1 = besonnt, 0 = verschattet.
+
+        VEKTORISIERT und IN METERN. Der Strahl steigt je Pixelschritt um
+        sun_z * mpp Meter - vorher um sun_z Meter, was die Sonne um den Faktor
+        mpp zu tief stellte.
+
+        DIE REICHWEITE FOLGT AUS DER GEOMETRIE statt aus einer festen Zahl:
+        laenger als Hoehenspanne / tan(Sonnenhoehe) kann ein Schatten nicht
+        sein. Die alte Grenze von 2 * Kartenbreite war willkuerlich und der
+        Grund, warum der Schattenwurf so lange brauchte.
+        """
+        mpp = max(float(meters_per_pixel), 1e-6)
+        if sun_z <= 1e-4:
+            return np.zeros_like(heightmap, dtype=np.float32)
+
+        size = heightmap.shape[0]
+        reichweite_px, schritt = ShadowCalculator.raycast_grenzen(heightmap, mpp,
+                                                                 sun_z)
+
+        H = heightmap.astype(np.float64)
+        gy, gx = np.mgrid[0:size, 0:size]
+        im_schatten = np.zeros((size, size), dtype=bool)
+
+        d = schritt
+        while d < reichweite_px:
+            sx = gx + sun_x * d
+            sy = gy + sun_y * d
+            drin = (sx >= 0) & (sx < size - 1) & (sy >= 0) & (sy < size - 1)
+            if not drin.any():
+                break
+            xi = np.clip(sx, 0, size - 1.001)
+            yi = np.clip(sy, 0, size - 1.001)
+            x0 = xi.astype(np.int32)
+            y0 = yi.astype(np.int32)
+            fx = xi - x0
+            fy = yi - y0
+            gelaende = (H[y0, x0] * (1 - fx) * (1 - fy)
+                        + H[y0, x0 + 1] * fx * (1 - fy)
+                        + H[y0 + 1, x0] * (1 - fx) * fy
+                        + H[y0 + 1, x0 + 1] * fx * fy)
+            strahl = H + sun_z * d * mpp
+            im_schatten |= drin & (strahl <= gelaende)
+            d += schritt
+
+        return (~im_schatten).astype(np.float32)
 
     def _is_in_shadow_cpu(self, heightmap: np.ndarray, x: int, y: int,
                          sun_x: float, sun_y: float, sun_z: float) -> bool:
@@ -1254,6 +1587,17 @@ class BaseTerrainGenerator:
         terrain_data.heightmap = heightmap
         terrain_data.slopemap = slopemap
         terrain_data.shadowmap = shadowmap
+        # Die vier Weltkarten-Ausgaben mitnehmen. OHNE Pflichtpruefung: im alten
+        # Pfad (WELTKARTE_AKTIV = False) gibt es sie nicht, und ein fehlendes
+        # Flussnetz darf den Zusammenbau nicht scheitern lassen.
+        for schluessel in ("river_mask", "river_order", "river_generation",
+                           "region_map", "klima_map", "seegrad",
+                           "ufer_region_a", "ufer_region_b", "see_eis",
+                           "kuesten_archetyp", "kuesten_staerke"):
+            setattr(terrain_data, schluessel,
+                    self.data_lod_manager.get_calculator_output(
+                        "terrain.redistribution", schluessel, lod_level))
+
         terrain_data.calculated_sun_angles = self.shadow_calculator.get_sun_angles_for_lod(lod_level)[0]
         terrain_data.fallback_used = self._determine_fallback_used()
         terrain_data.update_parameters(parameters)
@@ -1354,6 +1698,21 @@ class BaseTerrainGenerator:
         Heightmap -> Power-Redistribution, ergibt die finale heightmap.
         """
         parameters = self._current_parameters
+
+        # WELTKARTE - die Weiche (docs/INTEGRATIONSPLAN.md, Stufe P1).
+        #
+        # Ist sie aktiv, kommt die Heightmap aus core/terrain_weltkarte.py:
+        # neun Regionen als Parameterfeld auf einer Plaetzchenform, mit Meer.
+        # Der alte Pfad (Noise -> Potenz -> Erosionsfilter -> Flussnetz) bleibt
+        # vollstaendig erhalten und laeuft, sobald der Schalter aus ist - er
+        # muss lauffaehig bleiben, bis die Weltkarte abgenommen ist.
+        weltkarte = self._weltkarte_heightmap(lod_level)
+        if weltkarte is not None:
+            self.data_lod_manager.set_calculator_output(
+                calculator_id, lod_level, weltkarte)
+            self.logger.debug("Weltkarte statt Noise-Gelaende erzeugt")
+            return
+
         noise_grid = self.data_lod_manager.get_calculator_output("terrain.noise", "noise_grid", lod_level)
         if noise_grid is None:
             raise ValueError(f"terrain.redistribution: noise_grid für LOD {lod_level} nicht verfügbar")
@@ -1388,6 +1747,198 @@ class BaseTerrainGenerator:
 
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, outputs)
         self.logger.debug("Heightmap generation + redistribution completed")
+
+    def _weltkarte_heightmap(self, lod_level: int):
+        """
+        Die Heightmap der Regionenwelt, oder None wenn der Schalter aus ist.
+
+        WAS HIER ANDERS IST ALS IM ALTEN PFAD, und warum es so sein muss:
+
+        * KEINE FENSTERNORMIERUNG. Der alte Pfad streckt jede Karte auf
+          0..AMPLITUDE. Hier steht die Hoehe in echten Metern, und sie darf
+          NEGATIV sein - unter 0 ist Meer. Eine Normierung wuerde die
+          Kuestenlinie verschieben und alle neun Regionseichungen entwerten.
+        * DIE KARTENGROESSE STEHT FEST. Die Welt ist WELT_KM breit; ein anderer
+          Wert von map_distance_km wuerde Regionsgroessen und Talabstaende
+          gegeneinander verschieben. Der Wert wird deshalb im Manager gesetzt,
+          damit alle nachgelagerten Knoten dieselbe Skala benutzen.
+        * AMPLITUDE, FEATURE_SIZE_M und REDISTRIBUTE_POWER wirken nicht. Die
+          Regionen bringen ihre eigenen mit. Die Regler bleiben stehen, damit
+          der alte Pfad weiter bedienbar ist.
+        """
+        import gui.config.value_default as vd
+        if not getattr(vd, "WELTKARTE_AKTIV", False):
+            return None
+
+        from core.terrain_weltkarte import weltfeld, WELT_KM
+
+        parameters = self._current_parameters
+        size = self._lod_level_to_size(lod_level, parameters.get("map_size", 512))
+        seed = int(parameters.get("map_seed", self.map_seed))
+
+        manager = self._ensure_data_lod_manager()
+        if abs(float(manager.get_map_distance_km()) - WELT_KM) > 1e-6:
+            manager.set_map_distance_km(WELT_KM)
+            self.logger.info(
+                "Weltkarte aktiv: map_distance_km auf %.1f km gesetzt", WELT_KM)
+
+        heightmap, felder = weltfeld(size, seed, shader_manager=self.shader_manager)
+        mpp = WELT_KM * 1000.0 / float(size)
+
+        # DER EROSIONSFILTER - nach dem Weltfeld, VOR dem Flussnetz.
+        #
+        # Diese Reihenfolge steht so im INTEGRATIONSPLAN (S4) und hat einen
+        # Grund: der Filter erzeugt Grate und Rinnen, und die Taeler sollen in
+        # genau diese Form geschnitten werden. Umgekehrt wuerde der Filter die
+        # frisch eingegrabenen Taeler wieder zuschuetten.
+        ridge_ersatz = None
+        gefiltert = self._weltkarte_erosionsfilter(heightmap, felder)
+        if gefiltert is not None:
+            heightmap = gefiltert["heightmap"]
+            ridge_ersatz = gefiltert["ridge_map"]
+
+        fluss_maske = np.zeros((size, size), dtype=np.float32)
+        fluss_ordnung = np.zeros((size, size), dtype=np.float32)
+        fluss_generation = np.zeros((size, size), dtype=np.float32)
+
+        if getattr(vd, "WELTFLUESSE_AKTIV", False):
+            heightmap, fluss_maske, fluss_ordnung, fluss_generation = \
+                self._weltfluesse(heightmap, felder, size, seed)
+
+        # ridge_map ist ein Anzeige-Output des Erosionsfilters. Solange der bei
+        # aktiver Weltkarte nicht laeuft, liefert die Hangneigung ein
+        # brauchbares Ersatzbild - besser als ein fehlender Output, der die
+        # Anzeige leer laesst (smoke_test_pipeline_outputs).
+        # ridge_map: seit dem 2026-08-07 die echte des Erosionsfilters, wenn er
+        # laeuft. Die Hangneigung als Ersatz war ein Notbehelf, solange er aus
+        # war - sie zeigt Steilheit, nicht Grate.
+        if ridge_ersatz is not None:
+            ridge = ridge_ersatz
+        else:
+            gy, gx = np.gradient(heightmap.astype(np.float32), mpp)
+            ridge = np.hypot(gx, gy).astype(np.float32)
+
+        # region_map: welche der neun Regionen an diesem Pixel fuehrt (0..8 in
+        # der Reihenfolge von alle_regionen(), Nordwest nach Suedost). Kommt aus
+        # demselben Gewichtsfeld, das auch das Gelaende formt - der Siedlungs-
+        # generator liest daran die Kultur ab, der Terrain-Reiter faerbt danach.
+        # klima_map: drei Ebenen als EIN Output statt dreier Einzelausgaben.
+        #
+        #   [0] Jahresmitteltemperatur auf Meereshoehe, Grad
+        #   [1] Jahresspanne (Juli minus Januar), Kelvin
+        #   [2] Jahresniederschlag, mm
+        #
+        # Sie entstehen aus DENSELBEN Regionsgewichten wie das Gelaende, sind
+        # also an den Regionsgrenzen bereits weich ueberblendet - genau die
+        # Vorgabe des Nutzers vom 2026-08-07 ("wir muessen immer
+        # Regionengrenzen sanft uebergehen lassen"). Wuerde das Wetter sie
+        # ueber `region_map` (argmax) nachschlagen, gaebe es harte Kanten.
+        klima = np.stack([felder["temp_mittel_m0"],
+                          felder["temp_spanne"],
+                          felder["niederschlag_mm"]], axis=0).astype(np.float32)
+
+        return {
+            "heightmap": heightmap.astype(np.float32),
+            "ridge_map": ridge,
+            "river_mask": fluss_maske,
+            "river_order": fluss_ordnung,
+            "river_generation": fluss_generation,
+            "region_map": felder["regionen"].astype(np.int16),
+            "klima_map": klima,
+            # Seegliederung (docs/KLIMA_UND_SEE.md §2, docs/OFFENE_PUNKTE.md
+            # 3.1/3.2/3.6): seegrad 0 auf Land, 1..4+ auf See (Breitensuche
+            # ueber den See-Voronoi-Zellgraphen); ufer_region_a/b die bis zu
+            # zwei naechstgelegenen Regionen je Seezelle.
+            "seegrad": felder["seegrad"],
+            "ufer_region_a": felder["ufer_region_a"],
+            "ufer_region_b": felder["ufer_region_b"],
+            "see_eis": felder["see_eis"],
+            # Kuesten-Archetypen (docs/OFFENE_PUNKTE.md 3.8) - lokaler Index
+            # (0..2) INNERHALB der Region, zusammen mit region_map ueber
+            # terrain_weltkarte.KUESTEN_ARCHETYPEN nachschlagbar; -1 = kein
+            # Archetyp hier. kuesten_staerke ist die Blendstaerke selbst
+            # (0..1) - die vom Nutzer angefragte "Strahlungstiefe".
+            "kuesten_archetyp": felder.get("kuesten_archetyp"),
+            "kuesten_staerke": felder.get("kuesten_staerke"),
+            # Regionsziel fuer die Windgeschwindigkeit (SPEZIFIKATION.md §3.5),
+            # weich ueber die Regionsgrenzen gemischt wie klima_map - siehe
+            # weather_generator.py._run_coupled_atmosphere_simulation fuer die
+            # Verwendung als raeumlicher wind_speed_factor.
+            "wind_ziel_map": felder["wind_mittel_ms"].astype(np.float32),
+        }
+
+    def _weltfluesse(self, heightmap, felder, size, seed):
+        """
+        Flussnetz in drei Rechenstufen, dann die Taeler eingraben.
+
+        Rueckgabe: (heightmap mit Taelern, maske, ordnung, generation).
+
+        NUR UEBER WASSER GEZEICHNET. Die Laeufe reichen konstruktionsbedingt bis
+        MUENDUNGSTIEFE_M (-50 m), damit ein Fluss sichtbar ins Meer muendet und
+        die Muendungsrichtung stimmt. Alles unterhalb von 0 m wird in Maske und
+        Ordnung weggelassen - dort ist Meer, kein Fluss.
+        """
+        from core.terrain_weltfluesse import (flussnetz, taeler_eingraben,
+                                              MUENDUNGSTIEFE_M, ERBE_KOSTEN)
+        import core.terrain_river_network as rn
+
+        # DIE REGLER WIRKEN WIEDER (2026-08-06).
+        #
+        # Bis dahin nahm `flussnetz` ueberhaupt keine Parameter entgegen, und
+        # die neun `river_*`-Regler der Oberflaeche bewegten nichts - gemessen
+        # 0.00 m Hoehenaenderung und 0 abweichende Flusspixel bei allen neun.
+        #
+        # Fuenf haben eine echte Entsprechung im neuen Netz und sind hier
+        # angeschlossen. Die uebrigen vier (`river_border_outflow`,
+        # `river_divide_blend`, `river_plateau_flatten`, `river_meander`)
+        # beschreiben Dinge, die es im Weltflussnetz nicht gibt - eine Insel
+        # entwaessert ins Meer und nicht ueber den Kartenrand. Sie bleiben
+        # gesperrt (gui/config/value_default.stillgelegte_regler).
+        p = self._current_parameters
+
+        def regler(name, vorgabe):
+            wert = p.get(name)
+            return float(wert) if wert is not None else float(vorgabe)
+
+        netz = flussnetz(
+            heightmap, seed,
+            kosten_staerke=regler("river_cost_strength", 6.0),
+            abstand_makro_m=regler("river_spacing_m", 1200.0),
+            muendungstiefe_m=-abs(regler("river_mouth_depth_m",
+                                         -MUENDUNGSTIEFE_M)),
+            erbe_kosten=regler("river_inherit_cost", ERBE_KOSTEN))
+        if netz is None:
+            leer = np.zeros((size, size), dtype=np.float32)
+            return heightmap, leer, leer.copy(), leer.copy()
+
+        geschnitten = taeler_eingraben(
+            heightmap, netz, felder,
+            breite_faktor=regler("river_valley_width", 0.35),
+            tiefe_anteil=regler("river_incision_share", 0.30),
+            form=regler("river_valley_form", 1.3),
+            abstand_makro_m=regler("river_spacing_m", 1200.0))
+
+        punkte, eltern = netz["punkte"], netz["eltern"]
+        strahler = rn.strahler_order(eltern, netz["reihenfolge"])
+        maske = np.zeros((size, size), dtype=np.float32)
+        ordnung = np.zeros((size, size), dtype=np.float32)
+        generation = np.zeros((size, size), dtype=np.float32)
+        for i in range(len(punkte)):
+            e = eltern[i]
+            if e < 0:
+                continue
+            schritte = max(int(np.linalg.norm(punkte[i] - punkte[e]) * 2.0), 2)
+            for t in np.linspace(0.0, 1.0, schritte):
+                p = punkte[e] * (1.0 - t) + punkte[i] * t
+                y = int(np.clip(round(p[0]), 0, size - 1))
+                x = int(np.clip(round(p[1]), 0, size - 1))
+                if geschnitten[y, x] <= 0.0:
+                    continue
+                maske[y, x] = 1.0
+                ordnung[y, x] = max(ordnung[y, x], float(strahler[i]))
+                generation[y, x] = max(generation[y, x],
+                                       float(3 - netz["lauf_stufe"][i]))
+        return geschnitten, maske, ordnung, generation
 
     def _apply_river_network(self, P: np.ndarray, amplitude: float):
         """
@@ -1533,6 +2084,64 @@ class BaseTerrainGenerator:
 
         return filter_parameters
 
+    def _weltkarte_erosionsfilter(self, heightmap, felder):
+        """
+        Der ATEF-Erosionsfilter fuer die Weltkarte, mit REGIONSGEWICHTUNG.
+
+        Nutzerwunsch 2026-08-07: "der erosion filter sollte aber eigentlich
+        schon einstellbar sein und ein automatischer faktor gewichtet das ganze
+        pro region dann. also in den bergen wo mehr masse ist haben wir mehr
+        features, baeche etc. und in den niederungen weniger."
+
+        ZWEI UNTERSCHIEDE ZUM ALTEN PFAD, beide zwingend:
+
+        1. KEINE HOEHENNORMIERUNG. `_apply_erosion_filter` zieht das Ergebnis
+           zum Schluss auf 0..AMPLITUDE zurueck. Auf der Weltkarte waere das
+           verheerend: dort steht die Hoehe in echten Metern und darf negativ
+           sein, und eine Normierung wuerde die Kuestenlinie verschieben und
+           alle neun Regionseichungen entwerten.
+
+        2. DER FILTER SIEHT NUR LAND. Er normiert intern gegen die Spanne der
+           uebergebenen Karte; mit dem Meeresboden bei -200 m waere diese
+           Spanne zur Haelfte Wasser, und die Landstruktur bekaeme entsprechend
+           weniger davon ab. Uebergeben wird deshalb max(H, 0).
+
+        DIE GEWICHTUNG kommt aus `relief_m` - dem Feld, das ohnehin schon je
+        Pixel vorliegt. Das Alpenland mit 1000 m Relief bekommt damit rund das
+        Achtfache an Struktur wie das Huegelland mit 115 m.
+        """
+        from gui.config.value_default import EROSION_FILTER_AKTIV
+        if not EROSION_FILTER_AKTIV:
+            return None
+
+        from core.terrain_erosion_filter import filter_heightmap
+        import core.terrain_weltkarte as rw
+
+        size = int(heightmap.shape[0])
+        mpp = rw.WELT_KM * 1000.0 / float(size)
+        parameter = self._erosion_filter_parameters(size, rw.WELT_KM)
+
+        nur_land = np.maximum(heightmap, 0.0).astype(np.float32)
+        ergebnis = filter_heightmap(nur_land, mpp, parameter)
+        delta = np.asarray(ergebnis["height_delta"], dtype=np.float64)
+
+        # REGIONSGEWICHT. Bezug ist EROSION_BEZUGSRELIEF_M, damit das Gewicht
+        # eine Bedeutung hat und nicht am jeweiligen Kartenmittel haengt - eine
+        # Normierung auf das Bild waere derselbe Fehler wie bei der Hoehenskala.
+        relief = np.asarray(felder["relief_m"], dtype=np.float64)
+        gewicht = np.clip(relief / EROSION_BEZUGSRELIEF_M,
+                          EROSION_GEWICHT_MIN, EROSION_GEWICHT_MAX)
+
+        # NUR UEBER WASSER. Unter der Wasserlinie gibt es keine Rinnen und
+        # keine Grate; das Delta dort wuerde nur den Meeresboden aufrauhen.
+        ueber_wasser = np.clip(heightmap / 50.0, 0.0, 1.0)
+
+        return {
+            "heightmap": (heightmap + delta * gewicht * ueber_wasser
+                          ).astype(np.float32),
+            "ridge_map": np.asarray(ergebnis["ridge_map"], dtype=np.float32),
+        }
+
     def _apply_erosion_filter(self, heightmap: np.ndarray, amplitude: float):
         """
         ATEF-Erosionsfilter auf die fertig umverteilte Heightmap (SPEZIFIKATION
@@ -1605,6 +2214,28 @@ class BaseTerrainGenerator:
         heightmap = self.data_lod_manager.get_calculator_output("terrain.redistribution", "heightmap", lod_level)
         if heightmap is None:
             raise ValueError(f"terrain.shadow: heightmap für LOD {lod_level} nicht verfügbar")
+
+        # SCHATTEN WERDEN AUF DER OBERFLAECHE GEWORFEN, NICHT AUF DEM
+        # MEERESBODEN.
+        #
+        # Der Meeresboden wirft keinen Schatten - dort steht Wasser, und dessen
+        # Oberflaeche ist eben. Ohne diese Klemmung berechnete der Raycast die
+        # Verschattung an der Unterwassertopografie, und das Wetter las sie als
+        # Sonneneinstrahlung: `temp += (shadow - 0.5) * u_solar_power` im
+        # Temperatur-Shader macht daraus einen Temperaturunterschied, den es
+        # nicht geben kann.
+        #
+        # Das Gelaende selbst behaelt seine Tiefen - geklemmt wird nur, was in
+        # den Raycast geht.
+        import gui.config.value_default as vd
+        if getattr(vd, "WELTKARTE_AKTIV", False):
+            heightmap = np.maximum(heightmap, 0.0)
+
+        # Die Pixelgroesse MUSS gesetzt sein, sonst rechnet der Schattenwurf mit
+        # 1 m je Pixel und haelt jeden Hang fuer eine Wand (2026-08-07).
+        manager = self._ensure_data_lod_manager()
+        self.shadow_calculator.set_meters_per_pixel(
+            float(manager.get_map_distance_km()) * 1000.0 / heightmap.shape[0])
 
         shadowmap = self.shadow_calculator.calculate_shadows(heightmap, lod_level)
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"shadowmap": shadowmap})

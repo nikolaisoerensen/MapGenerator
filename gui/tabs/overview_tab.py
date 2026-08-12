@@ -140,11 +140,16 @@ class OverviewTab(BaseMapTab):
         """
         self.logger.debug(f"Data updated: {generator_type}.{data_key}")
 
-        # Completeness neu prüfen
+        # Completeness neu prüfen (billig, kein Redraw - unabhängig von
+        # Sichtbarkeit).
         self.check_world_completeness()
 
-        # Composite View aktualisieren falls bereits angezeigt
-        if self.world_data_complete:
+        # Composite View aktualisieren, aber NUR wenn dieser Tab gerade
+        # sichtbar ist (2026-08-11, siehe BaseMapTab.on_data_updated() für den
+        # vollen Befund) - sonst redraw't Overview bei JEDER Daten-Änderung
+        # irgendeines Generators mit, auch wenn niemand hinschaut.
+        if (self.world_data_complete
+                and self.viewport_widget is not None and self.viewport_widget.isVisible()):
             self.update_composite_view()
 
     def check_world_completeness(self):

@@ -311,6 +311,156 @@ class WeatherData:
         }
 
 
+# =============================================================================
+# RECHENGITTER DES WETTERS
+# =============================================================================
+# Temperatur, Wind, Feuchte und Niederschlag werden IMMER auf diesem Gitter
+# gerechnet, unabhaengig von der Kartengroesse; die Ergebnisse gehen
+# hochskaliert heraus (siehe _get_prepared_terrain_inputs und _speichern).
+#
+# Gemessen am 2026-08-06 auf dem GPU-Pfad:
+#
+#   Aufloesung   weather.temperature
+#   192 px        7.7 s
+#   384 px       52.1 s
+#   512 px      170.7 s      (86 % der gesamten Pipeline)
+#
+# Die Ursache ist doppelt: mehr Pixel UND mehr Zeitschritte
+# (_get_atmosphere_loop_steps liefert 25 bei 256 px, 35 bei 512, 50 bei 1024).
+# Bei 1024 px waeren rund 16 Minuten allein fuer diesen Knoten zu erwarten.
+#
+# 256 px sind bei 21.3 km Kartenbreite 83 m je Zelle. Ein Wind- oder
+# Temperaturfeld hat auf dieser Skala noch Struktur, auf 20 m nicht mehr - die
+# feinere Rechnung erzeugt Rauschen, kein Wetter.
+WETTER_GITTER = 256
+
+
+# =============================================================================
+# DAS FESTGELEGTE KLIMA (2026-08-07)
+# =============================================================================
+# Nutzer: "keine simulationskreise mehr, sondern in jedem kreis stecken
+# festlegungen damit es keinen drift mehr gibt." Diese Konstanten sind genau
+# solche Festlegungen - sie ersetzen Groessen, die vorher aus einer
+# Atmosphaerensimulation herausfielen und mit deren Schrittzahl wanderten.
+
+# Wie stark die Temperatur mit der Hoehe faellt.
+#
+# 2.0 K JE 100 M - das Dreifache der wirklichen Luftschichtung (0.65). Das ist
+# kein Fehler, sondern die Massstabsverdichtung dieser Welt.
+#
+# Nutzer 2026-08-07: "die hoehe muss ja nur angedeutet sein, also soll ja zu
+# unserer welt passen. wenn wir also ein hoehenprofil von 1500 m einstellen,
+# dann haben wir vielleicht so um 1100 m die schneegrenze ... dann muss der
+# faktor in der hoehenformel eingepflegt sein."
+#
+# DIE RECHNUNG DAHINTER. Das Alpenland hat auf Meereshoehe 22.0 Grad im Juli.
+# Damit die Firngrenze (Juli 0 Grad) bei 1100 m liegt:
+#
+#     22.0 K / 1100 m = 0.020 K/m
+#
+# Daraus folgt zugleich die Baumgrenze (Juli 10 Grad) bei rund 600 m und ein
+# Gipfel von 1500 m bei knapp -8 Grad. Ein vollstaendiges Hoehenprofil auf
+# einem Gebirge, das in der Wirklichkeit 3700 m bruechte.
+#
+# ZUR ERINNERUNG, warum das nicht schummelt: die ganze Welt ist verdichtet.
+# Eine Region ist 4 km breit statt 400; ein "Kontinent" misst 13 km. Eine
+# unveraenderte Luftschichtung wuerde bedeuten, dass es auf dieser Welt keine
+# Hoehenstufen gibt - gemessen am 2026-08-07 loeste die Baumgrenze zu 0.00 %
+# aus, weil der kaelteste Punkt an Land 10.4 Grad hatte.
+HOEHENABNAHME_K_PRO_M = 0.020
+
+# Wieviel der JAHRESSPANNE die Sonnenexposition ausmacht.
+#
+# Der Nutzer hatte 30 K zwischen Schatten und Sonne vorgeschlagen ("absichtlich
+# 20K hoeher, erstmal als erster schritt") - das ist die Spanne einer
+# OBERFLAECHEN-temperatur. Die Biome brauchen aber Lufttemperatur, und dort
+# sind 30 K zwischen Nord- und Suedhang zu viel: jeder Suedhang wuerde zur
+# Halbwueste und jeder Nordhang zum Nadelwald, innerhalb einer Region.
+#
+# 0.25 der Jahresspanne heisst: Atlantikkueste 3.5 K, Taiga 7.3 K zwischen
+# Schatten und voller Sonne. Das ist die Groessenordnung, die man in der
+# Vegetation wirklich sieht. Der Wert ist die erste Stellschraube, wenn die
+# Biome zu gleichfoermig oder zu fleckig ausfallen.
+EXPOSITIONSANTEIL = 0.25
+
+# Das Meer: Mitteltemperatur nach Noerdlichkeit, ohne Sonneneinfluss.
+# Nutzer: "im sommer 25 grad im sueden und 15 grad im norden."
+SEE_MITTEL_SUED = 19.5      # Juli 25, Januar 14
+SEE_MITTEL_NORD = 9.5       # Juli 15, Januar 4
+SEE_SPANNE = 11.0           # deutlich kleiner als an Land - Waermetraegheit
+SEE_STROEMUNG_K = 2.0       # Amplitude des Stroemungsrauschens
+
+# --- Niederschlag als Festlegung (2026-08-07) --------------------------------
+#
+# LUV_STAERKE   Wieviel mehr es auf der Windseite regnet. 0.6 heisst: an einem
+#               vollen Steilhang bis zu 60 % mehr als der Regionsgrundwert, im
+#               Lee entsprechend weniger. Die tanh-Kurve deckelt das, damit
+#               eine einzelne steile Wand nicht das Doppelte bekommt.
+# LUV_BEZUGSHANG  Bei welchem Anstieg (Meter je Meter Weg) der halbe Ausschlag
+#               erreicht ist. 0.05 entspricht rund 3 Grad - ein Wert, ab dem
+#               Luft merklich gehoben wird.
+# REGENSCHATTEN_M  Wie weit stromaufwaerts gerechnet wird. 6 km sind auf einer
+#               21-km-Karte gut ein Viertel der Breite; weiter zurueck traegt
+#               die Vorgeschichte kaum noch bei.
+# REGENSCHATTEN_HOEHE_M  Nach wieviel Metern kumuliertem Aufstieg der
+#               Niederschlag auf 1/e faellt. 900 m heisst: hinter einem
+#               900-m-Kamm kommt gut ein Drittel an.
+LUV_STAERKE = 0.6
+LUV_BEZUGSHANG = 0.05
+REGENSCHATTEN_M = 6000.0
+REGENSCHATTEN_HOEHE_M = 900.0
+
+# SEE_REGEN_ANTEIL  Wieviel es ueber See regnet, gemessen am Landwert derselben
+#               Region. Ohne Deckelung bekam die See 1.37-mal so viel wie das
+#               Land (Alpenland 3.38-mal), weil es dort keinen Regenschatten
+#               gibt, waehrend das Land durch die Normierung angehoben wird -
+#               der Nutzer sah "knallgruen ueber dem meer".
+#               0.8 ist auch physikalisch naeher dran: ueber offener See faellt
+#               etwas weniger als an einer gebirgigen Kueste, wo die Luft
+#               zusaetzlich gehoben wird.
+SEE_REGEN_ANTEIL = 0.8
+
+# SAISON_STAERKE  Wie stark der Jahresgang des Niederschlags ausschlaegt.
+#               0.35 heisst: eine voll kontinentale Region bekommt im Sommer
+#               das 1.35-fache ihres Monatsmittels, im Winter das 0.65-fache.
+#
+# DAS IST EIN ECHTES PHAENOMEN, und es laeuft in ZWEI RICHTUNGEN:
+#   kontinental (grosse Jahresspanne) -> SOMMERregen, aus Konvektion
+#   maritim     (kleine Jahresspanne) -> WINTERregen, aus Sturmzugbahnen
+# Das Meer ist mit 11 K Spanne maritim und damit winterfeucht.
+#
+# Die Kontinentalitaet muss nicht eigens eingetragen werden - sie steckt schon
+# in `temp_spanne`: Taiga 34.5 K gegen Huegelland 9.0 K.
+SAISON_STAERKE = 0.35
+SAISON_BEZUGSSPANNE = 15.0   # ab hier kippt es von maritim nach kontinental
+SAISON_UEBERGANG = 8.0       # wie schnell
+
+
+# =============================================================================
+# DIE ZEITACHSE
+# =============================================================================
+# Nutzer 2026-08-07: "sind dann die Millimeter auf jeweils 1 monat geeicht?
+# waere doch sinnvoll, also bei 800 Litern pro m2 dann um die 50 liter im
+# monat oder sowas."
+#
+# JA - ab jetzt. Der Niederschlag wird als MONATSRATE gefuehrt und erst beim
+# Ablegen mit der Ticklaenge multipliziert. Vorher stand in `precip_map` eine
+# Zweimonatssumme, ohne dass das irgendwo stand: das Fjordland zeigte 375
+# statt der 188 mm, die man bei 2250 mm Jahresniederschlag je Monat erwartet.
+#
+# MONATE_JE_TICK laesst sich auf 1 stellen, dann laeuft das Jahr in zwoelf
+# Schritten statt in sechs. Die Jahreskurve muss dafuer nicht angefasst werden -
+# sie ist eine stetige Funktion von `zeit_im_jahr` (0 = 1. Januar, 1 = Jahres-
+# ende) und laesst sich auf jeden Zeitpunkt auswerten:
+#
+#     jahresgang(t) = -cos(2*pi*t)
+#
+# Tiefpunkt bei t=0 (kaeltester Tag, Januar), Hochpunkt bei t=0.5 (waermster,
+# Juli) - genau die Kurve, die der Nutzer beschrieben hat.
+MONATE_JE_TICK = 2
+TICKS_JE_JAHR = 12 // MONATE_JE_TICK
+
+
 class WeatherSystemGenerator:
     """
     Hauptklasse für dynamisches Wetter- und Feuchtigkeitssystem mit vollständiger Manager-Integration
@@ -681,9 +831,9 @@ class WeatherSystemGenerator:
             # _calc_*-Methoden (die jetzt IMMER aus dem feingranularen Calculator-
             # Storage lesen, siehe get_calculator_combined_heightmap()) dort
             # gespiegelt, analog zu Geology/Water.
-            self.data_lod_manager.set_calculator_output(
+            self._speichern(
                 "terrain.redistribution", lod_level, {"heightmap": heightmap_combined})
-            self.data_lod_manager.set_calculator_output(
+            self._speichern(
                 "terrain.shadow", lod_level, {"shadowmap": shadowmap})
 
             for calculator_id in (
@@ -777,9 +927,81 @@ class WeatherSystemGenerator:
         if heightmap_combined is None or shadowmap is None:
             raise ValueError(f"Weather: heightmap_combined/shadowmap für LOD {lod_level} nicht verfügbar")
 
-        target_size = self._get_lod_size(lod_level, heightmap_combined.shape[0])
+        voll_size = self._get_lod_size(lod_level, heightmap_combined.shape[0])
+
+        # DAS WETTER RECHNET AUF FESTEM GITTER (siehe WETTER_GITTER).
+        #
+        # Gemessen am 2026-08-06: weather.temperature brauchte 171 von 199
+        # Sekunden der gesamten Pipeline bei 512 px, und es waechst DOPPELT -
+        # mehr Pixel UND mehr Zeitschritte (_get_atmosphere_loop_steps: 25 bei
+        # 256 px, 35 bei 512, 50 bei 1024). Bei der Vorgabe von 1024 px waeren
+        # das rund 16 Minuten allein fuer diesen Knoten.
+        #
+        # Ein Wind- oder Temperaturfeld ueber 21 km hat aber keine Struktur auf
+        # 20 m. Die Glaettungslaenge der Atmosphaere liegt Groessenordnungen
+        # darueber; die feine Aufloesung rechnet Rauschen, kein Wetter.
+        #
+        # Die Ausgaben werden vor dem Ablegen wieder auf die volle Kartengroesse
+        # gebracht (_speichern) - nach aussen aendert sich am Vertrag nichts,
+        # jeder Knoten liefert weiterhin Felder in Kartengroesse.
+        target_size = min(voll_size, WETTER_GITTER)
+        self._wetter_rechen_size = target_size
+        self._wetter_voll_size = voll_size
+
         heightmap, shadowmap = self._prepare_input_data(heightmap_combined, shadowmap, target_size)
         return heightmap, shadowmap, target_size
+
+    # ------------------------------------------------------------------
+    def _auf_kartengroesse(self, wert, rechen_size, voll_size):
+        """
+        Ein Ergebnis vom Rechengitter auf die Kartengroesse bringen.
+
+        Arbeitet auf beliebig verschachtelten Ausgaben: einzelne Karten,
+        Monatslisten, Schichtstapel (L,H,W) und Vektorfelder (H,W,2). Gesucht
+        werden die beiden Achsen, die `rechen_size` gross sind; alles andere
+        bleibt unangetastet.
+
+        Warum nicht scipy.ndimage.zoom mit Faktoren: dessen Ergebnisgroesse kann
+        um ein Pixel danebenliegen, und eine Karte, die 511 statt 512 breit ist,
+        faellt erst weit spaeter auf - bei einer Formpruefung in einem ganz
+        anderen Knoten.
+        """
+        if rechen_size >= voll_size:
+            return wert
+        if isinstance(wert, list):
+            return [self._auf_kartengroesse(w, rechen_size, voll_size) for w in wert]
+        if not isinstance(wert, np.ndarray) or wert.ndim < 2:
+            return wert
+
+        achsen = [i for i, d in enumerate(wert.shape) if d == rechen_size]
+        # Genau zwei benachbarte Achsen sind das Ortsgitter. Trifft das nicht
+        # zu, wird nichts angefasst - lieber unveraendert als falsch verzerrt.
+        if len(achsen) != 2 or achsen[1] != achsen[0] + 1:
+            return wert
+        y = achsen[0]
+
+        quelle = np.moveaxis(wert, (y, y + 1), (-2, -1))
+        rest = quelle.shape[:-2]
+        ziel = np.empty(rest + (voll_size, voll_size), dtype=np.float32)
+        for index in np.ndindex(*rest) if rest else [()]:
+            ziel[index] = self._interpolate_2d_bicubic(
+                np.ascontiguousarray(quelle[index], dtype=np.float32), voll_size)
+        return np.moveaxis(ziel, (-2, -1), (y, y + 1)).astype(wert.dtype, copy=False)
+
+    def _speichern(self, calculator_id: str, lod_level: int, outputs: dict) -> None:
+        """
+        Ausgaben ablegen - hochskaliert auf die Kartengroesse.
+
+        EINE Stelle statt neun: die Wetterknoten legen ihre Ergebnisse an neun
+        verschiedenen Punkten ab, und jede einzeln zu skalieren waere neunmal
+        dieselbe Gelegenheit, eine zu vergessen.
+        """
+        rechen = getattr(self, "_wetter_rechen_size", None)
+        voll = getattr(self, "_wetter_voll_size", None)
+        if rechen and voll and voll > rechen:
+            outputs = {k: self._auf_kartengroesse(v, rechen, voll)
+                       for k, v in outputs.items()}
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, outputs)
 
     def _calc_temperature(self, calculator_id: str, lod_level: int) -> None:
         """
@@ -838,21 +1060,45 @@ class WeatherSystemGenerator:
         latitude = self._current_parameters.get('map_latitude', WEATHER.MAP_LATITUDE["default"])
         longitude = self._current_parameters.get('map_longitude', WEATHER.MAP_LONGITUDE["default"])
 
+        # EIN SONNENSATZ STATT SECHS (2026-08-07).
+        #
+        # Nutzer: "Sommer und Winter sind noch vorhanden, aber die
+        # sonnenstaende sind die gleichen." Die Jahreszeit steckt seit dem
+        # festgelegten Temperaturmodell in der JAHRESKURVE, nicht mehr im
+        # Sonnenstand - der Schattenwurf muss deshalb nur noch EINMAL laufen
+        # statt sechsmal.
+        #
+        # Genommen wird der FRUEHLINGSSATZ (Periode 1, also Maerz/April): er
+        # liegt zwischen den Extremen und ist damit der neutrale Fall. Ein
+        # Sommersatz haette die Nordhaenge dauerhaft zu hell gemacht, ein
+        # Wintersatz zu dunkel.
+        #
+        # Das spart Faktor 6 auf dem teuersten Posten der Wetterrechnung. Die
+        # Monatsparameter bleiben sechsfach - sie sind billig und Wind und
+        # Feuchte lesen sie noch.
+        FRUEHLING = 1
+        sun_angles = generate_seasonal_sun_angles(FRUEHLING, latitude, longitude)
+        # Pixelgroesse setzen - ohne sie haelt der Schattenwurf jeden Hang fuer
+        # eine Wand (2026-08-07). heightmap ist hier bereits auf das
+        # Wettergitter gebracht, die Kartenbreite bleibt dieselbe.
+        self.shadow_calculator.set_meters_per_pixel(
+            float(self.data_lod_manager.get_map_distance_km()) * 1000.0
+            / heightmap.shape[0])
+        gemeinsame_shadowmap = self.shadow_calculator.calculate_shadows(
+            heightmap, lod_level, sun_angles_override=sun_angles)
+        # Dieselbe LOD-gefilterte Kanal-Teilmenge, die auch die Shadowmap
+        # erzeugt hat (siehe _weighted_solar_exposure()-Docstring - die
+        # Kanalzahl muss exakt übereinstimmen, sonst Shape-Mismatch-Fallback).
+        gemeinsame_winkel, _ = self.shadow_calculator.get_sun_angles_for_lod(
+            lod_level, sun_angles_override=sun_angles)
+
         monthly_shadowmaps = []
         monthly_sun_angles = []
         month_params_list = []
-        for month_index in range(6):
+        for month_index in range(TICKS_JE_JAHR):
             month_params = self._generate_seasonal_parameters(self._current_parameters, month_index)
-            sun_angles = generate_seasonal_sun_angles(month_index, latitude, longitude)
-            month_shadowmap = self.shadow_calculator.calculate_shadows(
-                heightmap, lod_level, sun_angles_override=sun_angles)
-            # Dieselbe LOD-gefilterte Kanal-Teilmenge, die auch die Shadowmap
-            # erzeugt hat (siehe _weighted_solar_exposure()-Docstring - die
-            # Kanalzahl muss exakt übereinstimmen, sonst Shape-Mismatch-Fallback).
-            filtered_angles, _ = self.shadow_calculator.get_sun_angles_for_lod(
-                lod_level, sun_angles_override=sun_angles)
-            monthly_shadowmaps.append(month_shadowmap)
-            monthly_sun_angles.append(filtered_angles)
+            monthly_shadowmaps.append(gemeinsame_shadowmap)
+            monthly_sun_angles.append(gemeinsame_winkel)
             month_params_list.append(month_params)
 
         # LOD-Vererbung (Weather-Rework Punkt F) - Endzustand derselben 6
@@ -910,7 +1156,7 @@ class WeatherSystemGenerator:
             monthly_humid_maps, monthly_precip_maps = [], []
             monthly_temp_layers, monthly_wind_layers, monthly_humid_layers = [], [], []
 
-            for month_index in range(6):
+            for month_index in range(TICKS_JE_JAHR):
                 initial_state = None
                 if has_lod_inheritance:
                     initial_state = {
@@ -929,13 +1175,54 @@ class WeatherSystemGenerator:
                 monthly_wind_layers.append(result['wind_layers'])
                 monthly_humid_layers.append(result['humid_layers'])
 
-                monthly_temp_maps.append(result['temp_layers'][AtmosphereLayers.GROUND])
+                # DIE TEMPERATUR IST SEIT 2026-08-07 EINE FESTLEGUNG.
+                #
+                # Sie faellt nicht mehr aus der Atmosphaerensimulation heraus,
+                # sondern folgt der Klimatabelle je Region (klima_map), der
+                # Hoehe und der Sonnenexposition. Der Grund ist nicht die
+                # Geschwindigkeit, sondern der Drift: die Simulation lief ueber
+                # 25 bis 50 Zeitschritte, und die Schrittzahl haengt an der
+                # Aufloesung - dieselbe Welt lieferte bei 512 px eine andere
+                # Temperatur als bei 256.
+                #
+                # Die Simulation laeuft weiter, denn Wind und Feuchte kommen
+                # noch aus ihr. Nur ihr Temperaturergebnis wird verworfen.
+                # ZEITPUNKT m/6, NICHT (m+0.5)/6.
+                #
+                # Mit der Periodenmitte liegen alle sechs Stichproben ZWISCHEN
+                # den Extremen, und der Jahresgang erreicht nur +/-0.866 statt
+                # +/-1 - gemessen kam die Taiga auf 21.7 K Spanne statt der
+                # eingetragenen 29.0. Mit m/6 faellt Periode 0 auf den Januar
+                # und Periode 3 auf den Juli, also genau auf die beiden Werte,
+                # aus denen die Tabelle gebildet ist.
+                fest = self.temperaturfeld_festgelegt(
+                    heightmap, monthly_shadowmaps[month_index], lod_level,
+                    zeit_im_jahr=month_index / TICKS_JE_JAHR)
+                monthly_temp_maps.append(
+                    fest if fest is not None
+                    else result['temp_layers'][AtmosphereLayers.GROUND])
                 monthly_wind_maps.append(result['wind_layers'][AtmosphereLayers.GROUND])
                 monthly_humid_maps.append(result['humid_layers'][AtmosphereLayers.GROUND])
                 # PRECIP_ANNUAL_SCALE_FACTOR hier (nicht in
                 # _run_coupled_atmosphere_simulation) angewendet - siehe
                 # dortiger Docstring-Kommentar.
-                monthly_precip_maps.append(result['precip_map'] * PRECIP_ANNUAL_SCALE_FACTOR)
+                # DER NIEDERSCHLAG IST SEIT 2026-08-07 EINE FESTLEGUNG.
+                #
+                # Regionsgrundwert mal Luv-Faktor mal Regenschatten - alles
+                # geschlossene Form, siehe niederschlagsfeld_festgelegt(). Die
+                # Simulation laeuft weiter fuer Wind und Feuchte; nur ihr
+                # Niederschlagsergebnis wird verworfen.
+                #
+                # Die sechs Perioden bekommen VORERST denselben Wert: die
+                # Klimatabelle fuehrt nur eine Jahressumme. Ein Jahresgang des
+                # Niederschlags (Mittelmeer trocken im Sommer) waere der
+                # naechste Schritt und braucht eine zweite Spalte in der
+                # Tabelle.
+                fest_p = self.niederschlagsfeld_festgelegt(
+                    heightmap, lod_level, zeit_im_jahr=month_index / TICKS_JE_JAHR)
+                monthly_precip_maps.append(
+                    fest_p if fest_p is not None
+                    else result['precip_map'] * PRECIP_ANNUAL_SCALE_FACTOR)
 
             # Mehrgenerationen-Puffer für Feuchte (siehe frühere _calc_humidity-
             # Fassung, Verhalten hier 1:1 erhalten, nur an den neuen Aufrufort
@@ -956,24 +1243,63 @@ class WeatherSystemGenerator:
             humid_map = np.mean(np.stack(monthly_humid_maps, axis=0), axis=0).astype(np.float32)
             precip_map = np.mean(np.stack(monthly_precip_maps, axis=0), axis=0).astype(np.float32)
 
+            # WIND IST SEIT 2026-08-11 REGIONAL KALIBRIERT (SPEZIFIKATION.md
+            # §3.5), zwei multiplikative Faktorfelder statt einer eigenen
+            # Formel - die Simulation liefert weiterhin Boeen an Graten und
+            # Kanalisierung in Taelern:
+            #   1. Luv/Lee am Gebirge (`_wind_luv_lee_faktor`, Mittelwert ~1.0)
+            #   2. Regionsmittel auf `wind_ziel_map` ziehen
+            #      (`_wind_regional_faktor`) - korrigiert dabei automatisch
+            #      jede Restverschiebung aus Schritt 1, das REGIONALE NIVEAU
+            #      bleibt also unabhaengig vom Luv/Lee-Term garantiert richtig.
+            # EIN Faktorfeld je Term aus dem Jahresmittel, auf alle sechs
+            # Monate UND beide Schichten-Layer angewandt - sonst wuerde eine
+            # monatsweise Normierung die saisonale Staerke-Schwankung aus
+            # WEATHER.CLIMATE_ZONE_SEASONAL_OFFSETS wieder einebnen.
+            richtung = float(self._current_parameters.get("prevailing_wind_direction", 0.0))
+            luv_lee_faktor = self._wind_luv_lee_faktor(heightmap, richtung)
+            wind_map = wind_map.copy()
+            wind_map[..., 0] *= luv_lee_faktor
+            wind_map[..., 1] *= luv_lee_faktor
+            for m in range(TICKS_JE_JAHR):
+                monthly_wind_maps[m] = monthly_wind_maps[m].copy()
+                monthly_wind_maps[m][..., 0] *= luv_lee_faktor
+                monthly_wind_maps[m][..., 1] *= luv_lee_faktor
+
+            wind_faktor = self._wind_regional_faktor(wind_map, lod_level)
+            if wind_faktor is not None:
+                wind_map = wind_map.copy()
+                wind_map[..., 0] *= wind_faktor
+                wind_map[..., 1] *= wind_faktor
+                for m in range(TICKS_JE_JAHR):
+                    monthly_wind_maps[m] = monthly_wind_maps[m].copy()
+                    monthly_wind_maps[m][..., 0] *= wind_faktor
+                    monthly_wind_maps[m][..., 1] *= wind_faktor
+
             temp_map_layers = np.mean(np.stack(monthly_temp_layers, axis=0), axis=0).astype(np.float32)
             wind_map_layers = np.mean(np.stack(monthly_wind_layers, axis=0), axis=0).astype(np.float32)
             humid_map_layers = np.mean(np.stack(monthly_humid_layers, axis=0), axis=0).astype(np.float32)
+            wind_map_layers = wind_map_layers.copy()
+            wind_map_layers[..., 0] *= luv_lee_faktor
+            wind_map_layers[..., 1] *= luv_lee_faktor
+            if wind_faktor is not None:
+                wind_map_layers[..., 0] *= wind_faktor
+                wind_map_layers[..., 1] *= wind_faktor
 
-            self.data_lod_manager.set_calculator_output(
+            self._speichern(
                 "weather.temperature", lod_level,
                 {"temp_map": temp_map, "temp_map_monthly": monthly_temp_maps,
                  "shadowmap_monthly": monthly_shadowmaps,
                  "temp_map_layers": temp_map_layers, "temp_map_layers_monthly": monthly_temp_layers})
-            self.data_lod_manager.set_calculator_output(
+            self._speichern(
                 "weather.wind", lod_level,
                 {"wind_map": wind_map, "wind_map_monthly": monthly_wind_maps,
                  "wind_map_layers": wind_map_layers, "wind_map_layers_monthly": monthly_wind_layers})
-            self.data_lod_manager.set_calculator_output(
+            self._speichern(
                 "weather.humidity", lod_level,
                 {"humid_map": humid_map, "humid_map_monthly": monthly_humid_maps,
                  "humid_map_layers": humid_map_layers, "humid_map_layers_monthly": monthly_humid_layers})
-            self.data_lod_manager.set_calculator_output(
+            self._speichern(
                 "weather.precipitation", lod_level,
                 {"precip_map": precip_map, "precip_map_monthly": monthly_precip_maps})
 
@@ -989,7 +1315,7 @@ class WeatherSystemGenerator:
                 for m in range(6)
             ]
             temp_map = np.mean(np.stack(monthly_temp_maps, axis=0), axis=0).astype(np.float32)
-            self.data_lod_manager.set_calculator_output(
+            self._speichern(
                 "weather.temperature", lod_level,
                 {"temp_map": temp_map, "temp_map_monthly": monthly_temp_maps,
                  "shadowmap_monthly": monthly_shadowmaps})
@@ -1034,7 +1360,7 @@ class WeatherSystemGenerator:
                 heightmap, month_temp_map, month_shadowmap, month_params, target_size, cfd_iterations))
 
         wind_map = np.mean(np.stack(monthly_wind_maps, axis=0), axis=0).astype(np.float32)
-        self.data_lod_manager.set_calculator_output(
+        self._speichern(
             calculator_id, lod_level, {"wind_map": wind_map, "wind_map_monthly": monthly_wind_maps})
 
     def _calc_humidity(self, calculator_id: str, lod_level: int) -> None:
@@ -1087,7 +1413,7 @@ class WeatherSystemGenerator:
             monthly_humid_maps.append(humid_map_m)
 
         humid_map = np.mean(np.stack(monthly_humid_maps, axis=0), axis=0).astype(np.float32)
-        self.data_lod_manager.set_calculator_output(
+        self._speichern(
             calculator_id, lod_level, {"humid_map": humid_map, "humid_map_monthly": monthly_humid_maps})
 
     def _calc_precipitation(self, calculator_id: str, lod_level: int) -> None:
@@ -1132,7 +1458,7 @@ class WeatherSystemGenerator:
         # normale gekoppelte Pfad liefern.
         monthly_precip_maps = [p * PRECIP_ANNUAL_SCALE_FACTOR for p in monthly_precip_maps]
         precip_map = np.mean(np.stack(monthly_precip_maps, axis=0), axis=0).astype(np.float32)
-        self.data_lod_manager.set_calculator_output(
+        self._speichern(
             calculator_id, lod_level, {"precip_map": precip_map, "precip_map_monthly": monthly_precip_maps})
 
     # Rueckfallwert, wenn das Vorab-Biom (noch) nicht vorliegt - z.B. in
@@ -2101,6 +2427,27 @@ class WeatherSystemGenerator:
             5: 35,  # LOD 512x512
             6: 50,  # LOD 1024x1024
         }
+
+        # DIE SCHRITTZAHL FOLGT DEM RECHENGITTER, NICHT DEM LOD (2026-08-07).
+        #
+        # Seit WETTER_GITTER rechnet das Wetter immer auf 256 px, egal wie gross
+        # die Karte ist. Die Schrittzahl folgte aber weiter dem LOD - bei einer
+        # 512er Karte liefen also 35 Schritte auf einem 256er Gitter statt 25.
+        # Gemessen: weather.temperature 25.2 s bei 512 px gegen 10.1 s bei 256,
+        # obwohl beide dieselbe Arbeit haetten sein muessen.
+        #
+        # Das war kein Altbestand, sondern ein Fehler, den ich mit dem festen
+        # Gitter selbst eingebaut habe: zwei Groessen, die zusammengehoeren,
+        # aus verschiedenen Quellen zu speisen.
+        #
+        # Jetzt aus der tatsaechlichen Gitterkante abgeleitet. Gleiches Gitter
+        # heisst gleiche Schrittzahl heisst gleiches Ergebnis - genau die
+        # Driftfreiheit, um die es bei der ganzen Umstellung geht.
+        gitter = getattr(self, "_wetter_rechen_size", None)
+        if gitter:
+            stufe = max(1, min(6, int(round(np.log2(max(gitter, 32) / 32.0))) + 1))
+            return step_mapping[stufe]
+
         return step_mapping.get(lod_level, 60)
 
     def _prepare_input_data(self, heightmap_combined: np.ndarray, shadowmap: np.ndarray,
@@ -2115,6 +2462,23 @@ class WeatherSystemGenerator:
             heightmap = self._interpolate_2d_bicubic(heightmap_combined, target_size)
         else:
             heightmap = heightmap_combined.copy()
+
+        # DIE ATMOSPHAERE STEHT AUF DER WASSEROBERFLAECHE, NICHT AUF DEM
+        # MEERESBODEN.
+        #
+        # Seit der Weltkarte kann die Heightmap negativ werden. Jede
+        # hoehenabhaengige Groesse - Temperaturgradient, Luftdruck,
+        # Steigungsregen - rechnete damit unter Wasser weiter, als waere dort
+        # Luft. Gemessen am 2026-08-05 ueber See: r(Hoehe, Temperatur) = +0.44
+        # mit +1.66 Grad je 100 m TIEFE. Je tiefer der Meeresboden, desto
+        # waermer die Luft darueber - der Median lag ueber See bei 9.2 Grad
+        # gegen 7.0 an Land, obwohl das Meer auf Hoehe 0 liegt.
+        #
+        # Physikalisch ist die Sache eindeutig: die Grenzflaeche zur Atmosphaere
+        # ist der Meeresspiegel. Alles darunter ist Wasser und hat mit der Luft
+        # nichts zu tun. Deshalb wird hier auf 0 geklemmt - fuer das Wetter,
+        # NICHT fuer das Gelaende selbst, das seine Tiefen behaelt.
+        heightmap = np.maximum(heightmap, 0.0)
 
         # Shadowmap immer interpolieren (kann von anderem LOD kommen)
         if shadowmap.shape[0] != target_size:
@@ -2132,6 +2496,510 @@ class WeatherSystemGenerator:
             shadowmap_interp = shadowmap.copy()
 
         return heightmap, shadowmap_interp
+
+    # =========================================================================
+    # DAS FESTGELEGTE TEMPERATURFELD (2026-08-07)
+    # =========================================================================
+
+    def _klimafeld(self, lod_level: int, ebene: int, vorgabe: float):
+        """Eine Ebene von klima_map, auf das Wettergitter gebracht."""
+        klima = self.data_lod_manager.get_calculator_output(
+            "terrain.redistribution", "klima_map", lod_level)
+        if klima is None:
+            return None
+        feld = np.asarray(klima)[ebene]
+        ziel = getattr(self, "_wetter_rechen_size", None) or feld.shape[0]
+        if feld.shape[0] != ziel:
+            feld = self._interpolate_2d_bicubic(feld.astype(np.float32), ziel)
+        return feld.astype(np.float64)
+
+    # Luv/Lee-Kontrast am Gebirge fuer Wind (SPEZIFIKATION.md §3.5): "1.5-2x -
+    # deutlich schwaecher als der 3.6x bei Niederschlag, Wind bremst sich am
+    # Hang, staut sich aber nicht wie Feuchte". WIND_LUV_STAERKE so gewaehlt,
+    # dass volle Luv- gegen volle Lee-Seite (tanh -> +-1) genau das
+    # Kontrastverhaeltnis (1+s)/(1-s) = 1.74 trifft, in der Mitte des
+    # Zielbereichs. LUV_BEZUGSHANG wiederverwendet aus dem Niederschlag-
+    # Pendant (niederschlagsfeld_festgelegt) - dieselbe Frage ("wie steil
+    # zaehlt als steil"), keine precip-spezifische Physik.
+    WIND_LUV_STAERKE = 0.27
+
+    def _wind_luv_lee_faktor(self, heightmap: np.ndarray, richtung_grad: float) -> np.ndarray:
+        """
+        Multiplikatives Luv/Lee-Feld fuer Wind, exakt dasselbe Prinzip wie
+        `niederschlagsfeld_festgelegt`s `luv`-Term (dortiger Docstring fuer
+        die Herleitung von `anstieg`) - nur mit einer viel schwaecheren
+        Staerke (siehe WIND_LUV_STAERKE oben) und OHNE den kumulierten
+        Regenschatten-Term (Wind bremst sich am Hang lokal, staut sich aber
+        nicht wie Feuchte kammweit auf).
+
+        Mittelwert des Feldes liegt nahe 1.0 (tanh ist punktsymmetrisch) -
+        der nachfolgende Regionsmittel-Abgleich (`_wind_regional_faktor`)
+        korrigiert einen etwaigen Rest ohnehin, die REGIONALE ZIELGESCHWINDIGKEIT
+        bleibt also unabhaengig von diesem Term garantiert.
+        """
+        H = np.asarray(heightmap, dtype=np.float64)
+        size = H.shape[0]
+        mpp = (float(self.data_lod_manager.get_map_distance_km()) * 1000.0 / size)
+        rad = np.radians(float(richtung_grad))
+        wx, wy = -np.sin(rad), -np.cos(rad)
+        gy, gx = np.gradient(H, mpp)
+        anstieg = gx * wx + gy * wy
+        return (1.0 + self.WIND_LUV_STAERKE * np.tanh(anstieg / LUV_BEZUGSHANG)).astype(np.float32)
+
+    def _wind_regional_faktor(self, wind_map: np.ndarray, lod_level: int) -> Optional[np.ndarray]:
+        """
+        Windgeschwindigkeit JE REGION auf `wind_ziel_map` normieren
+        (SPEZIFIKATION.md §3.5, core/terrain_weltkarte.py REGIONEN.
+        wind_mittel_ms) - Richtung bleibt unveraendert, nur die LAENGE des
+        Vektors wird skaliert. Exakt dasselbe Prinzip wie
+        niederschlagsfeld_festgelegt's "direkt auf den Zielwert normieren":
+        die interne Simulation liefert die lokale STRUKTUR (Boeen an Graten,
+        Kanalisierung in Taelern - das bleibt erhalten, weil nur eine
+        Konstante je Region multipliziert wird), das REGIONALE NIVEAU kommt
+        von hier.
+
+        WARUM NICHT ALS INTERNER MULTIPLIKATOR AUF DEN DRUCKGRADIENTEN.
+        Erster Versuch: `wind_speed_factor` raeumlich variieren, an der einen
+        Stelle, wo es die Druckgradient-Kraft treibt. Gemessen (Alpenland-
+        Zielfaktor 0.16 gegen Kuesten-Zielfaktor 0.71, identische Karte):
+        1.871 m/s gegen 1.872 m/s - kein messbarer Unterschied. Der
+        Druckgradient ist nur EINER von mehreren additiven Antrieben
+        (Terrain-Ablenkung/-Speedup, thermische Konvektion, Anfangs-Rauschen)
+        und dominiert die Endgeschwindigkeit nicht. Die Normierung hier wirkt
+        dagegen GARANTIERT, weil sie das Endergebnis direkt skaliert statt
+        einen von mehreren Eingangstermen.
+
+        Rueckgabe: (H,W)-Multiplikatorfeld, auf die WIND-VEKTORLAENGE anzuwenden
+        (Richtung bleibt), oder None (alter Nicht-Weltkarten-Pfad ohne
+        `wind_ziel_map`/`region_map` - Aufrufer laesst wind_map dann
+        unveraendert).
+        """
+        ziel = self.data_lod_manager.get_calculator_output(
+            "terrain.redistribution", "wind_ziel_map", lod_level)
+        region_map = self.data_lod_manager.get_calculator_output(
+            "terrain.redistribution", "region_map", lod_level)
+        if ziel is None or region_map is None:
+            return None
+
+        groesse = wind_map.shape[0]
+        ziel = np.asarray(ziel, dtype=np.float32)
+        if ziel.shape[0] != groesse:
+            ziel = self._interpolate_2d_bicubic(ziel, groesse)
+        region_map = np.asarray(region_map)
+        if region_map.shape[0] != groesse:
+            region_map = self._resize_nearest_labels(region_map, (groesse, groesse))
+
+        geschwindigkeit = np.hypot(wind_map[..., 0], wind_map[..., 1]).astype(np.float64)
+        faktor = np.ones((groesse, groesse), dtype=np.float64)
+        for i in range(9):
+            maske = region_map == i
+            if not np.any(maske):
+                continue
+            mittel_ist = float(geschwindigkeit[maske].mean())
+            mittel_ziel = float(ziel[maske].mean())
+            if mittel_ist > 1e-6:
+                faktor[maske] = mittel_ziel / mittel_ist
+        # Geklemmt, damit ein einzelnes windstilles Pixel (mittel_ist nahe 0
+        # innerhalb der Region waere unproblematisch, aber ein pathologischer
+        # Ausreisser soll den Faktor nicht explodieren lassen) endlich bleibt.
+        faktor = np.clip(faktor, 0.1, 10.0)
+        return faktor.astype(np.float32)
+
+    @staticmethod
+    def jahresgang(zeit_im_jahr: float) -> float:
+        """
+        Wo im Jahr wir stehen: -1 im Januar, +1 im Juli.
+
+        `zeit_im_jahr` laeuft von 0 (1. Januar) bis 1. Eine reine Kosinuskurve,
+        also eine SKALARE Funktion der Zeit - kein Feld, keine Simulation. Das
+        ist der Kern der Vereinfachung: das raeumliche Muster wird EINMAL
+        gerechnet, der Jahresgang ist eine Zahl, die man auf jeden beliebigen
+        Zeitpunkt auswerten kann.
+
+        Der Nutzer am 2026-08-07: "wir werden aber im fertigen spiel komplette
+        jahre simulieren. also kann einfach eine Min und eine Max temperatur
+        sein und eine unregelmaessige kurve die ueber die jahreskurve gelegt
+        wird." Die unregelmaessige Ueberlagerung kommt spaeter (Punkt 1.x der
+        offenen Liste); vorerst ist der Verlauf glatt, wie ebenfalls vorgegeben
+        ("in unserer simulation ueber das jahr gibt es noch keine variation").
+        """
+        return float(-np.cos(2.0 * np.pi * float(zeit_im_jahr)))
+
+    def _je_region_auf_mittel(self, feld: np.ndarray, lod_level: int,
+                              ziel=1.0, maske=None) -> np.ndarray:
+        """
+        Ein Feld so skalieren, dass sein Mittel JE REGION `ziel` betraegt.
+
+        `ziel` darf eine Zahl sein oder ein dict {Regionsname: Zielwert}. Im
+        zweiten Fall trifft JEDE Region ihren eigenen Wert - und zwar PER
+        KONSTRUKTION, ohne dass die Eingabewerte gegen die Regionsmischung
+        vorkompensiert werden muessen.
+
+        DAS ERSETZT EINE EICHUNG. Beim Niederschlag wurde zuerst der
+        EINGABEwert geeicht, bis der Ausgabewert stimmte - zweimal, und beim
+        zweiten Mal wurde es schlechter statt besser (2026-08-07). Der Fehler
+        war, eine Zwischengroesse zu eichen und eine andere zu messen: die
+        Normierung glaettet ueber die Regionsgrenzen, und dabei verschiebt
+        sich das Mittel wieder.
+        #
+        Direkt auf das Ziel zu normieren macht die Eichung ueberfluessig, und
+        die eingetragenen Werte bleiben lesbar ("Bergen 2250 mm") statt
+        vorkompensiert ("Taiga 79 mm, damit 600 ankommen").
+
+        Damit trifft jede Region ihren Tabellenwert PER KONSTRUKTION, egal was
+        das Feld sonst tut - eine Festlegung statt einer Hoffnung. Dieselbe
+        Bauform wie bei der Sonnenexposition.
+
+        WEICHE UEBERGAENGE: die Kennzahl wird je Region bestimmt, dann aber als
+        FELD geglaettet. Ohne das staende an jeder Regionsgrenze ein Sprung.
+        """
+        from scipy import ndimage
+
+        f = np.asarray(feld, dtype=np.float64)
+        regionen = self.data_lod_manager.get_calculator_output(
+            "terrain.redistribution", "region_map", lod_level)
+        if regionen is None:
+            return f * (ziel / max(float(np.mean(f)), 1e-9))
+
+        R = np.asarray(regionen)
+        if R.shape != f.shape:
+            R = np.round(self._interpolate_2d_bicubic(
+                R.astype(np.float32), f.shape[0])).astype(np.int16)
+
+        from core.terrain_weltkarte import alle_regionen
+        namen = [r["name"] for _z, _s, r in alle_regionen()]
+
+        # NUR UEBER DER MASKE MITTELN.
+        #
+        # Ohne sie geht das MEER mit ein, und das war der eigentliche Fehler
+        # (2026-08-07, nach zwei Fehlversuchen mit Eichung und Glaettung): auf
+        # See gibt es keinen Regenschatten, dort steht der Rohwert also hoch.
+        # Der Regionsmittelwert wurde dadurch zu gross, und die Landflaeche
+        # rutschte um bis zu 36 % unter ihren Zielwert. Die Klimatabelle meint
+        # aber Landklima - Bergen liegt nicht auf dem Wasser.
+        gueltig = np.ones_like(f, dtype=bool) if maske is None else np.asarray(maske)
+
+        mittel_feld = np.full_like(f, max(float(np.mean(f[gueltig])), 1e-9))
+        ziel_feld = np.full_like(f, float(ziel) if not isinstance(ziel, dict)
+                                 else float(np.mean(list(ziel.values()))))
+        for i in range(9):
+            g = (R == i) & gueltig
+            if g.sum() < 50:
+                continue
+            # Gemessen wird ueber der Maske, GESETZT wird auf der ganzen
+            # Region - sonst bekaeme das Meer keine Korrektur und stuende als
+            # Kante an der Kueste.
+            ganz = R == i
+            mittel_feld[ganz] = max(float(np.mean(f[g])), 1e-9)
+            if isinstance(ziel, dict):
+                ziel_feld[ganz] = float(ziel.get(namen[i], 1.0))
+
+        # DAS VERHAELTNIS GLAETTEN, NICHT ZAEHLER UND NENNER EINZELN.
+        #
+        # Getrennt geglaettet nimmt der Nenner am Regionsrand den Mittelwert
+        # des NACHBARN an. Bei einem feuchten Nachbarn wird dort durch eine zu
+        # grosse Zahl geteilt, und die ganze Region rutscht ab - gemessen lag
+        # das Huegelland dadurch 36 % unter seinem Zielwert, obwohl direkt auf
+        # das Ziel normiert wurde.
+        #
+        # Als Verhaeltnis ist es ein reines Korrekturfeld: im Inneren einer
+        # Region genau ziel/mittel, am Rand weich zum Nachbarwert
+        # ueberblendet. Die Region trifft ihren Wert damit wirklich.
+        korrektur = ziel_feld / mittel_feld
+        sigma = max(f.shape[0] / 40.0, 1.0)
+        korrektur = ndimage.gaussian_filter(korrektur, sigma)
+        return f * korrektur
+
+    def _exposition_normiert(self, shadowmap: np.ndarray, lod_level: int) -> np.ndarray:
+        """
+        Die Sonnenexposition, je Region auf Mittel 0.5 und Spanne 0..1 gebracht.
+
+        WARUM NORMIERT WERDEN MUSS. Gemessen am 2026-08-07 mittelt die rohe
+        Exposition ueber Land auf 0.68, nicht auf 0.5. Ohne Normierung laege
+        jede Region um mehrere Kelvin neben ihrem Tabellenwert, und die
+        Klimatabelle waere nur noch Zierde. Mit ihr trifft jede Region ihr
+        Jahresmittel PER KONSTRUKTION - eine Festlegung, kein Regelkreis.
+
+        WEICHE UEBERGAENGE (Nutzervorgabe 2026-08-07: "wir muessen immer
+        Regionengrenzen sanft uebergehen lassen"). Die Kennzahlen werden je
+        Region bestimmt, dann aber als FELD geglaettet, bevor sie angewandt
+        werden. Ohne diese Glaettung staende an jeder Regionsgrenze ein
+        Temperatursprung.
+        """
+        from scipy import ndimage
+
+        e = np.asarray(shadowmap, dtype=np.float64)
+        if e.ndim == 3:
+            e = e.mean(axis=2)
+
+        regionen = self.data_lod_manager.get_calculator_output(
+            "terrain.redistribution", "region_map", lod_level)
+        if regionen is None:
+            # Ohne Regionen global normieren - besser als gar nicht.
+            mitte = float(np.median(e))
+            spanne = float(np.percentile(e, 95) - np.percentile(e, 5)) or 1.0
+            return np.clip(0.5 + (e - mitte) / spanne, 0.0, 1.0)
+
+        R = np.asarray(regionen)
+        if R.shape != e.shape:
+            R = np.round(self._interpolate_2d_bicubic(
+                R.astype(np.float32), e.shape[0])).astype(np.int16)
+
+        mitte_feld = np.full_like(e, float(np.median(e)))
+        spanne_feld = np.full_like(e, 1.0)
+        for i in range(9):
+            g = R == i
+            if g.sum() < 50:
+                continue
+            werte = e[g]
+            # MITTELWERT, nicht Median: nur dann mittelt sich der
+            # Expositionsterm ueber die Region exakt zu null, und die Region
+            # trifft ihr Jahresmittel. Mit dem Median blieb ein Rest von bis zu
+            # 1.5 K stehen (gemessen 2026-08-07).
+            mitte_feld[g] = float(np.mean(werte))
+            spanne_feld[g] = float(np.percentile(werte, 95)
+                                   - np.percentile(werte, 5)) or 1.0
+
+        # Glaetten, damit die Regionsgrenze im Ergebnis nicht als Kante steht.
+        sigma = max(e.shape[0] / 40.0, 1.0)
+        mitte_feld = ndimage.gaussian_filter(mitte_feld, sigma)
+        spanne_feld = np.maximum(ndimage.gaussian_filter(spanne_feld, sigma), 1e-6)
+
+        return np.clip(0.5 + (e - mitte_feld) / spanne_feld, 0.0, 1.0)
+
+    def niederschlagsfeld_festgelegt(self, heightmap: np.ndarray, lod_level: int,
+                                     zeit_im_jahr=None):
+        """
+        Der Jahresniederschlag als FESTLEGUNG statt als Simulationsergebnis.
+
+            P = P_region * luv_faktor * regenschatten
+
+        DREI TEILE, alle geschlossene Form:
+
+        1. `P_region` aus der Klimatabelle (Bergen 2250 mm, Madrid 430) - weich
+           ueber die Regionsgrenzen gemischt wie die Temperatur.
+
+        2. `luv_faktor` aus dem oertlichen ANSTIEG IN WINDRICHTUNG. Luft, die
+           einen Hang hinaufmuss, kuehlt ab und regnet aus; auf der Leeseite
+           bleibt sie trocken. Das ist der Mechanismus, den der Nutzer am
+           2026-08-07 beschrieben hat.
+
+        3. `regenschatten` aus dem KUMULIERTEN Anstieg stromaufwaerts. Luft,
+           die schon einen Kamm ueberquert hat, ist ausgeregnet.
+
+        WARUM DAS KEIN KREISLAUF IST. Der naheliegende Weg waere, Feuchte
+        Schritt fuer Schritt mit dem Wind wandern zu lassen - dann entscheidet
+        aber die Schrittzahl ueber das Ergebnis, und genau diesen Drift will
+        der Nutzer los. Stattdessen wird je Pixel EINMAL eine feste Strecke
+        gegen den Wind zurueckgelegt und der Anstieg aufsummiert: ein Integral
+        entlang einer Bahn, kein Einschwingen. Zweimal gerechnet ergibt
+        dasselbe, und die Aufloesung aendert daran nichts.
+
+        Rueckgabe: None, wenn klima_map fehlt (alter Pfad ohne Weltkarte).
+        """
+        p_region = self._klimafeld(lod_level, 2, 800.0)
+        if p_region is None:
+            return None
+
+        H = np.asarray(heightmap, dtype=np.float64)
+        size = H.shape[0]
+        mpp = (float(self.data_lod_manager.get_map_distance_km()) * 1000.0
+               / size)
+
+        richtung = float(self._current_parameters.get(
+            "prevailing_wind_direction", 0.0))
+        # Konvention wie beim Sonnenazimut: 0 = Norden, im Uhrzeigersinn.
+        # `prevailing_wind_direction` gibt an, WOHER der Wind kommt.
+        rad = np.radians(richtung)
+        wx, wy = -np.sin(rad), -np.cos(rad)          # wohin die Luft zieht
+
+        gy, gx = np.gradient(H, mpp)
+        # Anstieg je Meter Weg in Windrichtung. Positiv heisst: die Luft muss
+        # hinauf.
+        anstieg = gx * wx + gy * wy
+
+        luv = 1.0 + LUV_STAERKE * np.tanh(anstieg / LUV_BEZUGSHANG)
+
+        # Der kumulierte Aufstieg stromaufwaerts - eine feste Zahl Schritte.
+        strecke_px = max(int(REGENSCHATTEN_M / mpp), 1)
+        yy, xx = np.mgrid[0:size, 0:size].astype(np.float64)
+        kumuliert = np.zeros((size, size), dtype=np.float64)
+        for schritt in range(1, strecke_px + 1):
+            sx = np.clip(xx - wx * schritt, 0, size - 1).astype(np.int32)
+            sy = np.clip(yy - wy * schritt, 0, size - 1).astype(np.int32)
+            # Nur AUFstiege zaehlen - ein Abstieg macht die Luft nicht feuchter.
+            kumuliert += np.maximum(anstieg[sy, sx], 0.0)
+        kumuliert *= mpp                                  # in Metern Aufstieg
+
+        regenschatten = np.exp(-kumuliert / REGENSCHATTEN_HOEHE_M)
+
+        # JE REGION AUF MITTEL 1 NORMIEREN.
+        #
+        # Der Regenschatten kann nur VERRINGERN (exp(-x) <= 1), nie erhoehen -
+        # ohne Normierung lag jede Region 45 bis 53 % unter ihrem Tabellenwert
+        # (gemessen 2026-08-07). Die Normierung erhaelt das Muster von Luv und
+        # Lee vollstaendig und verschiebt nur das Niveau; damit trifft jede
+        # Region ihre Jahressumme per Konstruktion.
+        # DIREKT AUF DEN ZIELWERT NORMIEREN, nicht auf Mittel 1.
+        #
+        # Der Regenschatten kann nur VERRINGERN (exp(-x) <= 1), und die
+        # Regionsmischung zieht feuchte Regionen zu ihren trockenen Nachbarn
+        # hinunter - Fjordland lag 36 % unter seinem Wert. Beides zusammen
+        # laesst sich nicht durch vorkompensierte Eingabewerte auffangen: die
+        # Glaettung der Normierung verschiebt das Mittel erneut, und eine
+        # Eichung darauf lief in die falsche Richtung (2026-08-07).
+        #
+        # Hier wird stattdessen das FERTIGE Feld auf die Jahressumme der
+        # jeweiligen Region gezogen. Das Muster von Luv und Lee bleibt
+        # vollstaendig erhalten; nur das Niveau wird gesetzt.
+        from core.terrain_weltkarte import NIEDERSCHLAG_ZIEL
+        jahr = self._je_region_auf_mittel(
+            p_region * luv * regenschatten, lod_level,
+            NIEDERSCHLAG_ZIEL, maske=(H > 0.0))
+
+        # Ueber See gedaempft - siehe SEE_REGEN_ANTEIL.
+        jahr = np.where(H > 0.0, jahr, jahr * SEE_REGEN_ANTEIL)
+
+        if zeit_im_jahr is None:
+            return jahr.astype(np.float32)
+
+        # DER JAHRESGANG, aus der Kontinentalitaet abgeleitet.
+        #
+        # +1 heisst voll kontinental (Sommerregen), -1 voll maritim
+        # (Winterregen). Die Jahresspanne der Temperatur ist das Mass dafuer,
+        # und sie steht schon im Klimafeld - es braucht keine eigene Zahl.
+        t_spanne = self._klimafeld(lod_level, 1, 15.0)
+        if t_spanne is None:
+            return jahr.astype(np.float32)
+        kontinental = np.tanh((t_spanne - SAISON_BEZUGSSPANNE) / SAISON_UEBERGANG)
+        # Das Meer ist maritim, unabhaengig von der Region daneben.
+        kontinental = np.where(H > 0.0, kontinental,
+                               np.tanh((SEE_SPANNE - SAISON_BEZUGSSPANNE)
+                                       / SAISON_UEBERGANG))
+
+        # MONATSRATE mal Ticklaenge. `jahr` ist die Jahressumme; geteilt durch
+        # zwoelf ist es die Monatsrate, und ein Tick umfasst MONATE_JE_TICK
+        # davon. Bei 800 mm im Jahr sind das 67 mm je Monat und 133 je
+        # Zweimonatstick.
+        gang = 1.0 + SAISON_STAERKE * kontinental * self.jahresgang(zeit_im_jahr)
+        return (jahr / 12.0 * MONATE_JE_TICK * gang).astype(np.float32)
+
+    def _temperatur_raummuster(self, heightmap, shadowmap, lod_level):
+        """
+        Das RAEUMLICHE Muster: Sockel und Amplitude je Pixel, zeitunabhaengig.
+
+            T(x, y, t) = sockel(x, y) + amplitude(x, y) * jahresgang(t)
+
+        EINMAL gerechnet und zwischengespeichert. Genau darin besteht die
+        Vereinfachung, und ich hatte sie beim ersten Anlauf selbst verfehlt:
+        `temperaturfeld_festgelegt` wurde sechsmal aufgerufen und rechnete
+        jedes Mal die Expositionsnormierung samt Gaussglaettung neu. Die
+        Wetterrechnung wurde dadurch teurer statt billiger - gemessen 12.2 s
+        statt 9.9 s bei 256 px.
+
+        Der Jahresgang ist eine SKALARE Funktion; das Muster daneben ist
+        konstant. Beides zu trennen ist der ganze Punkt.
+        """
+        schluessel = (id(heightmap), heightmap.shape, lod_level,
+                      getattr(self, "_wetter_rechen_size", None))
+        zwischen = getattr(self, "_temperatur_cache", None)
+        if zwischen is not None and zwischen[0] == schluessel:
+            return zwischen[1]
+
+        t_mittel = self._klimafeld(lod_level, 0, 11.0)
+        t_spanne = self._klimafeld(lod_level, 1, 15.0)
+        if t_mittel is None or t_spanne is None:
+            return None
+
+        H = np.asarray(heightmap, dtype=np.float64)
+        land = H > 0.0
+
+        # DIREKTNORMIERUNG STATT VORKOMPENSIERTER EINGABE (2026-08-11,
+        # docs/OFFENE_PUNKTE.md 1.10/1.11). `t_mittel`/`t_spanne` kommen aus
+        # klima_map, also aus der weich ueber die Regionsgrenzen GEBLENDETEN
+        # Fassung von core.terrain_weltkarte.REGIONEN.temp_mittel_m0/
+        # temp_spanne - die Regionsmischung zieht jede Region zu ihren
+        # Nachbarn hin (Taiga bekam ohne Korrektur 1.8 statt der eigentlich
+        # gewollten 3.8, siehe KLIMA_ZIEL). Bisher wurde das durch
+        # HANDKALIBRIERTE Eingabewerte kompensiert - "Taiga 1.8, damit am
+        # Ende 3.8 ankommen" -, ueber drei Seeds von Hand geeicht und auf
+        # einem vierten schon wieder daneben (1.11: 30.9 K statt 29.0 K
+        # Jahresspanne).
+        #
+        # Exakt dasselbe Muster wie beim Niederschlag (1.3,
+        # niederschlagsfeld_festgelegt): das FERTIGE, geblendete Feld direkt
+        # auf den Zielwert je Region normieren (`_je_region_auf_mittel`)
+        # macht die Handeichung ueberfluessig und trifft die Vorgabe PER
+        # KONSTRUKTION, unabhaengig vom Blend. Die Eingabewerte in REGIONEN
+        # sind seither die LESBAREN, echten Zielwerte (identisch mit
+        # KLIMA_ZIEL) statt vorkompensierter Zahlen.
+        from core.terrain_weltkarte import KLIMA_ZIEL
+        mittel_ziel = {name: werte[0] for name, werte in KLIMA_ZIEL.items()}
+        spanne_ziel = {name: werte[1] for name, werte in KLIMA_ZIEL.items()}
+        t_mittel = self._je_region_auf_mittel(t_mittel, lod_level, mittel_ziel, maske=land)
+        t_spanne = self._je_region_auf_mittel(t_spanne, lod_level, spanne_ziel, maske=land)
+
+        exposition = self._exposition_normiert(shadowmap, lod_level)
+        sockel_land = (t_mittel
+                       - HOEHENABNAHME_K_PRO_M * np.maximum(H, 0.0)
+                       + t_spanne * EXPOSITIONSANTEIL * (exposition - 0.5))
+
+        # Die See: keine Sonne, keine Hoehenabnahme - eine Festlegung, kein
+        # Naeherungsverfahren. Genau das loescht den Kuestentemperatursprung
+        # von 5.6 K, dessen Ursache seit Wochen offen war: er entstand, weil
+        # das Meer als Landflaeche mit Hoehe 0 behandelt wurde.
+        size = H.shape[0]
+        y_anteil = np.linspace(0.0, 1.0, size)[:, None] * np.ones((1, size))
+        sockel_see = (SEE_MITTEL_SUED
+                      + (SEE_MITTEL_NORD - SEE_MITTEL_SUED) * y_anteil
+                      + self._stroemungsrauschen(size) * SEE_STROEMUNG_K)
+
+        sockel = np.where(land, sockel_land, sockel_see)
+        amplitude = np.where(land, 0.5 * t_spanne, 0.5 * SEE_SPANNE)
+
+        self._temperatur_cache = (schluessel, (sockel, amplitude))
+        return sockel, amplitude
+
+    def temperaturfeld_festgelegt(self, heightmap: np.ndarray,
+                                  shadowmap: np.ndarray, lod_level: int,
+                                  zeit_im_jahr: float = 0.5):
+        """
+        Das Temperaturfeld als FESTLEGUNG statt als Simulationsergebnis.
+
+            T = T_mittel(Region) - HOEHENABNAHME * hoehe
+                + Spanne/2 * jahresgang(t)
+                + Spanne * EXPOSITIONSANTEIL * (exposition - 0.5)
+
+        Auf See ohne Sonne und ohne Hoehenabnahme, dafuer mit einem groben
+        Stroemungsrauschen - Nutzervorgabe 2026-08-07.
+
+        Rueckgabe: None, wenn klima_map fehlt (alter Pfad ohne Weltkarte).
+        """
+        muster = self._temperatur_raummuster(heightmap, shadowmap, lod_level)
+        if muster is None:
+            return None
+        sockel, amplitude = muster
+        return (sockel + amplitude * self.jahresgang(zeit_im_jahr)).astype(np.float32)
+
+    def _stroemungsrauschen(self, size: int) -> np.ndarray:
+        """
+        Grobes Rauschen fuer die Meeresstroemungen, aus dem Kartenseed.
+
+        Nutzer: "dabei wird eine noisemap verwendet die meeresstroemungen etwas
+        darstellt", mit "geringer varianz". Sehr grosse Wellenlaenge - eine
+        Stroemung ist ein Gebilde von vielen Kilometern, kein Fleckenmuster.
+        """
+        schluessel = (size, int(self.map_seed))
+        zwischen = getattr(self, "_stroemung_cache", None)
+        if zwischen is not None and zwischen[0] == schluessel:
+            return zwischen[1]
+
+        rng = np.random.default_rng(int(self.map_seed) ^ 0x5EA1)
+        grob = rng.normal(size=(4, 4))
+        feld = self._interpolate_2d_bicubic(grob.astype(np.float32), size)
+        feld = feld / (float(np.abs(feld).max()) or 1.0)
+        self._stroemung_cache = (schluessel, feld.astype(np.float64))
+        return self._stroemung_cache[1]
 
     def _calculate_temperature_field(self, heightmap: np.ndarray, shadowmap: np.ndarray,
                                    parameters: Dict[str, Any], target_size: int,

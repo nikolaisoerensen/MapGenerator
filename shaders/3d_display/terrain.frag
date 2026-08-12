@@ -12,7 +12,8 @@ in vec3 LightPos;
 // Terrain Parameters
 uniform float heightScale;
 uniform float maxHeight;
-uniform int renderMode;  // 0=terrain, 1=geology, 2=weather, 3=water, 4=biome, 5=settlement
+uniform int renderMode;  // 0=terrain, 1=geology, 2=weather, 3=water, 4=biome,
+                         // 5=settlement, 6=Wasseroberflaeche (die Platte auf 0 m)
 
 // Shadow Mapping
 uniform sampler2D shadowMap;
@@ -43,8 +44,35 @@ uniform bool useContours;
 uniform float contourInterval;
 
 vec3 getTerrainColor() {
-    // Height-based terrain coloring. Kein Blau mehr (sah wie Wasser aus) -
-    // Grün ist jetzt die niedrigste Farbe (height=0), Weiß die höchste
+    // BLAU UNTER NULL - seit 2026-08-05.
+    //
+    // Vorher begann die Skala bei height=0 mit Gruen, und das war richtig:
+    // die Heightmap war nie negativ, ein blauer Bereich haette Wasser
+    // vorgetaeuscht, wo keines ist. Mit der Weltkarte
+    // (core/terrain_weltkarte.py) gibt es jetzt echtes Meer - alles unter 0 m
+    // liegt unter dem Meeresspiegel. Ohne diesen Zweig klebte der gesamte
+    // Meeresboden auf derselben gruenen Farbe wie die Kueste.
+    //
+    // FragPos.y ist Weltraum-Hoehe = Rohmeter * heightScale, also hat sie
+    // dasselbe Vorzeichen wie die Rohhoehe. maxHeight normiert nur den
+    // Landanteil; der Meeresanteil bekommt seinen eigenen Verlauf ueber die
+    // Tiefe in ROHMETERN, damit er nicht von der Landamplitude abhaengt.
+    float rohHoehe = FragPos.y / max(heightScale, 1e-9);
+    if (rohHoehe < 0.0) {
+        // 0 m Flachwasser -> 400 m Tiefsee, dieselben Stuetzstellen wie die
+        // 2D-Colormap in map_display_2d._hoehenfarben().
+        float tiefe = clamp(-rohHoehe / 400.0, 0.0, 1.0);
+        vec3 flach = vec3(0.290, 0.608, 0.831);
+        vec3 mittel = vec3(0.114, 0.373, 0.620);
+        vec3 tief = vec3(0.024, 0.165, 0.322);
+        if (tiefe < 0.5) {
+            return mix(flach, mittel, tiefe / 0.5);
+        }
+        return mix(mittel, tief, (tiefe - 0.5) / 0.5);
+    }
+
+    // Height-based terrain coloring. Ueber Null kein Blau (sah wie Wasser
+    // aus) - Grün ist die niedrigste Farbe (height=0), Weiß die höchste
     // (height=1). Dieselben 5 Stützstellen wie die 2D-Colormap
     // (gui/widgets/map_display_2d.py, plt.cm.terrain ab 25% zugeschnitten),
     // damit 2D- und 3D-Ansicht farblich konsistent aussehen.
@@ -138,6 +166,20 @@ vec3 getSettlementColor() {
 }
 
 void main() {
+    // WASSEROBERFLAECHE - eine durchscheinende Platte auf 0 m.
+    //
+    // Sie geht ihren eigenen Weg und laesst alles Uebrige aus: kein Licht,
+    // kein Schatten, keine Hoehenlinien. Sonst wuerde die Platte beschattet
+    // und mit Konturen ueberzogen, obwohl sie kein Gelaende ist.
+    //
+    // Deckkraft 0.78: flaches Wasser laesst den Meeresboden noch ahnen, die
+    // Flaeche liest sich aber als Wasser und nicht als Schleier. 0.55 war zu
+    // durchsichtig - der Meeresboden dominierte weiter das Bild.
+    if (renderMode == 6) {
+        FragColor = vec4(0.208, 0.502, 0.761, 0.78);
+        return;
+    }
+
     // Select color based on render mode
     vec3 color;
     switch(renderMode) {

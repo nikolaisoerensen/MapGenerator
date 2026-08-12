@@ -50,8 +50,21 @@ _CALCULATOR_SPECS = [
     # river_mask/river_order kommen seit 2026-07-30 aus dem Flussnetz-Skelett,
     # das ebenfalls in _calc_redistribution() mitlaeuft (SPEZIFIKATION §12).
     # Noch von niemandem gelesen und nicht als Anzeige-Layer registriert.
+    # river_generation seit 2026-08-05: 3 = Makro (Strom), 2 = Meso, 1 = Mikro
+    # (Bach), 0 = kein Fluss. Ein NEUER Output statt einer geaenderten
+    # Bedeutung von river_order - Water und Biome sollen einen Trog von einem
+    # Bach unterscheiden koennen, ohne dass bestehende Leser umlernen muessen.
+    # region_map seit 2026-08-06: 0..8, welche der neun Regionen an diesem Pixel
+    # fuehrt (Reihenfolge von alle_regionen(), Nordwest nach Suedost). Sie
+    # entsteht aus DEMSELBEN Gewichtsfeld, das auch die Gelaendeparameter
+    # traegt - deshalb haengt sie an terrain und nicht an settlement, obwohl
+    # settlement ihr Hauptleser ist. Ein zweiter Aufruf von voronoi_regionen()
+    # an anderer Stelle waere eine zweite Wahrheit (§4.5); der Regional-Reiter
+    # tat bis zu diesem Datum genau das.
+    # NUR bei aktiver Weltkarte belegt - im alten Pfad gibt es keine Regionen.
     CalculatorSpec("terrain.redistribution", "terrain", ["terrain.noise"],
-                   ["heightmap", "ridge_map", "river_mask", "river_order"]),
+                   ["heightmap", "ridge_map", "river_mask", "river_order",
+                    "river_generation", "region_map", "klima_map"]),
     CalculatorSpec("terrain.slope", "terrain", ["terrain.redistribution"], ["slopemap"]),
     CalculatorSpec("terrain.shadow", "terrain", ["terrain.redistribution"], ["shadowmap"]),
 
@@ -364,9 +377,10 @@ _CALCULATOR_SPECS = [
                    # Hand gepflegt: die Handtabelle fuehrte biome bei
                    # settlement, der Graph nicht. Die Handtabelle hatte recht.
                    ["settlement.settlements", "erosion.slope",
-                    "biome.integrate_layers"], ["roads"]),
-    CalculatorSpec("settlement.outer_roads", "settlement",
-                   ["settlement.settlements", "settlement.suitability", "erosion.slope"], ["outer_roads"]),
+                    "biome.integrate_layers"], ["roads", "sea_roads"]),
+    # settlement.outer_roads ENTFERNT (2026-08-10, OFFENE_PUNKTE 5.11): verband
+    # Siedlungen mit dem KARTENRAND - eine Insel/Region hat kein sinnvolles
+    # "Draussen". docs/SIEDLUNGEN_ENTWURF.md kennt diese Anbindung nicht.
     CalculatorSpec("settlement.roadsites", "settlement", ["settlement.pathfinding"], ["roadsite_list"]),
     CalculatorSpec("settlement.civ_influence", "settlement",
                    ["terrain.redistribution", "erosion.slope", "settlement.settlements",
@@ -410,8 +424,11 @@ CALCULATOR_GRAPH: Dict[str, CalculatorSpec] = {spec.calculator_id: spec for spec
 # -> 38 aktive Knoten. Am selben Tag kam erosion.slope dazu (Hangneigung NACH
 # der Erosion, siehe dortiger Kommentar - ein ZWEITER Slope-Knoten, weil ein
 # verschobener terrain.slope einen Zyklus ueber geology.layer_thickness
-# ergaebe) = netto +1 -> 39 aktive Knoten.
-assert len(CALCULATOR_GRAPH) == 39, f"Erwartet 39 aktive Calculators, gefunden {len(CALCULATOR_GRAPH)}"
+# ergaebe) = netto +1 -> 39 aktive Knoten. Wegenetz-Umbau 2026-08-10
+# (docs/SIEDLUNGEN_ENTWURF.md, OFFENE_PUNKTE 5.11) entfernte
+# settlement.outer_roads (Anbindung an den Kartenrand - eine Insel/Region hat
+# kein sinnvolles "Draussen") = netto -1 -> 38 aktive Knoten.
+assert len(CALCULATOR_GRAPH) == 38, f"Erwartet 38 aktive Calculators, gefunden {len(CALCULATOR_GRAPH)}"
 
 
 class CalculatorRoundScheduler:

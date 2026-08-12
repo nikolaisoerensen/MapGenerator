@@ -145,9 +145,54 @@ Subtropengürtel bei 20–33°**, wieder feuchtere Westwindzone.
 
 ### 3.5 Weather — Wind
 
-**Ziel:** noch **nicht definiert.** Zu klären: Jahresmittel je Breite,
-Luv-/Lee-Kontrast am Gebirge, jahreszeitliche Drehung, Böigkeit. Ohne Zielwerte
-ist Wind nicht abnehmbar.
+**Festgelegt 2026-08-11.** Anders als 3.3/3.4 (aus der Zeit vor der
+Weltkarte, latitudenbasiert) gilt dieser Abschnitt fuer das AKTUELLE
+9-Regionen-System (docs/KLIMA_UND_SEE.md) — Zielwerte je Region, nicht je
+Breite, aus realen Referenzorten (Gedaechtniswerte, ±1 m/s, vor endgueltiger
+Abnahme gegenzupruefen wie die Klimatabelle selbst).
+
+**Ziel:** Jahresmittel je Region treffen, mit Luv/Lee-Kontrast am Gebirge und
+Boeigkeit, OHNE jahreszeitliche Drehung (Richtung bleibt fest — passt zum
+bereits etablierten Luv/Lee-Muster bei 1.3, nur die STAERKE schwankt uebers
+Jahr, analog zur Temperaturkurve aus 1.1. "Festlegung statt Simulationskreis",
+docs/KLIMA_UND_SEE.md §0).
+
+| Region | Referenzort | Ziel | Stand (256px, Seed 20260804) | Charakter |
+|---|---|---:|---:|---|
+| Huegelland (Kelten) | Cork | 4.5 m/s | 4.32 ✓ | exponiert atlantisch, windig |
+| Fjordland (Wikinger) | Bergen | 3.0 m/s | 3.01 ✓ | fjordgeschuetzt, aber Boeen vom Meer |
+| Taiga (Slawen) | Wologda | 3.2 m/s | 3.22 ✓ | kontinental, ruhiger |
+| Atlantikkueste (Franken) | La Rochelle | 4.5 m/s | 4.29 ✓ | atlantisch exponiert |
+| Alpenland (Alemannen) | Chur | 2.2 m/s | 2.67 ✓ | Tal geschuetzt, aber Foehn-Spitzen |
+| Mittelgebirge (Sachsen) | Bamberg | 3.0 m/s | 3.03 ✓ | gemaessigt kontinental |
+| Steppe (Andalusier) | Madrid | 3.0 m/s | 3.24 ✓ | Hochebene, maessig |
+| Mittelmeer (Italiener) | Rom | 3.5 m/s | 3.56 ✓ | kuestennah |
+| Griechische Inseln (Byzantiner) | Iraklio | 4.5 m/s | 4.37 ✓ | Aegaeis, Meltemi-Boeen im Sommer |
+
+Erreicht ueber `_wind_regional_faktor()` (core/weather_generator.py): das
+REGIONALE MITTEL der simulierten Windgeschwindigkeit wird direkt auf
+`wind_ziel_map` normiert, exakt das "direkt auf den Zielwert normieren"-
+Prinzip aus 1.3 (Niederschlag). Alle neun Regionen innerhalb 0.5 m/s ihres
+Ziels, Rangfolge stimmt (Alpenland ist die windaermste Region). Gesichert in
+`tests/smoke_test_weather_wind_regions.py`.
+
+**Luv/Lee-Kontrast am Gebirge: Ziel 1.5–2×, NICHT verlaesslich erreicht.**
+Ein multiplikativer Term (`_wind_luv_lee_faktor`, Hangneigung in
+Windrichtung, analog zum Niederschlags-Luv-Term) ist eingebaut. Gemessen im
+Alpenland: die vorhandene 3-Schicht-Simulation hat selbst schon eine
+terraingetriebene Windstruktur (eigene Ablenkungs-/Speedup-Terme), die mit
+diesem einfachen Ansatz ANTIKORRELIERT (-0.53 Korrelationskoeffizient
+Faktor↔Basisgeschwindigkeit) statt neutral zu sein - der Zusatzterm wird
+dadurch weitgehend neutralisiert. Eine verlaessliche Loesung braeuchte
+entweder eine Abstimmung mit der internen Terrain-Kopplung der Simulation
+oder einen staerkeren, die Basis dominierenden Faktor - beides nicht Teil
+dieser Aenderung. Deshalb NICHT in der Zusicherung geprueft.
+
+**Boeigkeit:** ein Boenfaktor statt eines Turbulenzfelds, Spitze ≈ 1.4–1.6×
+des Mittels - als Designentscheidung festgehalten, noch NICHT als eigenes
+Feld gebaut (kein Konsument dafuer bisher).
+
+**Richtung:** vorherrschend West, fest — keine jahreszeitliche Drehung.
 
 ### 3.6 Water — Gewässer
 

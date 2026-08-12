@@ -59,14 +59,31 @@ class TERRAIN:
     # Zur Einordnung: streng "die Welt setzt sich fort" wären 20 km. Mit 15 km
     # ist jede Geländeform real rund ein Viertel kleiner als vorher - eine
     # bewusste Entscheidung nach Augenschein, kein Rechenergebnis.
-    WORLD_SIZE_KM = 15.0
+    # 2026-08-05 von 15.0 auf 21.3: das ist die Kantenlaenge der Regionenwelt
+    # (core/terrain_weltkarte.WELT_KM). Bei aktivem WELTKARTE_AKTIV setzt der
+    # Generator diesen Wert ohnehin im DataLODManager - stand der Regler
+    # daneben, zeigte die Oberflaeche 15 km an, waehrend alles mit 21.3
+    # gerechnet wurde.
+    WORLD_SIZE_KM = 21.3
 
     MAPSIZE = {
         # Vorgabe 2026-07-30 von 128 auf 256 angehoben: unter 30 Pixeln je Tal
         # bricht die Entwaesserung des Flussnetzes ein (gemessen 17 % bei
         # 128 px gegen 87 % bei 256 px, SPEZIFIKATION §13). Bei 2500 m
         # Talabstand und 15 km Karte sind 256 px die untere brauchbare Grenze.
-        "min": MAPSIZEMIN, "max": MAPSIZEMAX, "default": 256, "step": 32,
+        # 2026-08-06 von 256 auf 1024. Gemessen an der 21-km-Weltkarte:
+        #
+        #   px    m/px   Gesamtzeit   groesster Nachbarsprung (p99.9)
+        #   256   83.2      4.7 s     190 m
+        #   512   41.6     20   s     142 m
+        #   1024  20.8     31   s      37 m
+        #   2048  10.4     76   s      21 m
+        #
+        # Bei 256 px ist ein Tal zwei bis drei Pixel breit - das Querprofil
+        # wird nicht mehr aufgeloest, und das schlaegt als Stufe von 190 m je
+        # Pixel durch. 1024 loest die Taeler sauber auf; 2048 kostet das
+        # Doppelte und bringt nur noch 37 auf 21 m.
+        "min": MAPSIZEMIN, "max": MAPSIZEMAX, "default": 1024, "step": 32,
         "description": "Auflösung der Karte in Pixeln (Breite = Höhe). Größere "
                         "Werte zeigen mehr Detail, verlangsamen aber jede "
                         "nachfolgende Generierungsstufe."
@@ -338,20 +355,37 @@ class GEOLOGY:
 
 class SETTLEMENT:
     """Parameter für core/settlement_generator.py"""
+    # 2026-08-10 NEUE BEDEUTUNG: seit docs/SIEDLUNGEN_ENTWURF.md wird die Zahl
+    # der Siedlungen NICHT mehr direkt vorgegeben, sondern je Kultur aus der
+    # Eignungssumme ihrer Region abgeleitet (2 bis 5, verglichen mit den
+    # anderen acht Regionen - core/settlement_generator.py.calculate_settlements()).
+    # Damit dieser Regler weiterhin etwas bewirkt, wirkt er jetzt als
+    # MULTIPLIKATOR auf diese Ableitung, neutral bei seiner Vorgabe 3 - kleiner
+    # gibt insgesamt weniger, groesser mehr Siedlungen, aber die Verteilung
+    # zwischen den Kulturen (wer mehr, wer weniger bekommt) bleibt von der
+    # Eignung bestimmt, nicht vom Regler.
     SETTLEMENTS = {
         "min": 1, "max": 5, "default": 3, "step": 1,
-        "description": "Anzahl der Hauptsiedlungen (Städte/Dörfer), die auf "
-                        "der Karte platziert werden."
+        "description": "Multiplikator auf die Siedlungszahl je Kultur (2-5, "
+                        "aus der Eignung der jeweiligen Region abgeleitet). "
+                        "Vorgabe 3 ist neutral; kleiner/groesser gibt "
+                        "insgesamt weniger/mehr Siedlungen."
     }
+    # 2026-08-10: wie SETTLEMENTS ein MULTIPLIKATOR statt einer absoluten
+    # Gesamtzahl (Nutzer-Vorgabe: "pro region ein paar, so 1-4 jeweils").
+    # Ziel je der neun Regionen ist 1-4, Vorgabe 3 ist wieder neutral
+    # (core/settlement_generator.py.calculate_landmarks()). Vorher war der
+    # Regler eine GESAMTzahl fuer die ganze Karte - bei Vorgabe 3 kam am Ende
+    # nur eine Handvoll Landmarks auf der gesamten Weltkarte zusammen.
     LANDMARKS = {
         "min": 0, "max": 6, "default": 3, "step": 1,
-        "description": "Anzahl markanter Landmarken (z.B. Ruinen, besondere "
-                        "Orte) abseits der Siedlungen."
+        "description": "Multiplikator auf die Landmark-Zahl je Region (Ziel "
+                        "1-4 je der neun Regionen). Vorgabe 3 ist neutral."
     }
     ROADSITES = {
         "min": 0, "max": 6, "default": 3, "step": 1,
-        "description": "Anzahl zusätzlicher kleiner Wegpunkte/Raststätten "
-                        "entlang der Überlandstraßen."
+        "description": "Multiplikator auf die Roadsite-Zahl je Region (Ziel "
+                        "1-4 je der neun Regionen). Vorgabe 3 ist neutral."
     }
     PLOTNODES = {
         "min": 50, "max": 5000, "default": 200, "step": 10,
@@ -684,8 +718,14 @@ class RIVER_NETWORK:
         PLATEAU_FLATTEN  wie stark die Fläche zwischen den Tälern eingeebnet wird
     """
 
+    # 2026-08-06 auf 1200 m: das ist der MAKRO-Knotenabstand des
+    # Weltflussnetzes (core/terrain_weltfluesse.STUFEN). Meso und Mikro folgen
+    # im festen Verhaeltnis 1 : 1/2.86 : 1/8, ergeben also 420 und 150 m - die
+    # Werte, mit denen das Netz eingemessen wurde. Die Verhaeltnisse sind
+    # bewusst NICHT einzeln einstellbar: sie tragen die Schachtelung, und eine
+    # Mesostufe groeber als Makro machte die Vererbung sinnlos.
     SPACING_M = {
-        "min": 300.0, "max": 12000.0, "default": 3000.0, "step": 100.0,
+        "min": 300.0, "max": 12000.0, "default": 1200.0, "step": 100.0,
         "suffix": "m",
         "description": "Abstand benachbarter Talsohlen in Metern. Kleine Werte "
                         "ergeben ein dichtes, feinverästeltes Talnetz, große "
@@ -701,8 +741,10 @@ class RIVER_NETWORK:
     # etwas anderes als in einer 200-m-Landschaft, und der Wert musste bei
     # jeder Änderung der Amplitude nachgezogen werden. §4.4: eine absolute
     # Größe, wo eine relative hingehört.
+    # 2026-08-06 auf 0.30: der Wert, mit dem taeler_eingraben() bisher fest
+    # rechnete. Der alte Vorgabewert 0.55 gehoerte zum abgeloesten Netz.
     INCISION_SHARE = {
-        "min": 0.0, "max": 0.6, "default": 0.55, "step": 0.05,
+        "min": 0.0, "max": 0.6, "default": 0.30, "step": 0.05,
         "description": "Wie tief das größte Tal einschneidet, als Anteil der "
                         "Höhenspanne. Passt sich damit von selbst an die "
                         "Height Amplitude an. 0 lässt das Gelände unberührt; "
@@ -722,8 +764,22 @@ class RIVER_NETWORK:
                         "oben bei 0.9 begrenzt - eine exakt ebene Fläche hätte "
                         "kein Gefälle mehr, dem ein Fluss folgen kann."
     }
+    # 2026-08-06 NEUE BEDEUTUNG UND NEUE SPANNE: Faktor auf die Formgroesse der
+    # Region, mit der die Talbreite gebildet wird (taeler_eingraben
+    # breite_faktor). Die Vorgabe 1.1 ist der bisher fest verdrahtete Wert. Die
+    # alte Spanne 0.15..1.0 haette ihn nicht mehr hergegeben.
+    #
+    # 2026-08-10 VORGABE 1.1 -> 0.35. Die Beschreibung unten sagte schon immer
+    # "Anteil des Talabstands" - das stimmte aber nicht: bezogen wurde auf
+    # `formgroesse_m`, also auf den Massstab des Rauschens. Damit waren die
+    # Taeler 1200 bis 5500 m breit, waehrend die Laeufe im Mittel 111 m
+    # auseinanderstanden, und das Eingraben wirkte als flaechige Glaettung: es
+    # nahm dem Land 4.9 Grad mittleren Hang ab (Mittelmeerkueste 8.9 von 14.8).
+    # `taeler_eingraben` bezieht jetzt auf SPACING_M; bei 0.35 bleibt der
+    # mittlere Hang bis auf 0.6 Grad stehen. Die Beschreibung gilt damit
+    # woertlich - 0.5 heisst wirklich "bis zur Mitte zwischen zwei Laeufen".
     VALLEY_WIDTH = {
-        "min": 0.15, "max": 1.0, "default": 0.8, "step": 0.05,
+        "min": 0.10, "max": 3.0, "default": 0.35, "step": 0.05,
         "description": "Talbreite als Anteil des Talabstands. Bei 0.5 reicht "
                         "das Tal genau bis zur Mitte zwischen zwei Läufen und "
                         "es bleibt keine Hochfläche übrig; kleinere Werte "
@@ -752,6 +808,25 @@ class RIVER_NETWORK:
                         "eine harte Kante an der Wasserscheide, 1 einen "
                         "glatten Übergang."
     }
+    # ZWEI NEUE REGLER (2026-08-06). Beide waren Konstanten in
+    # core/terrain_weltfluesse.py und gehoeren zu den Groessen, an denen beim
+    # Bau des Netzes am meisten gedreht wurde - sie gehoeren an die Oberflaeche.
+    MOUTH_DEPTH_M = {
+        "min": 0.0, "max": 200.0, "default": 50.0, "step": 5.0,
+        "description": "Wie tief unter den Meeresspiegel die Laeufe "
+                       "weiterlaufen, bevor sie abgeschnitten werden. Ohne "
+                       "diese Tiefe enden Fluesse sichtbar VOR der Kueste; "
+                       "gezeichnet wird nur, was ueber 0 m liegt."
+    }
+
+    INHERIT_COST = {
+        "min": 0.02, "max": 1.0, "default": 0.12, "step": 0.02,
+        "description": "Was eine von der groberen Stufe geerbte Flussstrecke "
+                       "kostet, verglichen mit einer neuen. Klein heisst: ein "
+                       "Strom bleibt Strom. Bei 1.0 sucht sich jede Stufe "
+                       "ihren eigenen Weg, und die Laeufe reissen ab."
+    }
+
     COST_STRENGTH = {
         "min": 0.0, "max": 12.0, "default": 6.0, "step": 0.5,
         "description": "Wie stark die Flüsse hohes Gelände meiden. 0 lässt sie "
@@ -789,6 +864,37 @@ class RIVER_NETWORK:
 # Iteration - siehe SPEZIFIKATION §9.
 #
 # False laesst die Heightmap genau das, was die Power-Redistribution liefert.
+# =============================================================================
+# HAUPTSCHALTER Weltkarte
+# =============================================================================
+# Steht er, kommt die Heightmap aus core/terrain_weltkarte.py: neun Regionen
+# als Parameterfeld auf einer unregelmaessigen Kontinentform, mit Meer
+# (docs/INTEGRATIONSPLAN.md, Teil II). Der alte Pfad - Noise, Potenzkurve,
+# ATEF-Filter, Flussnetz - bleibt vollstaendig erhalten und laeuft, sobald der
+# Schalter aus ist.
+#
+# WAS SICH DAMIT AENDERT, und zwar sichtbar:
+#
+#   * Die Hoehe steht in ECHTEN METERN und darf NEGATIV sein. Unter 0 ist Meer.
+#     Bisher war die Heightmap immer 0..AMPLITUDE.
+#   * map_distance_km wird auf die Weltgroesse gesetzt (21.3 km). Der Regler
+#     wirkt nicht mehr - die Regionsgroessen haengen daran.
+#   * AMPLITUDE, FEATURE_SIZE_M und REDISTRIBUTE_POWER wirken nicht. Jede
+#     Region bringt ihre eigenen Werte mit.
+#
+# Noch NICHT enthalten: Fluesse und Taeler (Stufe P2). Die Heightmap ist also
+# das reine Regionengelaende.
+WELTKARTE_AKTIV = True
+
+# Fluesse und Taeler der Weltkarte (Stufe P2). Getrennt schaltbar, damit sich
+# das reine Regionengelaende auch ohne sie ansehen laesst - und damit bei einem
+# Fehler klar ist, welcher der beiden Schritte ihn verursacht.
+#
+# Kosten gemessen am 2026-08-05: bei 256 px 3.6 s fuer das Netz und 1.3 s fuer
+# das Eingraben, bei 512 px 14.0 und 7.3 s.
+WELTFLUESSE_AKTIV = True
+
+
 EROSION_FILTER_AKTIV = True
 
 
@@ -1390,3 +1496,115 @@ def validate_parameter_set(generator_type, parameters):
             errors.append("Alpine Level muss unter Snow Level liegen")
 
     return len(errors) == 0, warnings, errors
+
+
+# =============================================================================
+# STILLGELEGTE REGLER
+# =============================================================================
+
+def stillgelegte_regler():
+    """
+    Welche Regler bewirken im aktuellen Programmstand nichts - und warum.
+
+    ANLASS. Am 2026-08-06 wurde gemessen (nicht geschaetzt): ein Grundlauf, dann
+    je Regler ein deutlich anderer Wert, nur die Knoten seines eigenen
+    Generators neu gerechnet, jeder Output verglichen. Ergebnis: 49 von 109
+    Reglern aenderten nichts. Vier von fuenf Ursachen waren dieselbe Sache - die
+    Umstellung auf die Weltkarte hat 24 Regler stillgelegt, ohne sie aus der
+    Oberflaeche zu nehmen. Die Oberflaeche zeigte einen Programmstand von vor
+    dem Umbau.
+
+    DIESE FUNKTION HAENGT AN DEN SCHALTERN, nicht an einer festen Liste. Wird
+    WELTKARTE_AKTIV wieder ausgeschaltet, sind die Terrain-, Fluss- und
+    Filterregler sofort wieder frei; dasselbe gilt fuer EROSION_AKTIV. Eine
+    fest verdrahtete Sperre waere beim naechsten Umschalten falsch.
+
+    NICHT ENTHALTEN sind die Regler, die aus einem anderen Grund nichts tun -
+    `octaves`, `frequency`, `river_meander`, `erosion_filter_octaves` wirken in
+    KEINEM der beiden Modi. Das ist kein Nebeneffekt eines Schalters, sondern
+    ein eigener Befund; sie werden hier trotzdem gefuehrt, aber mit eigenem
+    Grund, damit die Untersuchung nicht in Vergessenheit geraet.
+
+    Return: dict {parameter_schluessel: begruendung}
+    """
+    gesperrt = {}
+
+    if WELTKARTE_AKTIV:
+        grund = ("Die Weltkarte ist aktiv. Die neun Regionen bringen ihre "
+                 "eigenen Gelaendewerte mit (core/terrain_weltkarte.py), der "
+                 "Rauschaufbau dieses Reglers wird nicht mehr durchlaufen.")
+        # `octaves` steht seit dem 2026-08-06 HIER und nicht mehr bei den
+        # angeblich wirkungslosen: nachgemessen am alten Pfad aendert er das
+        # Gelaende sehr wohl (Regler 1 gegen 3: 1434 m Hoehenunterschied). Er
+        # ist nur bei aktiver Weltkarte still, wie die anderen vier auch.
+        for schluessel in ("amplitude", "feature_size_m", "redistribute_power",
+                           "persistence", "lacunarity", "octaves"):
+            gesperrt[schluessel] = grund
+
+        gesperrt["map_distance_km"] = (
+            "Die Weltkarte setzt die Kartenbreite selbst auf %.1f km - ein "
+            "anderer Wert wuerde Regionsgroessen und Talabstaende "
+            "gegeneinander verschieben." % TERRAIN.WORLD_SIZE_KM)
+
+        # NUR NOCH VIER. Am 2026-08-06 wurden fuenf der neun Flussregler an
+        # core/terrain_weltfluesse.py angeschlossen (river_spacing_m,
+        # river_cost_strength, river_valley_width, river_valley_form,
+        # river_incision_share) und zwei neue kamen dazu (river_mouth_depth_m,
+        # river_inherit_cost). Die vier hier beschreiben Dinge, die es im
+        # Weltflussnetz nicht gibt.
+        gesperrt["river_border_outflow"] = (
+            "Die Welt ist eine Insel im offenen Meer - sie entwaessert ins "
+            "Meer und nicht ueber den Kartenrand. Dieser Preis hat kein "
+            "Gegenstueck mehr.")
+        gesperrt["river_divide_blend"] = (
+            "Das Weltflussnetz baut seine Laeufe aus einem Knotengraphen und "
+            "kennt keine weich ueberblendeten Wasserscheiden.")
+        gesperrt["river_plateau_flatten"] = (
+            "Hochflaechen entstehen in der Weltkarte aus der `potenz` der "
+            "jeweiligen Region, nicht aus einer Nachbehandlung des Flussnetzes.")
+        gesperrt["river_meander"] = (
+            "Gehoert zum abgeloesten Flussnetz (terrain_river_network.py); das "
+            "Weltflussnetz legt seine Laeufe ueber einen Knotengraphen und "
+            "maeandriert sie nicht nachtraeglich. Er wirkte ausserdem schon im "
+            "alten Pfad nicht - eigener, ungeklaerter Befund.")
+
+        # DIE FILTERREGLER SIND SEIT DEM 2026-08-07 WIEDER FREI.
+        #
+        # Der Erosionsfilter laeuft jetzt auch auf der Weltkarte mit - nach dem
+        # Weltfeld, vor dem Flussnetz (INTEGRATIONSPLAN S4), mit eigener Weiche
+        # ohne Hoehennormierung und mit Regionsgewichtung. Gemessen formt er in
+        # den Bergen 64.5 m um und in den Niederungen 17.6, also Faktor 3.7 -
+        # genau die Vorgabe "in den bergen wo mehr masse ist haben wir mehr
+        # features, und in den niederungen weniger".
+        #
+        # `erosion_filter_octaves` bleibt gesperrt, aber aus einem anderen
+        # Grund: er ist ab 5 durch die Nyquist-Grenze geklemmt (siehe unten).
+
+    if not EROSION_AKTIV:
+        grund_erosion = ("Die Erosionskette ist abgeschaltet (EROSION_AKTIV). "
+                         "Alle erosion.*-Knoten liefern Nullkarten.")
+        for schluessel in ("convergence_threshold", "deposition_rate",
+                           "erosion_capacity", "erosion_strength",
+                           "evaporation_rate", "hardness_influence",
+                           "max_steps", "rainfall", "simulation_resolution",
+                           "smoothing", "talus_angle_scale",
+                           "thermal_strength", "thermal_variant"):
+            gesperrt[schluessel] = grund_erosion
+
+    # `frequency` ist ABGELOEST, nicht kaputt.
+    #
+    # _calc_noise benutzt ihn nur, wenn `feature_size_m` NICHT gesetzt ist -
+    # und der hat eine Vorgabe, ist also immer gesetzt. Das ist Absicht:
+    # feature_size_m gibt die Formgroesse in METERN an und haengt damit an der
+    # Wirklichkeit, waehrend `frequency` nur an der Pixelzahl hing. Der alte
+    # Weg blieb fuer Labore und Altbestand stehen.
+    #
+    # Nachgemessen am 2026-08-06: mit feature_size_m = 0 wirkt `frequency`
+    # sofort wieder (Rauschstreuung 0.057 bei 0.001 gegen 0.263 bei 0.1).
+    # Er steht ohnehin in keinem Reiter.
+    gesperrt["frequency"] = (
+        "Abgeloest durch `feature_size_m`, der die Formgroesse in Metern angibt "
+        "statt in Zyklen je Pixel. Wirkt nur noch, wenn feature_size_m auf 0 "
+        "steht.")
+
+    return gesperrt

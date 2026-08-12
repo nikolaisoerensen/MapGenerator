@@ -1,5 +1,23 @@
 # Generation Pipeline — reale Datenabhängigkeiten
 
+> **TEILWEISE VERALTET (geprüft 2026-08-12).** Zwei Aussagen dieses Dokuments
+> stimmen nicht mehr, und beide betreffen genau das, wofür man es aufschlägt:
+>
+> * **Es sind heute 38 Knoten, nicht 29** (`managers/calculator_graph.py`:
+>   terrain 4, geology 8, weather 4, water 5, erosion 2, biome 6, settlement 9).
+>   Dazwischen liegen der Erosions-Ausbau, der Siedlungsumbau und der Wegfall
+>   von `settlement.outer_roads` (OFFENE_PUNKTE 5.11).
+> * **Der Orchestrator kennt die Knoten längst einzeln.** Der unten als
+>   „künftiger Umbau" beschriebene Schritt auf echte Calculator-/LOD-
+>   Synchronisation **ist gebaut** — es gibt einen globalen Dispatcher über
+>   alle Knoten. Der Abschnitt „Bekannte Probleme" beschreibt insoweit einen
+>   behobenen Zustand.
+>
+> **Gültig bleibt** die Beschreibung, *welcher* Rechenschritt *welche* Daten
+> von *wem* bezieht — das ist der eigentliche Wert dieser Datei und stimmt
+> für die beschriebenen Knoten weiterhin. Wer die Knotenliste selbst braucht,
+> nimmt `managers/calculator_graph.py` als Quelle, nicht dieses Dokument.
+
 Stand: 2026-07-08. Dieses Dokument beschreibt die **tatsächlichen** Datenabhängigkeiten
 zwischen den einzelnen Rechenschritten ("Calculators") der Welt-Generierung, wie sie
 im Code (`core/*_generator.py`) tatsächlich implementiert sind — nicht die im Code

@@ -49,8 +49,25 @@ void main() {
 
     float assignedBiome = imageLoad(biomeMap, baseCoord).r;
 
-    int subSeed = ((u_biome_seed + 54321 + baseCoord.x * 4 + baseCoord.y * 4 + i * 3571) + 1000000000) % 1000;
-    float probability = float(subSeed) / 1000.0;
+    // HIER SASSEN DIE DIAGONALEN BAENDER (Nutzerbild 2026-08-10).
+    //
+    // Vorlage: (u_biome_seed + 54321 + baseCoord.x*4 + baseCoord.y*4 + i*3571) % 1000
+    //
+    // "x*4 + y*4" ist 4*(x+y): der Wert hing nur von der SUMME der Koordinaten
+    // ab, jede Diagonale bekam denselben, und wegen %1000 wiederholte sich das
+    // alle 250 Diagonalen. Wo eine Wahrscheinlichkeit ueber null lag, kippte
+    // deshalb ein ganzer Streifen statt eines gestreuten Musters.
+    //
+    // Jetzt drei verschiedene grosse Primzahlen und eine Durchmischung, damit
+    // Nachbarn in JEDER Richtung unabhaengige Werte bekommen. Gleichlautend
+    // mit SupersamplingManager._sub_zufall() in core/biome_generator.py -
+    // beide Pfade muessen dasselbe Bild liefern.
+    uint h = uint(u_biome_seed + 54321) * 2654435761u
+           + uint(baseCoord.x) * 73856093u
+           + uint(baseCoord.y) * 19349663u
+           + uint(i) * 83492791u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    float probability = float((h >> 11) & 0xFFFFFu) / 1048576.0;
 
     float cliffP = imageLoad(cliffProb, baseCoord).r * u_supersampling_quality;
     if (probability < cliffP) {

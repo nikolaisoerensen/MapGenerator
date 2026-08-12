@@ -1,5 +1,16 @@
 # MapGenerator — Project Notes for Claude Code
 
+## Wegweiser durch die Dokumentation (Stand 2026-08-12)
+
+| Datei | Wofuer |
+|---|---|
+| `docs/UEBERGABE.md` | **Neue Sitzung oder neuer Rechner: hier anfangen.** Umgebung, Stand, wichtigster offener Punkt. |
+| `docs/SPEZIFIKATION.md` | Ziele und Invarianten — vor der Arbeit lesen (siehe unten) |
+| `docs/OFFENE_PUNKTE.md` | **Die einzige Aufgabenliste.** `docs/TODO.md` gibt es nicht mehr, sie ist dort in Abschnitt 12 aufgegangen. |
+| `docs/TESTBERICHT.md` | Was gerade gruen ist und was nicht, mit Erklaerung je Fehlschlag |
+| `docs/archiv/` | Historisch, gilt nicht mehr — nicht als Beschreibung des Ist-Zustands lesen |
+
+
 ## ZUERST LESEN: docs/SPEZIFIKATION.md
 
 Sie enthaelt das Oberziel, die Zielwerte je Komponente und die Invarianten, die
@@ -88,6 +99,15 @@ assert worker.gpu_available                  # verified True on this machine
 result = manager.request_shader_operation("erosion", "hydraulicField", inputs, {})
 ```
 
+Do **not** set `QT_QPA_PLATFORM=offscreen` before creating the `QGuiApplication`
+in a GPU-testing script. It seems like the obvious way to force headless mode,
+but it prevents `QOffscreenSurface`/`QOpenGLContext` from getting a real GL
+context — `worker.gpu_available` comes back `False` and every dispatch falls
+back to CPU, silently, with no error (2026-08-11: cost one wasted diagnostic
+run before the cause was found). Non-GPU headless scripts (pure `core/*.py`
+logic, no shader calls) can set it freely; scripts that call
+`request_shader_operation` must leave the platform at its default.
+
 Working example: `tests/smoke_test_erosion_gpu_parity.py` — it runs the full GPU
 erosion path and compares it against the CPU reference, single-step (tight
 tolerance) and over a long run (mass balance). Any new compute shader should
@@ -152,3 +172,57 @@ Nach jedem Verschieben deshalb zusaetzlich:
    und die Existenz aller 31 per `get_program()` angeforderten Shader.
 3. Eine echte GPU-Operation fahren und dabei auf WARNINGs achten, nicht nur
    auf den Rueckgabewert.
+
+
+## Gruene Tests koennen eine tote Funktion verdecken
+
+Am 2026-08-12 lief das neue adaptive 3D-Netz (`gui/widgets/adaptive_terrain_mesh.py`)
+**gar nicht** - wochenlang, unbemerkt, bei voller Testabdeckung.
+
+Die Vorbedingung verlangte eine Kantenlaenge von `2^n+1` (die uebliche
+RTIN-Konvention aus der Literatur). Dieses Projekt benutzt aber map_size-Werte,
+die **selbst** Zweierpotenzen sind - 1024, nicht 1025. Die Bedingung war damit
+fuer **jede reale Kartengroesse** falsch, und der Rueckfall auf das alte
+Gleichmaessig-Gitter griff still.
+
+**Zehn Tests waren gruen** - weil sie alle mit 129/257/513 gebaut waren, also
+mit einer Groessenklasse, die im Programm nicht vorkommt. Der Test pruefte eine
+Funktion, die im Betrieb nie aufgerufen wurde.
+
+Gefunden wurde es ausschliesslich deshalb, weil der Rueckfall eine Logzeile
+schrieb (`Adaptives Mesh nicht anwendbar`) und der Nutzer sie im Konsolenlauf
+sah.
+
+Zwei Regeln daraus:
+
+1. **Tests mit den ECHTEN Eingabegroessen bauen.** Eine ausgedachte Groesse
+   testet eine ausgedachte Situation. Bei Kartengroessen also 128/256/512/1024,
+   nicht das, was der Algorithmus in seinem Aufsatz gerne haette.
+2. **Jeder stille Rueckfall auf einen Ersatzpfad braucht eine laute Logzeile.**
+   Ein `try/except` mit CPU-Fallback, eine `if geeignet: ... else: ...`-Weiche,
+   ein `.get(key, default)` - alles, was im Fehlerfall trotzdem ein plausibles
+   Ergebnis liefert, ist von Erfolg nicht zu unterscheiden. Dieselbe Lektion
+   steht weiter unten schon einmal, fuer die GPU-Fallbacks nach dem
+   Dateiumzug - sie hat sich hier unabhaengig wiederholt.
+
+
+## Gelaendeaenderungen verstimmen zuerst die Regionseichung
+
+Die Kuesten-Archetypen (`_kuesten_umformen()` in `core/terrain_weltkarte.py`)
+wurden bei ihrem Bau gegen vier Terrain-Tests geprueft und fuer regressionsfrei
+erklaert. `tests/smoke_test_regionen_welt.py` war nicht darunter - und genau
+der schlaegt seither fehl.
+
+Gemessen (384 px, Seed 20260804, Median-Hang, Pass ein/aus):
+
+| Region | mit | ohne | Ziel |
+|---|---:|---:|---:|
+| Steppe | 10.6 | 6.6 | 6.5 |
+| Taiga | 9.1 | 5.9 | 7.5 |
+
+Bei diesen beiden stammt die **gesamte** Abweichung aus dem Kuestenpass.
+
+`smoke_test_regionen_welt.py` gehoert deshalb in die Pruefliste **jeder**
+Aenderung an `weltfeld()` - er ist der empfindlichste Waechter fuer
+Gelaendeform, weil er neun Regionen gegen feste Sollhaenge und Wasseranteile
+prueft. Er laeuft rund zwei Minuten; das ist der Preis.

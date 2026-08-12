@@ -346,6 +346,15 @@ class SettlementTab(BaseMapTab):
         self.potential_overlay_cb.toggled.connect(self.update_display_mode)
         layout.addWidget(self.potential_overlay_cb)
 
+        # Regionsfaerbung + weisse Grenzen (2026-08-11, docs/OFFENE_PUNKTE.md
+        # 6.1) - AUS per Default ("nur wenn man Regionen ausgewaehlt"), in
+        # subtilem Ton (siehe REGIONS_OVERLAY_ALPHA_SETTLEMENT in
+        # _apply_settlement_overlays()), damit Staedte/Strassen im Vordergrund
+        # bleiben.
+        self.regions_overlay_cb = QCheckBox("Regionen")
+        self.regions_overlay_cb.toggled.connect(self.update_display_mode)
+        layout.addWidget(self.regions_overlay_cb)
+
         return layout
 
     def _create_settlement_filter_controls(self) -> QHBoxLayout:
@@ -353,14 +362,22 @@ class SettlementTab(BaseMapTab):
         Erstellt Overlay-Checkboxen - kombinierbar mit JEDEM Basis-Layer-Radio
         (siehe update_settlement_display()), nicht auf einen Modus beschränkt.
 
-        Kein "Roads"-Checkbox mehr (Nutzer-Vorgabe, siehe
-        [[project-settlement-physics-lab-parity]]): roads/landmark_roads/
-        outer_roads sind die ALTE, straßengerade Pfadfindung von vor dem
-        PlotPhysicsSystem-Umbau ("da sind Verbindungen zwischen den Straßen
-        die einfach gerade Linien sind... das ist alles noch alter Kram") -
-        das reale, um die Plots herumführende Wegenetz kommt jetzt aus
-        plot_edges (immer sichtbar via overlay_plot_boundaries() mit dem
-        Traffic-Farbverlauf, siehe update_settlement_display()).
+        NUR PUNKT-/LINIENHAFTE ÜBERSICHT, NICHTS REGIONALES (2026-08-10,
+        Nutzer-Vorgabe: "stadtgrenzen und die nodes und alles sollten nur
+        regional erscheinen, im globalen bereich ja nur städte,
+        verbindungsstraßen und landmarks, roadsites, aber nur als punkte
+        jeweils immer"). Globaler Reiter zeigt deshalb NUR Städte/Landmarks/
+        Roadsites als Punkte plus die Verbindungsstraßen als Linien - "City
+        Boundary" und das Plot-/Node-Feingewebe (PlotPhysicsSystem) sind nach
+        SettlementRegionalTab gewandert, wo eine einzelne Region ohnehin groß
+        genug im Bild steht, dass diese Detailebene etwas nuetzt.
+
+        `show_roads_cb` ERSETZT die frueher entfernte "Roads"-Checkbox (siehe
+        [[project-settlement-physics-lab-parity]]): DAMALS war `roads` die
+        alte, straßengerade Pfadfindung von vor dem PlotPhysicsSystem-Umbau
+        ("das ist alles noch alter Kram"). Seit 2026-08-10
+        (docs/SIEDLUNGEN_ENTWURF.md §4) ist es ein echtes Gabriel-Graph/
+        Kostenfeld/Bereitschafts-Netz - kein Grund mehr, es zu verstecken.
         """
         layout = QHBoxLayout()
 
@@ -379,10 +396,10 @@ class SettlementTab(BaseMapTab):
         self.show_roadsites_cb.toggled.connect(self.update_display_mode)
         layout.addWidget(self.show_roadsites_cb)
 
-        self.show_city_boundary_cb = QCheckBox("City Boundary")
-        self.show_city_boundary_cb.setChecked(True)
-        self.show_city_boundary_cb.toggled.connect(self.update_display_mode)
-        layout.addWidget(self.show_city_boundary_cb)
+        self.show_roads_cb = QCheckBox("Roads")
+        self.show_roads_cb.setChecked(True)
+        self.show_roads_cb.toggled.connect(self.update_display_mode)
+        layout.addWidget(self.show_roads_cb)
 
         return layout
 
@@ -653,16 +670,20 @@ class SettlementTab(BaseMapTab):
         Funktionsweise: Basis-Layer ist immer die Heightmap (wie bei den
         anderen Tabs, siehe [[project-settlement-physics-lab-parity]] -
         Nutzer-Vorgabe: "sonst sieht man einfach so wie in anderen tabs nur
-        die heightmap (combined)"). Die frühere exklusive Terrain-Suitability/
-        Civilization-Map/Plot-Boundaries-Radiogruppe ist entfallen - Plot-
-        Kerne/-Nodes/-Kanten/Wildnisgrenze werden jetzt IMMER als Vektor-
-        Overlay gezeichnet, nicht mehr an einen gewählten Modus gekoppelt
-        (Nutzer-Report: "dann sehe ich keine plotkerne, keine plotnodes,
-        nichts" - lag daran, dass dieses Overlay vorher nur im inzwischen
-        entfernten "Plot Boundaries"-Modus gezeichnet wurde).
-        Aufgabe: Alle weiteren Overlays (Settlements/Landmarks/Roadsites/
-        Roads/City Boundary per Checkbox, Civ-Value/Potential-Field per
-        Checkbox) bleiben unabhängig davon zuschaltbar.
+        die heightmap (combined)").
+
+        KEIN Plot-/Node-Feingewebe MEHR HIER (2026-08-10, Nutzer-Vorgabe:
+        "stadtgrenzen und die nodes und alles sollten nur regional
+        erscheinen, im globalen bereich ja nur städte, verbindungsstraßen und
+        landmarks, roadsites, aber nur als punkte jeweils immer"). Das
+        `overlay_plot_boundaries()`-Aufrufziel (PlotPhysicsSystem-Kerne/
+        -Nodes/-Kanten/Wildnisgrenze) ist nach SettlementRegionalTab
+        gewandert - auf der Weltkarte waeren tausende Hausparzellen ohnehin
+        nur Pixelmatsch, die Regionsansicht zoomt weit genug, dass sie
+        wirklich etwas zeigen.
+        Aufgabe: Punkt-/Linien-Overlays (Settlements/Landmarks/Roadsites/
+        Roads per Checkbox, Civ-Value/Potential-Field per Checkbox) bleiben
+        unabhängig vom Basis-Layer zuschaltbar, siehe _apply_settlement_overlays().
 
         Nutzt wie die anderen Tabs get_current_display()/_push_data_to_current_display()
         statt eines nie zugewiesenen self.map_display.
@@ -670,15 +691,6 @@ class SettlementTab(BaseMapTab):
         heightmap = self.data_lod_manager.get_terrain_data("heightmap")
         if heightmap is not None:
             self._push_data_to_current_display(heightmap, "heightmap")
-
-        current_display = self.get_current_display()
-        display = current_display.display if current_display else None
-        if display is not None and hasattr(display, 'overlay_plot_boundaries'):
-            plot_nodes = self.data_lod_manager.get_settlement_data("plot_nodes")
-            plot_edges = self.data_lod_manager.get_settlement_data("plot_edges")
-            plot_cores = self.data_lod_manager.get_settlement_data("plot_cores")
-            wilderness_polygons = self.data_lod_manager.get_settlement_data("wilderness_polygons")
-            display.overlay_plot_boundaries(plot_nodes, plot_edges, plot_cores, wilderness_polygons)
 
         self._apply_settlement_overlays()
 
@@ -688,13 +700,23 @@ class SettlementTab(BaseMapTab):
     def _apply_settlement_overlays(self):
         """
         Zeichnet die ueber Checkboxen zuschaltbaren Overlays (Settlements/
-        Landmarks/Roadsites/Roads/City Boundary) auf den aktuell angezeigten
-        Basis-Layer - unabhaengig davon, welcher Radio-Modus aktiv ist.
+        Landmarks/Roadsites als Punkte, Roads als Linien) auf den aktuell
+        angezeigten Basis-Layer - unabhaengig davon, welcher Radio-Modus
+        aktiv ist. Bewusst NUR die weltkartentaugliche Uebersicht (siehe
+        update_settlement_display()); City Boundary und das Plot-/Node-
+        Feingewebe zeigt SettlementRegionalTab.
         """
         current_display = self.get_current_display()
         if not current_display or self.current_view != "2d":
             return
         display = current_display.display
+
+        # Gelbes 3x3-Ausschnittsgitter (docs/OFFENE_PUNKTE.md 6.2): Global UND Regional,
+        # nicht der Terrain-Reiter - dort laege es neben den Kulturfarben.
+        if hasattr(display, 'overlay_region_grid'):
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            if heightmap is not None:
+                display.overlay_region_grid(heightmap.shape[0])
 
         if hasattr(display, 'overlay_settlements') and (
                 self.show_settlements_cb.isChecked() or self.show_landmarks_cb.isChecked()
@@ -709,14 +731,16 @@ class SettlementTab(BaseMapTab):
 
             display.overlay_settlements(display_settlements, display_landmarks, display_roadsites)
 
-        # Kein overlay_roads()-Aufruf mehr (alte gerade Pfadfindung, siehe
-        # _create_settlement_filter_controls()-Docstring) - das reale
-        # Wegenetz kommt aus plot_edges, siehe update_settlement_display().
-
-        if hasattr(display, 'overlay_city_boundary_contour') and self.show_city_boundary_cb.isChecked():
-            city_mask = self.data_lod_manager.get_settlement_data("city_mask")
-            if city_mask is not None:
-                display.overlay_city_boundary_contour(city_mask)
+        # Verbindungsstrassen (docs/SIEDLUNGEN_ENTWURF.md §4): Landwege
+        # durchgezogen orange, Seewege gestrichelt in eigenem Blau (§4.4
+        # "anders gezeichnet - gestrichelt, in einem eigenen Blau").
+        if hasattr(display, 'overlay_roads') and self.show_roads_cb.isChecked():
+            roads = self.data_lod_manager.get_settlement_data("roads")
+            sea_roads = self.data_lod_manager.get_settlement_data("sea_roads")
+            if roads:
+                display.overlay_roads(roads, color='darkorange')
+            if sea_roads:
+                display.overlay_roads(sea_roads, color='royalblue', linestyle='--')
 
         # Civ-Value/Potenzialfeld-Overlays (Punkt c, siehe
         # [[project-settlement-physics-lab-parity]]) - kombinierbar mit jedem
@@ -731,41 +755,29 @@ class SettlementTab(BaseMapTab):
             if potential_field is not None:
                 display.overlay_potential_field(potential_field)
 
+        # Regionen (docs/OFFENE_PUNKTE.md 6.1) - subtiler Ton hier, damit
+        # Staedte/Strassen im Vordergrund bleiben (Nutzer-Vorgabe, siehe
+        # _create_settlement_overlay_toggle_controls()-Kommentar).
+        if hasattr(display, 'overlay_regions') and self.regions_overlay_cb.isChecked():
+            heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+            region_map = self.data_lod_manager.get_terrain_data("region_map")
+            if heightmap is not None and region_map is not None:
+                display.overlay_regions(region_map, heightmap, alpha=0.25)
+
     def apply_3d_overlays(self):
         """
-        Funktionsweise: Rendert das PlotPhysicsSystem-Ergebnis als texturierten
-        "Skin" auf dem 3D-Terrain (siehe [[project-settlement-plot-physics-rebuild]]
-        Teil 4, Nutzer-Vorgabe: "die 2D-Darstellung als Skin auf das Terrain
-        legen") - rasterisiert dieselbe Geometrie wie overlay_plot_boundaries()
-        (2D) headless über map_display_2d.rasterize_plot_boundaries_rgba() und
-        pusht sie als RGBA-Overlay-Textur. Läuft unabhängig vom aktuell
-        sichtbaren 2D/3D-Modus (das 3D-Widget existiert immer, siehe base_tab.py
-        _push_data_to_current_display()-Kommentar). Immer sichtbar, seit die
-        frühere exklusive "Plot Boundaries"-Radiogruppe entfallen ist (siehe
-        [[project-settlement-physics-lab-parity]]) - alles, was in 2D zu
-        sehen ist, ist jetzt auch in 3D zu sehen (Nutzer-Vorgabe).
-        Aufgabe: Ersetzt den vorherigen No-Op-Platzhalter.
+        KEIN Plot-/Node-Skin mehr hier (2026-08-10, Nutzer-Vorgabe siehe
+        _create_settlement_filter_controls()-Docstring) - die Rasterisierung
+        von PlotPhysicsSystem als 3D-Textur ist nach
+        SettlementRegionalTab.apply_3d_overlays() gewandert. `self.map_display_3d`
+        gehoert diesem Tab exklusiv (jeder BaseMapTab bekommt sein eigenes
+        3D-Widget, siehe base_tab.py create_ui()) - ein frueher hier gesetzter
+        Plot-Layer wuerde also nicht von selbst verschwinden, wenn er nicht
+        mehr gefuellt wird. Explizit ausblenden statt nur "nicht mehr fuellen".
         """
-        if not self.map_display_3d or not hasattr(self.map_display_3d.display, 'update_overlay_data'):
+        if not self.map_display_3d or not hasattr(self.map_display_3d.display, 'set_layer_visibility'):
             return
-
-        display_3d = self.map_display_3d.display
-
-        plot_nodes = self.data_lod_manager.get_settlement_data("plot_nodes")
-        heightmap = self.data_lod_manager.get_terrain_data("heightmap")
-        has_plots = bool(plot_nodes) and heightmap is not None
-        if has_plots:
-            plot_edges = self.data_lod_manager.get_settlement_data("plot_edges")
-            plot_cores = self.data_lod_manager.get_settlement_data("plot_cores")
-            wilderness_polygons = self.data_lod_manager.get_settlement_data("wilderness_polygons")
-            from gui.widgets.map_display_2d import rasterize_plot_boundaries_rgba
-            rgba = rasterize_plot_boundaries_rgba(
-                plot_nodes, plot_edges, plot_cores, wilderness_polygons,
-                map_size=heightmap.shape[0], resolution=heightmap.shape[0])
-            display_3d.update_overlay_data("settlement", "plots", rgba)
-
-        if hasattr(display_3d, 'set_layer_visibility'):
-            display_3d.set_layer_visibility("settlement", "plots", has_plots)
+        self.map_display_3d.display.set_layer_visibility("settlement", "plots", False)
 
     @pyqtSlot()
     def update_display_mode(self):

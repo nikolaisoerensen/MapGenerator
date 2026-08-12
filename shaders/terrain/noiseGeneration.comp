@@ -9,6 +9,20 @@ uniform float u_persistence;
 uniform float u_lacunarity;
 uniform int u_seed;
 
+// WELTVERSATZ in Pixeln dieser Karte.
+//
+// Ohne ihn kann nur ein Ausschnitt ab dem Weltursprung gerechnet werden. Die
+// Zoom-Pyramide (Makro/Meso/Mikro auf dieselbe Weltstelle) braucht aber
+// beliebige Fenster: noise_coord = (pixel + versatz) * frequency, und
+// (pixel + versatz) * frequency = weltmeter / formgroesse.
+//
+// Bis 2026-08-04 gab es diese beiden Uniforms nicht, und
+// SimplexNoiseGenerator.generate_noise_grid() sprang bei offset != 0 STILL auf
+// die CPU. Kein Fehler im Log, nur ein Programm, das um ein Vielfaches
+// langsamer rechnet - dieselbe Falle wie beim SHADERS_ROOT-Umzug (CLAUDE.md).
+uniform float u_offset_x;
+uniform float u_offset_y;
+
 // Echtes Gradient-Noise (Kurt-Spencer OpenSimplex-2D-Geometrie, siehe
 // opensimplex.internals._noise2 in core/terrain_generator.py's CPU-Referenz),
 // aber mit Hash-basierter Gradientenauswahl statt einer Permutationstabelle -
@@ -27,14 +41,28 @@ const vec2 GRAD2[8] = vec2[8](
     vec2(-5.0, -2.0), vec2(-2.0, -5.0)
 );
 
-// Ganzzahl-Bit-Mixing-Hash (seed-abhängig) statt Permutationstabellen-Lookup -
-// & 7 auf ein GLSL-int (Two's-Complement) liefert immer 0..7, auch bei
-// negativem Eingabewert.
+// PERMUTATIONSTABELLE STATT HASH - seit 2026-08-04.
+//
+// Hier stand ein Bit-Mixing-Hash mit der Begruendung, der generische
+// GPU-Dispatch reiche nur Skalar-Uniforms durch. Das stimmte fuer den
+// generischen Weg, aber _dispatch_noise_generation ist eine EIGENE Funktion
+// und kann sehr wohl ein Uniform-Array setzen.
+//
+// Der Preis des Hashes war hoch und blieb unbemerkt: GPU und CPU erzeugten aus
+// DEMSELBEN SEED VERSCHIEDENE WELTEN. Gemessen r = -0.065 zwischen beiden
+// Feldern - kein Zusammenhang. Kein Test hat das je geprueft, weil alle
+// vorhandenen Tests entweder nur den CPU-Pfad fahren oder nur die Form des
+// Ergebnisses ansehen. Sichtbar wurde es erst, als die Zoom-Pyramide verlangte,
+// dass jede Stufe dasselbe Weltfeld sieht (SPEZIFIKATION §4.1).
+//
+// Jetzt exakt wie opensimplex.internals._extrapolate2:
+//     index = perm[(perm[xsb & 0xFF] + ysb) & 0xFF] & 0x0E
+// & 0x0E liefert gerade Werte 0..14, also Paarindex 0..7 nach >> 1.
+uniform int u_perm[256];
+
 int gradIndex(int x, int y) {
-    int h = x * 374761393 + y * 668265263 + u_seed * 2147483647;
-    h = (h ^ (h >> 13)) * 1274126177;
-    h = h ^ (h >> 16);
-    return h & 7;
+    int i = u_perm[(u_perm[x & 0xFF] + y) & 0xFF] & 0x0E;
+    return i >> 1;
 }
 
 float extrapolate2(int xsb, int ysb, float dx, float dy) {
@@ -146,8 +174,11 @@ void main() {
     // Ausschnitt des Noise-Raums nahe (0,0), wo das Ergebnis praktisch konstant
     // ist (derselbe Bug wie ursprünglich in
     // SimplexNoiseGenerator._generate_cpu_optimized(), CPU-Seite).
-    float x = float(coord.x);
-    float y = float(coord.y);
+    // Der Versatz wird VOR der Frequenzmultiplikation addiert, genau wie im
+    // CPU-Pfad (_generate_cpu_optimized: np.arange(size) + offset_x, danach
+    // mal current_frequency). Jede andere Reihenfolge ergibt ein anderes Feld.
+    float x = float(coord.x) + u_offset_x;
+    float y = float(coord.y) + u_offset_y;
 
     float noise_value = 0.0;
     float amplitude = 1.0;

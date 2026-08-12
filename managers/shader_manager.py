@@ -365,6 +365,27 @@ def _gaussian_blur(worker: "GPUWorker", data: np.ndarray, sigma: float) -> np.nd
     return result
 
 
+_PERM_CACHE = {}
+
+
+def _openSimplex_perm(seed: int):
+    """
+    Die 256er Permutationstabelle, die opensimplex fuer diesen Seed benutzt.
+
+    Genommen wird sie aus der Bibliothek selbst, nicht nachgebaut - eine eigene
+    Fisher-Yates-Fassung wuerde beim naechsten Versionswechsel still
+    auseinanderlaufen, und genau solche stillen Abweichungen sind hier das
+    Problem gewesen.
+    """
+    if seed not in _PERM_CACHE:
+        from opensimplex.internals import _init
+        ergebnis = _init(seed)
+        perm = ergebnis[0] if isinstance(ergebnis, tuple) else ergebnis
+        _PERM_CACHE[seed] = np.ascontiguousarray(
+            np.asarray(perm, dtype=np.int32).ravel()[:256])
+    return _PERM_CACHE[seed]
+
+
 def _dispatch_noise_generation(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
     size = inputs["size"]
     program = worker.get_program("terrain", "noiseGeneration")
@@ -375,7 +396,22 @@ def _dispatch_noise_generation(worker: "GPUWorker", inputs: dict, parameters: di
     _set_uniforms(program, {
         "u_size": size, "u_octaves": inputs["octaves"], "u_frequency": inputs["frequency"],
         "u_persistence": inputs["persistence"], "u_lacunarity": inputs["lacunarity"], "u_seed": inputs["seed"],
+        # Weltversatz - 0 ergibt genau das Verhalten von vorher.
+        "u_offset_x": inputs.get("offset_x", 0.0),
+        "u_offset_y": inputs.get("offset_y", 0.0),
     })
+
+    # PERMUTATIONSTABELLE - dieselbe wie die CPU-Referenz.
+    #
+    # Ohne sie benutzte der Shader einen Bit-Mixing-Hash und erzeugte aus
+    # demselben Seed eine ANDERE Welt als die CPU (gemessen r = -0.065). Die
+    # frueher notierte Begruendung "der generische Dispatch reicht nur Skalare
+    # durch" gilt hier nicht: diese Funktion ist eigens fuer den Noise-Shader
+    # geschrieben und kann ein Uniform-Array setzen.
+    perm = _openSimplex_perm(int(inputs["seed"]))
+    ort = gl.glGetUniformLocation(program, "u_perm")
+    if ort != -1:
+        gl.glUniform1iv(ort, 256, perm)
     work_groups = (size + 15) // 16
     _dispatch_compute(program, work_groups, work_groups)
     result = _read_texture_data(output_texture, size, size)
@@ -409,12 +445,24 @@ def _dispatch_shadow_raycast(worker: "GPUWorker", inputs: dict, parameters: dict
     return {"success": True, "shadowmap": result}
 
 
-def _classify_lake_basins_vectorized(heightmap: np.ndarray, seed_id_map: np.ndarray, volume_threshold: float):
+def _classify_lake_basins_vectorized(heightmap: np.ndarray, seed_id_map: np.ndarray, volume_threshold: float,
+                                     meters_per_pixel: float = 1.0):
     """
     Portierung von WaterGenerator._classify_lake_basins() - vektorisiert statt
     Pixel-für-Pixel-Python-Schleife, da die Menge der Kandidaten-Pixel hier
     (anders als beim eigentlichen Jump-Flooding) schon aus der GPU-Berechnung
     vorliegt und sich mit numpy in einem Rutsch aggregieren lässt.
+
+    `meters_per_pixel` (2026-08-11, Pipeline-Audit 7.1): fehlte hier komplett -
+    `total_volume` war die reine Summe der Wassertiefen in "Meter-Pixel",
+    verglichen gegen `volume_threshold`, das seit 2026-07-27 ein ECHTES
+    Volumen in m³ ist (siehe LakeDetectionSystem._cell_area_m2()-Docstring
+    und WaterGenerator._classify_lake_basins(), die dort korrekt mit der
+    Zellflaeche multipliziert). Bei realistischen `meters_per_pixel`-Werten
+    (z.B. 100 m/px -> Zellflaeche 10000 m²) fehlte dadurch ein Faktor von
+    10000x - jedes Becken verfehlte die Schwelle, GPU-`lake_map` blieb
+    IMMER konstant -1 ("keine Seen"), unabhaengig vom Gelaende. CPU-Pfad war
+    nicht betroffen, deshalb fiel es nur im GPU/CPU-Vergleich auf.
 
     Wasserspiegel = Spill-Point (niedrigster Rand-Übergang zu einem
     Nachbarbecken oder zum Kartenrand), NICHT die maximale Höhe innerhalb des
@@ -483,7 +531,11 @@ def _classify_lake_basins_vectorized(heightmap: np.ndarray, seed_id_map: np.ndar
     submerged = valid_heights <= per_pixel_spill
     depth = np.where(submerged, per_pixel_spill - valid_heights, 0.0)
 
-    total_volume = np.bincount(inverse, weights=depth, minlength=n_basins)
+    # Reine Wassertiefen-Summe (Meter-Pixel) - erst die Multiplikation mit der
+    # Zellflaeche macht daraus ein echtes m³-Volumen, vergleichbar mit
+    # `volume_threshold` (siehe Docstring oben).
+    depth_sum = np.bincount(inverse, weights=depth, minlength=n_basins)
+    total_volume = depth_sum * (float(meters_per_pixel) ** 2)
 
     filtered_lake_map = np.full((height, width), -1, dtype=np.int32)
     valid_lakes = []
@@ -512,6 +564,7 @@ def _classify_lake_basins_vectorized(heightmap: np.ndarray, seed_id_map: np.ndar
 def _dispatch_jump_flood_lakes(worker: "GPUWorker", inputs: dict, parameters: dict) -> dict:
     heightmap = inputs["heightmap"]
     volume_threshold = inputs["lake_volume_threshold"]
+    meters_per_pixel = float(inputs.get("meters_per_pixel", 1.0))
     size = heightmap.shape[0]
 
     seed_program = worker.get_program("water", "localMinimaSeed")
@@ -550,7 +603,8 @@ def _dispatch_jump_flood_lakes(worker: "GPUWorker", inputs: dict, parameters: di
 
     seed_id_map = _read_texture_data(read_tex, size, size).astype(np.int32)
 
-    lake_map, valid_lakes = _classify_lake_basins_vectorized(heightmap, seed_id_map, volume_threshold)
+    lake_map, valid_lakes = _classify_lake_basins_vectorized(
+        heightmap, seed_id_map, volume_threshold, meters_per_pixel)
     return {"success": True, "lake_map": lake_map, "valid_lakes": valid_lakes}
 
 
@@ -1822,6 +1876,36 @@ class ShaderManager(QObject):
         self.logger = logging.getLogger(__name__)
         self._worker = None
         self._worker_lock = threading.Lock()
+        # Pro-Thread-Mitschnitt echter GPU-Dispatches (2026-08-11, fuer das
+        # Pipeline-Prozess-Log in generation_orchestrator.py CalculatorThread).
+        # Nur ECHTE Uebergaben an den GPUWorker zaehlen als Versuch - die
+        # billigen Vorab-Ablehnungen ("no_dispatch_registered"/"gpu_unavailable",
+        # siehe request_shader_operation()) NICHT, die sind kein Fallback von
+        # einem funktionierenden Pfad, sondern schlicht "kein Shader dafuer da".
+        self._dispatch_log_lock = threading.Lock()
+        self._dispatch_log = []  # Liste von (thread_id, "kategorie.operation", erfolgreich)
+
+    def _record_dispatch(self, category: str, operation: str, success: bool):
+        with self._dispatch_log_lock:
+            self._dispatch_log.append((threading.get_ident(), f"{category}.{operation}", success))
+            # Deckel, damit ein sehr langer Lauf nicht unbegrenzt waechst -
+            # ein einzelner Calculator-Knoten macht nie annaehernd so viele
+            # Dispatches, 2000 Eintraege reichen fuer die juengste Historie.
+            if len(self._dispatch_log) > 2000:
+                del self._dispatch_log[:len(self._dispatch_log) - 2000]
+
+    def dispatch_log_snapshot_index(self) -> int:
+        """Aktuelle Laenge des Dispatch-Logs - Startmarke fuer einen Knoten,
+        der gleich seine eigenen GPU-Aufrufe herausfiltern will."""
+        with self._dispatch_log_lock:
+            return len(self._dispatch_log)
+
+    def dispatch_log_since(self, start_index: int, thread_id: int):
+        """Alle Dispatch-Eintraege dieses Threads seit `start_index` -
+        siehe CalculatorThread.run() fuer die Auswertung zu GPU/CPU/Fallback."""
+        with self._dispatch_log_lock:
+            entries = self._dispatch_log[start_index:]
+        return [(op, ok) for (tid, op, ok) in entries if tid == thread_id]
 
     @property
     def gpu_available(self) -> bool:
@@ -1883,23 +1967,34 @@ class ShaderManager(QObject):
         try:
             result = worker.submit(category, operation, inputs, parameters)
             self.processing_finished.emit(operation_name, True)
+            self._record_dispatch(category, operation, bool(result.get("success")))
             return result
         except Exception as e:
             self.logger.warning(f"GPU-Operation {operation_name} fehlgeschlagen: {e}")
             self.processing_finished.emit(operation_name, False)
+            self._record_dispatch(category, operation, False)
             return {"success": False, "reason": str(e)}
 
-    def process_noise_generation(self, size, octaves, frequency, persistence, lacunarity, seed):
-        """GPU-beschleunigte Multi-Octave Noise-Generierung mit CPU-Fallback."""
+    def process_noise_generation(self, size, octaves, frequency, persistence, lacunarity, seed,
+                                 offset_x=0.0, offset_y=0.0):
+        """
+        GPU-beschleunigte Multi-Octave Noise-Generierung mit CPU-Fallback.
+
+        offset_x/offset_y verschieben das Fenster in PIXELN dieser Karte und
+        machen damit beliebige Weltausschnitte moeglich (Zoom-Pyramide). 0
+        ergibt genau das Verhalten von vorher.
+        """
         result = self.request_shader_operation(
             "terrain", "noiseGeneration",
             {"size": size, "octaves": octaves, "frequency": frequency,
-             "persistence": persistence, "lacunarity": lacunarity, "seed": seed},
+             "persistence": persistence, "lacunarity": lacunarity, "seed": seed,
+             "offset_x": offset_x, "offset_y": offset_y},
             {}
         )
         if result.get("success"):
             return result["noise"]
-        return self._cpu_fallback_noise(size, octaves, frequency, persistence, lacunarity, seed)
+        return self._cpu_fallback_noise(size, octaves, frequency, persistence, lacunarity, seed,
+                                        offset_x=offset_x, offset_y=offset_y)
 
     def process_shadow_raycast(self, heightmap, sun_elevation, sun_azimuth, shadowmap_size=64,
                                 max_distance=128.0, step_size=0.5, height_scale=1.0):
@@ -1931,7 +2026,8 @@ class ShaderManager(QObject):
             heightmap, sun_elevation, sun_azimuth, shadowmap_size,
             max_distance=max_distance, step_size=step_size, height_scale=height_scale)
 
-    def _cpu_fallback_noise(self, size, octaves, frequency, persistence, lacunarity, seed):
+    def _cpu_fallback_noise(self, size, octaves, frequency, persistence, lacunarity, seed,
+                            offset_x=0.0, offset_y=0.0):
         """
         CPU-Fallback für Noise-Generierung wenn GPU nicht verfügbar oder die
         GPU-Dispatch fehlschlägt. Nutzt denselben OpenSimplex-Algorithmus und
@@ -1942,7 +2038,10 @@ class ShaderManager(QObject):
         Höhenfeld zurückgab, statt eine Exception zu werfen.
         """
         generator = OpenSimplex(seed=seed)
-        coords = np.arange(size, dtype=np.float64)
+        # Der Versatz gehoert VOR die Frequenz, wie im Shader und im
+        # Hauptpfad. x und y getrennt, weil sie verschieden sein koennen.
+        coords_x = np.arange(size, dtype=np.float64) + offset_x
+        coords_y = np.arange(size, dtype=np.float64) + offset_y
 
         result = np.zeros((size, size), dtype=np.float32)
         amplitude = 1.0
@@ -1950,7 +2049,8 @@ class ShaderManager(QObject):
         max_amplitude = 0.0
 
         for _ in range(octaves):
-            octave_noise = generator.noise2array(coords * current_frequency, coords * current_frequency)
+            octave_noise = generator.noise2array(coords_x * current_frequency,
+                                                 coords_y * current_frequency)
             result += (amplitude * octave_noise).astype(np.float32)
             max_amplitude += amplitude
             amplitude *= persistence

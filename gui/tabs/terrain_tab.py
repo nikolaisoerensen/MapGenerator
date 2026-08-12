@@ -145,7 +145,14 @@ class TerrainTab(BaseMapTab):
         # Erosionsfilter - dessen Ergebnis ist die Flaeche, in die die Taeler
         # geschnitten werden.
         river_configs = [
+            # Seit dem 2026-08-06 wirken die ersten fuenf wieder - sie sind an
+            # core/terrain_weltfluesse.py angeschlossen. "Valley Spacing" ist
+            # jetzt der MAKRO-Knotenabstand; Meso und Mikro folgen daraus.
             ("river_spacing_m", "Valley Spacing (m)", RIVER_NETWORK.SPACING_M),
+            ("river_mouth_depth_m", "Mouth Depth (m)",
+             RIVER_NETWORK.MOUTH_DEPTH_M),
+            ("river_inherit_cost", "Trunk Continuity",
+             RIVER_NETWORK.INHERIT_COST),
             ("river_incision_share", "Valley Depth (share)",
              RIVER_NETWORK.INCISION_SHARE),
             ("river_plateau_flatten", "Plateau Flattening",
@@ -310,9 +317,29 @@ class TerrainTab(BaseMapTab):
         slope_radio.toggled.connect(lambda checked: self._on_display_mode_changed("slope", checked))
         self.display_mode_group.addButton(slope_radio, 1)
 
+        # Die neun Kulturregionen, halbtransparent ueber dem Gelaende. Sie
+        # gehoeren HIERHER und nicht in einen eigenen Reiter: die Regionen SIND
+        # das Gelaende - jede bringt ihre eigene Hoehe, Formgroesse und Rauheit
+        # mit, und man muss sehen koennen, ob eine Grenze einem Kamm folgt oder
+        # quer durch ein Tal laeuft.
+        region_radio = QRadioButton("Regionen")
+        region_radio.toggled.connect(lambda checked: self._on_display_mode_changed("regions", checked))
+        self.display_mode_group.addButton(region_radio, 3)
+
+        # Kuesten-Archetypen (2026-08-12, Nutzer-Vorgabe: "kann man die
+        # Kuestentypen auf der 2D-Karte darstellen? jede Region hat eine
+        # Farbe und die Helligkeit von flach (hell) zu steil (dunkel) sind
+        # die Kuestentypen") - Regionsfarbe wie beim "Regionen"-Modus,
+        # Helligkeit kodiert den hoehe_faktor des zugeordneten Archetyps.
+        kuesten_radio = QRadioButton("Kuestentypen")
+        kuesten_radio.toggled.connect(lambda checked: self._on_display_mode_changed("kuestentypen", checked))
+        self.display_mode_group.addButton(kuesten_radio, 4)
+
         layout.addWidget(height_radio)
         layout.addWidget(combined_radio)
         layout.addWidget(slope_radio)
+        layout.addWidget(region_radio)
+        layout.addWidget(kuesten_radio)
 
         return layout
 
@@ -459,6 +486,29 @@ class TerrainTab(BaseMapTab):
                 # reduzierten Magnitude (die die Richtungsinformation verwarf).
                 display_data = data if data is not None and hasattr(data, 'shape') and len(data.shape) == 3 \
                     else None
+            elif self.current_display_mode == "regions":
+                # region_map UND heightmap zusammen: der Renderer faerbt nur
+                # Land ein und braucht dafuer die Hoehen. Beide in einem
+                # payload statt in zwei Zugriffen - sonst haenge der Renderer
+                # still an der Reihenfolge der Display-Updates.
+                data = self.data_lod_manager.get_terrain_data("region_map")
+                hoehe = self.data_lod_manager.get_terrain_data("heightmap")
+                data_type = "region_map"
+                display_data = ({"regionen": data, "heightmap": hoehe}
+                                if data is not None and hoehe is not None else None)
+            elif self.current_display_mode == "kuestentypen":
+                # Regionsfarbe (wie "Regionen") x Helligkeit nach Archetyp-
+                # Steilheit (flach=hell, steil=dunkel) - siehe
+                # MapDisplay2D._render_kuesten_archetypen().
+                data = self.data_lod_manager.get_terrain_data("region_map")
+                hoehe = self.data_lod_manager.get_terrain_data("heightmap")
+                archetyp = self.data_lod_manager.get_terrain_data("kuesten_archetyp")
+                staerke = self.data_lod_manager.get_terrain_data("kuesten_staerke")
+                data_type = "kuesten_archetyp"
+                display_data = ({"regionen": data, "heightmap": hoehe,
+                                 "kuesten_archetyp": archetyp, "kuesten_staerke": staerke}
+                                if data is not None and hoehe is not None and archetyp is not None
+                                else None)
             else:
                 return
 
@@ -523,6 +573,25 @@ class TerrainTab(BaseMapTab):
                     f"Slope Statistics: Max {max_slope_deg:.1f}°, "
                     f"Mean {mean_slope_deg:.1f}°"
                 )
+
+            elif data_type == "region_map" and hasattr(data, 'shape'):
+                # LANDflaeche je Region, nicht Gesamtflaeche. Die Zuordnung gilt
+                # auch auf offener See - Huegelland kaeme sonst auf 66 km2, von
+                # denen 51 Ozean sind. Nur die Landzahl sagt etwas darueber aus,
+                # wieviele Siedlungen eine Kultur tragen kann.
+                from core.terrain_weltkarte import alle_regionen
+                heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+                if heightmap is not None:
+                    km_pro_pixel = (self.data_lod_manager.get_map_distance_km()
+                                    / float(data.shape[0]))
+                    land = np.asarray(heightmap) > 0.0
+                    zeilen = []
+                    for i, (_z, _s, region) in enumerate(alle_regionen()):
+                        flaeche = float((land & (np.asarray(data) == i)).sum()) \
+                            * km_pro_pixel * km_pro_pixel
+                        zeilen.append("%s %.1f km²" % (region["volk"], flaeche))
+                    self.height_range_label.setText("Landflaeche: "
+                                                    + ", ".join(zeilen))
 
             # Shadow Coverage (falls verfügbar)
             shadow_data = self.data_lod_manager.get_terrain_data("shadowmap")

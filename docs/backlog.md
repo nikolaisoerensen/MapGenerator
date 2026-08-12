@@ -1,10 +1,33 @@
-# Backlog
+# Backlog — ARCHIV (Stand 2026-07-08)
+
+> **Diese Datei ist seit dem 2026-08-12 ein Archiv und wird nicht mehr
+> gepflegt. Die gültige Aufgabenliste ist `docs/OFFENE_PUNKTE.md`.**
+>
+> Sie war bis dahin die Ersatz-Quelle für das nicht auslesbare Kanban-Board.
+> Der weitaus größte Teil ihrer Punkte ist erledigt — Flüsse erreichen das
+> Meer (OFFENE_PUNKTE 4.7), die Siedlungen sind komplett neu gebaut
+> (Abschnitt 5), der 3D-Kontextfehler ist behoben (`makeCurrent()` steht
+> heute in `update_heightmap()`).
+>
+> **Drei Punkte waren am 2026-08-12 noch offen und sind nach
+> `OFFENE_PUNKTE.md` übernommen worden**, damit sie nicht in diesem Archiv
+> verschwinden:
+>
+> | hier | dort | Sache |
+> |---|---|---|
+> | 41 | **7.9** | Geology ohne GPU-Anbindung |
+> | 42 | **7.10** | `jumpFloodLakes.comp` ohne echte Erreichbarkeitsprüfung |
+> | 45 | **7.11** | übrige GPU-Dispatchfunktionen nie auf dieselbe Fehlerklasse geprüft |
+>
+> Alles Übrige unten ist entweder erledigt oder durch die neuere Liste
+> überholt. Der Text bleibt stehen, weil einzelne Einträge die
+> **Begründungen** von damals festhalten — insbesondere Punkt 42, der genau
+> erklärt, warum der GPU-Watershed bewusst zurückgestellt wurde.
+
+---
 
 Offene Punkte aus dem Kanban-Board (Stand 2026-07-08, zuletzt aktualisiert
-2026-07-08 nach GPU-Session). Diese Datei ist die Quelle der Wahrheit für
-Claude, da das Kanban-Plugin selbst nicht auslesbar ist. Bitte beim
-Abschließen eines Punktes hier durchstreichen/entfernen statt nur im
-Kanban-Board zu verschieben.
+2026-07-08 nach GPU-Session).
 
 ## To Do
 

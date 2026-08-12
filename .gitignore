@@ -21,3 +21,6 @@ mprofile_*.dat
 
 # Laborausgaben (Bilder aus tools/*_lab.py)
 lab_output/
+
+# Laufzeit-Logs (2026-08-12)
+logs/

@@ -75,7 +75,71 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from opensimplex import OpenSimplex
-from scipy.ndimage import gaussian_filter
+from scipy import ndimage
+from scipy.ndimage import gaussian_filter, zoom
+
+# Um wieviel gröber eine weiträumige Glättung gerechnet werden darf. Siehe
+# grosse_glaettung() - eine Glättung über ein Fünftel der Karte hat unterhalb
+# von sigma/4 keine Struktur mehr, das Ergebnis wird nur hochgezogen.
+HUB_TEILER = 8
+
+# Kantenlänge der Kacheln, in denen das Störungsfeld gerechnet wird. Klein
+# genug, dass je Kachel nur wenige Segmente überhaupt in Frage kommen, groß
+# genug, dass der Verwaltungsaufwand je Kachel nicht überwiegt. Siehe
+# _build_fault_field_schnell().
+FAULT_KACHEL = 128
+
+
+def grosse_glaettung(feld: np.ndarray, sigma_px: float) -> np.ndarray:
+    """
+    Weiträumig glätten, ohne dass der Aufwand mit der dritten Potenz wächst.
+
+    WOFÜR. Zwei Stellen in diesem Modul glätten über einen festen BRUCHTEIL der
+    Karte: der Terrain-Hub (0.2 der Kantenlänge) und das Sediment-Overlay
+    (2 km von 21.3). SciPys `gaussian_filter` arbeitet mit einem Kern von
+    4·sigma Radius, der Aufwand ist also Pixelzahl mal sigma - und sigma wächst
+    hier selbst mit der Kantenlänge:
+
+        Aufwand ~ Kante² · Kante = Kante³
+
+    Gemessen am Terrain-Hub: 0.03 s bei 256 px, 0.19 bei 512, 2.08 bei 1024,
+    16.6 bei 2048. Bei 4096 wären es über zwei Minuten für EINE Glättung. Das
+    ist der Einbruch, den der Nutzer bei "stack deformations" sah.
+
+    WIE. Eine Glättung über ein Fünftel der Karte hat unterhalb von etwa
+    sigma/4 gar keine Struktur mehr. Sie darf deshalb auf einem gröberen Gitter
+    gerechnet und wieder hochgezogen werden - dieselbe Überlegung wie beim
+    Schattenwurf (SCHATTEN_TEILER in terrain_generator). Gemessen bei 2048 px:
+    16.6 s auf 0.52 s, also 32-fach, bei 0.03 m Abweichung gegen eine
+    Feldspanne von 8 m.
+
+    ZWEI FALLSTRICKE, beide beim ersten Versuch getroffen (97 m Fehler bei
+    39 m Spanne):
+      - Verkleinert werden muss mit dem BLOCKMITTEL, nicht durch Abtasten.
+        `zoom` würde genau die Feinstruktur wegwerfen, die die Glättung mitteln
+        soll, statt sie einzurechnen.
+      - Die Randbehandlung muss `reflect` bleiben wie in der Vorlage. Bei
+        einem sigma dieser Größe macht der Rand den Großteil des Ergebnisses
+        aus; mit `nearest` lag das Ergebnis um mehr als die Feldspanne daneben.
+    """
+    height, width = feld.shape
+    # Nie gröber als sigma/8. Bei sigma/4 lag die Abweichung bei 256 px noch
+    # bei 2 % der Feldspanne - das grobe Gitter war dann so klein, dass das
+    # Hochziehen selbst zum Fehler wurde. Bei den Größen, um die es geht
+    # (1024 und mehr), greift ohnehin die Obergrenze HUB_TEILER.
+    teiler = max(1, min(HUB_TEILER, int(sigma_px / 8)))
+    while teiler > 1 and (width % teiler or height % teiler):
+        teiler -= 1
+    if teiler <= 1:
+        return gaussian_filter(feld, sigma=sigma_px)
+
+    klein = feld.reshape(height // teiler, teiler,
+                         width // teiler, teiler).mean(axis=(1, 3))
+    # Das Blockmittel ist selbst eine Kastenglättung der Breite 1 im groben
+    # Gitter (Varianz 1/12); sie wird von der Zielvarianz abgezogen.
+    ziel = max((sigma_px / teiler) ** 2 - 1.0 / 12.0, 0.01)
+    klein = gaussian_filter(klein, sigma=float(np.sqrt(ziel)), mode="reflect")
+    return zoom(klein, teiler, order=3, mode="reflect")[:height, :width]
 
 from core.geology_layers import (
     ALL_ROCK_TYPES,
@@ -268,32 +332,17 @@ def _compute_slope_thin_factor(slopemap: np.ndarray) -> np.ndarray:
 # TEKTONIK-VERSCHIEBUNGSFELD Δz (Plan Punkt 3)
 # =============================================================================
 
-def _build_fault_field(shape: Tuple[int, int], map_distance_km: float, map_seed: int,
-                        fault_intensity: float, fault_detail: float,
-                        fault_edge_softness: float) -> Tuple[np.ndarray, np.ndarray]:
+def _fault_segments(map_distance_km: float, map_seed: int,
+                    fault_intensity: float, fault_detail: float
+                    ) -> List[Tuple[float, float, float, float, float, float]]:
     """
-    Störungsnetz: wenige Saatpunkte -> L-System-artige rekursive Verzweigung
-    (Rekursionstiefe = fault_detail) mit an den Astspitzen auslaufendem
-    Versatz -> pro Pixel nächstgelegenes Segment (vektorisierte
-    Punkt-zu-Segment-Distanz) bestimmt Vorzeichen-Seite und Versatzgröße.
-    fault_edge_softness (km) ersetzt das frühere bevel_warping als Breite der
-    weichen tanh-Übergangszone an der Bruchkante statt eines harten Sprungs.
-    Segmentwinkel werden bei jedem Verzweigungsschritt zufällig verzerrt -
-    ein leichtgewichtiger Ersatz für eine Perlin-Rauschverzerrung entlang der
-    Linie, ohne dass Liniengeometrie und Rauschfeld getrennt gepflegt werden
-    müssen.
+    Die Liniengeometrie des Störungsnetzes: (x0, y0, x1, y1, throw0, throw1).
 
-    Rückgabe: (fault_throw (H,W) m, fault_distance_map (H,W) km, unsigniert).
+    Herausgezogen, damit die schnelle und die ausführliche Fassung von
+    `_build_fault_field` GARANTIERT dieselben Störungen bekommen - sonst
+    verglichen die Messungen zwei verschiedene Welten miteinander. Die
+    Zufallsfolge bleibt Zeile für Zeile die alte.
     """
-    height, width = shape
-    if fault_intensity <= 0.0:
-        return (np.zeros(shape, dtype=np.float32),
-                np.full(shape, map_distance_km, dtype=np.float32))
-
-    x_km = (np.arange(width, dtype=np.float64) / width) * map_distance_km
-    y_km = (np.arange(height, dtype=np.float64) / height) * map_distance_km
-    X, Y = np.meshgrid(x_km, y_km)
-
     rng = np.random.RandomState((map_seed + 5000) & 0xFFFFFFFF)
     n_seeds = max(1, int(round(2 + fault_detail * 3)))
     max_depth = max(1, int(round(1 + fault_detail * 3)))
@@ -321,6 +370,155 @@ def _build_fault_field(shape: Tuple[int, int], map_distance_km: float, map_seed:
         sy = rng.uniform(0, map_distance_km)
         a0 = rng.uniform(0, 360)
         branch(sx, sy, a0, map_distance_km * 0.22, max_depth, 1.0)
+    return segments
+
+
+def _build_fault_field(shape: Tuple[int, int], map_distance_km: float,
+                       map_seed: int, fault_intensity: float,
+                       fault_detail: float, fault_edge_softness: float
+                       ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Dasselbe Störungsfeld wie `_build_fault_field_referenz`, aber kachelweise -
+    und BITGLEICH zu ihr.
+
+    WARUM. Die ausführliche Fassung darunter schleift über alle Segmente und
+    rechnet je Segment rund elf volle Kartenarrays, um am Ende nur das
+    NÄCHSTGELEGENE zu behalten. Der Aufwand ist Segmentzahl mal Pixelzahl - bei
+    fault_detail 1.0 sind das etwa 85 Segmente, bei 2048 px also Gigabytes
+    Speicherverkehr auf einem Kern. Gemessen 29.1 s bei 2048 px.
+
+    EIN ERSTER ANLAUF ÜBER EINE ABSTANDSTRANSFORMATION war 23-fach schneller,
+    aber falsch: er zeichnete die Segmente ins Raster und las aus dem
+    getroffenen Quellpixel ab, welches Segment gemeint war. An den
+    Verzweigungsknoten liegen mehrere Segmente fast gleich weit entfernt, das
+    Raster entschied sich dort für ein anderes als die exakte Rechnung - und
+    weil über jeder Störungslinie das VORZEICHEN kippt, waren das keine
+    Rundungsreste, sondern volle Sprünge: 9 m mittlere und 195 m größte
+    Abweichung bei 200 m Spanne. Jede bestehende Karte hätte anders ausgesehen.
+
+    WAS STATTDESSEN WIRKT. Nicht jedes Segment kann für jedes Pixel das nächste
+    sein. Die Karte wird deshalb in Kacheln zerlegt, und je Kachel bleiben nur
+    die Segmente übrig, die überhaupt in Frage kommen:
+
+      - untere Schranke: der Abstand zwischen Kachel- und Segmentrechteck ist
+        nie größer als der echte Abstand zum Segment;
+      - obere Schranke: der Abstand zu einem Segment ist eine KONVEXE Funktion
+        des Punktes, sein Größtwert über eine Kachel sitzt also immer in einer
+        Ecke - vier Auswertungen genügen, und der Wert ist exakt.
+
+    Ein Segment fliegt raus, sobald seine untere Schranke über der kleinsten
+    oberen aller Segmente liegt. Das ist eine reine Vorauswahl; was übrig
+    bleibt, wird mit derselben Formel wie vorher gerechnet. Das Ergebnis ist
+    daher identisch, nicht nur ähnlich.
+    """
+    height, width = shape
+    if fault_intensity <= 0.0:
+        return (np.zeros(shape, dtype=np.float32),
+                np.full(shape, map_distance_km, dtype=np.float32))
+
+    segments = _fault_segments(map_distance_km, map_seed, fault_intensity,
+                               fault_detail)
+    if not segments:
+        return (np.zeros(shape, dtype=np.float32),
+                np.full(shape, map_distance_km, dtype=np.float32))
+
+    seg = np.asarray(segments, dtype=np.float64)          # (S, 6)
+    sx0, sy0, sx1, sy1, st0, st1 = (seg[:, i] for i in range(6))
+    sdx, sdy = sx1 - sx0, sy1 - sy0
+    laenge2 = np.maximum(sdx * sdx + sdy * sdy, 1e-12)
+    lebt = laenge2 > 1e-9
+    # Rechteck je Segment - Grundlage der unteren Schranke.
+    rx0, rx1 = np.minimum(sx0, sx1), np.maximum(sx0, sx1)
+    ry0, ry1 = np.minimum(sy0, sy1), np.maximum(sy0, sy1)
+
+    def abstand_zu(px, py):
+        """Exakter Punkt-zu-Segment-Abstand, Punkte gegen alle Segmente."""
+        p = np.asarray(px)[:, None]
+        q = np.asarray(py)[:, None]
+        t = np.clip(((p - sx0) * sdx + (q - sy0) * sdy) / laenge2, 0.0, 1.0)
+        return np.hypot(p - (sx0 + t * sdx), q - (sy0 + t * sdy))
+
+    x_km = (np.arange(width, dtype=np.float64) / width) * map_distance_km
+    y_km = (np.arange(height, dtype=np.float64) / height) * map_distance_km
+
+    min_abs_dist = np.full(shape, np.inf, dtype=np.float64)
+    best_signed_dist = np.zeros(shape, dtype=np.float64)
+    best_throw_mag = np.zeros(shape, dtype=np.float64)
+
+    kachel = FAULT_KACHEL
+    for y_a in range(0, height, kachel):
+        y_e = min(y_a + kachel, height)
+        for x_a in range(0, width, kachel):
+            x_e = min(x_a + kachel, width)
+            bx0, bx1 = x_km[x_a], x_km[x_e - 1]
+            by0, by1 = y_km[y_a], y_km[y_e - 1]
+
+            # Untere Schranke: Rechteck gegen Rechteck.
+            luecke_x = np.maximum(np.maximum(bx0 - rx1, rx0 - bx1), 0.0)
+            luecke_y = np.maximum(np.maximum(by0 - ry1, ry0 - by1), 0.0)
+            unten = np.hypot(luecke_x, luecke_y)
+            # Obere Schranke: Größtwert sitzt in einer Ecke (Konvexität).
+            ecken = abstand_zu([bx0, bx1, bx0, bx1], [by0, by0, by1, by1])
+            oben = ecken.max(axis=0)
+            schwelle = float(np.min(np.where(lebt, oben, np.inf)))
+            kandidaten = np.nonzero(lebt & (unten <= schwelle))[0]
+
+            X, Y = np.meshgrid(x_km[x_a:x_e], y_km[y_a:y_e])
+            nah = min_abs_dist[y_a:y_e, x_a:x_e]
+            vz = best_signed_dist[y_a:y_e, x_a:x_e]
+            wurf = best_throw_mag[y_a:y_e, x_a:x_e]
+            for i in kandidaten:
+                t = ((X - sx0[i]) * sdx[i] + (Y - sy0[i]) * sdy[i]) / laenge2[i]
+                tc = np.clip(t, 0.0, 1.0)
+                dist = np.hypot(X - (sx0[i] + tc * sdx[i]),
+                                Y - (sy0[i] + tc * sdy[i]))
+                seite = (X - sx0[i]) * sdy[i] - (Y - sy0[i]) * sdx[i]
+                naeher = dist < nah
+                nah = np.where(naeher, dist, nah)
+                vz = np.where(naeher, np.sign(seite) * dist, vz)
+                wurf = np.where(naeher, st0[i] + (st1[i] - st0[i]) * tc, wurf)
+            min_abs_dist[y_a:y_e, x_a:x_e] = nah
+            best_signed_dist[y_a:y_e, x_a:x_e] = vz
+            best_throw_mag[y_a:y_e, x_a:x_e] = wurf
+
+    edge_width_km = max(0.02, fault_edge_softness)
+    fault_throw = np.tanh(best_signed_dist / edge_width_km) * best_throw_mag
+    return fault_throw.astype(np.float32), min_abs_dist.astype(np.float32)
+
+
+def _build_fault_field_referenz(shape: Tuple[int, int], map_distance_km: float,
+                                map_seed: int, fault_intensity: float,
+                                fault_detail: float, fault_edge_softness: float
+                                ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    DIE VORLAGE, nicht mehr im Betrieb - sie schleift über ALLE Segmente und
+    ist damit die einfach nachzulesende Fassung, gegen die
+    `_build_fault_field` in tests/smoke_test_geology_speed.py geprüft wird.
+
+    Störungsnetz: wenige Saatpunkte -> L-System-artige rekursive Verzweigung
+    (Rekursionstiefe = fault_detail) mit an den Astspitzen auslaufendem
+    Versatz -> pro Pixel nächstgelegenes Segment (vektorisierte
+    Punkt-zu-Segment-Distanz) bestimmt Vorzeichen-Seite und Versatzgröße.
+    fault_edge_softness (km) ersetzt das frühere bevel_warping als Breite der
+    weichen tanh-Übergangszone an der Bruchkante statt eines harten Sprungs.
+    Segmentwinkel werden bei jedem Verzweigungsschritt zufällig verzerrt -
+    ein leichtgewichtiger Ersatz für eine Perlin-Rauschverzerrung entlang der
+    Linie, ohne dass Liniengeometrie und Rauschfeld getrennt gepflegt werden
+    müssen.
+
+    Rückgabe: (fault_throw (H,W) m, fault_distance_map (H,W) km, unsigniert).
+    """
+    height, width = shape
+    if fault_intensity <= 0.0:
+        return (np.zeros(shape, dtype=np.float32),
+                np.full(shape, map_distance_km, dtype=np.float32))
+
+    x_km = (np.arange(width, dtype=np.float64) / width) * map_distance_km
+    y_km = (np.arange(height, dtype=np.float64) / height) * map_distance_km
+    X, Y = np.meshgrid(x_km, y_km)
+
+    segments = _fault_segments(map_distance_km, map_seed, fault_intensity,
+                               fault_detail)
 
     min_abs_dist = np.full(shape, np.inf, dtype=np.float64)
     best_signed_dist = np.zeros(shape, dtype=np.float64)
@@ -361,11 +559,36 @@ def _build_terrain_hub(terrain_height: np.ndarray, map_distance_km: float) -> np
     Effekt wäre unsichtbar. Die geglättete Version lässt lokale Gipfel/
     Täler von ihrem eigenen regionalen Mittel abweichen, wodurch der
     Ausbiss-Schnitt tatsächlich variiert.
+
+    AUF GROBEM GITTER GERECHNET (2026-08-10)
+    ----------------------------------------
+    Der Nutzer meldete, dass Geology "bei der Größe sehr langsam geworden" ist
+    und die Oberfläche bei `stack_deformation` stehenbleibt. Gemessen war das
+    hier: 0.03 s bei 256 px, 0.19 bei 512, 2.08 bei 1024, 16.6 bei 2048 - also
+    Wachstum mit der DRITTEN Potenz der Kantenlänge.
+
+    Der Grund steht in der Zeile darunter: `sigma_px` ist ein fester Bruchteil
+    der Kantenlänge (0.2), und SciPys `gaussian_filter` arbeitet mit einem Kern
+    von 4·sigma Radius. Der Aufwand ist damit Pixelzahl mal sigma, und sigma
+    wächst selbst mit der Kantenlänge. Bei 4096 px wären es über zwei Minuten -
+    für EINE Glättung.
+
+    Eine Glättung über 0.2 der Karte hat unterhalb von etwa sigma/4 keine
+    Struktur mehr. Sie darf deshalb auf einem gröberen Gitter gerechnet und
+    wieder hochgezogen werden - dieselbe Überlegung wie beim Schattenwurf
+    (SCHATTEN_TEILER in terrain_generator). Gemessen bei 2048 px: 16.6 s auf
+    0.52 s, also 32-fach, bei 0.03 m Abweichung gegen eine Feldspanne von 8 m.
+
+    Zwei Fallstricke, beide beim ersten Versuch getroffen (97 m Fehler bei
+    39 m Spanne): verkleinert werden muss mit dem BLOCKMITTEL, nicht durch
+    Abtasten - `zoom` würde genau die Feinstruktur wegwerfen, die die Glättung
+    mitteln soll -, und die Randbehandlung muss dieselbe sein wie vorher
+    (`reflect`), denn bei diesem sigma macht der Rand den Großteil aus.
     """
-    height, width = terrain_height.shape
+    _height, width = terrain_height.shape
     sigma_km = max(0.5, REGIONAL_HUB_SIGMA_FRACTION * map_distance_km)
     sigma_px = max(1.0, sigma_km * (width / map_distance_km))
-    return gaussian_filter(terrain_height.astype(np.float64), sigma=sigma_px)
+    return grosse_glaettung(terrain_height.astype(np.float64), sigma_px)
 
 
 class TectonicDisplacementField:
@@ -600,7 +823,9 @@ def _apply_sediment_overlay(layer_id_map: np.ndarray, heightmap_combined: np.nda
     height, width = heightmap_combined.shape
     sigma_km = 2.0  # feste Glättungsbreite, kein eigener Slider (Design-Entscheidung)
     sigma_px = max(1.0, sigma_km * (width / map_distance_km))
-    smoothed = gaussian_filter(heightmap_combined.astype(np.float64), sigma=sigma_px)
+    # Grobgitter, siehe grosse_glaettung(): auch hier ist sigma ein fester
+    # Bruchteil der Karte (2 von 21.3 km) und der Aufwand wüchse sonst kubisch.
+    smoothed = grosse_glaettung(heightmap_combined.astype(np.float64), sigma_px)
     relief = heightmap_combined.astype(np.float64) - smoothed
     span = float(np.max(heightmap_combined) - np.min(heightmap_combined))
     threshold = -0.02 * (span if span > 1e-6 else 1.0)

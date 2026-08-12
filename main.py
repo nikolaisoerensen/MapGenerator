@@ -109,7 +109,16 @@ class MapGeneratorApp(QObject):
             import colorlog
             handler = colorlog.StreamHandler()
             handler.setFormatter(colorlog.ColoredFormatter(
-                '%(log_color)s%(levelname)-8s%(reset)s %(blue)s%(name)s%(reset)s: %(message)s',
+                # Uhrzeit ERGAENZT (2026-08-11) - fehlte hier komplett, obwohl
+                # logging.basicConfig() oben eine mit Zeitstempel setzt: dieser
+                # Handler ERSETZT sie (root_logger.handlers.clear() unten), der
+                # Zeitstempel verschwand also aus der Konsole. Ohne ihn liess
+                # sich aus dem Log nicht ablesen, wie viel echte Zeit zwischen
+                # zwei Zeilen liegt - nur erraten ("das dauert sicher eine
+                # Minute"). Nur Uhrzeit, kein Datum - Sekundenaufloesung reicht,
+                # das Datum waere nur Platz auf jeder Zeile.
+                '%(log_color)s%(levelname)-8s%(reset)s %(asctime)s %(blue)s%(name)s%(reset)s: %(message)s',
+                datefmt='%H:%M:%S',
                 log_colors={
                     'DEBUG': 'cyan',
                     'INFO': 'yellow',

@@ -56,8 +56,16 @@ def _qt():
     return _QT_APP
 
 
-SIZE = 64
-LOD = 2
+# 2026-08-05 von 64 auf 128 px angehoben.
+#
+# Bei 64 px deckt ein Pixel 333 m ab. Die Siedlungen liegen dann so dicht
+# beieinander, dass jede Strasse kuerzer als drei Punkte ist -
+# calculate_roadsites() ueberspringt solche Strassen, und der Test meldete
+# roadsite_list als leer. Das ist kein Fehler im Programm, sondern eine Karte,
+# die zu grob fuer Siedlungswege ist. Bei 128 px und darueber erscheint die
+# Liste. Nachgewiesen im Vergleichslauf mit und ohne geklemmte Hoehen.
+SIZE = 128
+LOD = 3
 KM = 15.0
 SEED = 20260730
 

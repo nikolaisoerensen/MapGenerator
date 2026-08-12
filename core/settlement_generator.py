@@ -123,13 +123,13 @@ class SettlementData:
         self.civ_map = None  # (height, width) - Zivilisations-Einfluss
         self.plot_nodes = []  # List[PlotNode] - Alle PlotNodes
         self.plots = []  # List[Plot] - Alle Plots
-        self.roads = []  # List[List[Tuple]] - Alle Road-Pfade
+        self.roads = []  # List[List[Tuple]] - Alle Road-Pfade (Land)
+        self.sea_roads = []  # List[List[Tuple]] - Seewege, docs/SIEDLUNGEN_ENTWURF.md §4.4
         self.city_mask = None  # (height, width) - Settlement-ID pro Pixel, -1 = ausserhalb jeder Stadt
         self.voronoi_cell_map = None  # (height, width) - Landschafts-Plot-Zell-ID pro Pixel, -1 = Stadt/Wilderness
         self.street_mask = None  # (height, width) bool - innerstaedtisches Strassenraster
         self.house_parcel_map = None  # (height, width) - kartenweit eindeutige Hausparzellen-ID, -1 = keine Parzelle
         self.landmark_roads = []  # List[List[Tuple]] - Landmark-Anbindungen ans Strassennetz
-        self.outer_roads = []  # List[List[Tuple]] - Aussenverbindungen zur Kartengrenze
         self.plot_edges = {}  # Dict[int, PlotEdge] - adressierbares Kanten-Registry mit Traffic/Klassifikation
         self.potential_field = None  # (height, width, 2) - PlotPhysicsSystem-Kraftfeld, siehe [[project-settlement-physics-lab-parity]]
         # Vorher NIE über set_settlement_data_complete_lod() dekomponiert
@@ -234,11 +234,191 @@ class SettlementData:
         return status
 
 
+# Drei Raenge, alle klein (docs/SIEDLUNGEN_ENTWURF.md §1) - Unterscheidung ist
+# eine der Rang-Spanne, nicht Stadt gegen Metropole.
+RANG_HAEUSER = {"dorf": (15, 25), "siedlung": (25, 35), "stadt": (35, 50)}
+RANG_REIHENFOLGE = ("dorf", "siedlung", "stadt")
+
+
+# =============================================================================
+# KULTURKATALOGE - docs/KULTUREN_UND_ORTE.md, Abschnitt "AUSWAHL DES NUTZERS"
+# =============================================================================
+#
+# Der verbindliche Satz: 5 Roadsite- und 5 Landmark-Arten je der neun Kulturen
+# (45 + 45). Kulturnamen sind exakt die `volk`-Werte aus
+# core/terrain_weltkarte.py REGIONEN.
+#
+# JEDE ART TRAEGT EINE PLATZIERUNGSVORLIEBE (docs/SIEDLUNGEN_ENTWURF.md §4.6
+# fuer Roadsites, §4.7 fuer Landmarks nennt nur die KATEGORIEN, nicht die
+# Zuordnung je Art - die folgt hier aus dem Namen selbst: "Furtstein an der
+# Flussquerung" will an eine Furt, "Warte auf dem Kamm" auf einen Passpunkt,
+# "Osteria an der Kreuzung" ausdruecklich an eine Kreuzung; was keiner
+# Kategorie eindeutig zuzuordnen ist, gilt als "strecke" - der allgemeine
+# Zwischenstueck-Fall, den es nach dem Entwurf ebenfalls gibt ("auf langen
+# Zwischenstuecken ohne Ort, damit eine Tagesreise einen Halt hat").
+#
+# ROADSITE-KATEGORIEN: furt (Furt/Bruecke/Faehre), pass (Passhoehe/Kamm/
+# Bergsattel), kreuzung (Wegscheide/Marktflecken/Grenzuebergang), strecke
+# (alles andere - der Rest eines langen Weges).
+ROADSITE_KATALOG = {
+    "Kelten": [
+        ("Furtstein an der Flussquerung", "furt"),
+        ("Rastkreuz an der Wegscheide", "kreuzung"),
+        ("Bardenlager", "strecke"),
+        ("Pilgerherberge", "strecke"),
+        ("Zollringwall", "kreuzung"),
+    ],
+    "Wikinger": [
+        ("Faehrstelle ueber den Fjord", "furt"),
+        ("Sennhuette", "pass"),
+        ("Handelsplatz am Strand", "strecke"),
+        ("Kohlenmeiler", "strecke"),
+        ("Salzsiederei", "strecke"),
+    ],
+    "Slawen": [
+        ("Bohlenweg durchs Sumpfland", "strecke"),
+        ("Pelzhaendlerlager", "strecke"),
+        ("Blockhausherberge", "strecke"),
+        ("Grenzverhau aus Staemmen", "kreuzung"),
+        ("Faehre am Strom", "furt"),
+    ],
+    "Franken": [
+        ("Zollbruecke", "furt"),
+        ("Wechselstall fuer Pferde", "strecke"),
+        ("Fischerweiler", "strecke"),
+        ("Weinschenke", "strecke"),
+        ("Muehlenwehr", "furt"),
+    ],
+    "Alemannen": [
+        ("Passhospiz", "pass"),
+        ("Wechselstall fuer Saumtiere", "pass"),
+        ("Klause mit Wegzoll", "kreuzung"),
+        ("Holzriese", "strecke"),
+        ("Kaesespeicher", "strecke"),
+    ],
+    "Sachsen": [
+        ("Warte auf dem Kamm", "pass"),
+        ("Gerichtslinde", "kreuzung"),
+        ("Wuestung", "strecke"),
+        ("Kruggasthof", "strecke"),
+        ("Kalkofen", "strecke"),
+    ],
+    "Andalusier": [
+        ("Funduq — Karawanserei", "strecke"),
+        ("Aljibe — Zisterne am Weg", "strecke"),
+        ("Canada — Herdenweg", "strecke"),
+        ("Zoco — Marktflecken", "kreuzung"),
+        ("Oelmuehle", "strecke"),
+    ],
+    "Italiener": [
+        ("Via-Rest mit Meilenstein", "strecke"),
+        ("Fischtrockenplatz", "strecke"),
+        ("Weinpresse", "strecke"),
+        ("Rastplatz auf dem Bergsattel", "pass"),
+        ("Osteria an der Kreuzung", "kreuzung"),
+    ],
+    "Byzantiner": [
+        ("Skala — Anlegebucht", "furt"),
+        ("Zisternenhof", "strecke"),
+        ("Schwammtaucherlager", "strecke"),
+        ("Eselspfad mit Stuetzmauern", "pass"),
+        ("Xenodocheion", "strecke"),
+    ],
+}
+
+# LANDMARK-KATEGORIEN: gipfel (Kuppe/Fels/Hoehe), kueste (Kliff/Kueste/
+# Riff/Insel), quelle (Wasser als Heiligtum: Quelle, Fluss, Bruecke),
+# abgelegen (der Rest - "duerfen ausdruecklich weitab jedes Weges liegen").
+LANDMARK_KATALOG = {
+    "Kelten": [
+        ("Steinkreis auf der Kuppe", "gipfel"),
+        ("Heilige Quelle mit Opfergaben", "quelle"),
+        ("Ogham-Stein als Grenzmal", "abgelegen"),
+        ("Ganggrab", "abgelegen"),
+        ("Bienenkorbzellen am Kliff", "kueste"),
+    ],
+    "Wikinger": [
+        ("Runenstein", "abgelegen"),
+        ("Langhaus des Jarls", "abgelegen"),
+        ("Hoergr — Steinaltar auf der Hoehe", "gipfel"),
+        ("Thingplatz", "abgelegen"),
+        ("Gestrandetes Langschiff", "kueste"),
+    ],
+    "Slawen": [
+        ("Gorod — Ringwallburg", "abgelegen"),
+        ("Heiliger Hain", "abgelegen"),
+        ("Wehrturm aus Blockholz", "abgelegen"),
+        ("Verlassene Brandrodung", "abgelegen"),
+        ("Baerenhoehle mit Opferstelle", "abgelegen"),
+    ],
+    "Franken": [
+        ("Steinerne Abtei", "abgelegen"),
+        ("Rest einer Koenigspfalz", "abgelegen"),
+        ("Salzgarten am Aestuar", "kueste"),
+        ("Kliffkapelle", "kueste"),
+        ("Aquaeduktstueck der Roemer", "abgelegen"),
+    ],
+    "Alemannen": [
+        ("Bergkloster auf dem Sattel", "gipfel"),
+        ("Trutzburg auf dem Felskopf", "gipfel"),
+        ("Gletscherzunge", "gipfel"),
+        ("Eisenerzgrube", "abgelegen"),
+        ("Wildheu-Alm", "gipfel"),
+    ],
+    "Sachsen": [
+        ("Stumpf der gefaellten Irminsul", "abgelegen"),
+        ("Missionskirche aus Bruchstein", "abgelegen"),
+        ("Silbergrube", "abgelegen"),
+        ("Alte Landwehr", "abgelegen"),
+        ("Opferstein im Buchenwald", "abgelegen"),
+    ],
+    "Andalusier": [
+        ("Hisn — Felsenburg", "gipfel"),
+        ("Alcazaba-Ruine", "gipfel"),
+        ("Noria — Schoepfrad am Fluss", "quelle"),
+        ("Atalaya — Signalturm", "gipfel"),
+        ("Nekropole am Wadi", "abgelegen"),
+    ],
+    "Italiener": [
+        ("Roemische Bruecke", "quelle"),
+        ("Bergdorfkastell", "gipfel"),
+        ("Basilika mit Campanile", "abgelegen"),
+        ("Terrassierte Olivenhaenge", "abgelegen"),
+        ("Schwefelquelle", "quelle"),
+    ],
+    "Byzantiner": [
+        ("Kastro — Inselfestung", "kueste"),
+        ("Klippenkloster", "kueste"),
+        ("Antiker Tempel als Steinbruch", "abgelegen"),
+        ("Antikes Amphitheater", "abgelegen"),
+        ("Schiffswrackriff", "kueste"),
+    ],
+}
+
+
+def _naechste_kultur(x, y, settlements):
+    """Kultur der naechstgelegenen Siedlung - Grundlage fuer die Typwahl von
+    Roadsites/Landmarks, die selbst keine eigene Kulturzuordnung tragen."""
+    orte = [s for s in settlements if s.location_type == 'settlement' and s.culture]
+    if not orte:
+        return None
+    abstaende = [(s.x - x) ** 2 + (s.y - y) ** 2 for s in orte]
+    return orte[int(np.argmin(abstaende))].culture
+
+
 @dataclass
 class Location:
     """
     Funktionsweise: Datenstruktur für alle Arten von Locations (Settlements, Landmarks, Roadsites)
     Aufgabe: Einheitliche Repräsentation aller Siedlungs-Objekte
+
+    `culture`/`rank`/`house_count` (2026-08-10, docs/SIEDLUNGEN_ENTWURF.md §1+3):
+    nur fuer location_type == 'settlement' belegt. `culture` ist der Name aus
+    core.terrain_weltkarte (`volk`-Feld je Region), `rank` einer von
+    'dorf'/'siedlung'/'stadt' (15-25/25-35/35-50 Haeuser), `house_count` die
+    konkrete gezogene Zahl. Roadsites/Landmarks tragen ihre eigene Kultur ueber
+    `properties['culture']` statt eines eigenen Feldes - sie sind zahlreicher
+    und kuerzerlebig in der Auswertung.
     """
     location_id: int
     x: float
@@ -247,6 +427,9 @@ class Location:
     radius: float
     civ_influence: float
     properties: Dict = None
+    culture: str = ""
+    rank: str = ""
+    house_count: int = 0
 
 
 @dataclass
@@ -350,191 +533,193 @@ class Plot:
     plot_distance: float
 
 
+# Referenzhoehe der Hoehen-Daempfung (Meter). Ab hier ist der Standortwert auf
+# die Haelfte gefallen; oberhalb von rund 1800 m ist praktisch nichts mehr
+# uebrig. Frei gewaehlt, kein Regler (docs/SIEDLUNGEN_ENTWURF.md nennt keinen) -
+# passt zu den Regionshoehen der Weltkarte (Alpenland reicht nach der
+# Neueichung vom 2026-08-10 bis rund 1000 m ueber die Reliefspanne).
+ELEVATION_DAEMPFUNG_M = 600.0
+
+# Gewicht je Wassertyp fuer den staerksten Einzelfaktor ("Wasser am Ort").
+# Grossfluss/See sind der beste Standort (Muehlen, Transport in Masse),
+# Meereskueste vergleichbar einer Flussmuendung, der Bach am schwaechsten -
+# er traegt keine Lastschiffe. Werte aus water.manning_flow's water_biomes_map:
+# 0=kein Wasser, 1=Bach, 2=Fluss, 3=Grossfluss, 4=See.
+WASSERTYP_GEWICHT = {4: 1.0, 3: 1.0, 2: 0.8, 1: 0.5}
+KUeSTE_GEWICHT = 0.75
+
+
 class TerrainSuitabilityAnalyzer:
     """
-    Funktionsweise: Analysiert Terrain-Eignung für Settlements basierend auf Steigung, Höhe, Wasser-Nähe
-    Aufgabe: Erstellt Suitability-Map für optimale Settlement-Platzierung mit LOD-Optimierung
+    Eignungsfeld nach docs/SIEDLUNGEN_ENTWURF.md Abschnitt 2 - fuenf Faktoren:
+
+        Wasser am Ort         staerkster Einzelfaktor (Wassertyp x Naehe)
+        Ebener Grund          stark
+        Ackerland im Umkreis  stark (traegt die GROESSE, nicht die Lage)
+        Hoehenlage             daempfend (multiplikativ)
+        Erreichbarkeit          daempfend (multiplikativ, siehe unten)
+
+    ERREICHBARKEIT IST EIN RUECKSCHRITT, KEIN FUENFTER TERM VON ANFANG AN.
+    Das Wegenetz haengt an den Siedlungen, die Erreichbarkeit haengt am
+    Wegenetz - die Spezifikation loest das in EINEM Rueckschritt: die erste
+    Platzierung laeuft ohne Erreichbarkeit (Faktor neutral 1.0), nach dem
+    Netzbau wird der Rang einmal nachkorrigiert, ohne Orte zu verschieben
+    (Abschnitt 5 des Entwurfs). `create_combined_suitability` nimmt deshalb
+    ein optionales `reachability_map` entgegen statt es selbst zu berechnen -
+    der Aufrufer entscheidet, ob gerade die erste oder die nachkorrigierte
+    Runde laeuft.
+
+    VOLLSTAENDIG VEKTORISIERT (2026-08-10). Die Vorlage hatte fuer Slope und
+    Hoehe je eine Python-Doppelschleife ueber jeden Pixel einzeln - bei 512 px
+    ueber eine Viertelmillion Iterationen fuer zwei Faktoren, die sich beide
+    als einfache Feldformel schreiben lassen.
     """
 
     def __init__(self, terrain_factor_villages=1.0, map_size=64):
-        """
-        Funktionsweise: Initialisiert Suitability-Analyzer mit Terrain-Gewichtungsfaktor und LOD
-        Aufgabe: Setup der Terrain-Analyse-Parameter mit LOD-Anpassung
-        Parameter: terrain_factor_villages (float), map_size (int) - Gewichtung und tatsächliche Pixel-Größe
-        """
         self.terrain_factor = terrain_factor_villages
         self.map_size = map_size
 
-        # Größenabhängige Optimierungen (map_size ist die tatsächliche Pixel-Auflösung
-        # der übergebenen Arrays, nicht das alte string-basierte LOD-Label)
+        # Groessenabhaengige maximale Wasser-Suchdistanz (Pixel) - map_size ist
+        # die tatsaechliche Pixel-Aufloesung der uebergebenen Arrays.
         if map_size <= 64:
-            self.analysis_detail, self.max_distance_check = 0.5, 20
+            self.max_distance_check = 20
         elif map_size <= 128:
-            self.analysis_detail, self.max_distance_check = 0.7, 30
+            self.max_distance_check = 30
         elif map_size <= 256:
-            self.analysis_detail, self.max_distance_check = 1.0, 40
+            self.max_distance_check = 40
         else:
-            self.analysis_detail, self.max_distance_check = 1.0, 50
+            self.max_distance_check = 50
+
+        # Radius des "Umkreis" fuer den Ackerland-Faktor, in Pixeln - grob eine
+        # Tagesreise zu Fuss um die Felder, skaliert mit der Aufloesung wie die
+        # Wasser-Suchdistanz.
+        self.farmland_radius_px = max(3, int(round(self.max_distance_check * 0.6)))
 
     def analyze_slope_suitability(self, slopemap, progress_callback=None):
-        """
-        Funktionsweise: Bewertet Terrain-Eignung basierend auf Slope-Steilheit mit Progress-Updates
-        Aufgabe: Erstellt Slope-Suitability-Map für Settlement-Platzierung
-        Parameter: slopemap (numpy.ndarray), progress_callback - Slope-Daten und Progress-Callback
-        Returns: numpy.ndarray - Slope-Suitability zwischen 0 (ungeeignet) und 1 (ideal)
-        """
+        """Ebener Grund: 1.0 unter 0.1 Steigung, linear auf 0 bei 1.0."""
         if progress_callback:
             progress_callback("Terrain Analysis", 5, "Analyzing slope suitability...")
 
-        height, width = slopemap.shape[:2]
-        slope_suitability = np.zeros((height, width), dtype=np.float32)
+        dz_dx = slopemap[:, :, 0].astype(np.float64)
+        dz_dy = slopemap[:, :, 1].astype(np.float64)
+        hang = np.hypot(dz_dx, dz_dy)
 
-        # LOD-abhängige Detailgrad
-        detail_level = self.analysis_detail
+        eignung = np.select(
+            [hang < 0.1, hang < 0.5, hang < 1.0],
+            [np.ones_like(hang),
+             1.0 - (hang - 0.1) / 0.4 * 0.5,
+             0.5 - (hang - 0.5) / 0.5 * 0.5],
+            default=0.0)
+        return np.clip(eignung, 0.0, 1.0).astype(np.float32)
 
-        for y in range(height):
-            for x in range(width):
-                # Slope-Magnitude berechnen
-                dz_dx = slopemap[y, x, 0]
-                dz_dy = slopemap[y, x, 1]
-                slope_magnitude = np.sqrt(dz_dx ** 2 + dz_dy ** 2)
-
-                # Optimal: flache Bereiche (slope < 0.1)
-                # Akzeptabel: leichte Steigung (slope < 0.5)
-                # Ungeeignet: steile Hänge (slope > 1.0)
-                if slope_magnitude < 0.1:
-                    slope_suitability[y, x] = 1.0
-                elif slope_magnitude < 0.5:
-                    slope_suitability[y, x] = 1.0 - (slope_magnitude - 0.1) / 0.4 * 0.5
-                elif slope_magnitude < 1.0:
-                    slope_suitability[y, x] = 0.5 - (slope_magnitude - 0.5) / 0.5 * 0.5
-                else:
-                    slope_suitability[y, x] = 0.0
-
-                # LOD-Anpassung: Weniger Detail bei niedrigen LODs
-                if detail_level < 1.0:
-                    slope_suitability[y, x] = np.round(slope_suitability[y, x] / detail_level) * detail_level
-
-        return slope_suitability
-
-    def calculate_water_proximity(self, water_map, progress_callback=None):
+    def calculate_water_proximity(self, water_map, heightmap=None, progress_callback=None):
         """
-        Funktionsweise: Berechnet Eignung basierend auf Nähe zu Wasserquellen mit LOD-Optimierung
-        Aufgabe: Erstellt Water-Proximity-Suitability für Settlement-Platzierung
-        Parameter: water_map (numpy.ndarray), progress_callback - Wasser-Daten und Progress-Callback
-        Returns: numpy.ndarray - Water-Proximity-Suitability
+        Wasser am Ort: je Wassertyp eine eigene Distanzkarte, das Maximum aus
+        Typgewicht x Naehe-Abklingen gewinnt. Ein Dorf direkt an einem
+        Grossfluss zaehlt damit hoeher als eines gleich nah an einem Bach -
+        das war der Vorlage nicht bekannt, die jedes `water_map > 0`-Pixel
+        gleich behandelte.
         """
         if progress_callback:
             progress_callback("Terrain Analysis", 10, "Calculating water proximity...")
 
         height, width = water_map.shape
+        bestwert = np.zeros((height, width), dtype=np.float64)
 
-        # Vektorisiert statt O(H*W*Wasserpixel) Python-Doppelschleife (jeder Pixel
-        # berechnete zuvor seine Distanz zu JEDEM Wasser-Pixel einzeln neu) -
-        # distance_transform_edt() liefert dieselbe "Distanz zum naechsten
-        # True-Pixel" exakt, nur in O(H*W). War die Hauptursache fuer sehr lange
-        # bzw. haengende Settlement-Generierung bei groesseren/wasserreichen
-        # Karten (siehe docs/backlog.md Ticket #4 Performance-Hinweis).
-        water_mask = water_map > 0
-        if not np.any(water_mask):
-            return np.zeros((height, width), dtype=np.float32)
+        def abklingen(distanz):
+            # Gleiche Kurve wie die Vorlage: 0 direkt am Wasser (kein
+            # Ueberschwemmungsrisiko), Optimum 2-10 Pixel, Ausklingen bis 30.
+            w = np.zeros_like(distanz)
+            nah = distanz < 2
+            w[nah] = distanz[nah] / 2.0
+            w[(distanz >= 2) & (distanz <= 10)] = 1.0
+            gut = (distanz > 10) & (distanz <= 20)
+            w[gut] = 1.0 - (distanz[gut] - 10) / 10 * 0.5
+            ok = (distanz > 20) & (distanz <= self.max_distance_check)
+            w[ok] = np.maximum(0.0, 0.5 - (distanz[ok] - 20) / 10 * 0.5)
+            return w
 
-        min_distance = distance_transform_edt(~water_mask)
+        for typ, gewicht in WASSERTYP_GEWICHT.items():
+            maske = water_map == typ
+            if not np.any(maske):
+                continue
+            distanz = distance_transform_edt(~maske)
+            bestwert = np.maximum(bestwert, gewicht * abklingen(distanz))
 
-        # LOD-abhängige Maximal-Distanz: alles darueber bleibt 0.0 (wie vorher)
-        min_distance = np.where(min_distance > self.max_distance_check, np.inf, min_distance)
+        if heightmap is not None:
+            kueste = heightmap <= 0.0
+            if np.any(kueste) and not np.all(kueste):
+                distanz = distance_transform_edt(~kueste)
+                bestwert = np.maximum(bestwert, KUeSTE_GEWICHT * abklingen(distanz))
 
-        # Optimal: 2-10 Pixel Entfernung
-        # Akzeptabel: bis 20 Pixel
-        # Ungeeignet: > 30 Pixel oder direkt auf Wasser
-        water_suitability = np.zeros((height, width), dtype=np.float32)
-        near_mask = min_distance < 2
-        water_suitability[near_mask] = (min_distance[near_mask] / 2.0).astype(np.float32)  # zu nah (inkl. direkt auf Wasser = 0)
-        optimal_mask = (min_distance >= 2) & (min_distance <= 10)
-        water_suitability[optimal_mask] = 1.0  # Optimal
-        good_mask = (min_distance > 10) & (min_distance <= 20)
-        if np.any(good_mask):
-            water_suitability[good_mask] = 1.0 - (min_distance[good_mask] - 10) / 10 * 0.5
-        ok_mask = (min_distance > 20) & (min_distance <= 30)
-        if np.any(ok_mask):
-            water_suitability[ok_mask] = 0.5 - (min_distance[ok_mask] - 20) / 10 * 0.5
-        # > 30 (oder > max_distance_check, oben auf inf gesetzt) bleibt 0.0
-
-        return water_suitability
+        return np.clip(bestwert, 0.0, 1.0).astype(np.float32)
 
     def evaluate_elevation_fitness(self, heightmap, progress_callback=None):
         """
-        Funktionsweise: Bewertet Terrain-Eignung basierend auf Höhenlage
-        Aufgabe: Erstellt Elevation-Suitability für Settlement-Platzierung
-        Parameter: heightmap (numpy.ndarray), progress_callback - Höhendaten und Progress-Callback
-        Returns: numpy.ndarray - Elevation-Suitability
+        Hoehenlage, DAEMPFEND statt einer Wohlfuehlzone in der Mitte der
+        Hoehenspanne - die Vorlage bevorzugte 20-60% der lokalen Hoehenspanne
+        UNABHAENGIG von der absoluten Hoehe; auf einer flachen Karte war damit
+        auch der hoechste Punkt "optimal". Jetzt eine feste, physikalisch
+        gemeinte Kurve: je hoeher ueber dem Meer, desto kuerzer die
+        Wachstumszeit, desto weniger Ertrag (docs/SIEDLUNGEN_ENTWURF.md §2).
         """
         if progress_callback:
             progress_callback("Terrain Analysis", 15, "Evaluating elevation fitness...")
 
-        height, width = heightmap.shape
-        elevation_suitability = np.zeros((height, width), dtype=np.float32)
+        ueber_null = np.maximum(heightmap.astype(np.float64), 0.0)
+        return (1.0 / (1.0 + (ueber_null / ELEVATION_DAEMPFUNG_M) ** 2)).astype(np.float32)
 
-        # Höhen-Statistiken
-        min_height = np.min(heightmap)
-        max_height = np.max(heightmap)
-        height_range = max_height - min_height
-
-        if height_range == 0:
-            elevation_suitability.fill(1.0)
-            return elevation_suitability
-
-        for y in range(height):
-            for x in range(width):
-                # Normalisierte Höhe [0, 1]
-                norm_height = (heightmap[y, x] - min_height) / height_range
-
-                # Optimal: 20-60% der Höhenrange (Täler und niedrige Hügel)
-                # Akzeptabel: bis 80%
-                # Ungeeignet: > 80% (hohe Berge) oder < 10% (Sümpfe/Seen)
-                if norm_height < 0.1:
-                    elevation_suitability[y, x] = norm_height / 0.1 * 0.3
-                elif norm_height <= 0.2:
-                    elevation_suitability[y, x] = 0.3 + (norm_height - 0.1) / 0.1 * 0.4
-                elif norm_height <= 0.6:
-                    elevation_suitability[y, x] = 1.0  # Optimal
-                elif norm_height <= 0.8:
-                    elevation_suitability[y, x] = 1.0 - (norm_height - 0.6) / 0.2 * 0.5
-                else:
-                    elevation_suitability[y, x] = 0.5 - (norm_height - 0.8) / 0.2 * 0.5
-
-        return elevation_suitability
-
-    def create_combined_suitability(self, heightmap, slopemap, water_map, progress_callback=None):
+    def evaluate_farmland_radius(self, flat_suit, elevation_suit, land_mask, progress_callback=None):
         """
-        Funktionsweise: Kombiniert alle Suitability-Faktoren zu finaler Suitability-Map
-        Aufgabe: Erstellt finale Settlement-Suitability durch gewichtete Kombination
-        Parameter: heightmap, slopemap, water_map, progress_callback - Alle Terrain-Daten und Progress
-        Returns: numpy.ndarray - Kombinierte Suitability-Map
+        Ackerland im Umkreis: Anteil an flacher, tiefer Flaeche im Radius um
+        jeden Punkt - bestimmt, WIEVIELE Menschen der Ort ernaehren kann,
+        waehrend Wasser die LAGE traegt (docs/SIEDLUNGEN_ENTWURF.md §2).
+
+        Ein Boxfilter statt eines echten Kreises: bei den hier ueblichen
+        Radien (wenige Pixel) ist der Unterschied zur Kreisscheibe gering,
+        `uniform_filter` ist separierbar und braucht O(1) je Pixel statt
+        O(Radius^2).
         """
-        slope_suit = self.analyze_slope_suitability(slopemap, progress_callback)
-        water_suit = self.calculate_water_proximity(water_map, progress_callback)
-        elevation_suit = self.evaluate_elevation_fitness(heightmap, progress_callback)
+        if progress_callback:
+            progress_callback("Terrain Analysis", 12, "Evaluating farmland radius...")
 
-        # Gewichtete Kombination
-        weights = {
-            'slope': 0.4 * self.terrain_factor,
-            'water': 0.35,
-            'elevation': 0.25 * self.terrain_factor
-        }
+        from scipy.ndimage import uniform_filter
 
-        combined_suitability = (
-                slope_suit * weights['slope'] +
-                water_suit * weights['water'] +
-                elevation_suit * weights['elevation']
-        )
+        ackerland = (flat_suit >= 0.6) & (elevation_suit >= 0.4) & land_mask
+        anteil = uniform_filter(ackerland.astype(np.float64),
+                                size=2 * self.farmland_radius_px + 1, mode="nearest")
+        return anteil.astype(np.float32)
 
-        # Normalisierung auf [0, 1]
-        max_possible = sum(weights.values())
-        if max_possible > 0:
-            combined_suitability /= max_possible
+    def create_combined_suitability(self, heightmap, slopemap, water_map,
+                                    reachability_map=None, progress_callback=None):
+        """
+        Fuenf Faktoren zur Standortguete. Wasser/Ebene/Ackerland gehen additiv
+        gewichtet ein (Wasser am staerksten, die Begruendung siehe
+        WASSERTYP_GEWICHT), Hoehe und Erreichbarkeit wirken DAEMPFEND -
+        multiplikativ auf das Ergebnis, nicht als weiterer additiver Term -
+        weil sie im Entwurf ausdruecklich als daempfende Faktoren beschrieben
+        sind, nicht als weitere Qualitaeten, die sich aufaddieren.
+        """
+        land_mask = heightmap > 0.0
+        wasser_suit = self.calculate_water_proximity(water_map, heightmap, progress_callback)
+        flach_suit = self.analyze_slope_suitability(slopemap, progress_callback)
+        hoehe_suit = self.evaluate_elevation_fitness(heightmap, progress_callback)
+        acker_suit = self.evaluate_farmland_radius(flach_suit, hoehe_suit, land_mask,
+                                                   progress_callback)
 
-        return combined_suitability
+        gewichte = {'wasser': 0.45, 'flach': 0.30 * self.terrain_factor,
+                   'acker': 0.25 * self.terrain_factor}
+        summe_gewichte = sum(gewichte.values()) or 1.0
+        lage_guete = (wasser_suit * gewichte['wasser']
+                     + flach_suit * gewichte['flach']
+                     + acker_suit * gewichte['acker']) / summe_gewichte
+
+        daempfung = hoehe_suit
+        if reachability_map is not None:
+            daempfung = daempfung * np.clip(reachability_map, 0.0, 1.0)
+
+        combined = np.where(land_mask, lage_guete * daempfung, 0.0)
+        return combined.astype(np.float32)
 
 
 def _voronoi_edge_distance_map(cell_map):
@@ -559,68 +744,301 @@ def _voronoi_edge_distance_map(cell_map):
     return distance_transform_edt(~edge_mask).astype(np.float32)
 
 
+# Wasserkosten-Stufen fuer das Kostenfeld, docs/SIEDLUNGEN_ENTWURF.md §4.1.
+# Furt/kurze Bruecke bis zur Muendungstiefe-Groessenordnung bleibt machbar,
+# aber teuer; tieferes Wasser ist fuer LANDwege gesperrt (Seewege siehe
+# calculate_road_network()).
+WASSERKOSTEN_FLACH = 8.0     # 0 bis -5 m
+WASSERKOSTEN_TIEF = 25.0     # -5 bis -10 m
+WASSER_SPERRE_M = -10.0      # tiefer: gesperrt
+WEGERABATT = 0.4             # auf einem bereits gebauten Weg
+
+
+def bau_kostenfeld(heightmap, slopemap, slope_distance_ratio, weg_maske=None):
+    """
+    Das Kostenfeld EINMAL bauen, docs/SIEDLUNGEN_ENTWURF.md §4.1 ("Kostenfeld
+    zuerst") - nicht wie in der Vorlage je A*-Schritt neu aus slopemap
+    ausrechnen (`calculate_movement_cost` tat das bei jedem einzelnen
+    Nachbarn). Ebener Grund kostet 1.0, Hangkosten wachsen mit dem QUADRAT der
+    Neigung ("ein doppelt so steiler Hang kostet deutlich mehr als das
+    Doppelte - genau deshalb suchen sich Wege Saettel"), Wasser in drei Stufen,
+    ein bereits vorhandener Weg kostet nur WEGERABATT so viel wie sonst -
+    "der wichtigste Trick": Wege buendeln sich zu Hauptstrecken, statt
+    parallel zu laufen.
+
+    Rueckgabe: (H,W) float64, np.inf wo gesperrt (Wasser tiefer als
+    WASSER_SPERRE_M).
+    """
+    dz_dx = slopemap[:, :, 0].astype(np.float64)
+    dz_dy = slopemap[:, :, 1].astype(np.float64)
+    hang = np.hypot(dz_dx, dz_dy)
+    kosten = 1.0 + slope_distance_ratio * hang ** 2
+
+    if heightmap is not None:
+        h = heightmap.astype(np.float64)
+        flach = (h <= 0.0) & (h > -5.0)
+        tief = (h <= -5.0) & (h > WASSER_SPERRE_M)
+        gesperrt = h <= WASSER_SPERRE_M
+        kosten = np.where(flach, WASSERKOSTEN_FLACH, kosten)
+        kosten = np.where(tief, WASSERKOSTEN_TIEF, kosten)
+        kosten = np.where(gesperrt, np.inf, kosten)
+
+    if weg_maske is not None and np.any(weg_maske):
+        kosten = np.where(weg_maske, kosten * WEGERABATT, kosten)
+
+    return kosten
+
+
+# Seeweg-Kostenfeld, docs/SIEDLUNGEN_ENTWURF.md §4.4 - das SPIEGELBILD des
+# Landkostenfelds: Land ist gesperrt, Flachwasser teuer (an der Kueste
+# entlangtasten soll sich nicht lohnen), richtiges tiefes Wasser billig.
+SEEWEG_KOSTEN_FLACH = 3.0     # 0 bis SEEWEG_TIEFE_ZIEL_M
+SEEWEG_TIEFE_ZIEL_M = -10.0   # ab hier "echtes" tiefes Wasser
+
+
+def bau_seekostenfeld(heightmap, seegrad=None):
+    """
+    Kostenfeld fuer Seewege - Land gesperrt, Flachwasser teuer, tiefes Wasser
+    billig. Keine Hangkosten (der Meeresboden ist fuer die Route irrelevant).
+
+    Mit `seegrad` (docs/OFFENE_PUNKTE.md 3.3, "Seegrad als Grundlage fuer
+    Seewege - 'ab Grad 1' statt 'ab 10 m Tiefe'") zaehlt die See-VORONOI-
+    GLIEDERUNG statt der reinen Hoehe: Grad 0 (Kuestenzelle) teuer,
+    ab Grad 1 billig. OHNE seegrad (alter Nicht-Weltkarten-Pfad) bleibt die
+    Hoehenschwelle SEEWEG_TIEFE_ZIEL_M erhalten.
+    """
+    h = heightmap.astype(np.float64)
+    if seegrad is not None:
+        tief = seegrad >= 1
+    else:
+        tief = h <= SEEWEG_TIEFE_ZIEL_M
+    kosten = np.where(h > 0.0, np.inf, np.where(tief, 1.0, SEEWEG_KOSTEN_FLACH))
+    return kosten
+
+
+def _naechster_kuestenpunkt(x, y, heightmap):
+    """
+    Naechstes Wasserpixel zu (x,y) - der tatsaechliche Ausgangspunkt eines
+    Seewegs.
+
+    WARUM NOTWENDIG. "Land ist gesperrt" (§4.4) gilt fuer den Seeweg-Kosten-
+    feld woertlich - bau_seekostenfeld() setzt jedes Landpixel auf np.inf.
+    Eine Siedlung steht aber so gut wie nie GENAU auf der Wasserlinie,
+    sondern ein paar Pixel landeinwaerts. Ohne dieses Snapping haette A* am
+    Ausgangspunkt selbst schon nur unendlich teure Nachbarn und faende NIE
+    einen Weg, egal wie nah das Meer liegt - gemessen: zwei Hafenstaedte
+    beiderseits eines 10 Pixel breiten, tiefen Kanals bekamen 0 Seewege statt
+    des erwarteten einen.
+
+    Die eigentliche Route laeuft weiterhin STRIKT durchs Wasser (§4.4 bleibt
+    woertlich gueltig); nur die kurze Verbindung Siedlung->Kueste wird separat
+    als gerade Strecke angehaengt, nicht durch das Seeweg-A* selbst gesucht.
+    """
+    height, width = heightmap.shape
+    yi = int(np.clip(round(y), 0, height - 1))
+    xi = int(np.clip(round(x), 0, width - 1))
+    if heightmap[yi, xi] <= 0.0:
+        return x, y
+    wasser = heightmap <= 0.0
+    if not np.any(wasser):
+        return None
+    _abstand, index = distance_transform_edt(~wasser, return_indices=True)
+    return float(index[1][yi, xi]), float(index[0][yi, xi])
+
+
+def _seeweg_anteil_tief(pfad, heightmap, seegrad=None):
+    """Anteil der Pfadpunkte in echtem tiefen Wasser - die Auflage aus §4.4:
+    'der Weg muss den groessten Teil seiner Laenge in Wasser ab 10 m Tiefe
+    liegen. Ein Seeweg, der sich an der Kueste entlangtastet, waere kein
+    Seeweg, sondern ein schlechter Landweg.'
+
+    Mit `seegrad` gilt statt der Hoehenschwelle "ab Grad 1" (docs/OFFENE_PUNKTE.md
+    3.3) - dieselbe Umstellung wie in `bau_seekostenfeld()`."""
+    if not pfad:
+        return 0.0
+    height, width = heightmap.shape
+    tief = 0
+    for x, y in pfad:
+        xi = int(np.clip(round(x), 0, width - 1))
+        yi = int(np.clip(round(y), 0, height - 1))
+        if seegrad is not None:
+            if seegrad[yi, xi] >= 1:
+                tief += 1
+        elif heightmap[yi, xi] <= SEEWEG_TIEFE_ZIEL_M:
+            tief += 1
+    return tief / len(pfad)
+
+
+# Rang als Zahl fuer die Bereitschaftsformel (docs/SIEDLUNGEN_ENTWURF.md §4.3):
+# Bereitschaft = Rang(A) * Rang(B) * (gleiche Kultur ? 1.0 : 0.45). Zwei
+# Staedte (3*3=9) verbinden sich damit praktisch immer, zwei Doerfer
+# verschiedener Kultur (1*1*0.45=0.45) fast nie.
+RANG_ZAHL = {"dorf": 1, "siedlung": 2, "stadt": 3}
+BEREITSCHAFT_FREMDKULTUR = 0.45
+
+
+def _gabriel_kandidaten(punkte):
+    """
+    Gabriel-Graph ueber `punkte` (N,2): Kandidatenpaare fuer das Wegenetz,
+    docs/SIEDLUNGEN_ENTWURF.md §4.2. Zwei Punkte A,B sind Kandidaten, wenn im
+    Kreis mit Durchmesser AB kein dritter Punkt liegt - ergibt ein sparse,
+    zusammenhaengendes Netz mit typisch 2-3 Nachbarn je Ort statt eines Sterns
+    oder einer Vollverknuepfung.
+
+    O(n^3), das ist bei Siedlungszahlen im niedrigen Zehnerbereich (2-5 je
+    Kultur, bis zu neun Kulturen) unproblematisch - eine Beschleunigung waere
+    hier vorzeitige Optimierung.
+
+    Rueckgabe: Liste von (i, j)-Indexpaaren, i<j.
+    """
+    n = len(punkte)
+    kandidaten = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            mitte = (punkte[i] + punkte[j]) / 2.0
+            radius2 = float(np.sum((punkte[i] - punkte[j]) ** 2)) / 4.0
+            frei = True
+            for k in range(n):
+                if k == i or k == j:
+                    continue
+                if float(np.sum((punkte[k] - mitte) ** 2)) < radius2:
+                    frei = False
+                    break
+            if frei:
+                kandidaten.append((i, j))
+    return kandidaten
+
+
+def kreuzungen_finden(roads, sea_roads, settlements, shape, mindestabstand_siedlung=None):
+    """
+    Kreuzungen NACH dem Routing, docs/SIEDLUNGEN_ENTWURF.md §4.5: "alle
+    Wegepixel, an denen sich zwei Strecken treffen und die NICHT auf einem
+    Ort liegen". Sie entstehen von selbst durch den Wegerabatt aus §4.1 -
+    dort, wo zwei Strecken ein Stueck gemeinsam gehen und sich wieder trennen.
+
+    Rein geometrisch: jeder Weg (Land wie See) rasterisiert mit seiner
+    eigenen ID, ein Pixel zaehlt als Kreuzung, wenn es von mehr als einer
+    ID beruehrt wird. Naheliegende Kreuzungspixel werden zu EINER Kreuzung
+    zusammengefasst (`scipy.ndimage.label` auf der Kreuzungsmaske) - sonst
+    meldete ein einziges reales Treffen, wo zwei Strecken ein paar Pixel
+    breit gemeinsam laufen, mehrere "Kreuzungen" dicht nebeneinander.
+
+    Rueckgabe: Liste von (x, y)-Punkten.
+    """
+    from scipy import ndimage
+
+    height, width = shape
+    id_karte = np.full((height, width), -1, dtype=np.int32)
+    beruehrt_mehrfach = np.zeros((height, width), dtype=bool)
+
+    alle_wege = list(roads) + list(sea_roads)
+    for weg_id, weg in enumerate(alle_wege):
+        for x, y in weg:
+            xi = int(np.clip(round(x), 0, width - 1))
+            yi = int(np.clip(round(y), 0, height - 1))
+            bisherige = id_karte[yi, xi]
+            if bisherige == -1:
+                id_karte[yi, xi] = weg_id
+            elif bisherige != weg_id:
+                beruehrt_mehrfach[yi, xi] = True
+
+    if not np.any(beruehrt_mehrfach):
+        return []
+
+    # Auf einem Ort liegende Treffer sind keine Kreuzung, sondern der Ort
+    # selbst (jeder Weg endet ja an einer Siedlung - dort treffen sich
+    # zwangslaeufig alle an diesem Ort ankommenden Strecken).
+    if mindestabstand_siedlung is None:
+        mindestabstand_siedlung = max(2.0, min(height, width) / 64.0)
+    for s in settlements:
+        if s.location_type != 'settlement':
+            continue
+        y0 = max(0, int(s.y - mindestabstand_siedlung))
+        y1 = min(height, int(s.y + mindestabstand_siedlung) + 1)
+        x0 = max(0, int(s.x - mindestabstand_siedlung))
+        x1 = min(width, int(s.x + mindestabstand_siedlung) + 1)
+        beruehrt_mehrfach[y0:y1, x0:x1] = False
+
+    beschriftet, anzahl = ndimage.label(beruehrt_mehrfach)
+    kreuzungen = []
+    for i in range(1, anzahl + 1):
+        ys, xs = np.nonzero(beschriftet == i)
+        kreuzungen.append((float(xs.mean()), float(ys.mean())))
+    return kreuzungen
+
+
 class PathfindingSystem:
     """
-    Funktionsweise: Findet Wege geringsten Widerstands zwischen Settlements für Straßen
-    Aufgabe: Erstellt realistische Straßenverbindungen mit Spline-Interpolation und LOD-Optimierung
+    A*-Wegesuche auf einem VORBERECHNETEN Kostenfeld (siehe bau_kostenfeld()).
+    Erstellt realistische Straßenverbindungen mit Spline-Interpolation und
+    LOD-Optimierung.
     """
 
-    def __init__(self, road_slope_to_distance_ratio=1.0, map_size=64,
+    def __init__(self, cost_field, map_size=64,
                  edge_distance_map=None, edge_bias=0.0, edge_bias_scale=16.0):
         """
-        Funktionsweise: Initialisiert Pathfinding-System mit Slope-Distance-Gewichtung und LOD
-        Aufgabe: Setup der Pathfinding-Parameter mit LOD-Anpassung
-        Parameter: road_slope_to_distance_ratio (float), map_size (int) - Gewichtung und tatsächliche Pixel-Größe
-        Parameter: edge_distance_map - optionale (H,W)-Distanz zur naechsten Voronoi-
-            Zellgrenze (siehe _voronoi_edge_distance_map()); None = kein Edge-Bias
-            (Legacy-Verhalten, reine Slope-Kosten).
+        Parameter: cost_field - (H,W) float, aus bau_kostenfeld(); np.inf =
+            gesperrt.
+        Parameter: map_size (int) - tatsaechliche Pixel-Groesse, fuer die
+            LOD-Suchbudgets.
+        Parameter: edge_distance_map - optionale (H,W)-Distanz zur naechsten
+            Voronoi-Zellgrenze (siehe _voronoi_edge_distance_map()); None =
+            kein Edge-Bias.
         Parameter: edge_bias - Staerke der Bevorzugung von Zellgrenzen (0 = aus)
-        Parameter: edge_bias_scale - charakteristische Distanz (Pixel), ueber die
-            der Edge-Bias von "billig direkt auf der Grenze" zu "voller Straf-
-            aufschlag weit von jeder Grenze" saettigt (typischerweise die
-            Voronoi-Seed-Spacing-Groessenordnung).
+        Parameter: edge_bias_scale - charakteristische Distanz (Pixel), ueber
+            die der Edge-Bias von "billig direkt auf der Grenze" zu "voller
+            Strafaufschlag weit von jeder Grenze" saettigt.
         """
-        self.slope_distance_ratio = road_slope_to_distance_ratio
+        self.cost_field = cost_field
         self.map_size = map_size
         self.edge_distance_map = edge_distance_map
         self.edge_bias = edge_bias
         self.edge_bias_scale = max(1e-3, edge_bias_scale)
 
-        # Größenabhängige Pathfinding-Optimierungen
+        # Größenabhängige Pathfinding-Optimierungen.
+        #
+        # SUCHBUDGET DEUTLICH ANGEHOBEN (2026-08-10, Nutzer-Vorgabe: Strassen
+        # sollen "moeglichst realistisch durch die taeler meandern"). Die
+        # alten Budgets (500/1000/2000/5000) stammen aus der Zeit vor dem
+        # Kostenfeld-Umbau (§4.1) - ein rein linearer Hangkosten-Aufschlag
+        # liess A* fast immer zuegig zum Ziel finden. Das neue Kostenfeld ist
+        # streckenweise sehr viel schaerfer (Hangkosten QUADRATISCH, Wasser
+        # bis 25x, ganze Bereiche unendlich teuer): ein Weg, der einem Grat
+        # wirklich ausweichen muss, braucht dafuer einen laengeren,
+        # unoffensichtlichen Umweg - und genau den findet A* nur, wenn ihm
+        # das Budget nicht vorher ausgeht.
+        #
+        # Gemessen an einem synthetischen Grat mit einem einzigen Pass (siehe
+        # tests/smoke_test_settlement_roads.py, Abschnitt "Taeler"): bei den
+        # ALTEN Budgets brach die Suche IMMER ab und lieferte den nutzlosen
+        # Geradlinien-Fallback (siehe find_least_resistance_path()-Docstring)
+        # - selbst dort, wo ein guter Weg klar existierte. Notwendiges Budget
+        # wuchs dabei ungefaehr mit dem QUADRAT der Kantenlaenge:
+        #   100 px -> 10000 noetig, 256 px -> 51200 noetig, 512 px -> 200000 noetig
+        # (grob size*size, mit Sicherheitsmarge hier auf 1.3*size*size gesetzt).
+        # Bei 512 px kostete ein einzelner derart schwieriger Kandidat rund
+        # 3 s - vertretbar, weil das nur EINMAL am finalen LOD laeuft und die
+        # meisten Kandidaten (kein derart erzwungener Umweg noetig) weit
+        # darunter bleiben. Nach oben gedeckelt, damit ein pathologischer Fall
+        # nicht unbegrenzt Zeit kostet.
         if map_size <= 64:
-            self.max_search_nodes, self.path_resolution = 500, 2
-        elif map_size <= 128:
-            self.max_search_nodes, self.path_resolution = 1000, 1
-        elif map_size <= 256:
-            self.max_search_nodes, self.path_resolution = 2000, 1
+            self.max_search_nodes, self.path_resolution = 4000, 2
         else:
-            self.max_search_nodes, self.path_resolution = 5000, 1
+            self.max_search_nodes = min(600_000, int(1.3 * map_size * map_size))
+            self.path_resolution = 1
 
-    def calculate_movement_cost(self, slopemap, x, y):
-        """
-        Funktionsweise: Berechnet Bewegungskosten für einzelnen Punkt basierend auf Slope
-        Aufgabe: Kostenfunktion für A*-Pathfinding
-        Parameter: slopemap, x, y - Slope-Daten und Koordinaten
-        Returns: float - Bewegungskosten für diesen Punkt
-        """
-        height, width = slopemap.shape[:2]
+    def calculate_movement_cost(self, x, y):
+        """Bewegungskosten fuer einen Punkt - liest aus dem Kostenfeld, rechnet nichts neu."""
+        height, width = self.cost_field.shape[:2]
 
         if x < 0 or x >= width or y < 0 or y >= height:
             return float('inf')
 
-        # Slope-Magnitude berechnen
-        dz_dx = slopemap[y, x, 0]
-        dz_dy = slopemap[y, x, 1]
-        slope_magnitude = np.sqrt(dz_dx ** 2 + dz_dy ** 2)
-
-        # Basis-Kosten: 1.0 + Slope-Penalty
-        base_cost = 1.0
-        slope_penalty = slope_magnitude * self.slope_distance_ratio
-        cost = base_cost + slope_penalty
+        cost = float(self.cost_field[y, x])
 
         # Edge-Bias: guenstiger nahe einer Voronoi-Zellgrenze, saettigt Richtung
         # (1 + edge_bias) je weiter man sich von jeder Grenze entfernt.
-        if self.edge_distance_map is not None and self.edge_bias > 0:
+        if self.edge_distance_map is not None and self.edge_bias > 0 and np.isfinite(cost):
             distance_to_edge = self.edge_distance_map[y, x]
             if np.isfinite(distance_to_edge):
                 cost *= 1.0 + self.edge_bias * (
@@ -628,43 +1046,74 @@ class PathfindingSystem:
 
         return cost
 
-    def find_least_resistance_path(self, slopemap, start_pos, end_pos, progress_callback=None):
+    def _a_stern(self, start_x, start_y, end_x, end_y, max_nodes):
         """
-        Funktionsweise: A*-Pathfinding für Weg geringsten Widerstands zwischen zwei Punkten mit LOD-Optimierung
-        Aufgabe: Findet optimalen Straßenverlauf zwischen Settlements
-        Parameter: slopemap, start_pos, end_pos, progress_callback - Slope-Daten, Positionen und Progress
-        Returns: List[Tuple] - Wegpunkte vom Start zum Ziel
-        """
-        height, width = slopemap.shape[:2]
-        start_x, start_y = int(start_pos[0]), int(start_pos[1])
-        end_x, end_y = int(end_pos[0]), int(end_pos[1])
+        Der reine A*-Suchlauf mit festem Knotenbudget. Gibt den Pfad zurueck,
+        wenn er das Ziel innerhalb von `max_nodes` erreicht, sonst None.
 
-        # LOD-Einstellungen
-        max_nodes = self.max_search_nodes
+        OPTIMALITAET HAENGT NICHT AM BUDGET. A* mit einer zulaessigen
+        Heuristik expandiert Knoten in Reihenfolge ihrer wahren optimalen
+        Kosten - sobald das Ziel EXPANDIERT (nicht nur erreicht) wird, ist der
+        gefundene Pfad der optimale, unabhaengig davon, wie gross `max_nodes`
+        war. Ein kleineres Budget kann also nur FRUEHER aufgeben, nie einen
+        schlechteren-aber-erfolgreichen Pfad liefern - das macht die
+        Zwei-Stufen-Eskalation in find_least_resistance_path() sicher.
+
+        VEKTORISIERUNG WAR HIER KEINE OPTION (A* ist von Natur aus
+        sequenziell - jeder Schritt haengt vom vorigen ab), also wurden zwei
+        klassische Python-A*-Kosten stattdessen direkt angegriffen (gemessen
+        an einer echten 512-px-Welt mit 41 Siedlungen, cProfile):
+
+        1. GESCHLOSSENE MENGE. Die Vorlage kannte keine - ein Zellenupdate,
+           das eine bereits im `open_set` liegende, aber noch nicht
+           expandierte Zelle erneut mit besserem g_score einfuegte,
+           HINTERLIESS den alten (schlechteren) Heap-Eintrag einfach liegen
+           ("lazy deletion" ohne die dazugehoerige Pruefung). Jeder so ver-
+           waiste Eintrag wurde beim Poppen trotzdem als "neuer" Knoten voll
+           expandiert. Jetzt: `closed` haelt bereits final expandierte Zellen
+           fest, ein Popup mit veraltetem f_score wird sofort uebersprungen.
+        2. METHODENAUFRUFE IM HEISSESTEN INNENPFAD. `calculate_movement_cost()`
+           lief 10.48 MILLIONEN mal (6.4 s reine Aufrufzeit), `_heuristic()`
+           1.39 Millionen mal (3.4 s) - beides fuer eine einzelne simple
+           Feldabfrage bzw. eine Wurzel. Direkt inline gerechnet mit lokalen
+           Variablen statt `self.`-Attributzugriffen je Aufruf.
+        """
+        height, width = self.cost_field.shape[:2]
+        cost_field = self.cost_field
         path_resolution = self.path_resolution
+        # Edge-Bias nur einbeziehen, wenn er ueberhaupt aktiv ist (bei den
+        # Aufrufen aus calculate_road_network() immer aus) - sonst waere die
+        # Inline-Fassung fuer den haeufigsten Fall unnoetig komplizierter.
+        edge_map = self.edge_distance_map if self.edge_bias > 0 else None
+        edge_bias = self.edge_bias
+        edge_scale = self.edge_bias_scale
 
-        # A*-Datenstrukturen
-        open_set = [(0, start_x, start_y)]
+        open_set = [(0.0, start_x, start_y)]
         came_from = {}
-        g_score = {(start_x, start_y): 0}
-        f_score = {(start_x, start_y): self._heuristic((start_x, start_y), (end_x, end_y))}
+        g_score = {(start_x, start_y): 0.0}
+        closed = set()
 
         nodes_explored = 0
 
         while open_set and nodes_explored < max_nodes:
             current_f, current_x, current_y = heapq.heappop(open_set)
+            current_key = (current_x, current_y)
+            if current_key in closed:
+                continue  # veralteter Heap-Eintrag - diese Zelle ist schon fertig expandiert
+            closed.add(current_key)
             nodes_explored += 1
 
             if current_x == end_x and current_y == end_y:
-                # Pfad rekonstruieren
                 path = []
-                while (current_x, current_y) in came_from:
-                    path.append((current_x, current_y))
-                    current_x, current_y = came_from[(current_x, current_y)]
+                k = current_key
+                while k in came_from:
+                    path.append(k)
+                    k = came_from[k]
                 path.append((start_x, start_y))
                 return list(reversed(path))
 
-            # Nachbarn prüfen (8-Connectivity mit LOD-Resolution)
+            current_g = g_score[current_key]
+
             for dx in range(-path_resolution, path_resolution + 1, path_resolution):
                 for dy in range(-path_resolution, path_resolution + 1, path_resolution):
                     if dx == 0 and dy == 0:
@@ -677,29 +1126,97 @@ class PathfindingSystem:
                             neighbor_y < 0 or neighbor_y >= height):
                         continue
 
-                    # Bewegungskosten berechnen
-                    movement_cost = self.calculate_movement_cost(slopemap, neighbor_x, neighbor_y)
-                    if movement_cost == float('inf'):
+                    neighbor_key = (neighbor_x, neighbor_y)
+                    if neighbor_key in closed:
                         continue
 
-                    # Diagonale Bewegung kostet mehr
+                    movement_cost = float(cost_field[neighbor_y, neighbor_x])
+                    if movement_cost == float('inf'):
+                        continue
+                    if edge_map is not None:
+                        distance_to_edge = edge_map[neighbor_y, neighbor_x]
+                        if np.isfinite(distance_to_edge):
+                            movement_cost *= 1.0 + edge_bias * (
+                                distance_to_edge / (distance_to_edge + edge_scale))
+
                     if dx != 0 and dy != 0:
                         movement_cost *= 1.414
 
-                    tentative_g_score = g_score.get((current_x, current_y), float('inf')) + movement_cost
+                    tentative_g_score = current_g + movement_cost
 
-                    if tentative_g_score < g_score.get((neighbor_x, neighbor_y), float('inf')):
-                        came_from[(neighbor_x, neighbor_y)] = (current_x, current_y)
-                        g_score[(neighbor_x, neighbor_y)] = tentative_g_score
-                        f_score[(neighbor_x, neighbor_y)] = tentative_g_score + self._heuristic(
-                            (neighbor_x, neighbor_y), (end_x, end_y))
-                        heapq.heappush(open_set, (f_score[(neighbor_x, neighbor_y)], neighbor_x, neighbor_y))
+                    if tentative_g_score < g_score.get(neighbor_key, float('inf')):
+                        came_from[neighbor_key] = current_key
+                        g_score[neighbor_key] = tentative_g_score
+                        dxh = neighbor_x - end_x
+                        dyh = neighbor_y - end_y
+                        h = (dxh * dxh + dyh * dyh) ** 0.5
+                        heapq.heappush(open_set, (tentative_g_score + h, neighbor_x, neighbor_y))
 
-        # Kein Pfad gefunden oder Node-Limit erreicht - direkte Linie als Fallback
+        return None
+
+    def find_least_resistance_path(self, start_pos, end_pos, progress_callback=None):
+        """
+        Funktionsweise: A*-Pathfinding für Weg geringsten Widerstands zwischen zwei Punkten mit LOD-Optimierung
+        Aufgabe: Findet optimalen Straßenverlauf zwischen Settlements
+        Parameter: start_pos, end_pos, progress_callback - Positionen und Progress
+        Returns: (path, erreicht) - `path` immer eine Liste von Wegpunkten,
+            `erreicht` True nur, wenn A* das Ziel wirklich fand.
+
+        WARUM `erreicht` NOTWENDIG IST (2026-08-10, gefunden beim Testen der
+        Seewege). Wenn A* das Ziel nicht erreicht (Wasser/Berg sperrt jeden
+        Weg, oder das Node-Limit greift zuerst), lieferte diese Methode schon
+        immer die GERADE LUFTLINIE `[start, end]` als Fallback zurueck - eine
+        Geometrie, kein echter Pfad. Ein Aufrufer, der die "Kosten" dieses
+        Fallbacks bildet, indem er die Kostenfeld-Werte der zurueckgegebenen
+        Punkte aufsummiert, sieht davon aber NUR den Start- und Zielpunkt -
+        die eigentlich unpassierbaren Zellen DAZWISCHEN kommen in der
+        zweielementigen Liste gar nicht vor. Ergebnis: eine Route durch
+        gesperrtes tiefes Wasser wurde als "billig" gemessen (nur der
+        Zielpunkt zaehlte), bestand den Bereitschaftstest und wurde als
+        Landstrasse quer durchs Meer gebaut, statt dass ein Seeweg gesucht
+        wurde. Ein Aufrufer, dem die Erreichbarkeit wichtig ist (jeder
+        Bereitschafts-/Kulturzusammenhangstest in calculate_road_network()),
+        muss deshalb `erreicht` statt der Pfadlaenge pruefen.
+
+        ZWEI STUFEN STATT EINES GROSSEN BUDGETS (2026-08-10). Das Suchbudget
+        wurde fuer das neue, schaerfere Kostenfeld deutlich angehoben (siehe
+        __init__), damit Strassen einem Grat wirklich bis zum Pass ausweichen
+        koennen. Gemessen an einer realen 512-px-Welt kostete das aber: die
+        Siedlungskette bis zu den Roadsites brauchte 116.7 s statt 6.3 s bei
+        128 px - obwohl die MEISTEN Kandidatenpaare gar keinen grossen Umweg
+        brauchen und mit einem kleinen Budget laengst fertig waeren, bezahlte
+        JEDER Aufruf das volle Budget, sobald A* aus irgendeinem Grund bis zum
+        Ende suchen musste.
+        Deshalb zuerst mit einem kleinen Budget (das alte, 500/1000/2000/5000)
+        versuchen; nur wenn DAS scheitert, mit dem vollen Budget neu ansetzen.
+        Dank der Optimalitaets-Eigenschaft von A* (siehe _a_stern()-Docstring)
+        liefert das GARANTIERT denselben Pfad wie eine Suche, die sofort mit
+        dem vollen Budget gestartet waere - nur eben in der Mehrzahl der
+        Faelle sehr viel schneller.
+        """
+        start_x, start_y = int(start_pos[0]), int(start_pos[1])
+        end_x, end_y = int(end_pos[0]), int(end_pos[1])
+
+        schnelles_budget = min(self.max_search_nodes, self._SCHNELLES_BUDGET.get(
+            "gross" if self.map_size > 64 else "klein", 5000))
+        pfad = self._a_stern(start_x, start_y, end_x, end_y, schnelles_budget)
+        if pfad is None and schnelles_budget < self.max_search_nodes:
+            pfad = self._a_stern(start_x, start_y, end_x, end_y, self.max_search_nodes)
+
+        if pfad is not None:
+            return pfad, True
+
+        # Kein Pfad gefunden - direkte Linie als Fallback (siehe Docstring:
+        # NIE als echte Route behandeln, `erreicht` ist False).
         if progress_callback:
-            progress_callback("Road Building", 30, f"Pathfinding fallback after {nodes_explored} nodes")
+            progress_callback("Road Building", 30, "Pathfinding fallback - kein Pfad im Budget gefunden")
+        return [(start_x, start_y), (end_x, end_y)], False
 
-        return [(start_x, start_y), (end_x, end_y)]
+    # Kleines Erstbudget fuer die schnelle erste Stufe (siehe
+    # find_least_resistance_path()) - dieselben Werte, die vor dem
+    # Kostenfeld-Umbau als EINZIGES Budget dienten und dort fuer die meisten
+    # Faelle ausreichten.
+    _SCHNELLES_BUDGET = {"klein": 4000, "gross": 5000}
 
     def _heuristic(self, pos1, pos2):
         """
@@ -875,7 +1392,20 @@ class CityBoundaryAnalyzer:
         """
         height, width = heightmap.shape
         city_mask = np.full((height, width), -1, dtype=np.int32)
-        city_cost_map = np.full((height, width), np.inf, dtype=np.float32)
+        # -1.0 STATT np.inf FUER "UNERREICHT" (2026-08-10, OFFENE_PUNKTE 5.13).
+        #
+        # np.inf ist fuer echte Kosten korrekt gemeint ("unerreichbarer Pixel
+        # hat unendliche Kosten"), aber ein stiller Landmine: jede kuenftige
+        # Anzeige (Colorbar-Normierung liest feld.min()/.max()) oder
+        # Serialisierung (JSON kennt kein Infinity) waere daran zerbrochen,
+        # ohne dass beim Schreiben dieser Methode irgendetwas darauf
+        # hingewiesen haette - genau das meldete der generische Pipeline-Test
+        # (`smoke_test_pipeline_outputs.py`, Kategorie "NICHT-ENDLICH").
+        #
+        # -1.0 spiegelt genau die Konvention, die `city_mask` bereits hat
+        # ("-1 = ausserhalb jeder Stadt"): city_mask==-1 GENAU DORT, wo
+        # city_cost_map==-1.0 - ein Aufrufer kann beide gleich lesen.
+        city_cost_map = np.full((height, width), -1.0, dtype=np.float32)
 
         city_settlements = [s for s in settlements if s.location_type == 'settlement']
         for i, settlement in enumerate(city_settlements):
@@ -890,7 +1420,12 @@ class CityBoundaryAnalyzer:
                 self.terrain_factor, max_cost=max_cost)
 
             reached = seed_nearest >= 0
-            better = reached & (seed_cost < city_cost_map)
+            # "-1.0 gilt als schlechter als jede echte Kostenzahl" statt eines
+            # blossen `<` - eine reale Kostenzahl ist nie negativ, aber `<`
+            # allein wuerde das erste Settlement nie gewinnen lassen (jede
+            # echte Zahl ist groesser als -1.0).
+            noch_unerreicht = city_cost_map < 0.0
+            better = reached & (noch_unerreicht | (seed_cost < city_cost_map))
             city_cost_map[better] = seed_cost[better]
             city_mask[better] = settlement.location_id
 
@@ -3081,12 +3616,13 @@ class SettlementGenerator:
         self.damping = 0.80
         self.plot_tier_factor = 1.0
 
-        # Kraft-Schalter (Production-Default: alle an, siehe
-        # PlotPhysicsSystem.__init__-Docstring fuer die Begruendung, warum
-        # das vom Lab-Debug-Default "alle aus" abweicht).
-        self.enable_core_plotnode_spring = True
-        self.enable_plotnode_plotnode_spring = True
-        self.enable_pressure = True
+        # Kraft-Schalter. Springs/Pressure seit 2026-08-11 aus (siehe
+        # _load_default_parameters()-Kommentar fuer die volle Begruendung -
+        # dieselben Werte hier nur als Fallback, falls je eine Instanz ohne
+        # set_active_parameters() genutzt wird).
+        self.enable_core_plotnode_spring = False
+        self.enable_plotnode_plotnode_spring = False
+        self.enable_pressure = False
         self.enable_plot_node_repulsion = True
         self.enable_field_cores = True
         self.enable_field_plotnodes = True
@@ -3217,9 +3753,27 @@ class SettlementGenerator:
             'damping': SETTLEMENT.DAMPING["default"],
             'plot_tier_factor': SETTLEMENT.PLOT_TIER_FACTOR["default"],
             # Kraft-Schalter (reine Booleans, kein ParameterSlider/Config-Slot)
-            'enable_core_plotnode_spring': True,
-            'enable_plotnode_plotnode_spring': True,
-            'enable_pressure': True,
+            #
+            # PHYSIK VEREINFACHT (2026-08-11, Nutzer-Vorgabe): "sobald die
+            # Physik losgeht geht alles kaputt" - zwei Federn (core<->plotnode,
+            # plotnode<->plotnode) und die Verkehrs-Kontraktion darauf machten
+            # das System instabil. Die Verkehrs-Kontraktion (_rest_length_
+            # plotnode_plotnode_batch(), schrumpft die Ruhelaenge der
+            # plotnode<->plotnode-Feder anhand von ridge_traffic_shrink_ema)
+            # haengt AUSSCHLIESSLICH an enable_plotnode_plotnode_spring - mit
+            # der Feder aus ist sie automatisch mit weg, ohne dass ihr Code
+            # geloescht werden musste. Nutzer-Vorgabe woertlich: "einfach
+            # zurueck zur Abstossung der Nodes untereinander reicht" -
+            # enable_plot_node_repulsion bleibt daher an, ebenso die
+            # Wildnis-/Stadtgrenzen-Eindaemmung (enable_*_containment,
+            # "wildnisgrenze, stadtgrenze, alles gut" - das ist die bereits
+            # VORHER berechnete Grenze selbst, nur ihre physik-seitige
+            # Ruecksetzkraft laeuft hier mit). enable_pressure (Flaechendruck
+            # je Zelle) ebenfalls aus - eine weitere Kraft neben der
+            # gewuenschten reinen Abstossung, nicht Teil der Vorgabe.
+            'enable_core_plotnode_spring': False,
+            'enable_plotnode_plotnode_spring': False,
+            'enable_pressure': False,
             'enable_plot_node_repulsion': True,
             'enable_field_cores': True,
             'enable_field_plotnodes': True,
@@ -3379,7 +3933,7 @@ class SettlementGenerator:
             for calculator_id in (
                 "settlement.suitability", "settlement.settlements", "settlement.city_boundary",
                 "settlement.city_blocks", "settlement.landscape_voronoi", "settlement.pathfinding",
-                "settlement.outer_roads", "settlement.roadsites", "settlement.civ_influence",
+                "settlement.roadsites", "settlement.civ_influence",
                 "settlement.landmarks", "settlement.landmark_roads", "settlement.plot_nodes",
             ):
                 getattr(self, "_calc_" + calculator_id.split(".", 1)[1])(calculator_id, lod)
@@ -3416,10 +3970,10 @@ class SettlementGenerator:
         house_parcel_map = self.data_lod_manager.get_calculator_output(
             "settlement.city_blocks", "house_parcel_map", lod_level)
         roads = self.data_lod_manager.get_calculator_output("settlement.pathfinding", "roads", lod_level)
+        sea_roads = self.data_lod_manager.get_calculator_output(
+            "settlement.pathfinding", "sea_roads", lod_level)
         landmark_roads = self.data_lod_manager.get_calculator_output(
             "settlement.landmark_roads", "landmark_roads", lod_level)
-        outer_roads = self.data_lod_manager.get_calculator_output(
-            "settlement.outer_roads", "outer_roads", lod_level)
         roadsite_list = self.data_lod_manager.get_calculator_output(
             "settlement.roadsites", "roadsite_list", lod_level)
         civ_map = self.data_lod_manager.get_calculator_output("settlement.civ_influence", "civ_map", lod_level)
@@ -3452,8 +4006,8 @@ class SettlementGenerator:
         settlement_data.street_mask = street_mask
         settlement_data.house_parcel_map = house_parcel_map
         settlement_data.roads = roads if roads is not None else []
+        settlement_data.sea_roads = sea_roads if sea_roads is not None else []
         settlement_data.landmark_roads = landmark_roads if landmark_roads is not None else []
-        settlement_data.outer_roads = outer_roads if outer_roads is not None else []
         settlement_data.roadsite_list = roadsite_list if roadsite_list is not None else []
         settlement_data.civ_map = civ_map
         settlement_data.landmark_list = landmark_list if landmark_list is not None else []
@@ -3562,7 +4116,23 @@ class SettlementGenerator:
         self.scale_factor = heightmap.shape[0] / 128.0
         self.area_scale_factor = self.scale_factor ** 2
 
-        return {"heightmap": heightmap, "slopemap": slopemap, "water_map": water_map}
+        # Kulturregionen (2026-08-10, docs/SIEDLUNGEN_ENTWURF.md §3). OHNE
+        # Pflichtpruefung: terrain.redistribution ist zwar bereits eine echte
+        # Abhaengigkeit von settlement.settlements (calculator_graph.py), aber
+        # nur im WELTKARTE_AKTIV-Pfad liefert sie ueberhaupt region_map -
+        # calculate_settlements() faellt bei None auf eine einzige namenlose
+        # Kultur zurueck (altes Verhalten).
+        region_map = self.data_lod_manager.get_calculator_output(
+            "terrain.redistribution", "region_map", lod_level)
+
+        # Seegrad (docs/OFFENE_PUNKTE.md 3.3, "ab Grad 1 statt ab 10 m Tiefe"):
+        # gleiches OHNE-Pflichtpruefung-Muster wie region_map - nur auf der
+        # Weltkarte vorhanden.
+        seegrad = self.data_lod_manager.get_calculator_output(
+            "terrain.redistribution", "seegrad", lod_level)
+
+        return {"heightmap": heightmap, "slopemap": slopemap, "water_map": water_map,
+                "region_map": region_map, "seegrad": seegrad}
 
     def _calc_suitability(self, calculator_id: str, lod_level: int) -> None:
         """
@@ -3581,7 +4151,8 @@ class SettlementGenerator:
         self._update_progress("Terrain Analysis", 5, "Analyzing terrain suitability for settlements...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
         suitability_map = self.calculate_terrain_suitability(
-            inputs["heightmap"], inputs["slopemap"], inputs["water_map"], lod_level)
+            inputs["heightmap"], inputs["slopemap"], inputs["water_map"], lod_level,
+            region_map=inputs.get("region_map"))
         self.data_lod_manager.set_calculator_output(
             calculator_id, lod_level, {"combined_suitability_map": suitability_map})
 
@@ -3597,7 +4168,8 @@ class SettlementGenerator:
         if suitability_map is None:
             raise ValueError(f"settlement.settlements: combined_suitability_map für LOD {lod_level} nicht verfügbar")
 
-        settlement_list = self.calculate_settlements(suitability_map, inputs["heightmap"], lod_level)
+        settlement_list = self.calculate_settlements(
+            suitability_map, inputs["heightmap"], lod_level, region_map=inputs.get("region_map"))
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"settlement_list": settlement_list})
 
     def _calc_city_boundary(self, calculator_id: str, lod_level: int) -> None:
@@ -3631,13 +4203,18 @@ class SettlementGenerator:
         dieser frühe Bootstrap-Pfad ist bewusst NICHT ersetzt, weil
         PlotPhysicsSystem selbst civ_map als Eingabe braucht und daher
         zwangsläufig NACH civ_influence laufen muss (Zirkelbezug sonst).
+        Seit 2026-08-10 liefert calculate_road_network() zwei Listen: `roads`
+        (Land, Gabriel-Graph + Kostenfeld + Bereitschaftstest,
+        docs/SIEDLUNGEN_ENTWURF.md §4) und `sea_roads` (§4.4, fuer
+        Kulturpaare ohne endlichen Landweg).
         voronoi_cell_map (früher aus settlement.landscape_voronoi, jetzt
         entfernt) entfällt ersatzlos - calculate_road_network() fällt dafür
         bereits dokumentiert auf reines Slope-Cost-Pathfinding zurück.
         Siehe _is_final_lod().
         """
         if not self._is_final_lod(calculator_id, lod_level):
-            self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roads": []})
+            self.data_lod_manager.set_calculator_output(
+                calculator_id, lod_level, {"roads": [], "sea_roads": []})
             return
         self._update_progress("Road Building", 25, "Creating road networks between settlements...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
@@ -3646,20 +4223,37 @@ class SettlementGenerator:
         if settlement_list is None:
             raise ValueError(f"settlement.pathfinding: settlement_list für LOD {lod_level} nicht verfügbar")
 
-        roads = self.calculate_road_network(settlement_list, inputs["slopemap"], lod_level, None)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roads": roads})
+        roads, sea_roads = self.calculate_road_network(
+            settlement_list, inputs["heightmap"], inputs["slopemap"], lod_level, None,
+            seegrad=inputs.get("seegrad"))
+        self.data_lod_manager.set_calculator_output(
+            calculator_id, lod_level, {"roads": roads, "sea_roads": sea_roads})
 
     def _calc_roadsites(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'settlement.roadsites' (#31) - siehe _is_final_lod()."""
+        """
+        Calculator-Node 'settlement.roadsites' (#31) - siehe _is_final_lod().
+        Braucht seit dem Umbau auf den 45-Arten-Katalog (docs/SIEDLUNGEN_ENTWURF.md
+        §4.6) zusaetzlich heightmap (Furt-/Passerkennung) und settlement_list
+        (Kulturzuordnung je Standort ueber _naechste_kultur()) - ruft dafuer
+        jetzt selbst _get_prepared_settlement_inputs() statt sich wie zuvor
+        nur auf das transitiv gesetzte self.scale_factor zu verlassen.
+        """
         if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roadsite_list": []})
             return
         self._update_progress("Roadsite Placement", 40, "Placing roadsites along roads...")
+        inputs = self._get_prepared_settlement_inputs(lod_level)
         roads = self.data_lod_manager.get_calculator_output("settlement.pathfinding", "roads", lod_level)
-        if roads is None:
-            raise ValueError(f"settlement.roadsites: roads für LOD {lod_level} nicht verfügbar")
+        sea_roads = self.data_lod_manager.get_calculator_output(
+            "settlement.pathfinding", "sea_roads", lod_level)
+        settlement_list = self.data_lod_manager.get_calculator_output(
+            "settlement.settlements", "settlement_list", lod_level)
+        if roads is None or settlement_list is None:
+            raise ValueError(f"settlement.roadsites: fehlende Inputs für LOD {lod_level}")
 
-        roadsite_list = self.calculate_roadsites(roads, lod_level)
+        roadsite_list = self.calculate_roadsites(
+            roads, sea_roads or [], settlement_list, inputs["heightmap"], lod_level,
+            region_map=inputs.get("region_map"))
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"roadsite_list": roadsite_list})
 
     def _calc_civ_influence(self, calculator_id: str, lod_level: int) -> None:
@@ -3689,10 +4283,14 @@ class SettlementGenerator:
         self._update_progress("Landmark Placement", 65, "Placing landmarks in wilderness areas...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
         civ_map = self.data_lod_manager.get_calculator_output("settlement.civ_influence", "civ_map", lod_level)
-        if civ_map is None:
-            raise ValueError(f"settlement.landmarks: civ_map für LOD {lod_level} nicht verfügbar")
+        settlement_list = self.data_lod_manager.get_calculator_output(
+            "settlement.settlements", "settlement_list", lod_level)
+        if civ_map is None or settlement_list is None:
+            raise ValueError(f"settlement.landmarks: fehlende Inputs für LOD {lod_level}")
 
-        landmark_list = self.calculate_landmarks(civ_map, inputs["heightmap"], inputs["slopemap"], lod_level)
+        landmark_list = self.calculate_landmarks(
+            civ_map, inputs["heightmap"], inputs["slopemap"], inputs["water_map"],
+            settlement_list, lod_level, region_map=inputs.get("region_map"))
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"landmark_list": landmark_list})
 
     def _calc_landmark_roads(self, calculator_id: str, lod_level: int) -> None:
@@ -3711,28 +4309,9 @@ class SettlementGenerator:
         if landmark_list is None or roads is None:
             raise ValueError(f"settlement.landmark_roads: fehlende Inputs für LOD {lod_level}")
 
-        landmark_roads = self.calculate_landmark_roads(landmark_list, roads, inputs["slopemap"], lod_level)
+        landmark_roads = self.calculate_landmark_roads(
+            landmark_list, roads, inputs["heightmap"], inputs["slopemap"], lod_level)
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"landmark_roads": landmark_roads})
-
-    def _calc_outer_roads(self, calculator_id: str, lod_level: int) -> None:
-        """Calculator-Node 'settlement.outer_roads' (NEU) - 2-3 Außenverbindungen
-        von Siedlungen zur Kartengrenze an plausiblen Positionen (nicht
-        Bergspitze/Meer, siehe calculate_outer_connections()). Siehe _is_final_lod()."""
-        if not self._is_final_lod(calculator_id, lod_level):
-            self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"outer_roads": []})
-            return
-        self._update_progress("Outer Roads", 27, "Connecting settlements to map border...")
-        inputs = self._get_prepared_settlement_inputs(lod_level)
-        settlement_list = self.data_lod_manager.get_calculator_output(
-            "settlement.settlements", "settlement_list", lod_level)
-        suitability_map = self.data_lod_manager.get_calculator_output(
-            "settlement.suitability", "combined_suitability_map", lod_level)
-        if settlement_list is None or suitability_map is None:
-            raise ValueError(f"settlement.outer_roads: fehlende Inputs für LOD {lod_level}")
-
-        outer_roads = self.calculate_outer_connections(
-            settlement_list, suitability_map, inputs["water_map"], inputs["slopemap"], lod_level)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"outer_roads": outer_roads})
 
     def _calc_plot_nodes(self, calculator_id: str, lod_level: int) -> None:
         """
@@ -3841,206 +4420,678 @@ class SettlementGenerator:
              # aussen exportiert, wurde nach generate() intern verworfen.
              "potential_field": plot_system.potential_field})
 
-    def calculate_terrain_suitability(self, heightmap, slopemap, water_map, lod):
+    def calculate_terrain_suitability(self, heightmap, slopemap, water_map, lod,
+                                       reachability_map=None, region_map=None):
         """
-        Funktionsweise: Berechnet Terrain-Suitability für optimale Settlement-Platzierung
-        Aufgabe: Kombiniert Slope-, Water-Proximity- und Elevation-Fitness zu finaler Suitability-Map
-        Parameter: heightmap, slopemap, water_map, lod - Alle Terrain-Daten und LOD-Level
-        Returns: numpy.ndarray - Kombinierte Suitability-Map für Settlement-Platzierung
+        Fuenf-Faktor-Eignungsfeld (docs/SIEDLUNGEN_ENTWURF.md §2). `reachability_map`
+        bleibt None fuer die erste Platzierungsrunde (Faktor neutral) - siehe
+        TerrainSuitabilityAnalyzer.create_combined_suitability().
+
+        Multipliziert danach mit `_randfaktor()` (docs/OFFENE_PUNKTE.md 5.14) -
+        eine weiche Absenkung nahe der Kastengrenze des 3x3-Ausschnittsgitters,
+        nur wenn `region_map` vorliegt (WELTKARTE_AKTIV).
         """
         analyzer = TerrainSuitabilityAnalyzer(self.terrain_factor_villages, heightmap.shape[0])
-        combined_suitability = analyzer.create_combined_suitability(heightmap, slopemap, water_map, self._update_progress)
+        combined_suitability = analyzer.create_combined_suitability(
+            heightmap, slopemap, water_map, reachability_map=reachability_map,
+            progress_callback=self._update_progress)
+        randfaktor = self._randfaktor(heightmap.shape[0], region_map)
+        if randfaktor is not None:
+            combined_suitability = combined_suitability * randfaktor
         return combined_suitability
 
-    def calculate_settlements(self, suitability_map, heightmap, lod):
+    def _randfaktor(self, size, region_map):
         """
-        Funktionsweise: Platziert Settlements basierend auf Terrain-Suitability mit LOD-abhängiger Anzahl
-        Aufgabe: Erstellt Settlement-Liste mit optimaler Positionierung und Mindestabständen
-        Parameter: suitability_map, heightmap, lod - Suitability-Daten und LOD-Level
-        Returns: List[Location] - Alle platzierten Settlements
+        Weiche Randstrafe zur Kastengrenze des 3x3-Ausschnittsgitters
+        (docs/OFFENE_PUNKTE.md 5.14, urspr. TODO §D2 Vorschlag 2: "Abschlag im Eignungswert in den
+        letzten ~200m vor der Kastengrenze. Er entscheidet nur bei sonst
+        gleichwertigen Plaetzen. Ein hartes Verbot waere schaedlich: Staedte
+        sollen an Fluessen und Kuesten liegen, und eine Gitterlinie laeuft
+        davon voellig unabhaengig."). Faktor 0.5 direkt auf der Linie, linear
+        auf 1.0 ab 200m Abstand - eine Absenkung, kein Ausschluss.
+
+        None wenn `region_map` fehlt (alter Nicht-Weltkarten-Pfad ohne
+        Gitter) - dasselbe Signal, das schon `calculate_settlements()` fuer
+        denselben Fall benutzt.
         """
-        # LOD-abhängige Settlement-Anzahl
-        lod_factors = {"LOD64": 0.5, "LOD128": 0.8, "LOD256": 1.0, "FINAL": 1.0}
-        adjusted_count = max(1, int(self.settlements * lod_factors.get(lod, 1.0)))
+        if region_map is None:
+            return None
+        import core.terrain_weltkarte as rw
+        linien = np.asarray(rw.gitterlinien_px(size))
+        achse = np.arange(size, dtype=np.float64)
+        abstand_1d = np.min(np.abs(achse[:, None] - linien[None, :]), axis=1)
+        abstand_px = np.minimum(abstand_1d[None, :], abstand_1d[:, None])
+        mpp = rw.WELT_KM * 1000.0 / size
+        abstand_m = abstand_px * mpp
+        schwelle_m = 200.0
+        return (0.5 + 0.5 * np.clip(abstand_m / schwelle_m, 0.0, 1.0)).astype(np.float32)
+
+    def _grenzabstand_m(self, x, y, size):
+        """Abstand eines einzelnen Punkts zur naechsten Kastengrenze, in
+        Metern - fuer die Roadsite-/Landmark-Kandidatenreihung (5.14)."""
+        import core.terrain_weltkarte as rw
+        linien = rw.gitterlinien_px(size)
+        dx = min(abs(x - l) for l in linien)
+        dy = min(abs(y - l) for l in linien)
+        mpp = rw.WELT_KM * 1000.0 / size
+        return min(dx, dy) * mpp
+
+    def _fern_zuerst(self, punkte, size, schwelle_m=200.0, xy=lambda p: (p[0], p[1])):
+        """
+        Stabile Umsortierung: Kandidaten mit >= schwelle_m Randabstand zuerst,
+        sonst unveraendert (innerhalb jeder Gruppe bleibt die vorherige,
+        bereits zufaellige Reihenfolge erhalten). Genau die "weiche Strafe,
+        kein Verbot" aus 5.14 fuer Punktlisten (statt eines Eignungsfeld-
+        Faktors wie bei Siedlungen): naeher-am-Rand wird nur nachrangig, nicht
+        gestrichen - fehlen ferne Kandidaten, werden die nahen trotzdem
+        benutzt. `xy` holt (x, y) aus einem Listenelement - Vorgabe passt fuer
+        (x, y)-Paare (Roadsites), Landmarks brauchen (kategorie, x, y).
+        """
+        def _fern(p):
+            x, y = xy(p)
+            return self._grenzabstand_m(x, y, size) < schwelle_m
+        return sorted(punkte, key=_fern)
+
+    def _rang_zuweisen(self, werte_mit_rauschen):
+        """
+        Rang je Settlement EINER Kultur, docs/SIEDLUNGEN_ENTWURF.md §3.
+
+        Der beste Wert wird immer 'stadt' - das ist genau "mindestens ein Ort
+        je Kultur ist Stadt". Vom Rest (r = n-1 Orte) wird die obere Haelfte
+        'siedlung', der Rest 'dorf':
+            r=1 (n=2): 0 siedlung, 1 dorf      -> [stadt, dorf]
+            r=2 (n=3): 1 siedlung, 1 dorf      -> [stadt, siedlung, dorf]
+            r=3 (n=4): 1 siedlung, 2 dorf
+            r=4 (n=5): 2 siedlung, 2 dorf
+        `werte_mit_rauschen` ist der Eignungswert am Standort PLUS Rauschen
+        (§2: "Gezogen wird mit Rauschen um den Wert herum, sodass gelegentlich
+        ein Dorf an bester Lage sitzt und eine Stadt an mittelmaessiger") - der
+        Rang folgt also nicht dem rohen Eignungswert, sondern dieser bereits
+        verrauschten Fassung.
+        """
+        n = len(werte_mit_rauschen)
+        reihenfolge = sorted(range(n), key=lambda i: -werte_mit_rauschen[i])
+        raenge = [""] * n
+        if n == 0:
+            return raenge
+        raenge[reihenfolge[0]] = "stadt"
+        rest = reihenfolge[1:]
+        siedlung_anzahl = len(rest) // 2
+        for i, idx in enumerate(rest):
+            raenge[idx] = "siedlung" if i < siedlung_anzahl else "dorf"
+        return raenge
+
+    def calculate_settlements(self, suitability_map, heightmap, lod, region_map=None):
+        """
+        Platziert Settlements je Kultur (docs/SIEDLUNGEN_ENTWURF.md §2+3).
+
+        ANZAHL JE KULTUR: 2 bis 5, abgeleitet aus der Eignungssumme der
+        Kulturregion verglichen mit der bestausgestatteten Region ("die Summe
+        der Eignung ueber der Region, verglichen mit allen neun"):
+
+            norm_c = Eignungssumme(Kultur c) / max(Eignungssumme ueber alle Kulturen)
+            anzahl_c = round(2 + 3 * norm_c)     # 2 bei norm=0, 5 bei norm=1
+
+        Der `settlements`-Regler (frueher eine absolute Gesamtzahl) wirkt jetzt
+        als MULTIPLIKATOR auf diese Ableitung, neutral bei seiner Vorgabe 3
+        (siehe gui/config/value_default.py SETTLEMENT.SETTLEMENTS) - der
+        Regler bleibt drehbar, bestimmt aber nicht mehr die Zahl direkt.
+
+        OHNE region_map (alter Nicht-Weltkarten-Pfad, WELTKARTE_AKTIV=False):
+        eine einzige namenlose Kultur, `self.settlements` Orte direkt - das
+        alte Verhalten bleibt fuer diesen Pfad erhalten.
+        """
+        # KOPIE, NICHT DAS ORIGINAL. `_reduce_suitability_around_point` mutiert
+        # das Array in-place - ohne Kopie waere das der gecachte Calculator-
+        # Output "settlement.suitability"/combined_suitability_map selbst
+        # (Python/NumPy reichen Arrays per Referenz), der dann fuer jede
+        # spaetere Anzeige/Wiederverwendung schon mit Loechern um jede
+        # Siedlung herum daestuende. War schon in der Vorlage so angelegt,
+        # hier beim Umbau auf mehrere Kulturschleifen mit-behoben.
+        suitability_map = suitability_map.copy()
+        height, width = heightmap.shape
+        zufall_s = self._knoten_zufall("settlements")
+
+        if region_map is None:
+            kulturen = [("", np.ones((height, width), dtype=bool),
+                        max(1, int(round(self.settlements))))]
+        else:
+            import core.terrain_weltkarte as rw
+            region_map = np.asarray(region_map)
+            summen = {}
+            masken = {}
+            for i, (_z, _s, r) in enumerate(rw.alle_regionen()):
+                maske = (region_map == i) & (heightmap > 0.0)
+                if not np.any(maske):
+                    continue
+                masken[i] = maske
+                summen[i] = float(suitability_map[maske].sum())
+
+            hoechste_summe = max(summen.values()) if summen else 0.0
+            multiplikator = self.settlements / 3.0
+            kulturen = []
+            for i, summe in summen.items():
+                norm_c = summe / hoechste_summe if hoechste_summe > 0 else 0.0
+                anzahl = int(round(2 + 3 * norm_c))
+                anzahl = int(np.clip(round(anzahl * multiplikator), 2, 5))
+                name = rw.alle_regionen()[i][2]["volk"]
+                kulturen.append((name, masken[i], anzahl))
+            # Feste Reihenfolge (Regionsindex) statt Dict-Iterationsreihenfolge -
+            # sonst haengt die Platzierungsreihenfolge (und damit, wer sich wem
+            # gegenueber den Mindestabstand sichert) am Python-Hash statt am Seed.
+            kulturen.sort(key=lambda k: k[0])
+
+        gesamt_anzahl = sum(a for _n, _m, a in kulturen) or 1
 
         settlements = []
-        height, width = heightmap.shape
+        for kultur_name, kultur_maske, anzahl_ziel in kulturen:
+            # MINDESTABSTAND JE KULTUR, NICHT EIN GEMEINSAMER GLOBALER.
+            #
+            # Ein einziger, aus der GESAMTzahl aller Orte auf der Karte
+            # abgeleiteter Mindestabstand liess kleine Regionen ihr Ziel
+            # verfehlen: gemessen bei 96 px, Seed 12345, bekam Italiener/
+            # Mittelmeer (klein, kuestennah) nur 1 statt der vorgesehenen 2-5
+            # Orte - der Abstand war fuer die GANZE Karte bemessen, nicht fuer
+            # diese eine, kleinere Flaeche. Jede Kultur bekommt stattdessen
+            # ihren eigenen Abstand aus der WURZEL ihrer eigenen Landflaeche -
+            # eine kleine Region lässt ihre Orte enger stehen.
+            kultur_flaeche = float(np.count_nonzero(kultur_maske))
+            min_distance = max(4.0, np.sqrt(kultur_flaeche) / (anzahl_ziel + 1))
 
-        # Mindestabstand zwischen Settlements berechnen
-        map_diagonal = np.sqrt(height ** 2 + width ** 2)
-        min_distance = max(10, map_diagonal / (adjusted_count + 1))
+            neue_dieser_kultur = []
+            # Erreicht die Kultur ihr Ziel bei diesem Abstand nicht (Region zu
+            # klein/zerklueftet fuer so viele Orte), wird der Abstand bis zu
+            # zweimal halbiert, bevor mit weniger als dem Ziel weitergemacht
+            # wird - lieber ein kleinerer, aber tatsaechlich erreichter
+            # Abstand als stillschweigend zu wenige Orte.
+            for _versuch in range(3):
+                if len(neue_dieser_kultur) >= anzahl_ziel:
+                    break
+                # SPERRMASKE EINMAL JE min_distance AUFBAUEN, DANACH NUR NOCH
+                # LOKAL ERWEITERN (2026-08-11, Pipeline-Audit-Befund).
+                #
+                # Vorher baute _find_best_settlement_positions bei JEDEM
+                # Versuch die Sperrflaeche neu auf - eine Python-Schleife
+                # ueber ALLE bisher platzierten Siedlungen (karteweit, nicht
+                # nur diese Kultur), die je Siedlung ein GANZES (H,W)-Array
+                # anlegte. Gemessen: 17.5x langsamer bei 256->512px (4x mehr
+                # Pixel) statt der erwarteten ~4x - die wiederholte
+                # Vollraster-Allokation je Siedlung UND je Versuch summierte
+                # sich quadratisch mit der Siedlungszahl. `settlement.
+                # settlements` brauchte dadurch 3.37s statt 0.23s bei 512px.
+                # Die Sperrflaeche einer Siedlung ist aber, genau wie bei
+                # _reduce_suitability_around_point(), nur eine lokal
+                # begrenzte Kreisscheibe - denselben Trick wendet jetzt auch
+                # diese Maske an: einmalig je min_distance aus allen
+                # bisherigen Siedlungen aufbauen (billig, da lokal begrenzt),
+                # danach pro neu platzierter Siedlung nur noch EIN lokales
+                # Update statt eines kompletten Neuaufbaus.
+                gesperrt_mask = np.zeros(suitability_map.shape, dtype=bool)
+                for s in settlements:
+                    self._markiere_gesperrt(gesperrt_mask, s.x, s.y, min_distance)
+                attempts, max_attempts = 0, anzahl_ziel * 20
+                while len(neue_dieser_kultur) < anzahl_ziel and attempts < max_attempts:
+                    attempts += 1
+                    best_positions = self._find_best_settlement_positions(
+                        suitability_map, gesperrt_mask, erlaubt_mask=kultur_maske)
+                    if not best_positions:
+                        break
+                    x, y = zufall_s.choice(best_positions[:min(10, len(best_positions))])
 
-        attempts = 0
-        max_attempts = adjusted_count * 20
+                    # Rang-Rauschen (§2) direkt am gewaehlten Standort - "an
+                    # bester Lage" heisst hoechster Eignungswert, das Rauschen
+                    # kann das verschieben, ohne die Lage selbst zu aendern.
+                    rang_wert = float(suitability_map[int(y), int(x)]) + zufall_s.uniform(-0.25, 0.25)
 
-        while len(settlements) < adjusted_count and attempts < max_attempts:
-            attempts += 1
+                    platzhalter = Location(
+                        location_id=self.next_location_id, x=float(x), y=float(y),
+                        location_type='settlement', radius=0.0, civ_influence=0.8,
+                        properties={'rang_wert': rang_wert}, culture=kultur_name)
+                    self.next_location_id += 1
+                    neue_dieser_kultur.append(platzhalter)
+                    settlements.append(platzhalter)
+                    # Nur die neue Siedlung lokal in die Sperrmaske eintragen,
+                    # nicht sie komplett neu aufbauen (siehe Kommentar oben).
+                    self._markiere_gesperrt(gesperrt_mask, x, y, min_distance)
+                    # UNTERDRUECKUNGSRADIUS GROESSER ALS DER MINDESTABSTAND
+                    # (2026-08-10, Nutzer-Vorgabe: "die staedte gleichmaessiger
+                    # verteilen, etwas weniger geklumpt"). Gemessen VORHER:
+                    # mittlerer Nachbarabstand nur 0.76x dessen, was eine
+                    # gleichmaessige Verteilung ergaebe (5 von 9 Kulturen unter
+                    # 0.65x - deutlich geklumpt). Grund: _reduce_suitability_
+                    # around_point() liess die Eignung ausserhalb von
+                    # min_distance komplett unberuehrt - bei einer Region mit
+                    # EINEM starken Eignungshuegel blieb direkt ausserhalb des
+                    # Ausschlussradius noch reichlich hohe Eignung uebrig, und
+                    # der naechste Ort setzte sich an den Rand genau dieses
+                    # Huegels statt in einen anderen Teil der Region - eine
+                    # Perlenkette am Huegelrand statt einer Streuung. Die
+                    # harte Ausschlusszone (min_distance, fuer die
+                    # Ziel-Trefferquote wichtig) bleibt unveraendert; nur die
+                    # WEICHE Eignungs-Absenkung wirkt jetzt ueber einen
+                    # groesseren Radius, sodass die Suche nach dem naechsten
+                    # Ort tatsaechlich in einen anderen Bereich ausweicht.
+                    self._reduce_suitability_around_point(
+                        suitability_map, x, y, min_distance * 2.5)
 
-            # Position mit höchster Suitability finden
-            best_positions = self._find_best_settlement_positions(suitability_map, settlements, min_distance)
+                    if self._update_progress:
+                        progress = 15 + (len(settlements) * 10) // gesamt_anzahl
+                        self._update_progress(
+                            "Settlement Placement", progress,
+                            f"Placed {len(settlements)}/{gesamt_anzahl} settlements")
+                min_distance = max(2.0, min_distance * 0.5)
 
-            if not best_positions:
-                break
-
-            # Zufällige Position aus besten wählen
-            x, y = random.choice(best_positions[:min(10, len(best_positions))])
-
-            # Settlement erstellen
-            settlement_size = random.uniform(0.5, 1.5)  # Variiert Stadtgröße
-            # (3 + settlement_size*2) war ein absoluter Pixelwert (~4-6px,
-            # unabhaengig von map_size) - mit self.scale_factor multipliziert
-            # fuer Map-Groessen-Unabhaengigkeit, siehe
-            # [[project-settlement-scale-invariance]].
-            radius = (3 + settlement_size * 2) * self.scale_factor
-            civ_influence = 0.8
-
-            settlement = Location(
-                location_id=self.next_location_id,
-                x=float(x),
-                y=float(y),
-                location_type='settlement',
-                radius=radius,
-                civ_influence=civ_influence,
-                properties={'size': settlement_size}
-            )
-
-            settlements.append(settlement)
-            self.next_location_id += 1
-
-            # Suitability um neue Settlement reduzieren
-            self._reduce_suitability_around_point(suitability_map, x, y, min_distance)
-
-            # Progress-Update
-            if self._update_progress:
-                progress = 15 + (len(settlements) * 10) // adjusted_count
-                self._update_progress("Settlement Placement", progress, f"Placed {len(settlements)}/{adjusted_count} settlements")
+            # Rang erst, wenn ALLE Orte dieser Kultur stehen - er ist eine
+            # Aussage ueber die Kultur als Ganzes ("bester Ort wird Stadt"),
+            # nicht ueber einen einzelnen Platzierungsschritt.
+            raenge = self._rang_zuweisen([s.properties['rang_wert'] for s in neue_dieser_kultur])
+            for settlement, rang in zip(neue_dieser_kultur, raenge):
+                lo, hi = RANG_HAEUSER[rang]
+                haeuser = int(round(zufall_s.uniform(lo, hi)))
+                groesse01 = (haeuser - 15) / (50 - 15)
+                settlement.rank = rang
+                settlement.house_count = haeuser
+                # (3 + groesse01*2) haelt denselben Radienbereich wie die
+                # fruehere, vom Rang unabhaengige Zufallsstreuung - jetzt aus
+                # der tatsaechlichen Haeuserzahl, nicht danaben her gewuerfelt.
+                settlement.radius = (3 + groesse01 * 2) * self.scale_factor
+                settlement.civ_influence = {"dorf": 0.6, "siedlung": 0.7, "stadt": 0.8}[rang]
 
         return settlements
 
-    def calculate_road_network(self, settlements, slopemap, lod, voronoi_cell_map=None):
+    def calculate_road_network(self, settlements, heightmap, slopemap, lod, voronoi_cell_map=None,
+                               seegrad=None):
         """
-        Funktionsweise: Erstellt Straßennetzwerk zwischen Settlements mit LOD-optimiertem Pathfinding
-        Aufgabe: Findet optimale Straßenverbindungen mit Spline-Interpolation
-        Parameter: settlements, slopemap, lod - Settlement-Liste, Slope-Daten und LOD-Level
-        Parameter: voronoi_cell_map - optionale Landschafts-Voronoi-Zellzuordnung
-            (settlement.landscape_voronoi, #36) - wenn vorhanden, bevorzugen die
-            Straßen den Verlauf entlang der Zellgrenzen (Nutzer-Vorgabe); None
-            faellt auf reines Slope-Cost-Pathfinding zurueck (Legacy-Verhalten).
-        Returns: List[List[Tuple]] - Alle Road-Pfade als Wegpunkt-Listen
+        Wegenetz nach docs/SIEDLUNGEN_ENTWURF.md §4.1-§4.3. Ablauf, in dieser
+        Reihenfolge:
+
+          1. KOSTENFELD (§4.1) - einmal, ueber bau_kostenfeld(). Wasser in drei
+             Stufen, Hangkosten quadratisch, ein bestehender Weg verbilligt
+             sich selbst (WEGERABATT) - "Wege buendeln sich zu Hauptstrecken".
+          2. GABRIEL-GRAPH (§4.2) - welche Ortspaare ueberhaupt Kandidaten
+             sind: A-B nur, wenn im Kreis ueber ihrer Verbindungsstrecke kein
+             dritter Ort liegt. Kein Stern, keine Vollverknuepfung.
+          3. BEREITSCHAFTSTEST (§4.3) je Kandidat, absteigend nach
+             Bereitschaft abgearbeitet (die eifrigsten Verbindungen zuerst -
+             sie werden ohnehin fast immer gebaut und damit zur Haupttrasse,
+             auf die sich schwaechere Kandidaten per Wegerabatt aufbuendeln
+             koennen):
+
+                Bereitschaft = Rang(A) * Rang(B) * (gleiche Kultur ? 1.0 : 0.45)
+                Wegkosten    = Pfadkosten-Summe / Luftlinienabstand
+
+             `Wegkosten` ist damit dimensionslos und mit `Bereitschaft`
+             vergleichbar - ein flaches, einfaches Stueck Land liegt nahe 1.0,
+             ein Gebirge oder Wasser treibt es weit darueber. Gebaut wird bei
+             Bereitschaft > Wegkosten. Rang zaehlt dorf=1/siedlung=2/stadt=3,
+             sodass zwei Staedte (9.0) praktisch immer verbinden, zwei Doerfer
+             verschiedener Kultur (0.45) fast nie - genau die vom Entwurf
+             genannten Faelle.
+          4. KULTURZUSAMMENHANG (§4.3, Ausnahme) - je Kultur wird geprueft, ob
+             ihre Orte nach Schritt 3 EINEN zusammenhaengenden Teilgraphen
+             bilden. Falls nicht, werden die guenstigsten fehlenden
+             Verbindungen nachgetragen, unabhaengig von der Bereitschaft -
+             "egal was sie kosten". Findet sich dabei KEIN endlich teurer
+             Landweg (Wasser trennt die Komponenten vollstaendig), wird
+             stattdessen ein SEEWEG versucht (§4.4) - siehe bau_seekostenfeld().
+
+        `voronoi_cell_map` wie bisher optional fuer den Randbias entlang von
+        Landschafts-Voronoi-Zellgrenzen. `seegrad` (docs/OFFENE_PUNKTE.md 3.3)
+        steuert das Seeweg-Kostenfeld und die Tiefwasser-Auflage aus §4.4 -
+        "ab Grad 1" statt "ab 10 m Tiefe", siehe bau_seekostenfeld()/
+        _seeweg_anteil_tief(). None faellt auf die alte Hoehenschwelle zurueck.
+
+        Returns: (roads, sea_roads) - je List[List[Tuple]]. Seewege getrennt
+        zurueckgegeben, weil sie "anders gezeichnet werden - gestrichelt, in
+        einem eigenen Blau" (§4.4), nicht weil sie technisch etwas anderes
+        waeren.
         """
         if len(settlements) < 2:
-            return []
+            return [], []
 
         edge_distance_map = None
         if voronoi_cell_map is not None:
             edge_distance_map = _voronoi_edge_distance_map(voronoi_cell_map)
 
-        pathfinder = PathfindingSystem(
-            self.road_slope_to_distance_ratio, slopemap.shape[0],
-            edge_distance_map=edge_distance_map)
+        basis_kostenfeld = bau_kostenfeld(heightmap, slopemap, self.road_slope_to_distance_ratio)
+        weg_maske = np.zeros(basis_kostenfeld.shape, dtype=bool)
+
+        def route(a, b):
+            """(Pfad, Pfadkosten) fuer ein Ortspaar - nutzt den aktuellen Wegerabatt."""
+            feld = (np.where(weg_maske, basis_kostenfeld * WEGERABATT, basis_kostenfeld)
+                   if np.any(weg_maske) else basis_kostenfeld)
+            pathfinder = PathfindingSystem(feld, slopemap.shape[0],
+                                           edge_distance_map=edge_distance_map)
+            pfad, erreicht = pathfinder.find_least_resistance_path(
+                (a.x, a.y), (b.x, b.y), self._update_progress)
+            # Nicht erreicht -> unendlich, EGAL was die (bei einem Fallback
+            # bedeutungslose) Pfadsumme sagen wuerde. Siehe Docstring von
+            # find_least_resistance_path().
+            kosten = (sum(pathfinder.calculate_movement_cost(x, y) for x, y in pfad[1:])
+                     if erreicht else float('inf'))
+            return pathfinder, pfad, kosten
+
+        def merke(pf, pfad):
+            """Einen bereits gerouteten Pfad tatsaechlich bauen: glaetten,
+            in die Wegemaske eintragen (kuenftige Routen guenstiger machen),
+            der Ausgabeliste hinzufuegen. Nimmt Pfad/Pathfinder ENTGEGEN statt
+            selbst neu zu routen - der Aufrufer hat sie fuer die
+            Bereitschaftspruefung ohnehin schon berechnet."""
+            geglaettet = pf.apply_spline_smoothing(
+                pfad, smoothing_factor=3, progress_callback=self._update_progress)
+            for x, y in pfad:
+                xi, yi = int(round(x)), int(round(y))
+                if 0 <= yi < weg_maske.shape[0] and 0 <= xi < weg_maske.shape[1]:
+                    weg_maske[yi, xi] = True
+            roads.append(geglaettet)
+            return geglaettet
+
         roads = []
+        gebaut = set()  # {frozenset({id_a, id_b})}
 
-        # Minimum Spanning Tree für Settlement-Verbindungen
-        connected = [settlements[0]]
-        unconnected = settlements[1:]
+        # ---------------------------------------------------- 2: Gabriel-Graph
+        kandidaten_indizes = _gabriel_kandidaten(
+            np.array([[s.x, s.y] for s in settlements], dtype=np.float64))
 
-        road_count = 0
-        total_roads = len(settlements) - 1
+        # BEREITSCHAFT HAENGT NICHT AN DEN WEGKOSTEN - sie kann also VORAB
+        # sortiert werden, waehrend die Wegkosten erst BEIM Abarbeiten
+        # berechnet werden (nicht vorab in einem zweiten Durchlauf). Das ist
+        # kein Stildetail: nur so wirkt der Wegerabatt aus Schritt 1 auch auf
+        # die ENTSCHEIDUNG spaeterer, schwaecherer Kandidaten - eine Verbindung
+        # neben einer bereits gebauten Haupttrasse wird dadurch tatsaechlich
+        # eher gebaut, nicht nur geometrisch an sie herangezogen. Ein erster
+        # Entwurf werte alle Kandidaten VOR jedem Bau aus - der Rabatt griff
+        # dort nie in die Entscheidung, nur noch in die spaeter neu
+        # geroutete Geometrie.
+        def bereitschaft_von(i, j):
+            a, b = settlements[i], settlements[j]
+            rang_a = RANG_ZAHL.get(a.rank, 1)
+            rang_b = RANG_ZAHL.get(b.rank, 1)
+            kulturfaktor = 1.0 if a.culture == b.culture else BEREITSCHAFT_FREMDKULTUR
+            return rang_a * rang_b * kulturfaktor
 
-        while unconnected:
-            best_connection = None
-            best_distance = float('inf')
+        kandidaten_indizes.sort(key=lambda ij: -bereitschaft_von(*ij))
 
-            for connected_settlement in connected:
-                for unconnected_settlement in unconnected:
-                    distance = np.sqrt(
-                        (connected_settlement.x - unconnected_settlement.x) ** 2 +
-                        (connected_settlement.y - unconnected_settlement.y) ** 2
-                    )
+        # ---------------------------------------------------- 3: Bereitschaftstest
+        road_count, total_roads = 0, max(1, len(kandidaten_indizes))
+        for i, j in kandidaten_indizes:
+            a, b = settlements[i], settlements[j]
+            luftlinie = max(1.0, float(np.hypot(a.x - b.x, a.y - b.y)))
+            pf, pfad, pfadkosten = route(a, b)
+            wegkosten = pfadkosten / luftlinie
+            if bereitschaft_von(i, j) > wegkosten:
+                merke(pf, pfad)
+                gebaut.add(frozenset((a.location_id, b.location_id)))
+            road_count += 1
+            if self._update_progress:
+                progress = 25 + (road_count * 12) // total_roads
+                self._update_progress("Road Building", progress,
+                                      f"Bewertet {road_count}/{total_roads} Kandidaten")
 
-                    if distance < best_distance:
-                        best_distance = distance
-                        best_connection = (connected_settlement, unconnected_settlement)
+        # ---------------------------------------------------- 4: Kulturzusammenhang
+        sea_roads = []
+        seekostenfeld = bau_seekostenfeld(heightmap, seegrad=seegrad)
+        seepfadfinder = PathfindingSystem(seekostenfeld, slopemap.shape[0])
 
-            if best_connection:
-                start_settlement, end_settlement = best_connection
+        def see_route(a, b):
+            """
+            Seeweg zwischen zwei SIEDLUNGEN, nicht zwischen zwei Wasserpixeln.
+            A* laeuft nur zwischen den naechstgelegenen Kuestenpunkten (das
+            eigentliche Seekostenfeld haelt Land strikt gesperrt); die kurzen
+            Verbindungen Siedlung->Kueste an beiden Enden sind gerade Strecken,
+            siehe _naechster_kuestenpunkt().
+            """
+            ka = _naechster_kuestenpunkt(a.x, a.y, heightmap)
+            kb = _naechster_kuestenpunkt(b.x, b.y, heightmap)
+            if ka is None or kb is None:
+                return [(a.x, a.y), (b.x, b.y)], float('inf')
+            see_pfad, erreicht = seepfadfinder.find_least_resistance_path(
+                ka, kb, self._update_progress)
+            kosten = (sum(seepfadfinder.calculate_movement_cost(x, y) for x, y in see_pfad[1:])
+                     if erreicht else float('inf'))
+            pfad = [(a.x, a.y)] + see_pfad + [(b.x, b.y)]
+            return pfad, kosten
 
-                # Pfad finden mit Progress-Callback
-                path = pathfinder.find_least_resistance_path(
-                    slopemap,
-                    (start_settlement.x, start_settlement.y),
-                    (end_settlement.x, end_settlement.y),
-                    self._update_progress
-                )
+        kulturen = {}
+        for idx, s in enumerate(settlements):
+            kulturen.setdefault(s.culture, []).append(idx)
 
-                # Spline-Glättung anwenden
-                smoothed_path = pathfinder.apply_spline_smoothing(path, smoothing_factor=3, progress_callback=self._update_progress)
-                roads.append(smoothed_path)
+        for kultur, indizes in kulturen.items():
+            if len(indizes) < 2:
+                continue
+            # Zusammenhangskomponenten NUR ueber bereits gebaute Kanten
+            # innerhalb dieser Kultur (Union-Find).
+            eltern = {idx: idx for idx in indizes}
 
-                connected.append(end_settlement)
-                unconnected.remove(end_settlement)
+            def find(x):
+                while eltern[x] != x:
+                    eltern[x] = eltern[eltern[x]]
+                    x = eltern[x]
+                return x
 
-                road_count += 1
+            for idx_a in indizes:
+                for idx_b in indizes:
+                    if idx_a >= idx_b:
+                        continue
+                    paar = frozenset((settlements[idx_a].location_id, settlements[idx_b].location_id))
+                    if paar in gebaut:
+                        wa, wb = find(idx_a), find(idx_b)
+                        if wa != wb:
+                            eltern[wa] = wb
 
-                # Progress-Update für Straßen
-                if self._update_progress:
-                    progress = 25 + (road_count * 15) // total_roads
-                    self._update_progress("Road Building", progress, f"Built {road_count}/{total_roads} roads")
+            # Solange mehr als eine Komponente uebrig ist: die tatsaechlich
+            # GUENSTIGSTE Verbindung (Pfadkosten, nicht nur Luftlinie)
+            # zwischen zwei VERSCHIEDENEN Komponenten nachtragen - "egal was
+            # sie kosten", also ohne Bereitschaftstest. Bei diesen kleinen
+            # Gruppen (2-5 Orte je Kultur) ist ein volles Routing je
+            # verbleibendem Paar noch billig. Findet sich kein endlicher
+            # Landweg (Wasser trennt vollstaendig), wird stattdessen ein
+            # Seeweg versucht (§4.4) - eine Union bleibt hier auch dann
+            # bestehen, WENN nur der Seeweg gelingt, sonst haette die naechste
+            # Runde denselben unmoeglichen Landweg wieder als "billigsten"
+            # gewaehlt und liefe endlos im Kreis.
+            while len({find(idx) for idx in indizes}) > 1:
+                beste = None
+                for idx_a in indizes:
+                    for idx_b in indizes:
+                        if idx_a >= idx_b or find(idx_a) == find(idx_b):
+                            continue
+                        a, b = settlements[idx_a], settlements[idx_b]
+                        pf, pfad, pfadkosten = route(a, b)
+                        if beste is None or pfadkosten < beste[0]:
+                            beste = (pfadkosten, idx_a, idx_b, pf, pfad)
+                if beste is None:
+                    break
+                kosten, idx_a, idx_b, pf, pfad = beste
+                a, b = settlements[idx_a], settlements[idx_b]
+                paar = frozenset((a.location_id, b.location_id))
 
-        return roads
+                if np.isfinite(kosten):
+                    if paar not in gebaut:
+                        merke(pf, pfad)
+                        gebaut.add(paar)
+                    eltern[find(idx_a)] = find(idx_b)
+                    continue
 
-    def calculate_roadsites(self, roads, lod):
+                # Kein endlicher Landweg - Seeweg versuchen. §4.4 Auflage: der
+                # groesste Teil der Laenge muss in echtem tiefen Wasser liegen,
+                # sonst waere es "kein Seeweg, sondern ein schlechter Landweg".
+                # ">=" statt ">": bei kurzen Ueberfahrten (wenige Pfadpunkte)
+                # landet der Anteil leicht GENAU auf der Schwelle (z.B. 3 von
+                # 5 Punkten = 0.6) - eine echte Mehrheit soll nicht an einem
+                # Rundungs-Gleichstand scheitern.
+                see_pfad, see_kosten = see_route(a, b)
+                if np.isfinite(see_kosten) and _seeweg_anteil_tief(
+                        see_pfad, heightmap, seegrad=seegrad) >= 0.5:
+                    if paar not in gebaut:
+                        sea_roads.append(see_pfad)
+                        gebaut.add(paar)
+                    eltern[find(idx_a)] = find(idx_b)
+                else:
+                    # Auch per Seeweg nicht zu verbinden (z.B. Kueste liegt
+                    # dazwischen, kein tiefes Wasser erreichbar) - dieses Paar
+                    # gilt als erledigt, damit die Schleife nicht haengen
+                    # bleibt; die Kultur bleibt fuer diese zwei Orte getrennt.
+                    eltern[find(idx_a)] = find(idx_b)
+
+        return roads, sea_roads
+
+    def _knoten_zufall(self, name: str):
         """
-        Funktionsweise: Platziert Roadsites entlang von Straßen zwischen 30-70% der Weglänge
-        Aufgabe: Erstellt Roadsite-Liste mit verschiedenen Typen (Tavern, Trading Post, etc.)
-        Parameter: roads, lod - Road-Pfade und LOD-Level
+        Ein eigener Zufallsgenerator je Knoten, aus map_seed abgeleitet.
+
+        WARUM NICHT DAS GLOBALE `random`. Der Seed wird einmal im Konstruktor
+        gesetzt, aber `random` ist Modulzustand: bis ein spaeter Knoten an die
+        Reihe kommt, haengt er davon ab, WIEVIELE Zufallszahlen die Knoten
+        davor gezogen haben. Das unterscheidet sich zwischen GPU- und CPU-Pfad,
+        weil die verschiedene Codewege nehmen.
+
+        Gemessen am 2026-08-05: roadsite_list war im GPU-Durchlauf leer und im
+        CPU-Durchlauf gefuellt - bei identischem Seed und identischer Karte.
+        Damit war die Vorgabe verletzt, dass alles aus Seed und Reglern
+        reproduzierbar sein muss.
+
+        Ein Generator je Knoten haengt nur am Seed und am Knotennamen, nicht an
+        der Ausfuehrungsgeschichte.
+        """
+        streuung = 0
+        for zeichen in name:
+            streuung = (streuung * 131 + ord(zeichen)) & 0x7FFFFFFF
+        return random.Random((int(self.map_seed) << 8) ^ streuung)
+
+    def calculate_roadsites(self, roads, sea_roads, settlements, heightmap, lod, region_map=None):
+        """
+        Roadsites nach docs/SIEDLUNGEN_ENTWURF.md §4.6: "bevorzugt an
+        Kreuzungen (ein Gasthof lebt vom Verkehr), an Furten und
+        Passhoehen, auf langen Zwischenstuecken ohne Ort". Typ kommt aus dem
+        45-Arten-Katalog der naechstgelegenen Kultur (ROADSITE_KATALOG,
+        docs/KULTUREN_UND_ORTE.md), nach Platzierungskategorie passend
+        gewaehlt - eine Kreuzung bei den Kelten wird eher "Zollringwall" als
+        "Bardenlager", eine Passhoehe bei den Alemannen eher "Passhospiz".
+
+        Mit `region_map` (WELTKARTE_AKTIV) wird PRO REGION ausgewaehlt statt
+        ein einziges Mal fuer die ganze Karte (Nutzer-Vorgabe 2026-08-10:
+        "pro region ein paar, so 1-4 jeweils") - vorher gab ein einziges
+        globales Ziel (z.B. 3 bei Standard-Reglerstellung) ueber alle neun
+        Regionen zusammen nur eine Handvoll Roadsites auf der gesamten
+        Weltkarte. Die Kategorie-Prioritaet aus §4.6 bleibt je Region
+        erhalten; nur die ZIELZAHL wird jetzt neun Mal statt einmal
+        ausgewertet.
+
+        Parameter: roads, sea_roads, settlements, heightmap, lod, region_map
         Returns: List[Location] - Alle platzierten Roadsites
         """
         roadsites = []
+        zufall = self._knoten_zufall("roadsites")
 
-        if not roads or self.roadsites == 0:
+        alle_wege = list(roads) + list(sea_roads)
+        if not alle_wege or self.roadsites == 0:
             return roadsites
 
-        # LOD-abhängige Roadsite-Anzahl
-        lod_factors = {"LOD64": 0.3, "LOD128": 0.6, "LOD256": 1.0, "FINAL": 1.0}
-        adjusted_count = max(0, int(self.roadsites * lod_factors.get(lod, 1.0)))
+        height, width = heightmap.shape
+        size = height
 
-        sites_per_road = max(1, adjusted_count // len(roads)) if adjusted_count > 0 else 0
+        # ---- Kandidatentypen sammeln, in der Prioritaet aus §4.6 ----
+        kreuzungen = list(kreuzungen_finden(roads, sea_roads, settlements, (height, width)))
 
-        for road_idx, road in enumerate(roads):
-            if len(road) < 3:
+        furt_punkte, pass_punkte, strecke_punkte = [], [], []
+        for weg in roads:  # Furt/Pass nur auf Landwegen sinnvoll
+            if len(weg) < 3:
                 continue
+            hoehen = []
+            for x, y in weg:
+                xi = int(np.clip(round(x), 0, width - 1))
+                yi = int(np.clip(round(y), 0, height - 1))
+                h = float(heightmap[yi, xi])
+                hoehen.append(h)
+                if WASSER_SPERRE_M < h <= 0.0:
+                    furt_punkte.append((x, y))
+            # Passpunkt: der hoechste Punkt des Weges - aber nur, wenn der
+            # Weg wirklich steigt (Spanne > 30 m), sonst waere "hoechster
+            # Punkt" nur Rauschen auf flachem Land.
+            if hoehen and (max(hoehen) - min(hoehen)) > 30.0:
+                pass_punkte.append(weg[int(np.argmax(hoehen))])
+            pos = min(len(weg) - 1, int(zufall.uniform(0.3, 0.7) * len(weg)))
+            strecke_punkte.append(weg[pos])
+        for weg in sea_roads:
+            if len(weg) >= 3:
+                pos = min(len(weg) - 1, int(zufall.uniform(0.3, 0.7) * len(weg)))
+                strecke_punkte.append(weg[pos])
 
-            road_length = len(road)
+        for punkte in (furt_punkte, pass_punkte, strecke_punkte):
+            zufall.shuffle(punkte)
 
-            for _ in range(sites_per_road):
-                if len(roadsites) >= adjusted_count:
+        # 5.14: innerhalb jeder Kategorie randferne Kandidaten zuerst - eine
+        # weiche Praeferenz (Tie-Breaker), keine Ausduennung. Die Kategorie-
+        # Prioritaet selbst (Kreuzung > Furt > Pass > Strecke) bleibt die
+        # PRIMAERE Ordnung unten in `kandidaten`.
+        if region_map is not None:
+            kreuzungen = self._fern_zuerst(kreuzungen, size)
+            furt_punkte = self._fern_zuerst(furt_punkte, size)
+            pass_punkte = self._fern_zuerst(pass_punkte, size)
+            strecke_punkte = self._fern_zuerst(strecke_punkte, size)
+
+        kandidaten = (
+            [("kreuzung", x, y) for x, y in kreuzungen]
+            + [("furt", x, y) for x, y in furt_punkte]
+            + [("pass", x, y) for x, y in pass_punkte]
+            + [("strecke", x, y) for x, y in strecke_punkte]
+        )
+
+        # ---- Zielzahl(en): ohne region_map ein einziges Ziel fuer die ganze
+        # Karte (altes Verhalten), mit region_map eines je der neun Regionen ----
+        lod_factors = {"LOD64": 0.3, "LOD128": 0.6, "LOD256": 1.0, "FINAL": 1.0}
+        skala = lod_factors.get(lod, 1.0)
+        if region_map is None:
+            gebiete = [(np.ones((height, width), dtype=bool),
+                       max(0, int(self.roadsites * skala)))]
+        else:
+            import core.terrain_weltkarte as rw
+            region_map = np.asarray(region_map)
+            multiplikator = self.roadsites / 3.0
+            gebiete = []
+            for i, (_z, _s, _r) in enumerate(rw.alle_regionen()):
+                maske = (region_map == i)
+                if not np.any(maske):
+                    continue
+                anzahl = max(0, int(round(zufall.randint(1, 4) * multiplikator * skala)))
+                gebiete.append((maske, anzahl))
+
+        # ---- Auswahl mit Mindestabstand, damit sie sich nicht drängen ----
+        min_abstand = max(3.0, min(height, width) / 40.0)
+        gewaehlt = []
+        for maske, anzahl_ziel in gebiete:
+            if anzahl_ziel <= 0:
+                continue
+            hinzugefuegt = 0
+            for kategorie, x, y in kandidaten:
+                if hinzugefuegt >= anzahl_ziel:
                     break
+                xi = int(np.clip(round(x), 0, width - 1))
+                yi = int(np.clip(round(y), 0, height - 1))
+                if not maske[yi, xi]:
+                    continue
+                if any((x - gx) ** 2 + (y - gy) ** 2 < min_abstand ** 2
+                      for _k, gx, gy in gewaehlt):
+                    continue
+                gewaehlt.append((kategorie, x, y))
+                hinzugefuegt += 1
 
-                # Position zwischen 30-70% der Weglänge
-                position_ratio = random.uniform(0.3, 0.7)
-                position_index = int(position_ratio * road_length)
-                position_index = max(0, min(road_length - 1, position_index))
+        # ---- Typ aus dem Katalog der naechstgelegenen Kultur ----
+        for kategorie, x, y in gewaehlt:
+            kultur = _naechste_kultur(x, y, settlements)
+            katalog = ROADSITE_KATALOG.get(kultur, []) if kultur else []
+            passend = [name for name, kat in katalog if kat == kategorie]
+            auswahl = passend or [name for name, _kat in katalog]
+            name = zufall.choice(auswahl) if auswahl else "Rastplatz"
 
-                x, y = road[position_index]
-
-                roadsite_type = random.choice([
-                    'tavern', 'trading_post', 'shrine', 'toll_house',
-                    'gallows', 'market', 'industry'
-                ])
-
-                roadsite = Location(
-                    location_id=self.next_location_id,
-                    x=float(x),
-                    y=float(y),
-                    location_type='roadsite',
-                    radius=1.5 * self.scale_factor,
-                    civ_influence=0.4,
-                    properties={'roadsite_type': roadsite_type}
-                )
-
-                roadsites.append(roadsite)
-                self.next_location_id += 1
+            roadsite = Location(
+                location_id=self.next_location_id, x=float(x), y=float(y),
+                location_type='roadsite', radius=1.5 * self.scale_factor,
+                civ_influence=0.4, properties={'roadsite_type': name, 'kategorie': kategorie},
+                culture=kultur or "")
+            roadsites.append(roadsite)
+            self.next_location_id += 1
 
         if self._update_progress:
             self._update_progress("Roadsite Placement", 45, f"Placed {len(roadsites)} roadsites")
@@ -4084,65 +5135,136 @@ class SettlementGenerator:
 
         return civ_map
 
-    def calculate_landmarks(self, civ_map, heightmap, slopemap, lod):
+    def calculate_landmarks(self, civ_map, heightmap, slopemap, water_map, settlements, lod, region_map=None):
         """
-        Funktionsweise: Platziert Landmarks in Wilderness-Bereichen mit niedrigem civ_map-Wert
-        Aufgabe: Erstellt Landmark-Liste (Castle, Monastery, etc.) mit Elevation/Slope-Constraints
-        Parameter: civ_map, heightmap, slopemap, lod - Civilization-Map, Terrain-Daten und LOD-Level
+        Landmarks nach docs/SIEDLUNGEN_ENTWURF.md §4.7: "unabhaengig vom Netz,
+        nach eigenen Kriterien: Gipfel, Kliffs, Quellen, abgelegene Stellen -
+        duerfen ausdruecklich weitab jedes Weges liegen". Typ kommt aus dem
+        45-Arten-Katalog der naechstgelegenen Kultur (LANDMARK_KATALOG,
+        docs/KULTUREN_UND_ORTE.md), nach Kategorie passend gewaehlt.
+
+        VIER KATEGORIEN, VIER MASKEN. Die alte Fassung hatte eine einzige
+        pauschale Hoehen-Obergrenze (unterste 70%) - das schloss Gipfel-Arten
+        ("Trutzburg auf dem Felskopf", "Atalaya — Signalturm") von genau den
+        Stellen aus, die ihr Name verlangt. Jetzt eine Basis (Wildnis + kein
+        Extremhang), darauf vier verschiedene Feinauswahlen.
+
+        Mit `region_map` (WELTKARTE_AKTIV) PRO REGION ausgewaehlt, siehe
+        `calculate_roadsites()` fuer dieselbe Begruendung (Nutzer-Vorgabe
+        2026-08-10: "pro region ein paar, so 1-4 jeweils"). Kategorien bleiben
+        global gemischt (kein Prioritaetsranking zwischen ihnen, anders als
+        bei Roadsites) - die Randstrafe (5.14) wirkt hier deshalb erst NACH
+        dem Mischen aller Kategorien, als letzter, schwaechster Tie-Breaker.
+
+        Parameter: civ_map, heightmap, slopemap, water_map, settlements, lod, region_map
         Returns: List[Location] - Alle platzierten Landmarks
         """
         landmarks = []
+        zufall = self._knoten_zufall("landmarks")
 
-        # LOD-abhängige Landmark-Anzahl
         lod_factors = {"LOD64": 0.5, "LOD128": 0.8, "LOD256": 1.0, "FINAL": 1.0}
-        adjusted_count = max(0, int(self.landmarks * lod_factors.get(lod, 1.0)))
-
-        if adjusted_count == 0:
-            return landmarks
+        skala = lod_factors.get(lod, 1.0)
 
         height, width = civ_map.shape
+        size = height
 
-        # Vektorisiert statt Pixel-fuer-Pixel-Python-Schleife: die alten Helper
-        # _check_elevation_suitability()/_check_slope_suitability() riefen pro
-        # Pixel (H*W-mal!) erneut np.min()/np.max() auf die komplette heightmap
-        # auf - zweitgroesster Performance-Fund neben calculate_water_proximity()
-        # (siehe docs/backlog.md Ticket #4 Performance-Hinweis).
+        # ---- Zielzahl(en) zuerst, damit der Kandidatenpool passend gross ist ----
+        if region_map is None:
+            gebiete = [(np.ones((height, width), dtype=bool),
+                       max(0, int(self.landmarks * skala)))]
+        else:
+            import core.terrain_weltkarte as rw
+            region_map = np.asarray(region_map)
+            multiplikator = self.landmarks / 3.0
+            gebiete = []
+            for i, (_z, _s, _r) in enumerate(rw.alle_regionen()):
+                maske = (region_map == i)
+                if not np.any(maske):
+                    continue
+                anzahl = max(0, int(round(zufall.randint(1, 4) * multiplikator * skala)))
+                gebiete.append((maske, anzahl))
+        gesamt_ziel = sum(a for _m, a in gebiete)
+        if gesamt_ziel == 0:
+            return landmarks
+
         min_height = np.min(heightmap)
         max_height = np.max(heightmap)
         height_range = max_height - min_height
-        if height_range == 0:
-            elevation_ok = np.ones((height, width), dtype=bool)
-        else:
-            norm_height = (heightmap - min_height) / height_range
-            elevation_ok = norm_height < 0.7  # Landmarks nur in unteren 70% der Höhen
+        norm_height = ((heightmap - min_height) / height_range
+                       if height_range > 0 else np.zeros((height, width)))
 
         slope_magnitude = np.sqrt(slopemap[..., 0] ** 2 + slopemap[..., 1] ** 2)
-        slope_ok = slope_magnitude < 0.5  # Landmarks nur bei moderaten Slopes
+        basis = (civ_map < self.landmark_wilderness) & (slope_magnitude < 0.5)
 
-        wilderness_ok = civ_map < self.landmark_wilderness
-        valid_mask = wilderness_ok & elevation_ok & slope_ok
-        valid_ys, valid_xs = np.nonzero(valid_mask)
-        valid_positions = list(zip(valid_xs.tolist(), valid_ys.tolist()))
+        schwelle_px = max(2.0, min(height, width) / 20.0)
+        land = heightmap > 0.0
+        kueste_dist = distance_transform_edt(land) if np.any(~land) else np.full((height, width), np.inf)
+        wasser_maske = water_map > 0
+        quelle_dist = (distance_transform_edt(~wasser_maske) if np.any(wasser_maske)
+                       else np.full((height, width), np.inf))
 
-        # Landmarks gleichmäßig verteilen
-        if len(valid_positions) < adjusted_count:
-            adjusted_count = len(valid_positions)
+        kategorie_masken = {
+            # "gipfel"/"abgelegen" fehlte bisher der Landfilter - auf der
+            # Weltkarte (negative Hoehen = Meer) normiert `norm_height` ueber
+            # die GESAMTE Hoehenspanne inklusive Meerestiefen; ein Meerespixel
+            # mit civ_map~0 und Hangneigung~0 (offene See ist flach) erfuellte
+            # damit klaglos "abgelegen" (norm_height < 0.7 trifft auf fast
+            # jedes Meerespixel zu) - Landmarks landeten im offenen Meer.
+            "gipfel": basis & land & (norm_height > 0.6),
+            "kueste": basis & land & (kueste_dist < schwelle_px),
+            "quelle": basis & land & (quelle_dist < schwelle_px),
+            "abgelegen": basis & land & (norm_height < 0.7),
+        }
 
-        sampled_positions = self._sample_landmark_positions(valid_positions, adjusted_count)
+        # Pool je Kategorie MUSS mit der Anzahl der Gebiete mitwachsen - sonst
+        # verschwinden Kategorien wie "gipfel"/"kueste"/"quelle", die auf
+        # wenige Regionen konzentriert sind, aus einem einzigen globalen
+        # Zufallsschnitt schon vor der Regionszuordnung (gemessen: mit dem
+        # alten Schnitt max(gesamt_ziel*3, 20) blieben bei neun Regionen
+        # sieben davon komplett ohne Landmark). Ein Schnitt je Region statt
+        # global waere sauberer, aber die Masken sind ohnehin durch die
+        # Wildnis-/Hoehen-/Kuestenbedingungen begrenzt - ungekuerzt reichen
+        # sie bei Kartengroessen bis in den vierstelligen Pixelbereich.
+        pool_je_kategorie = max(gesamt_ziel * 3, 20) * max(len(gebiete), 1)
+        kandidaten = []
+        for kategorie, maske in kategorie_masken.items():
+            ys, xs = np.nonzero(maske)
+            punkte = list(zip(xs.tolist(), ys.tolist()))
+            zufall.shuffle(punkte)
+            kandidaten.extend((kategorie, x, y) for x, y in punkte[:pool_je_kategorie])
+        zufall.shuffle(kandidaten)
+        if region_map is not None:
+            kandidaten = self._fern_zuerst(kandidaten, size, xy=lambda p: (p[1], p[2]))
 
-        for x, y in sampled_positions:
-            landmark_type = random.choice(['castle', 'monastery', 'mystic_site', 'ruins'])
+        min_abstand = max(3.0, min(height, width) / 20.0)
+        gewaehlt = []
+        for regionsmaske, anzahl_ziel in gebiete:
+            if anzahl_ziel <= 0:
+                continue
+            hinzugefuegt = 0
+            for kategorie, x, y in kandidaten:
+                if hinzugefuegt >= anzahl_ziel:
+                    break
+                if not regionsmaske[y, x]:
+                    continue
+                if any((x - gx) ** 2 + (y - gy) ** 2 < min_abstand ** 2
+                      for _k, gx, gy in gewaehlt):
+                    continue
+                gewaehlt.append((kategorie, x, y))
+                hinzugefuegt += 1
+
+        for kategorie, x, y in gewaehlt:
+            kultur = _naechste_kultur(x, y, settlements)
+            katalog = LANDMARK_KATALOG.get(kultur, []) if kultur else []
+            passend = [name for name, kat in katalog if kat == kategorie]
+            auswahl = passend or [name for name, _kat in katalog]
+            name = zufall.choice(auswahl) if auswahl else "Verlassene Staette"
 
             landmark = Location(
-                location_id=self.next_location_id,
-                x=float(x),
-                y=float(y),
-                location_type='landmark',
-                radius=2.0 * self.scale_factor,
-                civ_influence=0.4,
-                properties={'landmark_type': landmark_type}
-            )
-
+                location_id=self.next_location_id, x=float(x), y=float(y),
+                location_type='landmark', radius=2.0 * self.scale_factor,
+                civ_influence=0.4, properties={'landmark_type': name, 'kategorie': kategorie},
+                culture=kultur or "")
             landmarks.append(landmark)
             self.next_location_id += 1
 
@@ -4151,14 +5273,14 @@ class SettlementGenerator:
 
         return landmarks
 
-    def calculate_landmark_roads(self, landmarks, roads, slopemap, lod):
+    def calculate_landmark_roads(self, landmarks, roads, heightmap, slopemap, lod):
         """
         Funktionsweise: Verbindet jedes Landmark deterministisch per A*-Pathfinding
         mit dem nächstgelegenen Wegpunkt des bestehenden Hauptstraßennetzes.
         Aufgabe: Landmark-Anbindung ohne Zufallsmechanismus (Nutzer-Vorgabe -
         das dekorative Zusatz-Wegenetz ist bewusst auf Phase 2 verschoben).
-        Parameter: landmarks, roads, slopemap, lod - Landmark-Liste, bestehende
-            Road-Pfade, Slope-Daten und LOD-Level
+        Parameter: landmarks, roads, heightmap, slopemap, lod - Landmark-Liste,
+            bestehende Road-Pfade, Hoehen-/Slope-Daten und LOD-Level
         Returns: List[List[Tuple]] - Ein Pfad pro Landmark zum Straßennetz
         """
         if not landmarks or not roads:
@@ -4168,7 +5290,13 @@ class SettlementGenerator:
         if not road_points:
             return []
 
-        pathfinder = PathfindingSystem(self.road_slope_to_distance_ratio, slopemap.shape[0])
+        weg_maske = np.zeros(heightmap.shape, dtype=bool)
+        for px, py in road_points:
+            xi, yi = int(round(px)), int(round(py))
+            if 0 <= yi < weg_maske.shape[0] and 0 <= xi < weg_maske.shape[1]:
+                weg_maske[yi, xi] = True
+        kostenfeld = bau_kostenfeld(heightmap, slopemap, self.road_slope_to_distance_ratio, weg_maske)
+        pathfinder = PathfindingSystem(kostenfeld, slopemap.shape[0])
         landmark_roads = []
 
         for landmark in landmarks:
@@ -4176,75 +5304,21 @@ class SettlementGenerator:
             nearest_idx = int(np.argmin(distances))
             target = road_points[nearest_idx]
 
-            path = pathfinder.find_least_resistance_path(
-                slopemap, (landmark.x, landmark.y), target, self._update_progress)
+            path, _erreicht = pathfinder.find_least_resistance_path(
+                (landmark.x, landmark.y), target, self._update_progress)
             smoothed_path = pathfinder.apply_spline_smoothing(
                 path, smoothing_factor=3, progress_callback=self._update_progress)
             landmark_roads.append(smoothed_path)
 
         return landmark_roads
 
-    def calculate_outer_connections(self, settlements, suitability_map, water_map, slopemap, lod, count=None):
-        """
-        Funktionsweise: Verbindet Siedlungen mit 2-3 Punkten am Kartenrand an
-        plausiblen Positionen (nicht Bergspitze/Meer, siehe Nutzer-Vorgabe).
-        Aufgabe: Randpunkt-Auswahl über Suitability + Wasser-Ausschluss, über
-        den Kartenumfang verteilt (Mindestabstand), dann A*-Pathfinding von der
-        jeweils nächstgelegenen Siedlung.
-        Parameter: settlements, suitability_map, water_map, slopemap, lod, count
-            - Settlement-Liste, Terrain-Eignung, Wasser-Maske, Slope-Daten,
-              LOD-Level und optionale feste Anzahl Außenverbindungen (Default:
-              2-3, abhängig von der Settlement-Anzahl)
-        Returns: List[List[Tuple]] - Ein Pfad pro Außenverbindung
-        """
-        settlements_only = [s for s in settlements if s.location_type == 'settlement']
-        if not settlements_only:
-            return []
-
-        height, width = suitability_map.shape
-        connection_count = count if count is not None else min(3, max(2, len(settlements_only)))
-
-        border_candidates = []
-        for x in range(width):
-            border_candidates.append((x, 0))
-            border_candidates.append((x, height - 1))
-        for y in range(height):
-            border_candidates.append((0, y))
-            border_candidates.append((width - 1, y))
-
-        # Wasser-Punkte (Meer/See am Kartenrand) ausschließen, Rest nach Suitability sortieren
-        scored = [
-            (suitability_map[y, x], x, y) for (x, y) in border_candidates if water_map[y, x] <= 0
-        ]
-        if not scored:
-            return []
-        scored.sort(key=lambda item: item[0], reverse=True)
-
-        # Ausgewählte Randpunkte über den Kartenumfang verteilen (Mindestabstand),
-        # damit nicht alle Verbindungen in derselben Ecke landen
-        chosen = []
-        map_perimeter = 2 * (width + height)
-        min_spacing = map_perimeter / (connection_count * 2)
-        for _, x, y in scored:
-            if len(chosen) >= connection_count:
-                break
-            if all((x - cx) ** 2 + (y - cy) ** 2 >= min_spacing ** 2 for cx, cy in chosen):
-                chosen.append((x, y))
-
-        pathfinder = PathfindingSystem(self.road_slope_to_distance_ratio, slopemap.shape[0])
-        outer_roads = []
-
-        for (bx, by) in chosen:
-            nearest_settlement = min(
-                settlements_only, key=lambda s: (s.x - bx) ** 2 + (s.y - by) ** 2)
-
-            path = pathfinder.find_least_resistance_path(
-                slopemap, (nearest_settlement.x, nearest_settlement.y), (bx, by), self._update_progress)
-            smoothed_path = pathfinder.apply_spline_smoothing(
-                path, smoothing_factor=3, progress_callback=self._update_progress)
-            outer_roads.append(smoothed_path)
-
-        return outer_roads
+    # calculate_outer_connections() ENTFERNT (2026-08-10, OFFENE_PUNKTE 5.11).
+    # Verband Siedlungen mit 2-3 Punkten am KARTENRAND - eine Annahme, die zu
+    # keiner Insel/Region passt: es gibt kein sinnvolles "Draussen", zu dem
+    # eine Strasse fuehren sollte. docs/SIEDLUNGEN_ENTWURF.md kennt nur
+    # Siedlung-Siedlung-, Siedlung-See- (Seewege) und Roadsite/Landmark-
+    # Anbindungen - keine Kartenrand-Anbindung. War ein Leftover aus einer
+    # frueheren Konzeptphase.
 
     def _save_to_data_manager(self, data_manager, result, parameters):
         """
@@ -4348,62 +5422,78 @@ class SettlementGenerator:
         return interpolated
 
     # Hilfsmethoden für Settlement-Platzierung
-    def _find_best_settlement_positions(self, suitability_map, existing_settlements, min_distance):
+    def _find_best_settlement_positions(self, suitability_map, gesperrt_mask,
+                                        erlaubt_mask=None):
         """
-        Funktionsweise: Findet beste verfügbare Positionen für Settlement-Platzierung
+        Beste verfuegbare Positionen, absteigend nach Eignung.
+
+        VEKTORISIERT (2026-08-10). Die Vorlage war eine Python-Doppelschleife
+        ueber JEDEN Pixel, darin fuer jeden Kandidaten noch eine Schleife ueber
+        alle bisherigen Siedlungen - bei wachsender Siedlungszahl O(H*W*N) in
+        reinem Python, aufgerufen einmal PRO VERSUCH. `erlaubt_mask` ist neu:
+        beschraenkt die Suche auf eine Kulturregion, siehe calculate_settlements().
+
+        `gesperrt_mask` (2026-08-11, Pipeline-Audit): fertige (H,W)-Bool-
+        Sperrflaeche statt einer Liste bestehender Siedlungen - der Aufrufer
+        baut sie einmal je min_distance auf und erweitert sie danach lokal
+        (siehe `_markiere_gesperrt`), statt sie hier bei JEDEM Versuch aus
+        allen Siedlungen neu zu berechnen. Gemessen: `settlement.settlements`
+        skalierte dadurch bei 256->512px (4x Pixel) um 17.5x statt der
+        erwarteten ~4x - jetzt behoben.
         """
-        height, width = suitability_map.shape
-        candidates = []
+        gueltig = np.ones(suitability_map.shape, dtype=bool) if erlaubt_mask is None else erlaubt_mask
+        if not np.any(gueltig):
+            return []
+        schwelle = np.percentile(suitability_map[gueltig], 75)
+        kandidat = gueltig & (suitability_map >= schwelle)
 
-        threshold = np.percentile(suitability_map, 75)  # Top 25%
+        if gesperrt_mask is not None:
+            kandidat &= ~gesperrt_mask
 
-        for y in range(height):
-            for x in range(width):
-                if suitability_map[y, x] < threshold:
-                    continue
+        ys, xs = np.nonzero(kandidat)
+        if len(xs) == 0:
+            return []
+        reihenfolge = np.argsort(-suitability_map[ys, xs])
+        return [(int(xs[i]), int(ys[i])) for i in reihenfolge]
 
-                # Mindestabstand zu existierenden Settlements prüfen
-                too_close = False
-                for settlement in existing_settlements:
-                    distance = np.sqrt((x - settlement.x) ** 2 + (y - settlement.y) ** 2)
-                    if distance < min_distance:
-                        too_close = True
-                        break
-
-                if not too_close:
-                    candidates.append((x, y, suitability_map[y, x]))
-
-        candidates.sort(key=lambda c: c[2], reverse=True)
-        return [(x, y) for x, y, _ in candidates]
+    def _markiere_gesperrt(self, gesperrt_mask, center_x, center_y, radius):
+        """
+        Traegt EINE Kreisscheibe in eine bestehende Sperrmaske ein - lokal
+        begrenzt auf ihre Bounding-Box, wie `_reduce_suitability_around_point`.
+        Ermoeglicht, die Sperrflaeche mehrerer Siedlungen inkrementell
+        aufzubauen, ohne je Siedlung ein volles (H,W)-Array anzulegen (siehe
+        `_find_best_settlement_positions`-Docstring).
+        """
+        height, width = gesperrt_mask.shape
+        y0 = max(0, int(center_y - radius))
+        y1 = min(height, int(center_y + radius + 1))
+        x0 = max(0, int(center_x - radius))
+        x1 = min(width, int(center_x + radius + 1))
+        if y1 <= y0 or x1 <= x0:
+            return
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        innerhalb = (xx - center_x) ** 2 + (yy - center_y) ** 2 < radius ** 2
+        gesperrt_mask[y0:y1, x0:x1] |= innerhalb
 
     def _reduce_suitability_around_point(self, suitability_map, center_x, center_y, radius):
         """
-        Funktionsweise: Reduziert Suitability um gegebenen Punkt für Mindestabstände
+        Eignung um einen Punkt herum absenken, fuer Mindestabstaende.
+        VEKTORISIERT (2026-08-10) - siehe _find_best_settlement_positions().
         """
         height, width = suitability_map.shape
+        y0 = max(0, int(center_y - radius))
+        y1 = min(height, int(center_y + radius + 1))
+        x0 = max(0, int(center_x - radius))
+        x1 = min(width, int(center_x + radius + 1))
+        if y1 <= y0 or x1 <= x0:
+            return
 
-        for y in range(max(0, int(center_y - radius)), min(height, int(center_y + radius + 1))):
-            for x in range(max(0, int(center_x - radius)), min(width, int(center_x + radius + 1))):
-                distance = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
-                if distance <= radius:
-                    reduction_factor = 1.0 - (distance / radius) * 0.8
-                    suitability_map[y, x] *= reduction_factor
-
-    def _sample_landmark_positions(self, positions, count):
-        """
-        Funktionsweise: Sampelt Landmark-Positionen für gleichmäßige Verteilung
-        """
-        if len(positions) <= count:
-            return positions
-
-        step = len(positions) // count
-        sampled = []
-
-        for i in range(0, len(positions), step):
-            if len(sampled) < count:
-                sampled.append(positions[i])
-
-        return sampled
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        distanz = np.hypot(xx - center_x, yy - center_y)
+        innerhalb = distanz <= radius
+        faktor = 1.0 - (distanz / radius) * 0.8
+        block = suitability_map[y0:y1, x0:x1]
+        block[innerhalb] *= faktor[innerhalb]
 
     def _create_plot_map(self, map_shape, plots):
         """
@@ -4449,12 +5539,16 @@ class SettlementGenerator:
         settlement_data = self._execute_generation("LOD64", dependencies, parameters)
         return settlement_data.settlement_list
 
-    def create_road_network(self, settlements, slopemap, road_slope_to_distance_ratio):
+    def create_road_network(self, settlements, heightmap, slopemap, road_slope_to_distance_ratio):
         """
-        Funktionsweise: Legacy-Methode für Road-Network-Erstellung
+        Funktionsweise: Legacy-Methode für Road-Network-Erstellung. Unbenutzt
+        im Rest des Projekts (kein Aufrufer gefunden) - nur der Vollstaendigkeit
+        halber an die neue calculate_road_network()-Signatur angepasst
+        (heightmap fuer die Wasserkosten-Stufen, §4.1), damit sie nicht als
+        stiller Aufruf-Landmine liegen bleibt.
         """
-        pathfinder = PathfindingSystem(road_slope_to_distance_ratio, "LOD64")
-        return self.calculate_road_network(settlements, slopemap, "LOD64")
+        self.road_slope_to_distance_ratio = road_slope_to_distance_ratio
+        return self.calculate_road_network(settlements, heightmap, slopemap, "LOD64")
 
     def place_landmarks(self, civ_map, landmarks_count, landmark_wilderness, heightmap, slopemap):
         """

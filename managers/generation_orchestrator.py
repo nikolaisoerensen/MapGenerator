@@ -61,9 +61,12 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread, QMutex, QMutexLocker, QTi
 from typing import Dict, List, Set, Any, Callable
 import functools
 import logging
+import threading
 import time
 from enum import Enum
 import os
+
+import numpy as np
 
 from managers.calculator_graph import CALCULATOR_GRAPH, CalculatorDispatcher
 from managers.shader_manager import ShaderManager
@@ -404,9 +407,22 @@ class GenerationOrchestrator(QObject):
                 "low_impact": []
             },
             GeneratorType.WEATHER: {
-                "high_impact": ["air_temp_entry", "ground_temp_offset", "altitude_cooling"],
-                "medium_impact": ["thermic_effect", "wind_speed_factor"],
-                "low_impact": ["terrain_factor"]
+                # Ergaenzt 2026-08-11 (Pipeline-Audit): sieben Weather-Regler
+                # fehlten hier komplett, fielen also auf "low_impact" (der
+                # Default fuer jeden nicht gelisteten Parameter, siehe
+                # calculate_parameter_impact()) - obwohl der Graph
+                # (managers/calculator_graph.py) klare Abhaengigkeiten von
+                # weather.* nach water.*/biome.*/settlement.* zeigt. Eine
+                # Aenderung an z.B. prevailing_wind_direction liess damit
+                # Wasser/Biome/Siedlung auf dem ALTEN Stand stehen - derselbe
+                # Fehlertyp, den der Kommentar bei EROSION oben schon einmal
+                # dokumentiert (fehlende Kette -> "Dependencies invalidated:
+                # erosion -> ['erosion']").
+                "high_impact": ["air_temp_entry", "ground_temp_offset", "altitude_cooling",
+                                "air_humidity_entry", "map_latitude", "prevailing_wind_direction"],
+                "medium_impact": ["thermic_effect", "wind_speed_factor",
+                                   "sun_relevance_factor", "thermal_pressure_coupling"],
+                "low_impact": ["terrain_factor", "map_longitude", "turbulence_strength"]
             },
             GeneratorType.WATER: {
                 # rain_threshold/manning_coefficient sind 2026-07-27 entfernt
@@ -423,10 +439,31 @@ class GenerationOrchestrator(QObject):
                 "low_impact": ["edge_softness", "cliff_slope"]
             },
             GeneratorType.SETTLEMENT: {
+                # Ergaenzt 2026-08-11 (Pipeline-Audit): die 14 PlotPhysicsSystem-
+                # Regler (Feder-/Massen-/Daempfungs-Parameter der Grundstuecks-
+                # Simulation, siehe settlement.plot_nodes) fehlten hier.
+                # ANDERS als bei Weather ist das kein Korrektheitsbug -
+                # Settlement ist Blatt-Generator (nichts haengt downstream
+                # von ihm ab), und die Selbst-Invalidierung des eigenen
+                # Generators greift ohnehin immer. Es ist aber ein
+                # PERFORMANCE-Bug: weil die Kategorie fehlte, setzte jede
+                # dieser Feinjustierungen alle NEUN Settlement-Knoten zurueck
+                # (inklusive settlement.pathfinding, ~9.8s bei 512px), obwohl
+                # nur settlement.plot_nodes den jeweiligen Parameter liest.
+                # Echte Knoten-genaue Invalidierung braucht die groessere,
+                # separate Ueberarbeitung aus Befund 9 des Audits (Generator-
+                # statt Knoten-Ebene) - hier nur die fehlende Einordnung
+                # selbst nachgetragen.
                 "high_impact": ["settlements", "landmarks", "roadsites", "plotnodes"],
                 "medium_impact": ["civ_influence_decay", "terrain_factor_villages",
-                                  "plot_base_spacing", "plot_civ_spacing_factor"],
-                "low_impact": ["plot_height_cost_factor", "landmark_wilderness", "road_slope_to_distance_ratio"]
+                                  "plot_base_spacing", "plot_civ_spacing_factor",
+                                  "city_reach_factor", "city_size", "civ_influence_range",
+                                  "plot_tier_factor"],
+                "low_impact": ["plot_height_cost_factor", "landmark_wilderness", "road_slope_to_distance_ratio",
+                              "core_mass", "core_plotnode_spring_stiffness", "damping",
+                              "plotnode_plotnode_spring_stiffness", "plot_city_repulsion_strength",
+                              "plot_gravity_strength", "plot_node_mass", "plot_node_repulsion_strength",
+                              "potential_strength", "pressure_strength"]
             }
         }
 
@@ -844,6 +881,28 @@ class GenerationOrchestrator(QObject):
         self._active_parameters[generator_type] = parameters
         return True
 
+    # ZWEI AUFLOESUNGSSTUFEN UEBER DAS ZIEL-LOD: VERSUCHT UND ZURUECKGENOMMEN
+    # (2026-08-06).
+    #
+    # Der Gedanke war richtig - Terrain braucht 1024 px, Wetter und Biome nicht.
+    # Der Weg war falsch: `set_calculator_target_lod()` je Generator zu senken
+    # bringt die Rundensteuerung zum Stillstand.
+    #
+    # CalculatorGraph._start_round() nimmt das MAXIMUM aller Ziel-LODs als
+    # Startrunde, und get_next_ready_batch() zaehlt nur aufwaerts. Ein Knoten
+    # mit niedrigerem Ziel liegt damit unterhalb der Startrunde und wird NIE
+    # aufgerufen. Im Programm sah man: Terrain fertig auf LOD 6, danach endlos
+    # "get_next_ready_batch kommt nicht voran ... offen: geology.*".
+    #
+    # Der Docstring von _start_round() sagt das ausdruecklich - ich habe ihn
+    # erst gelesen, nachdem der Fehler da war.
+    #
+    # Der richtige Weg fuehrt NICHT ueber das Ziel-LOD, sondern ueber die
+    # gerechnete GROESSE je Generator: alle Knoten bleiben auf demselben LOD,
+    # ein Generator rechnet sein Feld aber intern kleiner und legt es kleiner
+    # ab. DataLODManager.get_calculator_output() tastet bereits um, wenn ein
+    # Abnehmer eine andere Groesse braucht - dieser Teil ist gebaut und bleibt.
+
     def _calculator_ids_for(self, generator_name: str) -> List[str]:
         """Alle Calculator-Knoten-IDs, die zu diesem Generator gehören."""
         return [cid for cid, spec in CALCULATOR_GRAPH.items() if spec.generator == generator_name]
@@ -1125,8 +1184,21 @@ class GenerationOrchestrator(QObject):
         generator_instance = self.get_generator_instance(generator_type)
         parameters = self._active_parameters.get(generator_name, {})
 
+        # ZEITMESSUNG UM ASSEMBLE/STORE/EMIT (2026-08-11, Nutzerbefund):
+        # zwischen zwei Pipeline-Knoten-Zeilen lag eine 91.6s-Luecke, obwohl
+        # ALLE beteiligten Knoten laengst fertig gerechnet hatten. Der
+        # Verdacht: nicht die Knoten selbst, sondern das hier - Zusammenbau
+        # des Domain-Objekts UND, falls generation_completed/
+        # lod_progression_completed direkt (gleicher Thread) verbunden sind,
+        # JEDE synchron angehaengte Anzeige-Aktualisierung - laeuft komplett
+        # unprotokolliert auf dem Hauptthread und blockiert dabei auch das
+        # Dispatchen bereits fertiger Knoten (deren calculator_completed
+        # haengt in der Qt-Ereigniswarteschlange, bis dieser Aufruf
+        # zurueckkehrt). Eigene Log-Zeile statt Stillschweigen.
+        t_assemble = time.perf_counter()
         assemble_method = getattr(generator_instance, f"assemble_{generator_name}_data")
         generator_output = assemble_method(lod_level, parameters)
+        dt_assemble = time.perf_counter() - t_assemble
 
         complete_setters = {
             "terrain": self.data_lod_manager.set_terrain_data_complete_lod,
@@ -1137,7 +1209,9 @@ class GenerationOrchestrator(QObject):
             "biome": self.data_lod_manager.set_biome_data_complete_lod,
             "settlement": self.data_lod_manager.set_settlement_data_complete_lod,
         }
+        t_store = time.perf_counter()
         complete_setters[generator_name](generator_output, lod_level, parameters)
+        dt_store = time.perf_counter() - t_store
         self.logger.debug(f"{generator_name}-Daten für LOD {lod_level} abgelegt")
 
         request = self.active_requests_by_generator.get(generator_name)
@@ -1154,14 +1228,22 @@ class GenerationOrchestrator(QObject):
                 "source_tab": request.source_tab if request else generator_name,
                 "timestamp": time.time(),
             }
+            t_emit = time.perf_counter()
             self.generation_completed.emit(request_id, result_data)
+            dt_emit = time.perf_counter() - t_emit
             self.active_requests_by_generator.pop(generator_name, None)
             if request:
                 self.active_request_mapping.pop(request.request_id, None)
             self.logger.info(f"Final completion emitted for {generator_name} (LOD {lod_level})")
         else:
             # Zwischen-LOD - sofortige UI-Updates mit bestem verfügbarem LOD
+            t_emit = time.perf_counter()
             self.lod_progression_completed.emit(request_id, lod_level)
+            dt_emit = time.perf_counter() - t_emit
+
+        _PIPELINE_LOGGER.info(
+            "%-42s | %-8s | Zusammenbau %6.3fs | Ablegen %6.3fs | Signal/Anzeige-Refresh %6.3fs",
+            f"{generator_name}.[assemble]", "MAIN", dt_assemble, dt_store, dt_emit)
 
     def _note_activity(self, generator_name: str):
         """Lebenszeichen eines Generators vermerken - siehe
@@ -1525,6 +1607,53 @@ class GenerationOrchestrator(QObject):
         self.logger.info("Generation orchestrator cleanup completed")
 
 
+# Eigener Logger-Name (2026-08-11, Nutzerwunsch: Rechenzeit je Prozess-Knoten
+# sichtbar mitloggen, "Name Prozess, GPU/CPU/Fallback, Dauer, Output") - so
+# lassen sich diese Zeilen in der Konsole/Logdatei per Namensfilter von den
+# uebrigen ~9 Loggern dieser Datei trennen, ohne deren Pegel anzuheben.
+_PIPELINE_LOGGER = logging.getLogger("Pipeline")
+
+# LUECKE SEIT DER LETZTEN PROZESS-ZEILE (2026-08-11, Nutzerbefund) - global
+# ueber alle Knoten, nicht pro Knoten. "Dauer" oben misst nur die reine
+# Rechenzeit INNERHALB von method(...) - das deckt NICHT die Zeit ab, die ein
+# fertig gerechneter, aber noch nicht dispatchter Knoten wartet, bis
+# advance_calculator_dispatch() ihn ueberhaupt startet (z.B. weil der
+# Hauptthread mit dem Zusammenbauen/Anzeigen eines fertigen Generators
+# beschaeftigt ist). Der Nutzer fand genau das: zwischen zwei Prozess-Zeilen
+# lag rund eine Minute, obwohl beide gemeldeten "Dauer"-Werte zusammen nur
+# Sekundenbruchteile ausmachten - vorher unsichtbar, weil weder ein
+# Zeitstempel in der Konsole stand (siehe main.py _setup_logging) noch dieser
+# Wert geloggt wurde. Reiner Diagnosewert: bei parallelen Sibling-Knoten
+# derselben Runde ist die Luecke auch bei normalem Betrieb klein, nicht null -
+# erst ein Wert, der weit ueber der eigenen und der vorherigen Dauer liegt,
+# zeigt einen echten Blockierer an.
+_pipeline_gap_lock = threading.Lock()
+_pipeline_last_event_at = {"t": None}
+
+
+def _pipeline_gap_since_last(now: float):
+    with _pipeline_gap_lock:
+        prev = _pipeline_last_event_at["t"]
+        _pipeline_last_event_at["t"] = now
+    return None if prev is None else now - prev
+
+
+def _format_output_value(value: Any) -> str:
+    """Kurzform eines einzelnen Calculator-Outputs fuers Prozess-Log -
+    Dimension/Typ, nicht der Inhalt (der waere fuer ein Log zu gross)."""
+    if isinstance(value, np.ndarray):
+        return f"{value.dtype}{tuple(value.shape)}"
+    if isinstance(value, dict):
+        return f"dict[{len(value)}]"
+    if isinstance(value, (list, tuple)):
+        return f"{type(value).__name__}[{len(value)}]"
+    if value is None:
+        return "None"
+    if isinstance(value, (int, float, bool, str)):
+        return repr(value) if isinstance(value, str) else str(value)
+    return type(value).__name__
+
+
 class CalculatorThread(QThread):
     """
     Funktionsweise: Worker-Thread für EINEN einzelnen Calculator-Knoten (nicht
@@ -1588,7 +1717,13 @@ class CalculatorThread(QThread):
 
             method_name = "_calc_" + self.calculator_id.split(".", 1)[1]
             method = getattr(self.generator_instance, method_name)
+
+            shader_manager = getattr(self.generator_instance, "shader_manager", None)
+            dispatch_start = shader_manager.dispatch_log_snapshot_index() if shader_manager else 0
+            t0 = time.perf_counter()
             method(self.calculator_id, self.lod_level)
+            duration = time.perf_counter() - t0
+            self._log_process(shader_manager, dispatch_start, duration)
 
             self.calculator_completed.emit(self.calculator_id, self.lod_level, True, "")
 
@@ -1604,6 +1739,52 @@ class CalculatorThread(QThread):
 
     def _emit_live_plot_update(self, snapshot):
         self.settlement_plot_live_update.emit(snapshot)
+
+    def _log_process(self, shader_manager, dispatch_start: int, duration: float):
+        """
+        Ein Log-Eintrag je abgeschlossenem Calculator-Knoten: Name, GPU/CPU/
+        Fallback, Dauer, Output-Dimensionen (2026-08-11, Nutzerwunsch - siehe
+        docs/OFFENE_PUNKTE.md Pipeline-Audit). Deckt alle 38 Knoten aus EINER
+        Stelle ab (statt 38 Generatoren einzeln anzufassen), weil hier bereits
+        jede _calc_*-Methode durchlaeuft.
+
+        GPU/CPU/Fallback aus dem Dispatch-Log des ShaderManager (siehe dort):
+        nur ECHTE Uebergaben an den GPUWorker zaehlen als Versuch - ein Knoten
+        ohne jeden GPU-Aufruf ist "CPU" (kein Shader dafuer implementiert),
+        ein Knoten mit mindestens einem erfolgreichen Aufruf ist "GPU", ein
+        Knoten mit Aufrufversuchen, die alle scheiterten, ist "Fallback".
+
+        Fehler hier duerfen den Knoten nicht zum Scheitern bringen - Logging
+        ist Diagnose, nicht Teil der eigentlichen Berechnung.
+        """
+        try:
+            calls = (shader_manager.dispatch_log_since(dispatch_start, threading.get_ident())
+                     if shader_manager is not None else [])
+            if any(ok for _op, ok in calls):
+                pfad = "GPU"
+            elif calls:
+                pfad = "Fallback"
+            else:
+                pfad = "CPU"
+
+            spec = CALCULATOR_GRAPH.get(self.calculator_id)
+            data_lod_manager = getattr(self.generator_instance, "data_lod_manager", None)
+            output_parts = []
+            if spec is not None and data_lod_manager is not None:
+                for key in spec.output_keys:
+                    value = data_lod_manager.get_calculator_output(self.calculator_id, key, self.lod_level)
+                    output_parts.append(f"{key}={_format_output_value(value)}")
+            output_str = " ".join(output_parts) if output_parts else "-"
+
+            gap = _pipeline_gap_since_last(time.perf_counter())
+            gap_str = f"{gap:7.3f}s" if gap is not None else "    -  "
+
+            _PIPELINE_LOGGER.info(
+                "%-42s | %-8s | Dauer %7.3fs | seit letztem Knoten %s | %s",
+                self.calculator_id, pfad, duration, gap_str, output_str)
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Prozess-Log fuer '%s' fehlgeschlagen", self.calculator_id, exc_info=True)
 
     def _emit_progress(self, phase: str, progress: int, message: str):
         """Adapter zwischen der (phase, progress, message)-Signatur, die alle

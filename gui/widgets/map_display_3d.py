@@ -81,9 +81,11 @@ import OpenGL.GL as gl
 import OpenGL.arrays.vbo as glvbo
 from OpenGL.GL import shaders
 import math
+import time
 from gui.config.gui_default import CanvasSettings, ColorSchemes
 from gui.config.value_default import TERRAIN
 from gui.widgets.map_display_2d import _calculate_contour_levels, _get_layer_range, compute_slope_compass_rgb
+from gui.widgets.adaptive_terrain_mesh import build_adaptive_mesh, ist_fuer_adaptives_mesh_geeignet
 
 # 3D-interne Overlay-Layer-Namen (siehe self.overlay_data) -> Key in
 # CanvasSettings.CANVAS_2D["layer_ranges"] (dieselbe Tabelle, die auch die
@@ -556,6 +558,12 @@ class MapDisplay3D(QOpenGLWidget):
         self.terrain_height_scale = 1.0
         self.terrain_center_y = 0.0
 
+        # Fehlertoleranz (Meter) fuer die adaptive Mesh-Triangulierung -
+        # siehe gui/widgets/adaptive_terrain_mesh.py. Nur bei quadratischen
+        # Heightmaps mit Kantenlaenge 2^n+1 aktiv, sonst automatischer
+        # Rueckfall auf das Gleichmaessig-Gitter (siehe _generate_terrain_mesh).
+        self._adaptive_mesh_fehler_toleranz_m = 6.0
+
     def initializeGL(self):
         """
         Funktionsweise: OpenGL-Initialisierung beim ersten Aufruf - ERWEITERT
@@ -686,6 +694,30 @@ class MapDisplay3D(QOpenGLWidget):
             self.rendering_error.emit("Invalid heightmap data received")
             return
 
+        # base_tab.py._push_data_to_current_display() ruft update_heightmap()
+        # bei JEDEM 3D-Layer-Wechsel auf, auch reinen Textur-Wechseln wie
+        # Height->Slope (siehe dortiger Kommentar: "Overlay-Layer werden
+        # zusaetzlich IMMER an... gepusht") - dabei wird i.d.R. dieselbe,
+        # inhaltlich unveraenderte kombinierte Heightmap erneut hereingereicht
+        # (get_terrain_data_combined() baut bei jedem Aufruf ein NEUES Array
+        # per .copy(), ein reiner Objekt-Identitaets-Vergleich wuerde also
+        # immer "geaendert" sagen). Solange das Mesh gleichfoermig war, war
+        # ein Rebuild bei jedem Wechsel gratis (rein vektorisiertes Numpy) -
+        # seit der adaptiven Triangulierung (siehe adaptive_terrain_mesh.py)
+        # kostet ein Rebuild bei 1024px real 2-3s Python-Rechenzeit, was sich
+        # beim Umschalten auf einen anderen Skin (z.B. Slope) als spuerbares
+        # Ruckeln zeigte (Nutzerbefund 2026-08-12) - der Rebuild war dabei
+        # komplett unnoetig, da sich nur die Textur, nicht die Geometrie
+        # aendert. Deshalb: Inhaltsvergleich statt Identitaet, Rebuild nur bei
+        # tatsaechlicher Aenderung (oder wenn noch gar kein Mesh existiert).
+        _t0 = time.time()
+        unveraendert = (
+            self.heightmap is not None
+            and self.heightmap.shape == heightmap.shape
+            and np.array_equal(self.heightmap, heightmap)
+        )
+        print(f"DEBUG: update_heightmap({tab_type}): Vergleich {time.time()-_t0:.3f}s, unveraendert={unveraendert}, mesh vorhanden={self.mesh_vertices is not None}")
+
         self.heightmap = heightmap
         self.current_tab = tab_type
         self._calculate_terrain_scaling()
@@ -697,6 +729,11 @@ class MapDisplay3D(QOpenGLWidget):
         contour_levels = _calculate_contour_levels(heightmap)
         if len(contour_levels) >= 2:
             self.contour_interval = float(contour_levels[1] - contour_levels[0])
+
+        if unveraendert and self.mesh_vertices is not None:
+            self.update()
+            print(f"DEBUG: update_heightmap({tab_type}): Rebuild uebersprungen, gesamt {time.time()-_t0:.3f}s")
+            return
 
         # _generate_terrain_mesh() erstellt/löscht OpenGL-Buffer direkt (glGenBuffers,
         # glDeleteBuffers, VBO-Upload) - das läuft hier NICHT innerhalb von paintGL(),
@@ -711,6 +748,7 @@ class MapDisplay3D(QOpenGLWidget):
             self._generate_terrain_mesh()
         finally:
             self.doneCurrent()
+        print(f"DEBUG: update_heightmap({tab_type}): Rebuild gesamt {time.time()-_t0:.3f}s")
 
         self.update()
 
@@ -1055,74 +1093,119 @@ class MapDisplay3D(QOpenGLWidget):
         height, width = self.heightmap.shape
         heightmap = self.heightmap.astype(np.float32)
 
-        # Vertex-Positionen (vectorized, (height, width) Grids)
-        x_idx = np.arange(width, dtype=np.float32)
-        y_idx = np.arange(height, dtype=np.float32)
-        pos_x = np.broadcast_to(
-            (x_idx / (width - 1) - 0.5) * width * self.terrain_scale_factor, (height, width))
-        pos_z = np.broadcast_to(
-            ((y_idx / (height - 1) - 0.5) * height * self.terrain_scale_factor)[:, None], (height, width))
-        pos_y = heightmap * self.terrain_height_scale
+        # Adaptive, fehler-getriebene Triangulierung (siehe adaptive_terrain_mesh.py):
+        # wenige grosse Dreiecke auf flachen Flaechen (offenes Meer, Ebenen),
+        # volle Pixel-Aufloesung an Klippen/Detailbereichen - statt vorher
+        # ueberall exakt einem Vertex pro Pixel. Nur bei quadratischer
+        # Heightmap mit Kantenlaenge 2^n+1 anwendbar (alle map_size-Werte
+        # dieses Projekts erfuellen das); sonst automatischer Rueckfall auf
+        # das bisherige Gleichmaessig-Gitter unten.
+        adaptives_ergebnis = None
+        if ist_fuer_adaptives_mesh_geeignet(heightmap):
+            adaptives_ergebnis = build_adaptive_mesh(
+                heightmap, self.terrain_scale_factor, self.terrain_height_scale,
+                fehler_toleranz_m=self._adaptive_mesh_fehler_toleranz_m)
 
-        # Normalen: gleiche Rand-Behandlung wie die vorherige Pro-Vertex-Schleife
-        # (Rand: einseitige Differenz, Innen: unhalbierte zentrale Differenz - deshalb
-        # kein np.gradient(), das die Differenz innen halbiert).
-        dz_dx = np.empty_like(heightmap)
-        dz_dx[:, 1:-1] = heightmap[:, 2:] - heightmap[:, :-2]
-        dz_dx[:, 0] = heightmap[:, 1] - heightmap[:, 0]
-        dz_dx[:, -1] = heightmap[:, -1] - heightmap[:, -2]
+        if adaptives_ergebnis is not None:
+            self.mesh_vertices, self.mesh_indices, mesh_stats = adaptives_ergebnis
+            print(f"DEBUG: Adaptives Terrain-Mesh: {mesh_stats['dreiecke']}/{mesh_stats['voll_dreiecke']} "
+                  f"Dreiecke ({mesh_stats['dreiecke'] / mesh_stats['voll_dreiecke']:.1%}), "
+                  f"{mesh_stats['blaetter']} Blaetter, {mesh_stats['vertices']}/{mesh_stats['voll_vertices']} Vertices")
+        else:
+            print("DEBUG: Adaptives Mesh nicht anwendbar (Heightmap-Groesse) - Gleichmaessig-Gitter")
+            # Vertex-Positionen (vectorized, (height, width) Grids)
+            x_idx = np.arange(width, dtype=np.float32)
+            y_idx = np.arange(height, dtype=np.float32)
+            pos_x = np.broadcast_to(
+                (x_idx / (width - 1) - 0.5) * width * self.terrain_scale_factor, (height, width))
+            pos_z = np.broadcast_to(
+                ((y_idx / (height - 1) - 0.5) * height * self.terrain_scale_factor)[:, None], (height, width))
+            pos_y = heightmap * self.terrain_height_scale
 
-        dz_dy = np.empty_like(heightmap)
-        dz_dy[1:-1, :] = heightmap[2:, :] - heightmap[:-2, :]
-        dz_dy[0, :] = heightmap[1, :] - heightmap[0, :]
-        dz_dy[-1, :] = heightmap[-1, :] - heightmap[-2, :]
+            # Normalen: gleiche Rand-Behandlung wie die vorherige Pro-Vertex-Schleife
+            # (Rand: einseitige Differenz, Innen: unhalbierte zentrale Differenz - deshalb
+            # kein np.gradient(), das die Differenz innen halbiert).
+            dz_dx = np.empty_like(heightmap)
+            dz_dx[:, 1:-1] = heightmap[:, 2:] - heightmap[:, :-2]
+            dz_dx[:, 0] = heightmap[:, 1] - heightmap[:, 0]
+            dz_dx[:, -1] = heightmap[:, -1] - heightmap[:, -2]
 
-        dx = dz_dx * self.terrain_height_scale
-        dy = dz_dy * self.terrain_height_scale
+            dz_dy = np.empty_like(heightmap)
+            dz_dy[1:-1, :] = heightmap[2:, :] - heightmap[:-2, :]
+            dz_dy[0, :] = heightmap[1, :] - heightmap[0, :]
+            dz_dy[-1, :] = heightmap[-1, :] - heightmap[-2, :]
 
-        # Cross-Product der beiden Tangenten entlang der Vertex-Nachbarn: Tangente
-        # X-Richtung (Spalten) = (step, dx, 0), Tangente Z-Richtung (Zeilen) =
-        # (0, dy, step) - cross(T_x, T_z) = (-dx*step, step^2, -dy*step).
-        # Frühere Fassung (vor diesem Fix) hatte X/Z vertauscht und normal_z als
-        # von dy unabhängige Konstante -step^2 - dadurch beeinflussten Nord/Süd-
-        # Gefälle (Zeilen-Gradient dy) die Beleuchtung nie, nur Ost/West-Gefälle
-        # (dx, fälschlich im X-Slot der alten Formel gelandet). Sichtbar geworden
-        # als "Sonne kommt aus Osten" trotz Süd-Lichtposition, siehe [[project-3d-sun-normal-fix]] -
-        # jede Lichtrichtung mit -Z-Anteil (Süden) beleuchtete dadurch praktisch
-        # das gesamte Terrain gleichmäßig statt gezielt Süd-Hänge.
-        step_size = self.terrain_scale_factor
-        normal_x = -dx * step_size
-        normal_y = np.full((height, width), step_size ** 2, dtype=np.float32)
-        normal_z = -dy * step_size
+            dx = dz_dx * self.terrain_height_scale
+            dy = dz_dy * self.terrain_height_scale
 
-        length = np.sqrt(normal_x ** 2 + normal_y ** 2 + normal_z ** 2)
-        safe_length = np.where(length > 0, length, 1.0)
-        normal_x = np.where(length > 0, normal_x / safe_length, 0.0)
-        normal_y = np.where(length > 0, normal_y / safe_length, 1.0)
-        normal_z = np.where(length > 0, normal_z / safe_length, 0.0)
+            # Cross-Product der beiden Tangenten entlang der Vertex-Nachbarn: Tangente
+            # X-Richtung (Spalten) = (step, dx, 0), Tangente Z-Richtung (Zeilen) =
+            # (0, dy, step) - cross(T_x, T_z) = (-dx*step, step^2, -dy*step).
+            # Frühere Fassung (vor diesem Fix) hatte X/Z vertauscht und normal_z als
+            # von dy unabhängige Konstante -step^2 - dadurch beeinflussten Nord/Süd-
+            # Gefälle (Zeilen-Gradient dy) die Beleuchtung nie, nur Ost/West-Gefälle
+            # (dx, fälschlich im X-Slot der alten Formel gelandet). Sichtbar geworden
+            # als "Sonne kommt aus Osten" trotz Süd-Lichtposition, siehe [[project-3d-sun-normal-fix]] -
+            # jede Lichtrichtung mit -Z-Anteil (Süden) beleuchtete dadurch praktisch
+            # das gesamte Terrain gleichmäßig statt gezielt Süd-Hänge.
+            step_size = self.terrain_scale_factor
+            normal_x = -dx * step_size
+            normal_y = np.full((height, width), step_size ** 2, dtype=np.float32)
+            normal_z = -dy * step_size
 
-        # Texture-Coordinates
-        tex_u = np.broadcast_to(x_idx / (width - 1), (height, width))
-        tex_v = np.broadcast_to((y_idx / (height - 1))[:, None], (height, width))
+            length = np.sqrt(normal_x ** 2 + normal_y ** 2 + normal_z ** 2)
+            safe_length = np.where(length > 0, length, 1.0)
+            normal_x = np.where(length > 0, normal_x / safe_length, 0.0)
+            normal_y = np.where(length > 0, normal_y / safe_length, 1.0)
+            normal_z = np.where(length > 0, normal_z / safe_length, 0.0)
 
-        # Interleaved Vertex-Layout wie zuvor: [pos_x, pos_y, pos_z, nx, ny, nz, u, v]
-        # pro Vertex, in derselben y-major/x-minor Reihenfolge wie die alte Schleife.
-        vertex_grid = np.stack(
-            [pos_x, pos_y, pos_z, normal_x, normal_y, normal_z, tex_u, tex_v], axis=-1)
-        self.mesh_vertices = vertex_grid.reshape(-1).astype(np.float32)
+            # Texture-Coordinates
+            tex_u = np.broadcast_to(x_idx / (width - 1), (height, width))
+            tex_v = np.broadcast_to((y_idx / (height - 1))[:, None], (height, width))
 
-        # Indices für Triangles (zwei pro Quad, gleiche Winkel-Reihenfolge wie zuvor)
-        yy, xx = np.meshgrid(np.arange(height - 1), np.arange(width - 1), indexing='ij')
-        top_left = yy * width + xx
-        top_right = yy * width + (xx + 1)
-        bottom_left = (yy + 1) * width + xx
-        bottom_right = (yy + 1) * width + (xx + 1)
+            # Interleaved Vertex-Layout wie zuvor: [pos_x, pos_y, pos_z, nx, ny, nz, u, v]
+            # pro Vertex, in derselben y-major/x-minor Reihenfolge wie die alte Schleife.
+            vertex_grid = np.stack(
+                [pos_x, pos_y, pos_z, normal_x, normal_y, normal_z, tex_u, tex_v], axis=-1)
+            self.mesh_vertices = vertex_grid.reshape(-1).astype(np.float32)
 
-        triangle_1 = np.stack([top_left, bottom_left, top_right], axis=-1)
-        triangle_2 = np.stack([top_right, bottom_left, bottom_right], axis=-1)
-        indices = np.stack([triangle_1, triangle_2], axis=-2)
+            # Indices für Triangles (zwei pro Quad, gleiche Winkel-Reihenfolge wie zuvor)
+            yy, xx = np.meshgrid(np.arange(height - 1), np.arange(width - 1), indexing='ij')
+            top_left = yy * width + xx
+            top_right = yy * width + (xx + 1)
+            bottom_left = (yy + 1) * width + xx
+            bottom_right = (yy + 1) * width + (xx + 1)
 
-        self.mesh_indices = indices.reshape(-1).astype(np.uint32)
+            triangle_1 = np.stack([top_left, bottom_left, top_right], axis=-1)
+            triangle_2 = np.stack([top_right, bottom_left, bottom_right], axis=-1)
+            indices = np.stack([triangle_1, triangle_2], axis=-2)
+
+            self.mesh_indices = indices.reshape(-1).astype(np.uint32)
+
+        # Gibt es ueberhaupt Meer? Nur dann wird die Wasserplatte gezeichnet -
+        # bei einer Karte ohne negative Hoehen waere sie eine blaue Scheibe
+        # quer durch das Tal. Die Platte wird bei jedem neuen Gelaende neu
+        # aufgebaut, weil sich die Ausdehnung geaendert haben kann.
+        #
+        # ALTE VAO/VBO ERST LOESCHEN (2026-08-11, Pipeline-Log-Nutzerbefund -
+        # GPU lief bei 1024px im Lauf der Generierung aus dem VRAM). Vorher
+        # stand hier nur `self._wasser_vao = None` - das verwirft die Python-
+        # Referenz, aber NICHT das GL-Objekt selbst (`glGenVertexArrays`/
+        # `glGenBuffers` in _render_water_plane() unten legen dann bei jedem
+        # naechsten Aufruf klaglos ein NEUES VAO/VBO an, weil `getattr(self,
+        # "_wasser_vao", None) is None` wieder zutrifft). Bei jeder Mesh-
+        # Neuerzeugung mit Wasser blieb das alte Paar orphaned auf der GPU
+        # zurueck. Die einzelne Wasserplatte ist klein (6 Vertices), aber bei
+        # wiederholten Regenerationen ohne Programmneustart summiert sich das -
+        # und war neben dem Alle-Tabs-Redraw (6.14) ein zweiter Beitrag zum
+        # beobachteten VRAM-Leck.
+        if getattr(self, "_wasser_vao", None) is not None:
+            gl.glDeleteVertexArrays(1, [self._wasser_vao])
+        if getattr(self, "_wasser_vbo", None) is not None:
+            gl.glDeleteBuffers(1, [self._wasser_vbo])
+        self._hat_wasser = bool(np.any(heightmap < 0.0))
+        self._wasser_vao = None
+        self._wasser_vbo = None
 
         # OpenGL-Buffers erstellen
         self._create_mesh_buffers()
@@ -1538,8 +1621,81 @@ class MapDisplay3D(QOpenGLWidget):
         gl.glDrawElements(gl.GL_TRIANGLES, len(self.mesh_indices), gl.GL_UNSIGNED_INT, None)
         gl.glBindVertexArray(0)
 
+        self._render_wasserflaeche()
+
         if shadow_texture_id is not None:
             gl.glDeleteTextures(1, [shadow_texture_id])
+
+    def _render_wasserflaeche(self):
+        """
+        Die Wasseroberflaeche als durchscheinende Platte auf 0 m.
+
+        WARUM SIE NOETIG IST. Seit der Weltkarte kann die Heightmap negativ
+        werden, und der Meeresboden ist dann zwar blau gefaerbt, liegt aber als
+        SENKE da - aus schraeger Sicht sieht man in ein trockenes Becken. Die
+        Platte schliesst es und macht aus der Senke ein Meer.
+
+        Sie wird NACH dem Gelaende gezeichnet, mit Blending und ohne
+        Tiefenschreiben: so verdeckt sie nichts, was ueber ihr liegt, und
+        flaches Wasser laesst den Grund durchscheinen.
+
+        Nur wenn es ueberhaupt Wasser gibt - bei einer Karte ohne negative
+        Hoehen waere sie eine blaue Scheibe quer durch das Tal.
+        """
+        if self.shader_program is None or self.mesh_vertices is None:
+            return
+        if not getattr(self, "_hat_wasser", False):
+            return
+
+        if getattr(self, "_wasser_vao", None) is None:
+            # Ausdehnung aus dem Gelaendenetz uebernehmen, damit die Platte
+            # genau bis an den Kartenrand reicht.
+            ecken = self.mesh_vertices.reshape(-1, 8)
+            x0, x1 = float(ecken[:, 0].min()), float(ecken[:, 0].max())
+            z0, z1 = float(ecken[:, 2].min()), float(ecken[:, 2].max())
+            daten = np.array([
+                [x0, 0.0, z0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                [x1, 0.0, z0, 0.0, 1.0, 0.0, 1.0, 0.0],
+                [x1, 0.0, z1, 0.0, 1.0, 0.0, 1.0, 1.0],
+                [x0, 0.0, z0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                [x1, 0.0, z1, 0.0, 1.0, 0.0, 1.0, 1.0],
+                [x0, 0.0, z1, 0.0, 1.0, 0.0, 0.0, 1.0],
+            ], dtype=np.float32)
+            self._wasser_vao = gl.glGenVertexArrays(1)
+            self._wasser_vbo = gl.glGenBuffers(1)
+            gl.glBindVertexArray(self._wasser_vao)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._wasser_vbo)
+            gl.glBufferData(gl.GL_ARRAY_BUFFER, daten.nbytes, daten,
+                            gl.GL_STATIC_DRAW)
+            schritt = 8 * 4
+            for platz, versatz in ((0, 0), (1, 3 * 4), (2, 6 * 4)):
+                grosse = 2 if platz == 2 else 3
+                gl.glVertexAttribPointer(platz, grosse, gl.GL_FLOAT,
+                                         gl.GL_FALSE, schritt,
+                                         gl.ctypes.c_void_p(versatz))
+                gl.glEnableVertexAttribArray(platz)
+            gl.glBindVertexArray(0)
+
+        # renderMode kurz auf 6 stellen und danach auf den Wert des aktuellen
+        # Tabs zuruecksetzen. ZurueckLESEN (glGetUniformiv) waere fehleranfaellig
+        # und je nach Treiber verschieden - der Sollwert steht ohnehin fest.
+        modi = {"terrain": 0, "geology": 1, "weather": 2, "water": 3,
+                "erosion": 3, "biome": 4, "settlement": 5}
+        ort = gl.glGetUniformLocation(self.shader_program, "renderMode")
+        if ort >= 0:
+            gl.glUniform1i(ort, 6)
+
+        gl.glEnable(gl.GL_BLEND)
+        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+        gl.glDepthMask(gl.GL_FALSE)
+        gl.glBindVertexArray(self._wasser_vao)
+        gl.glDrawArrays(gl.GL_TRIANGLES, 0, 6)
+        gl.glBindVertexArray(0)
+        gl.glDepthMask(gl.GL_TRUE)
+        gl.glDisable(gl.GL_BLEND)
+
+        if ort >= 0:
+            gl.glUniform1i(ort, modi.get(self.current_tab, 0))
 
     def _bind_shadow_texture(self):
         """

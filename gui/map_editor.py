@@ -99,6 +99,12 @@ WATER_AVAILABLE, WaterTab, water_error = _import_tab_safely("gui.tabs.water_tab"
 BIOME_AVAILABLE, BiomeTab, biome_error = _import_tab_safely("gui.tabs.biome_tab", "BiomeTab")
 SETTLEMENT_AVAILABLE, SettlementTab, settlement_error = _import_tab_safely("gui.tabs.settlement_tab", "SettlementTab")
 OVERVIEW_AVAILABLE, OverviewTab, overview_error = _import_tab_safely("gui.tabs.overview_tab", "OverviewTab")
+# Seit 2026-08-05: eigener Reiter fuer das Flussnetz (steht hinter Terrain,
+# weil es dessen Heightmap formt) und ein zweiter Siedlungsreiter, der auf
+# eine der neun Regionen zoomt.
+RIVER_AVAILABLE, RiverTab, river_error = _import_tab_safely("gui.tabs.river_tab", "RiverTab")
+SETTLEMENT_REGIONAL_AVAILABLE, SettlementRegionalTab, settlement_regional_error = _import_tab_safely(
+    "gui.tabs.settlement_regional_tab", "SettlementRegionalTab")
 
 
 class MapEditorWindow(QMainWindow):
@@ -627,22 +633,36 @@ class MapEditorWindow(QMainWindow):
         comprehensive error handling and appropriate fallbacks
         for missing or failed tab implementations.
         """
-        # Tab configuration with availability status - Terrain startet zuerst,
-        # Overview steht als Abschluss-Übersicht am Ende.
+        # SCHLUESSEL UND BESCHRIFTUNG SIND GETRENNT - seit 2026-08-05.
+        #
+        # Bis dahin war die Beschriftung zugleich der Schluessel: `self.tabs`,
+        # `tab_order` und der 3D-renderMode lasen alle `tab_name.lower()`. Eine
+        # deutsche Beschriftung haette damit jeden dieser Nachschlaege gebrochen
+        # - "geologie" findet keinen Generator namens "geology".
+        #
+        # Jetzt: (schluessel, beschriftung, klasse, ...). Der Schluessel bleibt
+        # englisch und unveraendert, die Beschriftung ist frei.
+        #
+        # Reihenfolge nach Vorgabe des Nutzers vom 2026-08-05 und zugleich nach
+        # der Pipeline (siehe CALCULATOR_GRAPH): das Flussnetz kommt direkt nach
+        # dem Terrain, weil es dessen Heightmap formt, und die Siedlungen
+        # zerfallen in eine globale und eine regionale Ansicht.
         tab_configs = [
-            ("Terrain", TerrainTab, TERRAIN_AVAILABLE, terrain_error),
-            ("Geology", GeologyTab, GEOLOGY_AVAILABLE, geology_error),
-            # Erosion zwischen Geology und Weather - die Tab-Reihenfolge
-            # entspricht der Pipeline-Reihenfolge (siehe CALCULATOR_GRAPH).
-            ("Erosion", ErosionTab, EROSION_AVAILABLE, erosion_error),
-            ("Weather", WeatherTab, WEATHER_AVAILABLE, weather_error),
-            ("Water", WaterTab, WATER_AVAILABLE, water_error),
-            ("Biome", BiomeTab, BIOME_AVAILABLE, biome_error),
-            ("Settlement", SettlementTab, SETTLEMENT_AVAILABLE, settlement_error),
-            ("Overview", OverviewTab, OVERVIEW_AVAILABLE, overview_error)
+            ("terrain", "Terrain", TerrainTab, TERRAIN_AVAILABLE, terrain_error),
+            ("rivers", "Flussnetzwerk", RiverTab, RIVER_AVAILABLE, river_error),
+            ("geology", "Geologie", GeologyTab, GEOLOGY_AVAILABLE, geology_error),
+            ("erosion", "Erosion", ErosionTab, EROSION_AVAILABLE, erosion_error),
+            ("weather", "Wetter", WeatherTab, WEATHER_AVAILABLE, weather_error),
+            ("water", "Wasser", WaterTab, WATER_AVAILABLE, water_error),
+            ("biome", "Biome", BiomeTab, BIOME_AVAILABLE, biome_error),
+            ("settlement", "Siedlungen (Global)", SettlementTab,
+             SETTLEMENT_AVAILABLE, settlement_error),
+            ("settlement_regional", "Siedlungen (Regional)", SettlementRegionalTab,
+             SETTLEMENT_REGIONAL_AVAILABLE, settlement_regional_error),
+            ("overview", "Overview", OverviewTab, OVERVIEW_AVAILABLE, overview_error)
         ]
 
-        for tab_name, tab_class, available, error_type in tab_configs:
+        for tab_key, tab_name, tab_class, available, error_type in tab_configs:
             try:
                 self.logger.info(f"DEBUG: Starting creation of {tab_name} tab...")
 
@@ -650,13 +670,13 @@ class MapEditorWindow(QMainWindow):
                     # Attempt to create real tab instance
                     tab_instance = self._create_tab_instance(tab_class, tab_name)
                     if tab_instance:
-                        self._add_successful_tab(tab_name, tab_instance)
+                        self._add_successful_tab(tab_key, tab_name, tab_instance)
                         self.logger.info(f"DEBUG: {tab_name} tab completed successfully")
                     else:
-                        self._add_error_tab(tab_name, "instantiation_failed")
+                        self._add_error_tab(tab_key, tab_name, "instantiation_failed")
                 else:
                     # Create appropriate error tab based on failure type
-                    self._add_error_tab(tab_name, error_type)
+                    self._add_error_tab(tab_key, tab_name, error_type)
 
                 self.logger.info(f"DEBUG: {tab_name} tab processing finished")
 
@@ -664,7 +684,7 @@ class MapEditorWindow(QMainWindow):
                 self.logger.error(f"Unexpected error creating {tab_name} tab: {e}")
                 import traceback
                 traceback.print_exc()
-                self._add_error_tab(tab_name, "unexpected_error")
+                self._add_error_tab(tab_key, tab_name, "unexpected_error")
 
     def _create_tab_instance(self, tab_class: type, tab_name: str) -> Optional[QWidget]:
         """
@@ -698,7 +718,7 @@ class MapEditorWindow(QMainWindow):
             traceback.print_exc()
             return None
 
-    def _add_successful_tab(self, tab_name: str, tab_instance: QWidget):
+    def _add_successful_tab(self, tab_key: str, tab_name: str, tab_instance: QWidget):
         """
         Add successfully created tab to interface
         ========================================
@@ -715,11 +735,11 @@ class MapEditorWindow(QMainWindow):
             self.viewport_stack.addWidget(tab_instance.viewport_widget)
             self.parameter_stack.addWidget(tab_instance.parameter_widget)
             self.statistics_stack.addWidget(tab_instance.statistics_widget)
-            self.tab_order.append(tab_name.lower())
+            self.tab_order.append(tab_key)
             self.logger.info(f"Tab added to shell at index: {index}")
 
-            self.tabs[tab_name.lower()] = tab_instance
-            self.tab_generation_status[tab_name.lower()] = {}
+            self.tabs[tab_key] = tab_instance
+            self.tab_generation_status[tab_key] = {}
 
             if hasattr(tab_instance, 'view_switched'):
                 tab_instance.view_switched.connect(self._on_tab_view_switched)
@@ -739,7 +759,7 @@ class MapEditorWindow(QMainWindow):
             traceback.print_exc()
             raise
 
-    def _add_error_tab(self, tab_name: str, error_type: str):
+    def _add_error_tab(self, tab_key: str, tab_name: str, error_type: str):
         """
         Create and add error tab with appropriate messaging
         ==================================================
@@ -754,9 +774,9 @@ class MapEditorWindow(QMainWindow):
         self.viewport_stack.addWidget(error_tab)
         self.parameter_stack.addWidget(self._create_placeholder_widget("Not available"))
         self.statistics_stack.addWidget(self._create_placeholder_widget("Not available"))
-        self.tab_order.append(tab_name.lower())
+        self.tab_order.append(tab_key)
 
-        self.tabs[tab_name.lower()] = error_tab
+        self.tabs[tab_key] = error_tab
 
     def _create_placeholder_widget(self, text: str) -> QWidget:
         """Kleiner Platzhalter für Spalte 3, wenn ein Tab nicht geladen werden konnte."""

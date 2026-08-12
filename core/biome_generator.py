@@ -429,6 +429,18 @@ class BiomeClassificationSystem:
 
         return biome_data
 
+    def _temp_map_juli(self, lod_level: int):
+        """Julitemperatur (Periode 3 von 6, siehe weather_generator.py
+        _calc_temperature()-Kommentar zu m/6-Zeitpunkten) statt des
+        Jahresmittels aus 'temp_map' - siehe Kommentar bei 'temp_map_juli'
+        in _get_prepared_biome_inputs()."""
+        monatlich = self.data_lod_manager.get_calculator_output(
+            "weather.temperature", "temp_map_monthly", lod_level)
+        if monatlich is not None and len(monatlich) > 3 and monatlich[3] is not None:
+            return monatlich[3]
+        return self.data_lod_manager.get_calculator_output(
+            "weather.temperature", "temp_map", lod_level)
+
     def _get_prepared_biome_inputs(self, lod_level: int, needed: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Holt NUR die tatsächlich angeforderten Biome-Dependencies
@@ -446,6 +458,32 @@ class BiomeClassificationSystem:
             "heightmap": lambda: self.data_lod_manager.get_calculator_combined_heightmap(lod_level),
             "temp_map": lambda: self.data_lod_manager.get_calculator_output(
                 "weather.temperature", "temp_map", lod_level),
+            # JULITEMPERATUR, NICHT JAHRESMITTEL (2026-08-11, Nutzerbefund via
+            # Mittelmeer-Fehlklassifikation, siehe docs/OFFENE_PUNKTE.md 9.1).
+            # `weather.temperature`s "temp_map" ist das JAHRESMITTEL ueber alle
+            # 6 saisonalen Perioden (weather_generator.py _calc_temperature(),
+            # `temp_map = np.mean(np.stack(monthly_temp_maps, ...)`). Sowohl
+            # BaseBiomeClassifier.biome_definitions ("temp ist die
+            # JULITEMPERATUR", core/biome_generator.py Kommentar bei
+            # self.biome_definitions) als auch die Alpin-/Firn-Schwellen
+            # (BAUMGRENZE_JULI_C/FIRN_JULI_C) sind aber explizit gegen Juli
+            # kalibriert - mit dem Jahresmittel verglichen liegt jeder Wert um
+            # etwa die halbe Jahresspanne zu kalt. Gemessen am Beispiel
+            # Mittelmeer (Jahresmittel/Spanne 16.9/17.5, Juli-Referenz laut
+            # docs/BIOME_MATRIX.md 25.6 Grad): der Median-Landpixel kam mit
+            # dem Jahresmittel auf 16.4 Grad statt Juli, wodurch Steineichen-
+            # wald (Bereich 21-28 Grad) fast ueberall ausserhalb seines
+            # Bereichs lag und komplett aus den Top-Biomen verschwand, waehrend
+            # Bruchwald (Bereich 14-22, toleranter nach unten) 47% der Region
+            # dominierte - beide Biome sind fuer Mittelmeer als Affinitaet
+            # gelistet, aber in völlig falschem Verhaeltnis.
+            # `temp_map_monthly[3]` ist bereits vorhanden (Periode 3 = Juli bei
+            # TICKS_JE_JAHR=6 und Zeitpunkt m/6, siehe dortiger Kommentar) -
+            # kein neuer Rechenweg noetig, nur die richtige bereits berechnete
+            # Schicht lesen. Fallback auf "temp_map" nur, falls
+            # temp_map_monthly aus irgendeinem Grund fehlt/leer ist (alter
+            # Einzelschicht-Fallback-Pfad ohne WELTKARTE_AKTIV o.ae.).
+            "temp_map_juli": lambda: self._temp_map_juli(lod_level),
             "precip_map": lambda: self.data_lod_manager.get_calculator_output(
                 "weather.precipitation", "precip_map", lod_level),
             "soil_moist_map": lambda: self.data_lod_manager.get_calculator_output(
@@ -620,18 +658,33 @@ class BiomeClassificationSystem:
         """Calculator-Node 'biome.base_classification' (#23) - Sibling zu super_override"""
         self._ensure_sub_components()
         inputs = self._get_prepared_biome_inputs(
-            lod_level, needed=["heightmap", "temp_map", "precip_map", "soil_moist_map"])
+            lod_level, needed=["heightmap", "temp_map_juli", "precip_map", "soil_moist_map"])
+        # region_map seit 2026-08-07: sie traegt die Regionsaffinitaet. Ohne
+        # sie klassifiziert der Aufruf wie zuvor, nur nach Klima.
+        region_map = self.data_lod_manager.get_calculator_output(
+            "terrain.redistribution", "region_map", lod_level)
         base_biome_map = self.base_biome_classifier.classify_base_biomes(
-            inputs['heightmap'], inputs['temp_map'], inputs['precip_map'], inputs['soil_moist_map'])
+            inputs['heightmap'], inputs['temp_map_juli'], inputs['precip_map'],
+            inputs['soil_moist_map'], region_map=region_map)
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"base_biome_map": base_biome_map})
 
     def _calc_super_override(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'biome.super_override' (#24) - Sibling zu base_classification"""
         self._ensure_sub_components()
         inputs = self._get_prepared_biome_inputs(
-            lod_level, needed=["heightmap", "temp_map", "water_biomes_map", "soil_moist_map"])
+            lod_level, needed=["heightmap", "temp_map_juli", "water_biomes_map", "soil_moist_map"])
+        # see_eis (docs/OFFENE_PUNKTE.md 3.6) - OHNE Pflichtpruefung, gleiches
+        # Muster wie region_map/seegrad anderswo: nur auf der Weltkarte
+        # vorhanden, None auf dem alten Pfad laesst Ocean unveraendert.
+        see_eis = self.data_lod_manager.get_calculator_output(
+            "terrain.redistribution", "see_eis", lod_level)
+        if see_eis is not None and see_eis.shape[0] != inputs['heightmap'].shape[0]:
+            from scipy import ndimage
+            faktor = inputs['heightmap'].shape[0] / see_eis.shape[0]
+            see_eis = ndimage.zoom(see_eis.astype(np.uint8), faktor, order=0).astype(bool)
         super_biome_mask, super_biome_probabilities = self.super_biome_override_system.apply_super_biome_overrides(
-            inputs['heightmap'], inputs['temp_map'], inputs['water_biomes_map'], inputs['soil_moist_map'])
+            inputs['heightmap'], inputs['temp_map_juli'], inputs['water_biomes_map'], inputs['soil_moist_map'],
+            see_eis=see_eis)
         self.data_lod_manager.set_calculator_output(
             calculator_id, lod_level,
             {"super_biome_mask": super_biome_mask, "super_biome_probabilities": super_biome_probabilities})
@@ -1029,38 +1082,107 @@ class BaseBiomeClassifier:
         # tendenziell (aber nicht streng) invers zueinander kalibriert - wer
         # wenig Wasser halten kann, verdunstet meist auch schneller,
         # empirisch nachjustierbar.
+        # =====================================================================
+        # DIE FUENFZEHN EUROPAEISCHEN GRUNDBIOME (2026-08-07)
+        # =====================================================================
+        #
+        # Die alte Tabelle war weltweit gedacht und hatte fuenf Arten, die auf
+        # einer 21-km-Insel in Europa nichts zu suchen haben (Ice Cap,
+        # Tropical Rainforest, Tropical Seasonal, Savanna, Badlands), und drei
+        # zu grobe (Grassland, Temperate Forest, Mediterranean) - damit sah das
+        # halbe Festland gleich aus.
+        #
+        # `temp` ist die JULITEMPERATUR in Grad, `precip` der JAHRES-
+        # niederschlag in mm. Beides liefert das Wettersystem seit dem
+        # 2026-08-07 als Festlegung: die Temperatur trifft ihre Regionsziele
+        # auf 1 K, der Niederschlag auf rund 5 %.
+        #
+        # Herleitung und Bezugsorte: docs/BIOME_MATRIX.md.
         self.biome_definitions = {
-            0: {'name': 'ice_cap', 'temp': (-40, -5), 'precip': (0, 300), 'elevation': (0, 8000), 'moisture': (0, 200),
-                'moisture_capacity': 40.0, 'evaporation_factor': 0.2},
-            1: {'name': 'tundra', 'temp': (-15, 5), 'precip': (100, 600), 'elevation': (0, 2000), 'moisture': (100, 400),
-                'moisture_capacity': 45.0, 'evaporation_factor': 0.5},
-            2: {'name': 'taiga', 'temp': (-10, 15), 'precip': (300, 1200), 'elevation': (50, 2500), 'moisture': (300, 800),
-                'moisture_capacity': 60.0, 'evaporation_factor': 0.6},
-            3: {'name': 'grassland', 'temp': (0, 25), 'precip': (200, 800), 'elevation': (10, 1500), 'moisture': (200, 600),
+            0: {'name': 'hochmoor', 'temp': (10, 17), 'precip': (1000, 3000),
+                'elevation': (0, 900), 'moisture': (800, 1500),
+                'moisture_capacity': 100.0, 'evaporation_factor': 0.3},
+            1: {'name': 'bruchwald', 'temp': (14, 22), 'precip': (800, 2000),
+                'elevation': (0, 400), 'moisture': (700, 1400),
+                'moisture_capacity': 95.0, 'evaporation_factor': 0.4},
+            2: {'name': 'feuchtwiese', 'temp': (13, 22), 'precip': (700, 1600),
+                'elevation': (0, 200), 'moisture': (600, 1200),
+                'moisture_capacity': 85.0, 'evaporation_factor': 0.7},
+            3: {'name': 'grasland', 'temp': (13, 22), 'precip': (500, 900),
+                'elevation': (0, 1200), 'moisture': (300, 700),
                 'moisture_capacity': 55.0, 'evaporation_factor': 1.0},
-            4: {'name': 'temperate_forest', 'temp': (5, 25), 'precip': (600, 2000), 'elevation': (0, 2000), 'moisture': (400, 1000),
-                'moisture_capacity': 75.0, 'evaporation_factor': 0.6},
-            5: {'name': 'mediterranean', 'temp': (8, 30), 'precip': (300, 900), 'elevation': (0, 1200), 'moisture': (200, 600),
-                'moisture_capacity': 40.0, 'evaporation_factor': 1.3},
-            6: {'name': 'desert', 'temp': (10, 50), 'precip': (0, 250), 'elevation': (0, 2000), 'moisture': (0, 100),
-                'moisture_capacity': 20.0, 'evaporation_factor': 1.8},
-            7: {'name': 'semi_arid', 'temp': (5, 35), 'precip': (200, 600), 'elevation': (0, 1800), 'moisture': (100, 400),
-                'moisture_capacity': 30.0, 'evaporation_factor': 1.4},
-            8: {'name': 'tropical_rainforest', 'temp': (20, 35), 'precip': (1500, 4000), 'elevation': (0, 1500), 'moisture': (800, 1500),
-                'moisture_capacity': 95.0, 'evaporation_factor': 0.5},
-            9: {'name': 'tropical_seasonal', 'temp': (18, 35), 'precip': (800, 2000), 'elevation': (0, 1200), 'moisture': (400, 1000),
+            4: {'name': 'heide', 'temp': (13, 19), 'precip': (500, 800),
+                'elevation': (0, 600), 'moisture': (200, 500),
+                'moisture_capacity': 40.0, 'evaporation_factor': 1.1},
+            5: {'name': 'fjell', 'temp': (2, 12), 'precip': (400, 2500),
+                'elevation': (300, 2000), 'moisture': (300, 1000),
+                'moisture_capacity': 50.0, 'evaporation_factor': 0.5},
+            6: {'name': 'nadelwald', 'temp': (12, 18), 'precip': (450, 900),
+                'elevation': (50, 1400), 'moisture': (350, 800),
+                'moisture_capacity': 65.0, 'evaporation_factor': 0.6},
+            7: {'name': 'mischwald', 'temp': (15, 20), 'precip': (500, 900),
+                'elevation': (0, 1000), 'moisture': (350, 800),
+                'moisture_capacity': 70.0, 'evaporation_factor': 0.7},
+            8: {'name': 'buchenwald', 'temp': (16, 21), 'precip': (600, 1000),
+                'elevation': (0, 1200), 'moisture': (450, 900),
+                'moisture_capacity': 80.0, 'evaporation_factor': 0.6},
+            9: {'name': 'eichenwald', 'temp': (18, 23), 'precip': (500, 800),
+                'elevation': (0, 800), 'moisture': (300, 700),
                 'moisture_capacity': 70.0, 'evaporation_factor': 0.8},
-            10: {'name': 'savanna', 'temp': (15, 35), 'precip': (400, 1200), 'elevation': (0, 1800), 'moisture': (200, 600),
-                 'moisture_capacity': 50.0, 'evaporation_factor': 1.1},
-            11: {'name': 'montane_forest', 'temp': (0, 20), 'precip': (800, 3000), 'elevation': (800, 3500), 'moisture': (600, 1200),
-                 'moisture_capacity': 70.0, 'evaporation_factor': 0.6},
-            12: {'name': 'swamp', 'temp': (5, 35), 'precip': (800, 3000), 'elevation': (0, 200), 'moisture': (800, 1500),
-                 'moisture_capacity': 100.0, 'evaporation_factor': 0.3},
-            13: {'name': 'coastal_dunes', 'temp': (5, 35), 'precip': (300, 1500), 'elevation': (0, 100), 'moisture': (200, 800),
-                 'moisture_capacity': 35.0, 'evaporation_factor': 1.3},
-            14: {'name': 'badlands', 'temp': (-5, 45), 'precip': (0, 400), 'elevation': (200, 2500), 'moisture': (0, 200),
-                 'moisture_capacity': 15.0, 'evaporation_factor': 1.7}
+            10: {'name': 'bergwald', 'temp': (10, 17), 'precip': (700, 2000),
+                 'elevation': (500, 2200), 'moisture': (500, 1100),
+                 'moisture_capacity': 75.0, 'evaporation_factor': 0.5},
+            11: {'name': 'macchia', 'temp': (22, 30), 'precip': (350, 700),
+                 'elevation': (0, 900), 'moisture': (150, 450),
+                 'moisture_capacity': 40.0, 'evaporation_factor': 1.4},
+            12: {'name': 'steineichenwald', 'temp': (21, 28), 'precip': (550, 900),
+                 'elevation': (0, 1000), 'moisture': (300, 700),
+                 'moisture_capacity': 55.0, 'evaporation_factor': 1.1},
+            13: {'name': 'trockensteppe', 'temp': (22, 32), 'precip': (250, 500),
+                 'elevation': (0, 1200), 'moisture': (100, 350),
+                 'moisture_capacity': 30.0, 'evaporation_factor': 1.5},
+            14: {'name': 'halbwueste', 'temp': (24, 36), 'precip': (0, 300),
+                 'elevation': (0, 1500), 'moisture': (0, 200),
+                 'moisture_capacity': 18.0, 'evaporation_factor': 1.8},
         }
+
+        # =====================================================================
+        # WELCHE BIOME ZU WELCHER REGION GEHOEREN
+        # =====================================================================
+        #
+        # Der Nutzer wollte "eine matrix fuer die regionen. bei jeder moeglichen
+        # temperatur und wassermenge gibt es dann ein biome fuer die region."
+        #
+        # Umgesetzt als AFFINITAET statt als neun getrennter Matrizen, und zwar
+        # aus einem Grund: neun Matrizen mit argmax(Region) erzeugen eine harte
+        # Biomkante entlang der Voronoi-Zellen. Ein Bonus auf die Eignung wird
+        # dagegen ueber die Regionsgewichte weich ueberblendet - dieselbe
+        # Bauform, die auch das Gelaende und das Klima benutzen.
+        #
+        # WARUM ES NOETIG IST: Taiga und Mittelgebirge liegen nur 2 K und 40 mm
+        # auseinander, sollen aber Nadel- gegen Buchenwald sein. Ueber
+        # Temperatur und Niederschlag allein sind sie nicht zu trennen.
+        #
+        # Die Liste je Region ist die Erwartung aus docs/BIOME_MATRIX.md
+        # Abschnitt 3 - dieselbe, gegen die auch geprueft wird.
+        self.regions_biome_affinitaet = {
+            "Huegelland":         ("hochmoor", "grasland", "feuchtwiese",
+                                   "heide", "bruchwald"),
+            "Fjordland":          ("hochmoor", "nadelwald", "bergwald", "fjell"),
+            "Taiga":              ("nadelwald", "mischwald", "hochmoor",
+                                   "grasland"),
+            "Atlantikkueste":     ("feuchtwiese", "eichenwald", "grasland",
+                                   "bruchwald"),
+            "Alpenland":          ("bergwald", "fjell", "buchenwald", "grasland"),
+            "Mittelgebirge":      ("buchenwald", "mischwald", "grasland",
+                                   "bergwald"),
+            "Steppe":             ("trockensteppe", "halbwueste", "macchia",
+                                   "steineichenwald"),
+            "Mittelmeer":         ("steineichenwald", "macchia", "grasland",
+                                   "bruchwald"),
+            "Griechische Inseln": ("macchia", "trockensteppe", "steineichenwald"),
+        }
+
         self._rescale_precip_moisture_ranges()
 
     def _rescale_precip_moisture_ranges(self):
@@ -1079,7 +1201,20 @@ class BaseBiomeClassifier:
         werden, sonst läge jeder real erreichbare precip_map-Wert weit
         unterhalb des Minimums fast aller Biome-Bereiche.
         """
-        precip_scale = 50.0 / 4000.0
+        # 2026-08-07: precip_map ist seit dem festgelegten Niederschlag eine
+        # TICKSUMME in echten Millimetern. Die Biomtabelle steht dagegen in
+        # JAHRES-Millimetern (Hochmoor 1000-3000).
+        #
+        # Der Faktor haengt damit an der Ticklaenge und wird von dort geholt -
+        # er darf NICHT als Zahl hier stehen. Sonst zeigte eine Umstellung auf
+        # Monatsticks stillschweigend jedes Biom um Faktor zwei verschoben.
+        #
+        # Die frueher hier stehende 50/4000-Kruecke stammte aus der Zeit, als
+        # precip_map eine Simulationsakkumulation ohne physikalische Einheit war
+        # und auf "~50 als typischer Hoechstwert" geeicht wurde. Mit einer
+        # Festlegung in Millimetern entfaellt diese Eichung.
+        from core.weather_generator import MONATE_JE_TICK
+        precip_scale = MONATE_JE_TICK / 12.0
         moisture_scale = 100.0 / 1500.0
 
         for biome_def in self.biome_definitions.values():
@@ -1089,9 +1224,50 @@ class BaseBiomeClassifier:
             m_min, m_max = biome_def['moisture']
             biome_def['moisture'] = (m_min * moisture_scale, m_max * moisture_scale)
 
-    def classify_base_biomes(self, heightmap, temp_map, precip_map, soil_moist_map):
+    def _affinitaetsbonus(self, form, region_map):
+        """
+        Ein Eignungsbonus je Biom, aus der Regionszugehoerigkeit.
+
+        Rueckgabe: (H, W, 15) oder None, wenn keine Regionskarte vorliegt.
+
+        WEICH, NICHT HART. Der Bonus wird als Feld gebildet und dann geglaettet
+        - genau wie die Klimafelder. Neun getrennte Matrizen mit argmax(Region)
+        haetten eine harte Biomkante entlang der Voronoi-Zellen erzeugt.
+        """
+        if region_map is None:
+            return None
+        from scipy import ndimage
+        from core.terrain_weltkarte import alle_regionen
+
+        R = np.asarray(region_map)
+        if R.shape != form[:2]:
+            from scipy.ndimage import zoom
+            R = np.round(zoom(R.astype(np.float32),
+                              form[0] / R.shape[0], order=0)).astype(np.int16)
+
+        namen = {d["name"]: i for i, d in self.biome_definitions.items()}
+        bonus = np.zeros(form[:2] + (15,), dtype=np.float32)
+        for i, (_z, _s, r) in enumerate(alle_regionen()):
+            g = R == i
+            if not g.any():
+                continue
+            for biom in self.regions_biome_affinitaet.get(r["name"], ()):
+                if biom in namen:
+                    bonus[g, namen[biom]] = AFFINITAETSBONUS
+
+        sigma = max(form[0] / 40.0, 1.0)
+        for k in range(15):
+            bonus[:, :, k] = ndimage.gaussian_filter(bonus[:, :, k], sigma)
+        return bonus
+
+    def classify_base_biomes(self, heightmap, temp_map, precip_map, soil_moist_map,
+                             region_map=None):
         """
         Klassifiziert Base-Biomes mit wissenschaftlich fundierter Multi-Factor-Analysis
+
+        `region_map` ist seit 2026-08-07 dazugekommen: sie traegt die
+        Regionsaffinitaet (siehe _affinitaetsbonus). Ohne sie klassifiziert die
+        Methode wie zuvor, nur nach Klima.
         """
         height, width = heightmap.shape
         fitness_maps = np.zeros((height, width, 15), dtype=np.float32)
@@ -1113,6 +1289,12 @@ class BaseBiomeClassifier:
             )
 
             fitness_maps[:, :, biome_id] = combined_fitness
+
+        # Der Regionsbonus - er entscheidet dort, wo das Klima allein nicht
+        # trennt (Taiga gegen Mittelgebirge: 2 K und 40 mm auseinander).
+        bonus = self._affinitaetsbonus((height, width), region_map)
+        if bonus is not None:
+            fitness_maps = fitness_maps + bonus
 
         # Dominantes Biome pro Pixel
         dominant_biomes = np.argmax(fitness_maps, axis=2)
@@ -1141,6 +1323,34 @@ class BaseBiomeClassifier:
         return fitness
 
 
+# Wie stark die Regionszugehoerigkeit die Biomwahl beeinflusst.
+#
+# Die Klimaeignung liegt bei 0..1; 0.35 heisst also, dass ein regionstypisches
+# Biom rund ein Drittel Vorsprung bekommt. Genug, um Taiga von Mittelgebirge zu
+# trennen (2 K und 40 mm auseinander), zu wenig, um das Klima zu ueberstimmen -
+# ein Gipfel im Alpenland wird trotzdem Fjell und nicht Buchenwald.
+# Die Baumgrenze und die Firngrenze als JULITEMPERATUR, nicht als Hoehe.
+#
+# In Norwegen auf 60 Grad Nord liegt die Baumgrenze bei rund 900 bis 1100 m,
+# und dort herrscht im Juli die 10-Grad-Isotherme - daher der Wert. Die
+# Firngrenze liegt dort, wo auch im Hochsommer nichts mehr abtaut.
+#
+# STAND 2026-08-07: auf dem DAMALIGEN Gelaende/Klimastand loeste keine der
+# beiden Regeln aus (kaelteste Julitemperatur an Land 10.4 Grad). Diese
+# Aussage ist SEIT DER TEMPERATUR-DIREKTNORMIERUNG (1.10/1.11 in docs/
+# OFFENE_PUNKTE.md, dieselbe Session) UEBERHOLT - nachgemessen 2026-08-11:
+# Julitemperatur an Land reicht inzwischen bis -12 Grad, `alpine_level`
+# realisiert sich auf ~8-9% der Landflaeche, `snow_level` auf ~1%, beide mit
+# plausibler Korrelation zu Hoehe/Kaelte. KEIN Regler hier wurde dafuer
+# geaendert - die Klimakalibrierung an anderer Stelle hat das nebenbei
+# geloest. Vor einer erneuten Schwellenaenderung hier immer erst mit dem
+# AKTUELLEN Klimastand nachmessen (docs/OFFENE_PUNKTE.md 2.7).
+BAUMGRENZE_JULI_C = 10.0
+FIRN_JULI_C = 0.0
+
+AFFINITAETSBONUS = 0.35
+
+
 class SuperBiomeOverrideSystem:
     """
     Priority-basiertes Override-System mit 11 speziellen Biom-Bedingungen
@@ -1167,9 +1377,15 @@ class SuperBiomeOverrideSystem:
         # Super-Biome-Offset (nach 15 Base-Biomes)
         self.super_biome_offset = 15
 
-    def apply_super_biome_overrides(self, heightmap, temp_map, water_biomes_map, soil_moist_map):
+    def apply_super_biome_overrides(self, heightmap, temp_map, water_biomes_map, soil_moist_map,
+                                    see_eis=None):
         """
         Wendet alle Super-Biome-Overrides in Priority-Reihenfolge an
+
+        `see_eis` (optional, (H,W) bool, core.terrain_weltkarte.seegliederung(),
+        docs/OFFENE_PUNKTE.md 3.6) - Seeeis vor der Taiga-Kueste, NACH der
+        Ocean-Zuweisung angewandt (ueberschreibt "Ocean" dort, wo Eis ist).
+        None (alter Nicht-Weltkarten-Pfad) laesst Ocean unveraendert.
         """
         height, width = heightmap.shape
         super_biome_mask = np.zeros((height, width), dtype=np.uint8)
@@ -1184,6 +1400,18 @@ class SuperBiomeOverrideSystem:
         # Ocean-Detection (Priority 0)
         ocean_mask = self._detect_ocean_connectivity(heightmap, water_biomes_map)
         super_biome_mask[ocean_mask] = self.super_biome_offset + 0  # Ocean
+
+        # SEEEIS (2026-08-11) - eigene, sichtbare Kategorie statt eines
+        # unbenutzten Datenfelds. Nutzer: "wie willst du das meereis
+        # shadern, wie willst du es sonst darstellen?" Harte Zuweisung wie
+        # bei Lake/River/Ocean daneben (kein Wahrscheinlichkeitsfeld noetig -
+        # `see_eis` ist bereits eine diskrete Ja/Nein-Entscheidung je
+        # Seezelle), nur auf tatsaechlichem Meer (see_eis ist zwar schon auf
+        # Land False, aber ocean_mask kann an Fluss-/Seemuendungen von
+        # water_biomes_map abweichen - beide zusammen sind sicherer als
+        # eines allein).
+        if see_eis is not None and see_eis.shape == (height, width):
+            super_biome_mask[ocean_mask & see_eis] = self.super_biome_offset + 11  # Sea Ice
 
         # Priority 5-6: Topographie-basierte Super-Biomes
         cliff_probabilities = self._calculate_cliff_probabilities(heightmap)
@@ -1201,9 +1429,22 @@ class SuperBiomeOverrideSystem:
 
         # Priority 9-10: Höhen-basierte Super-Biomes
         snow_probabilities = self._calculate_snow_level_probabilities(heightmap, temp_map)
-        super_biome_probabilities['snow_level'] = snow_probabilities
-
         alpine_probabilities = self._calculate_alpine_level_probabilities(heightmap, temp_map)
+
+        # NUR AUF LAND (2026-08-11, Nutzer-Befund am laufenden Programm:
+        # "vereinzelte weisse Punkte im Meer"). Beide Wahrscheinlichkeiten
+        # haengen NUR an der Julitemperatur (siehe dortige Docstrings,
+        # 2.2-Umbau) - ohne Landfilter erfuellt jedes hinreichend KALTE
+        # Meerespixel (auf der Weltkarte z.B. See-Nord vor der Taiga, siehe
+        # SEE_MITTEL_NORD in weather_generator.py) rein rechnerisch dieselbe
+        # Bedingung wie ein Gipfel. `_apply_supersampling_cpu()` ueberschreibt
+        # dann STOCHASTISCH einzelne Sub-Pixel des schon korrekt als "Ocean"
+        # erkannten `ocean_mask` mit "Snow Level"/"Alpine Level" - genau die
+        # vereinzelten weissen/grauen Punkte im offenen Meer statt eines
+        # zusammenhaengenden Seeeis-Bilds.
+        snow_probabilities = np.where(ocean_mask, 0.0, snow_probabilities)
+        alpine_probabilities = np.where(ocean_mask, 0.0, alpine_probabilities)
+        super_biome_probabilities['snow_level'] = snow_probabilities
         super_biome_probabilities['alpine_level'] = alpine_probabilities
 
         return super_biome_mask, super_biome_probabilities
@@ -1360,20 +1601,34 @@ class SuperBiomeOverrideSystem:
 
     def _calculate_snow_level_probabilities(self, heightmap, temp_map):
         """
-        Snow Level: h > snow_level + 500*(1 + temp_map(x,y)/10) mit temperaturabhängigen Übergängen
+        Firn: wo die Julitemperatur unter FIRN_JULI_C faellt.
+
+        TEMPERATURREGEL STATT HOEHENREGEL (2026-08-07). Die alte Fassung
+        rechnete `h > snow_level + 500*(1 + T/10)` - bei 15 Grad also ueber
+        2750 m. Der hoechste Punkt dieser Welt liegt bei 728 m; die Regel loeste
+        nie aus, und niemand konnte das sehen, weil sie stillschweigend 0
+        lieferte.
+
+        Die Temperaturregel ist ausserdem die richtige Bauform: eine
+        Schneegrenze ist keine Hoehenlinie. Sie folgt Hangausrichtung,
+        Schattenwurf und Regionsklima - und wird damit von selbst
+        unregelmaessig, genau wie der Nutzer es wollte ("mit varianz
+        entsprechend der temperatur, damit es keine gerade linie ist").
         """
-        temp_adjusted_snow_level = self.snow_level + 500 * (1 + temp_map / 10)
-        snow_height_diff = heightmap - temp_adjusted_snow_level
-
-        snow_probabilities = self._sigmoid(snow_height_diff / (100 * self.edge_softness))
-        snow_probabilities = np.maximum(0, snow_probabilities)
-
-        return snow_probabilities
+        return np.maximum(0.0, self._sigmoid(
+            (FIRN_JULI_C - temp_map) / max(1.0 * self.edge_softness, 0.1)))
 
     def _calculate_alpine_level_probabilities(self, heightmap, temp_map):
         """
-        Alpine Level: h > alpine_level + 500*(1 + temp_map(x,y)/10) mit temperaturabhängigen Übergängen
+        Alpin: oberhalb der Baumgrenze, also wo die Julitemperatur unter
+        BAUMGRENZE_JULI_C faellt. Begruendung siehe
+        _calculate_snow_level_probabilities.
         """
+        return np.maximum(0.0, self._sigmoid(
+            (BAUMGRENZE_JULI_C - temp_map) / max(1.0 * self.edge_softness, 0.1)))
+
+    def _alt_alpine_level_probabilities(self, heightmap, temp_map):
+        """Die alte Hoehenregel - steht nur noch zum Vergleich hier."""
         temp_adjusted_alpine_level = self.alpine_level + 500 * (1 + temp_map / 10)
         alpine_height_diff = heightmap - temp_adjusted_alpine_level
 
@@ -1435,50 +1690,78 @@ class SupersamplingManager:
 
         return self._apply_supersampling_cpu(biome_map, super_biome_probabilities)
 
+    @staticmethod
+    def _sub_zufall(seed, x, y, i):
+        """
+        Ein Wert in [0,1) je Teilpixel, der WIRKLICH von Ort und Ecke abhängt.
+
+        HIER SASSEN DIE DIAGONALEN BÄNDER (Nutzerbild vom 2026-08-10).
+        Die Vorlage rechnete:
+
+            sub_seed = (seed + 54321 + x * 4 + y * 4 + i * 3571) % 1000
+
+        `x * 4 + y * 4` ist `4·(x+y)`. Der "Zufallswert" hing damit nur von der
+        SUMME der Koordinaten ab - jede Diagonale bekam denselben Wert, und
+        wegen `% 1000` wiederholte sich das alle 250 Diagonalen. Wo eine
+        Super-Biom-Wahrscheinlichkeit über null lag, kippte deshalb nicht ein
+        gestreutes Muster, sondern ein ganzer diagonaler Streifen - quer über
+        Land UND offenes Meer.
+
+        Ersetzt durch eine Durchmischung mit drei verschiedenen großen
+        Primzahlen je Achse. Zwei benachbarte Punkte, egal in welcher Richtung,
+        bekommen damit unabhängige Werte.
+        """
+        h = (np.uint64(seed & 0xFFFFFFFF) * np.uint64(2654435761)
+             + x.astype(np.uint64) * np.uint64(73856093)
+             + y.astype(np.uint64) * np.uint64(19349663)
+             + np.uint64(int(i) * 83492791))
+        h = (h ^ (h >> np.uint64(13))) * np.uint64(1274126177)
+        return ((h >> np.uint64(11)) & np.uint64(0xFFFFF)).astype(np.float64) / float(1 << 20)
+
     def _apply_supersampling_cpu(self, biome_map, super_biome_probabilities):
-        """CPU-Implementierung des 2x2-Supersampling mit diskretisierter Rotation"""
+        """
+        CPU-Implementierung des 2x2-Supersampling mit diskretisierter Rotation.
+
+        VOLLSTÄNDIG VEKTORISIERT (2026-08-10). Die Vorlage war eine doppelte
+        Python-Schleife über jedes Pixel, innen noch einmal über vier Teilpixel
+        und sechs Wahrscheinlichkeitskarten - bei 1024 px sind das über 25
+        Millionen Durchläufe im Interpreter. Dieselbe Rechnung als Feldoperation
+        ist um Größenordnungen billiger und Zeile für Zeile dieselbe Formel,
+        abgesehen von `_sub_zufall` (siehe dort, das war ein Fehler).
+        """
         height, width = biome_map.shape
-        super_height, super_width = height * 2, width * 2
-        biome_map_super = np.zeros((super_height, super_width), dtype=np.uint8)
+        biome_map_super = np.zeros((height * 2, width * 2), dtype=np.uint8)
+        yy, xx = np.mgrid[0:height, 0:width]
 
-        for y in range(height):
-            for x in range(width):
-                # Diskretisierte Rotations-Zuweisung mit Primzahlen
-                rotation_hash = (self.biome_seed + 12345 + x * 997 + y * 991) % 4
+        # Diskretisierte Rotations-Zuweisung mit Primzahlen - unverändert.
+        rotation = (self.biome_seed + 12345 + xx * 997 + yy * 991) % 4
+        anordnung = {
+            0: [(0, 0), (0, 1), (1, 0), (1, 1)],   # TL, TR, BL, BR
+            1: [(1, 0), (0, 0), (1, 1), (0, 1)],   # BL, TL, BR, TR
+            2: [(1, 1), (1, 0), (0, 1), (0, 0)],   # BR, BL, TR, TL
+            3: [(0, 1), (1, 1), (0, 0), (1, 0)],   # TR, BR, TL, BL
+        }
 
-                # Sub-Pixel-Anordnung basierend auf Rotation
-                if rotation_hash == 0:    # 0° Rotation
-                    sub_order = [(0, 0), (0, 1), (1, 0), (1, 1)]  # TL, TR, BL, BR
-                elif rotation_hash == 1:  # 90° Rotation
-                    sub_order = [(1, 0), (0, 0), (1, 1), (0, 1)]  # BL, TL, BR, TR
-                elif rotation_hash == 2:  # 180° Rotation
-                    sub_order = [(1, 1), (1, 0), (0, 1), (0, 0)]  # BR, BL, TR, TL
-                else:                     # 270° Rotation
-                    sub_order = [(0, 1), (1, 1), (0, 0), (1, 0)]  # TR, BR, TL, BL
+        namen = list(super_biome_probabilities.keys()) if super_biome_probabilities else []
+        for i in range(4):
+            wert = self._sub_zufall(self.biome_seed + 54321, xx, yy, i)
+            zugewiesen = biome_map.astype(np.uint8).copy()
+            # Rückwärts, damit der ERSTE Treffer gewinnt - wie das `break` in
+            # der Schleifenfassung.
+            for name in reversed(namen):
+                karte = super_biome_probabilities[name]
+                if karte.shape[:2] != (height, width):
+                    continue
+                trifft = wert < karte * self.supersampling_quality
+                zugewiesen[trifft] = self._get_super_biome_index(name)
 
-                base_biome = biome_map[y, x]
-
-                # Sub-Pixel-Zuweisung mit Super-Biome-Probabilities
-                for i, (sub_y, sub_x) in enumerate(sub_order):
-                    target_y = y * 2 + sub_y
-                    target_x = x * 2 + sub_x
-
-                    # Sub-Pixel-Seed für Probabilistic-Assignment
-                    sub_seed = (self.biome_seed + 54321 + x * 4 + y * 4 + i * 3571) % 1000
-                    probability = sub_seed / 1000.0  # [0.000, 0.999]
-
-                    # Super-Biome-Assignment prüfen
-                    assigned_biome = base_biome
-
-                    if super_biome_probabilities:
-                        for super_biome_name, prob_map in super_biome_probabilities.items():
-                            if y < prob_map.shape[0] and x < prob_map.shape[1]:
-                                super_prob = prob_map[y, x] * self.supersampling_quality
-                                if probability < super_prob:
-                                    assigned_biome = self._get_super_biome_index(super_biome_name)
-                                    break
-
-                    biome_map_super[target_y, target_x] = assigned_biome
+            # Die Ecke, die dieses i bei der jeweiligen Rotation belegt.
+            for r, ecken in anordnung.items():
+                sub_y, sub_x = ecken[i]
+                gilt = rotation == r
+                ziel_y = (yy[gilt] * 2 + sub_y)
+                ziel_x = (xx[gilt] * 2 + sub_x)
+                biome_map_super[ziel_y, ziel_x] = zugewiesen[gilt]
 
         return biome_map_super
 
@@ -1498,7 +1781,8 @@ class SupersamplingManager:
             'lake_edge': super_biome_offset + 7,
             'river_bank': super_biome_offset + 8,
             'snow_level': super_biome_offset + 9,
-            'alpine_level': super_biome_offset + 10
+            'alpine_level': super_biome_offset + 10,
+            'sea_ice': super_biome_offset + 11,
         }
 
         return super_biome_mapping.get(super_biome_name, 0)

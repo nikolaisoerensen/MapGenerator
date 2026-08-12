@@ -5,7 +5,7 @@ from PyQt6.QtCore import pyqtSignal
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.collections import LineCollection
-from matplotlib.colors import ListedColormap, LogNorm, LinearSegmentedColormap, Normalize, PowerNorm, hsv_to_rgb
+from matplotlib.colors import ListedColormap, LogNorm, LinearSegmentedColormap, Normalize, PowerNorm, hsv_to_rgb, to_rgba
 from matplotlib.figure import Figure
 from gui.config.gui_default import CanvasSettings, ColorSchemes
 
@@ -178,12 +178,14 @@ def _calculate_contour_levels(heightmap):
     max_height = heightmap.max()
     min_height = heightmap.min()
 
+    # Abstaende verdoppelt (2026-08-12, Nutzer-Vorgabe: "die hoehenkonturen
+    # sind etwas viel... die abstaende verdoppeln").
     if max_height > 1000:
-        interval = 100  # Alle 100m bei hohen Bergen
+        interval = 200  # Alle 200m bei hohen Bergen
     elif max_height > 500:
-        interval = 50   # Alle 50m bei mittleren Höhen
+        interval = 100  # Alle 100m bei mittleren Höhen
     else:
-        interval = 25   # Alle 25m bei niedrigen Höhen
+        interval = 50   # Alle 50m bei niedrigen Höhen
 
     # Start bei nächstem Intervall über min_height
     start = np.ceil(min_height / interval) * interval
@@ -266,6 +268,64 @@ def rasterize_plot_boundaries_rgba(plot_nodes, plot_edges, plot_cores, wildernes
     # geflippt, damit Zeile 0 = y=0 gilt (row-index==y, wie heightmap/civ_map).
     return np.flipud(buffer)
 
+
+def rasterize_regions_rgba(region_map, heightmap, resolution=None, alpha=0.55, border_alpha=0.9):
+    """
+    (H,W,4) RGBA-Array: die neun Regionsfarben als Flaechenfuellung (nur auf
+    Land) plus WEISSE Grenzlinien zwischen benachbarten Regionen - "Grenzen
+    wie in einer Strategiespiel-Provinzkarte, farbige Regionen, weisse
+    Trennung" (Nutzer-Vorgabe 2026-08-11, docs/OFFENE_PUNKTE.md 6.1).
+    Transparent (alpha=0) ausserhalb von Land und ausserhalb jeder
+    Regionsgrenze - laesst Terrain/Basis-Layer darunter durchscheinen, reine
+    Zusatzeinfaerbung statt eigenem exklusivem Anzeigemodus (anders als
+    MapDisplay2D._render_region_map(), die einen kompletten Modus ersetzt).
+
+    Gemeinsame Rasterisierungsbasis fuer das 2D-Overlay
+    (MapDisplay2D.overlay_regions()) und den 3D-Skin-Textur-Upload
+    (map_display_3d.py._render_regions_overlay()), analog zu
+    rasterize_plot_boundaries_rgba() fuer Plots.
+
+    `alpha` regelt die Deckkraft der Flaechenfuellung - ein SUBTILER Wert
+    (Nutzer-Vorgabe: "in subtilen Toenen bei Settlement-Vorschau") fuer die
+    Siedlungs-Reiter (wo Staedte/Strassen im Vordergrund stehen sollen), der
+    volle Wert im Terrain-Reiter.
+    """
+    from core.terrain_weltkarte import alle_regionen
+
+    region_map = np.asarray(region_map)
+    heightmap = np.asarray(heightmap, dtype=np.float32)
+    if region_map.shape != heightmap.shape:
+        faktor = heightmap.shape[0] / region_map.shape[0]
+        region_map = zoom(region_map.astype(np.float32), faktor, order=0).astype(np.int16)
+    if resolution is not None and heightmap.shape[0] != resolution:
+        faktor = resolution / heightmap.shape[0]
+        region_map = zoom(region_map.astype(np.float32), faktor, order=0).astype(np.int16)
+        heightmap = zoom(heightmap, faktor, order=0)
+
+    land = heightmap > 0.0
+    rgba = np.zeros(region_map.shape + (4,), dtype=np.uint8)
+    for i, (_z, _s, r) in enumerate(alle_regionen()):
+        treffer = land & (region_map == i)
+        if not treffer.any():
+            continue
+        rgb = to_rgba(r["farbe"])[:3]
+        rgba[treffer, 0] = int(round(rgb[0] * 255))
+        rgba[treffer, 1] = int(round(rgb[1] * 255))
+        rgba[treffer, 2] = int(round(rgb[2] * 255))
+        rgba[treffer, 3] = int(round(alpha * 255))
+
+    grenzen = np.zeros(region_map.shape, dtype=bool)
+    grenzen[:, :-1] |= region_map[:, :-1] != region_map[:, 1:]
+    grenzen[:-1, :] |= region_map[:-1, :] != region_map[1:, :]
+    grenzen &= land
+    rgba[grenzen, 0] = 255
+    rgba[grenzen, 1] = 255
+    rgba[grenzen, 2] = 255
+    rgba[grenzen, 3] = int(round(border_alpha * 255))
+
+    return rgba
+
+
 class MapDisplay2D(QWidget):
     """
     Funktionsweise: 2D-Visualisierung von Heightmaps und anderen Generator-Outputs mit Matplotlib
@@ -344,7 +404,18 @@ class MapDisplay2D(QWidget):
         # vollen 0-1 Bereich, damit Grün jetzt die niedrigste Farbe ist (0m) und
         # Weiß weiterhin die höchste (elevation_vmax). Die Farbskala am Rand
         # (colorbar in _render_heightmap) nutzt automatisch dieselbe Colormap.
-        self.heightmap_cmap = ListedColormap(plt.cm.terrain(np.linspace(0.25, 1.0, 256)))
+        # HEIGHTMAP-FARBEN: BLAU UNTER NULL, LAND DARUEBER.
+        #
+        # Bis 2026-08-05 begann die Skala bei 0 m und schnitt das Blau aus
+        # matplotlib.terrain heraus - richtig, solange die Heightmap nie
+        # negativ wurde. Mit der Weltkarte gibt es echtes Meer, und ohne diese
+        # Aenderung klebte der gesamte Meeresboden auf derselben gruenen Farbe
+        # wie die Kueste.
+        #
+        # Die Skala laeuft jetzt von elevation_vmin (-400 m) bis vmax. Der
+        # Anteil unterhalb von 0 bekommt einen Blauverlauf von Tiefsee bis
+        # Flachwasser, darueber unveraendert terrain ab 0.25 (also ab Gruen).
+        self.heightmap_cmap = self._hoehenfarben()
 
         # Feste Biome-Colormap aus ColorSchemes.BIOME_COLOR_TABLE (dieselbe Quelle
         # wie BiomeLegendDialog) - vorher plt.cm.Set3, ein generischer 12-Farben-
@@ -397,20 +468,28 @@ class MapDisplay2D(QWidget):
             self.canvas.draw()
             return
 
+        # region_map kommt als dict (regionen + heightmap), weil der Renderer
+        # BEIDE braucht: gefaerbt wird nur Land. Anders als beim Geologie-
+        # Schnitt oben ist es aber ein ganz normales Rasterbild - Zoomgrenzen,
+        # Styling und Hoehenlinien sollen unveraendert gelten. Deshalb kein
+        # eigener Zweig, sondern nur ein Auspacken fuer alles, was ein Array
+        # erwartet.
+        raster = data["regionen"] if isinstance(data, dict) else data
+
         # Datenvalidierung
-        if not _validate_input_data(data):
+        if not _validate_input_data(raster):
             print(f"Warnung: Ungültige Daten für {layer_type} erhalten")
             return
 
-        self.current_data = data
+        self.current_data = raster
         self.current_layer = layer_type
 
         # Zoom-Grenzen basierend auf Daten setzen
         self.zoom_limits = {
-            'x_min': 0, 'x_max': data.shape[1],
-            'y_min': 0, 'y_max': data.shape[0],
-            'min_zoom_range': min(data.shape) * 0.05,  # Minimum 5% der kleineren Dimension
-            'max_zoom_range': max(data.shape) * 1.0   # Maximum 100% der größeren Dimension
+            'x_min': 0, 'x_max': raster.shape[1],
+            'y_min': 0, 'y_max': raster.shape[0],
+            'min_zoom_range': min(raster.shape) * 0.05,  # Minimum 5% der kleineren Dimension
+            'max_zoom_range': max(raster.shape) * 1.0   # Maximum 100% der größeren Dimension
         }
 
         # Alte Colorbar entfernen
@@ -436,6 +515,10 @@ class MapDisplay2D(QWidget):
             self._render_rock_map(data)
         elif layer_type == "biome_map":
             self._render_biome_map(data)
+        elif layer_type == "region_map":
+            self._render_region_map(data)
+        elif layer_type == "kuesten_archetyp":
+            self._render_kuesten_archetypen(data)
         elif layer_type == "water_map":
             self._render_water_map(data)
         elif layer_type == "temp_map":
@@ -482,6 +565,20 @@ class MapDisplay2D(QWidget):
         """
         self._water_biomes_reference = water_biomes_map
 
+    @staticmethod
+    def _hoehenfarben():
+        """Blau unter 0 m, Gelaendefarben darueber - passend zu vmin/vmax."""
+        vmin = CanvasSettings.CANVAS_2D["elevation_vmin"]
+        vmax = CanvasSettings.CANVAS_2D["elevation_vmax"]
+        gesamt = 256
+        anteil_meer = int(round(gesamt * (0.0 - vmin) / max(vmax - vmin, 1e-9)))
+        anteil_meer = int(np.clip(anteil_meer, 1, gesamt - 2))
+        meer = LinearSegmentedColormap.from_list(
+            "meer", ["#062a52", "#1d5f9e", "#4a9bd4"])(
+                np.linspace(0.0, 1.0, anteil_meer))
+        land = plt.cm.terrain(np.linspace(0.25, 1.0, gesamt - anteil_meer))
+        return ListedColormap(np.vstack([meer, land]))
+
     def _render_heightmap(self, heightmap):
         """
         Funktionsweise: Rendert Heightmap mit Terrain-Colormap und optionalen Contour-Lines
@@ -523,10 +620,32 @@ class MapDisplay2D(QWidget):
             heightmap = zoom(heightmap, zoom_factors, order=1)
 
         contour_levels = _calculate_contour_levels(heightmap)
-        contours = self.ax.contour(heightmap, levels=contour_levels,
-                                   colors=CanvasSettings.CANVAS_2D["contour_colors"],
-                                   linewidths=0.5, alpha=0.7)
-        self.ax.clabel(contours, inline=True, fontsize=8)
+
+        # Drei Gruppen (2026-08-12, Nutzer-Vorgabe): unter 0 in Graustufen
+        # (Wassertiefe ist keine Landform, verdient keine bunte Linie), die
+        # 0-Linie selbst dick (Kuestenlinie ist die wichtigste Hoehenlinie
+        # ueberhaupt), darueber wie bisher.
+        unter_null = [lvl for lvl in contour_levels if lvl < 0]
+        ueber_null = [lvl for lvl in contour_levels if lvl > 0]
+        hat_null = any(abs(lvl) < 1e-6 for lvl in contour_levels)
+
+        if unter_null:
+            tiefen_contours = self.ax.contour(
+                heightmap, levels=unter_null, cmap='Greys_r',
+                linewidths=0.5, alpha=0.6)
+            self.ax.clabel(tiefen_contours, inline=True, fontsize=8)
+
+        if hat_null:
+            null_contour = self.ax.contour(
+                heightmap, levels=[0.0], colors='#2c3e50', linewidths=1.6, alpha=0.9)
+            self.ax.clabel(null_contour, inline=True, fontsize=8)
+
+        if ueber_null:
+            hoehen_contours = self.ax.contour(
+                heightmap, levels=ueber_null,
+                colors=CanvasSettings.CANVAS_2D["contour_colors"],
+                linewidths=0.5, alpha=0.7)
+            self.ax.clabel(hoehen_contours, inline=True, fontsize=8)
 
     def _render_slopemap(self, slopemap):
         """
@@ -542,8 +661,16 @@ class MapDisplay2D(QWidget):
         """
         rgb = compute_slope_compass_rgb(slopemap[:, :, 0], slopemap[:, :, 1])
         self.ax.imshow(rgb, origin='lower', interpolation='bilinear')
+        # KEINE COLORBAR. Das Kompass-Farbrad ist ein RGB-Bild ohne skalare
+        # Werteachse - wie _render_rock_map() daneben.
+        #
+        # Hier stand bis zum 2026-08-10 direkt hinter dieser Zuweisung noch
+        # `self.current_colorbar.set_label('Slope (°)')`, also ein Aufruf auf
+        # None. Jede Slope-Anzeige in 2D warf damit einen AttributeError und
+        # blieb leer ("Slope 2D ist neuerdings tot"); in 3D lief sie weiter,
+        # weil der Weg dort an dieser Methode vorbeigeht. Ueberbleibsel aus der
+        # Zeit, als hier eine Steilheits-Magnitude in Grad gezeichnet wurde.
         self.current_colorbar = None
-        self.current_colorbar.set_label('Slope (°)')
 
     def _render_rock_map(self, rock_map):
         """
@@ -675,6 +802,181 @@ class MapDisplay2D(QWidget):
             self.current_colorbar.set_ticks(valid_values)
             self.current_colorbar.set_ticklabels(
                 [ColorSchemes.BIOME_COLOR_TABLE[int(val)][0] for val in valid_values])
+
+    def _render_region_map(self, payload):
+        """
+        Die neun Kulturregionen als Faerbung UEBER dem Gelaende.
+
+        payload ist ein dict mit "regionen" (int 0..8) und "heightmap" - beide
+        werden gebraucht, und ein zweiter Beschaffungsweg fuer die Heightmap
+        (etwa ueber _contour_reference_heightmap) waere eine stille Kopplung an
+        die Aufrufreihenfolge. Deshalb kommen sie zusammen herein, wie beim
+        Geologie-Schnitt.
+
+        DAS GELAENDE BLEIBT SICHTBAR. Eine reine Flaechenfaerbung waere neun
+        bunte Flecken ohne Bezug zum Land - man saehe nicht, ob eine Grenze
+        einem Kamm folgt oder quer durch ein Tal laeuft. Die Farbe liegt
+        deshalb halbtransparent auf dem normalen Hoehenbild.
+
+        NUR AUF LAND. Die Regionszuordnung gilt auch auf See (das Wasser vor den
+        Griechischen Inseln gehoert zu ihnen, und die Seewege brauchen das) -
+        aber gefaerbt wird sie dort nicht: der Ozean wuerde sonst in neun Farben
+        zerfallen, und die Kuestenlinie, das wichtigste Merkmal der Karte, waere
+        weg. Gemessen am 2026-08-06 sind 77 % der Huegelland-Zuordnung offenes
+        Meer jenseits des Kontinents.
+        """
+        import matplotlib.patheffects as pe
+        from scipy import ndimage
+        from core.terrain_weltkarte import alle_regionen
+
+        regionen = np.asarray(payload["regionen"])
+        heightmap = np.asarray(payload["heightmap"], dtype=np.float32)
+        land = heightmap > 0.0
+
+        self.ax.imshow(
+            heightmap, cmap=self.heightmap_cmap, origin='lower',
+            interpolation='bilinear',
+            vmin=CanvasSettings.CANVAS_2D["elevation_vmin"],
+            vmax=CanvasSettings.CANVAS_2D["elevation_vmax"])
+
+        gebiete = [r for _z, _s, r in alle_regionen()]
+        farbig = np.zeros(regionen.shape + (4,), dtype=np.float32)
+        for i, region in enumerate(gebiete):
+            treffer = land & (regionen == i)
+            if not treffer.any():
+                continue
+            rgba = to_rgba(region["farbe"])
+            farbig[treffer] = (rgba[0], rgba[1], rgba[2], 0.55)
+        self.ax.imshow(farbig, origin='lower', interpolation='nearest')
+
+        # Die Grenzen als duenne Linie - ohne sie verschwimmen benachbarte
+        # Regionen dort, wo ihre Farben aehnlich hell sind. WEISS statt
+        # dunkel (2026-08-11, Nutzer-Vorgabe: "Grenzen wie in medieval...
+        # mit farbigen Regionen, weisser Trennung") - einheitlich mit dem
+        # neuen zuschaltbaren Overlay (overlay_regions()/rasterize_regions_rgba()).
+        grenzen = np.zeros_like(land)
+        grenzen[:, :-1] |= regionen[:, :-1] != regionen[:, 1:]
+        grenzen[:-1, :] |= regionen[:-1, :] != regionen[1:, :]
+        grenzen &= land
+        rand = np.zeros(regionen.shape + (4,), dtype=np.float32)
+        rand[grenzen] = (1.0, 1.0, 1.0, 0.9)
+        self.ax.imshow(rand, origin='lower', interpolation='nearest')
+
+        # BESCHRIFTUNG AM WEITESTEN INNEN LIEGENDEN PUNKT, nicht am Schwerpunkt.
+        # Regionen sind teils konkav (Fjordland um seinen Hauptfjord herum) oder
+        # zweigeteilt; ihr Schwerpunkt kann im Wasser oder in der Nachbarregion
+        # liegen. Das Maximum der Abstandstransformation liegt garantiert im
+        # Gebiet und mit groesstem Abstand zu dessen Rand - also dort, wo eine
+        # Beschriftung auch wirklich Platz hat.
+        for i, region in enumerate(gebiete):
+            treffer = land & (regionen == i)
+            if treffer.sum() < 9:
+                continue
+            abstand = ndimage.distance_transform_edt(treffer)
+            y, x = np.unravel_index(int(np.argmax(abstand)), abstand.shape)
+            self.ax.text(
+                x, y, "%s\n%s" % (region["name"], region["volk"]),
+                ha="center", va="center", fontsize=8, color="white",
+                linespacing=1.2, zorder=6,
+                path_effects=[pe.withStroke(linewidth=2.5, foreground="black")])
+
+    def _render_kuesten_archetypen(self, payload):
+        """
+        Kuesten-Archetypen (docs/OFFENE_PUNKTE.md 3.8, Nutzer-Vorgabe
+        2026-08-12: "jede Region hat eine Farbe und die Helligkeit von
+        flach (hell) zu steil (dunkel) sind die unterschiedlichen
+        Kuestentypen... falls es eine Strahlungstiefe gibt... koennte man
+        das auch darstellen").
+
+        Regionsfarbe wie beim "Regionen"-Modus (_render_region_map()) -
+        Helligkeit kodiert den `hoehe_faktor` des zugeordneten Archetyps
+        GLOBAL normiert (nicht je Region), damit "flach" in zwei
+        verschiedenen Regionen gleich hell aussieht, nicht nur relativ
+        zueinander. Die "Strahlungstiefe" (wie stark dieser Pass an einem
+        Pixel gegenueber dem Rohgelaende gewichtet wurde,
+        `kuesten_staerke`) steuert die Deckkraft - Kernzonen der Archetypen
+        stehen kraeftig da, der Randbereich blendet weich zum normalen
+        Gelaende aus, ganz ohne eigenen Schalter.
+        """
+        import matplotlib.patheffects as pe
+        from scipy import ndimage
+        from core.terrain_weltkarte import alle_regionen, KUESTEN_ARCHETYPEN
+
+        regionen = np.asarray(payload["regionen"])
+        heightmap = np.asarray(payload["heightmap"], dtype=np.float32)
+        archetyp = payload.get("kuesten_archetyp")
+        staerke = payload.get("kuesten_staerke")
+        land = heightmap > 0.0
+
+        self.ax.imshow(
+            heightmap, cmap=self.heightmap_cmap, origin='lower',
+            interpolation='bilinear',
+            vmin=CanvasSettings.CANVAS_2D["elevation_vmin"],
+            vmax=CanvasSettings.CANVAS_2D["elevation_vmax"])
+
+        if archetyp is None:
+            # Kuesten-Archetypen (noch) nicht berechnet (z.B. alter Nicht-
+            # Weltkarten-Pfad) - wenigstens die Regionsfaerbung zeigen statt
+            # einer leeren Flaeche.
+            self._render_region_map(payload)
+            return
+        archetyp = np.asarray(archetyp)
+        staerke = np.asarray(staerke) if staerke is not None else np.ones_like(heightmap)
+
+        # hoehe_faktor global auf [0.2, 2.0] normiert (siehe KUESTEN_ARCHETYPEN-
+        # Tabelle - reale Werte liegen zwischen 0.25 und 1.8) - flach (niedrig)
+        # -> hell (1.3x), steil (hoch) -> dunkel (0.5x).
+        HOEHE_FAKTOR_MIN, HOEHE_FAKTOR_MAX = 0.2, 2.0
+
+        farbig = np.zeros(regionen.shape + (4,), dtype=np.float32)
+        gebiete = [r for _z, _s, r in alle_regionen()]
+        for i, region in enumerate(gebiete):
+            archetypen = KUESTEN_ARCHETYPEN.get(region["name"])
+            if not archetypen:
+                continue
+            basis_rgb = np.array(to_rgba(region["farbe"])[:3], dtype=np.float32)
+            for lokal_index, typ in enumerate(archetypen):
+                treffer = land & (regionen == i) & (archetyp == lokal_index)
+                if not treffer.any():
+                    continue
+                norm = np.clip(
+                    (typ["hoehe_faktor"] - HOEHE_FAKTOR_MIN) / (HOEHE_FAKTOR_MAX - HOEHE_FAKTOR_MIN),
+                    0.0, 1.0)
+                helligkeit = 1.3 - norm * 0.8  # flach 1.3x hell, steil 0.5x dunkel
+                rgb = np.clip(basis_rgb * helligkeit, 0.0, 1.0)
+                alpha = 0.25 + 0.55 * np.clip(staerke[treffer], 0.0, 1.0)
+                farbig[treffer, 0] = rgb[0]
+                farbig[treffer, 1] = rgb[1]
+                farbig[treffer, 2] = rgb[2]
+                farbig[treffer, 3] = alpha
+        self.ax.imshow(farbig, origin='lower', interpolation='nearest')
+
+        # Grenzen zwischen Archetyp-Zonen als duenne weisse Linie - gleiche
+        # Bauform wie _render_region_map()'s Regionsgrenzen.
+        zonen_id = regionen.astype(np.int32) * 8 + np.where(archetyp >= 0, archetyp, 0)
+        grenzen = np.zeros_like(land)
+        grenzen[:, :-1] |= (zonen_id[:, :-1] != zonen_id[:, 1:]) & land[:, :-1] & land[:, 1:]
+        grenzen[:-1, :] |= (zonen_id[:-1, :] != zonen_id[1:, :]) & land[:-1, :] & land[1:, :]
+        rand = np.zeros(regionen.shape + (4,), dtype=np.float32)
+        rand[grenzen] = (1.0, 1.0, 1.0, 0.5)
+        self.ax.imshow(rand, origin='lower', interpolation='nearest')
+
+        # Legende: Archetyp-Namen je Region an ihrem am weitesten innen
+        # liegenden Punkt - analog zu _render_region_map()'s Regionsnamen.
+        for i, region in enumerate(gebiete):
+            archetypen = KUESTEN_ARCHETYPEN.get(region["name"])
+            if not archetypen:
+                continue
+            for lokal_index, typ in enumerate(archetypen):
+                treffer = land & (regionen == i) & (archetyp == lokal_index)
+                if treffer.sum() < 12:
+                    continue
+                abstand = ndimage.distance_transform_edt(treffer)
+                y, x = np.unravel_index(int(np.argmax(abstand)), abstand.shape)
+                self.ax.text(
+                    x, y, typ["name"], ha="center", va="center", fontsize=6,
+                    color="white", zorder=6,
+                    path_effects=[pe.withStroke(linewidth=2.0, foreground="black")])
 
     def _render_water_map(self, water_map):
         """
@@ -912,7 +1214,21 @@ class MapDisplay2D(QWidget):
         layer_type (str) - Layer-Key für den Farbskalen-Lookup
         """
         cmap_name, vmin, vmax, scale = _get_layer_range(layer_type) if layer_type else (None, None, None, "linear")
-        cmap = plt.cm.get_cmap(cmap_name) if cmap_name else plt.cm.viridis
+        # `plt.cm.get_cmap` GIBT ES NICHT MEHR (entfernt in matplotlib 3.9).
+        #
+        # Das war die gemeinsame Ursache dafuer, dass 18 Darstellungen leer
+        # blieben (Nutzermeldung 2026-08-10: "im 2D geht im geology nur Rock
+        # Outcrop und Cross section. und so weiter"). Alles, was hier
+        # hereinkommt - Hardness, die fuenf Geologie-Diagnosen, Humidity, Flow,
+        # Bodenfeuchte, Verdunstung und der gesamte Erosionsreiter - warf beim
+        # Zeichnen einen AttributeError. Die Reiter fangen ihn ab und schreiben
+        # ihn ins Log, also gab es keine Fehlermeldung, nur eine leere Flaeche.
+        # Rock Outcrop und Cross-Section ueberlebten, weil sie eigene
+        # Zeichenwege haben und hier nie vorbeikommen.
+        #
+        # `plt.get_cmap` (ohne `.cm`) besteht weiter und wird an den drei
+        # anderen Stellen im Projekt bereits benutzt.
+        cmap = plt.get_cmap(cmap_name) if cmap_name else plt.get_cmap("viridis")
 
         if scale == "log" and vmin is not None and vmax is not None:
             # Stark rechtsschiefe Werteverteilung (die meisten Pixel exakt 0,
@@ -931,6 +1247,22 @@ class MapDisplay2D(QWidget):
 
         self.current_colorbar = self.figure.colorbar(im, ax=self.ax)
         self.current_colorbar.set_label('Value')
+
+        # MEER AUCH HIER BLAU (2026-08-12, Nutzer-Vorgabe: "water depth karte
+        # sollte dort wo Meer ist ebenso blau sein"). `water_depth_map`
+        # (erosion.hydraulic) modelliert Oberflaechenwasser/Abfluss, nicht die
+        # Ozeantiefe - auf offener See liefert es praktisch 0 und faerbt sich
+        # dadurch als hellstes Blau/fast Weiss statt als erkennbares Meer.
+        # Feste, deckende Meeresfarbe ueber jedes Pixel unter 0m gelegt, damit
+        # das Meer ueberall gleich aussieht wie in den anderen Darstellungen.
+        if layer_type == "water_depth_map" and self._contour_reference_heightmap is not None:
+            referenz = np.asarray(self._contour_reference_heightmap)
+            if referenz.shape == data.shape:
+                ozean = referenz < 0.0
+                if np.any(ozean):
+                    meer_rgba = np.zeros(data.shape + (4,), dtype=np.float32)
+                    meer_rgba[ozean] = (0.09, 0.32, 0.55, 1.0)
+                    self.ax.imshow(meer_rgba, origin='lower', interpolation='nearest', zorder=2)
 
     def overlay_settlements(self, settlement_list, landmark_list=None, roadsite_list=None):
         """
@@ -974,14 +1306,16 @@ class MapDisplay2D(QWidget):
             self.ax.legend(loc='upper right', fontsize=8, framealpha=0.7)
         self.canvas.draw()
 
-    def overlay_roads(self, roads, color='darkorange', linewidth=1.2, alpha=0.85, zorder=4):
+    def overlay_roads(self, roads, color='darkorange', linewidth=1.2, alpha=0.85, zorder=4,
+                      linestyle='-'):
         """
         Funktionsweise: Zeichnet Road-Pfade als Linien über das aktuell
         angezeigte Bild
-        Aufgabe: Overlay für SettlementTab "Road Network" - mehrfach mit
-        unterschiedlicher color aufrufbar, um Hauptstraßen/Landmark-
-        Anbindungen/Außenverbindungen optisch zu unterscheiden (siehe
-        SettlementTab.update_settlement_display())
+        Aufgabe: Overlay für SettlementTab "Roads" - mehrfach mit
+        unterschiedlicher color/linestyle aufrufbar, um Landwege und Seewege
+        optisch zu unterscheiden (docs/SIEDLUNGEN_ENTWURF.md §4.4: Seewege
+        "anders gezeichnet - gestrichelt, in einem eigenen Blau", siehe
+        SettlementTab._apply_settlement_overlays()).
         Parameter: roads (List[List[Tuple]]) - Liste von Pfaden, je Pfad eine
         Liste von (x,y[,...])-Punkten
         """
@@ -993,8 +1327,35 @@ class MapDisplay2D(QWidget):
                 continue
             xs = [p[0] for p in path]
             ys = [p[1] for p in path]
-            self.ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, zorder=zorder)
+            self.ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha,
+                         zorder=zorder, linestyle=linestyle)
 
+        self.canvas.draw()
+
+    def overlay_region_grid(self, size, color='yellow', linewidth=1.0, alpha=0.6,
+                             zorder=3, linestyle=(0, (5, 4))):
+        """
+        Funktionsweise: Zeichnet das gelbe 3x3-Ausschnittsgitter (Kontinent in
+        neun feste, gleich grosse Kaesten geteilt - docs/OFFENE_PUNKTE.md 6.2,
+        docs/OFFENE_PUNKTE.md 6.2). Nur in Siedlungen Global und Regional
+        aufgerufen, NICHT im Terrain-Reiter (dort laege es neben den
+        Kulturfarben, siehe D2: "man liest zwei verschiedene Neunerteilungen
+        als eine").
+        Aufgabe: Macht sichtbar, wie die Regionalkarten-Kaesten liegen, gegen
+        die Orte/Landmarks/Roadsites einen weichen Randabstand einhalten
+        (settlement_generator._randfaktor).
+        Parameter: size (int) - Kantenlaenge der aktuell angezeigten Karte in
+        Pixeln, fuer core.terrain_weltkarte.gitterlinien_px().
+        """
+        if self.current_data is None:
+            return
+        from core.terrain_weltkarte import gitterlinien_px
+        linien = gitterlinien_px(size)
+        for position in linien:
+            self.ax.axvline(position, color=color, linewidth=linewidth,
+                            alpha=alpha, zorder=zorder, linestyle=linestyle)
+            self.ax.axhline(position, color=color, linewidth=linewidth,
+                            alpha=alpha, zorder=zorder, linestyle=linestyle)
         self.canvas.draw()
 
     def overlay_city_boundary_contour(self, city_mask, color='gold', linewidth=2.2):
@@ -1046,6 +1407,35 @@ class MapDisplay2D(QWidget):
         im = self.ax.imshow(civ_map, cmap=plt.get_cmap(cmap_name or "plasma"), origin='lower',
                              alpha=alpha, zorder=2, vmin=vmin, vmax=vmax)
         self._civ_overlay_artists.append(im)
+        self.canvas.draw()
+
+    def overlay_regions(self, region_map, heightmap, alpha=0.55):
+        """
+        Regionsfaerbung + weisse Grenzlinien als zuschaltbares Overlay ueber
+        dem aktuellen Basis-Layer - kombinierbar mit jedem anderen Layer
+        (Staedte/Strassen/Roadsites etc.), anders als die exklusive
+        "Regionen"-Radio-Ansicht im Terrain-Reiter (_render_region_map()).
+        Nutzer-Vorgabe 2026-08-11: "Grenzen wie in medieval... mit farbigen
+        Regionen, weisser Trennung und halt nur wenn man Regionen ausgewaehlt
+        und in subtilen Toenen bei Settlement-Vorschau" - `alpha` ist deshalb
+        Parameter statt Konstante: Siedlungs-Reiter uebergeben einen
+        niedrigeren Wert als der Terrain-Reiter.
+        Nutzt dieselbe Rasterisierung wie der 3D-Skin-Textur-Upload
+        (rasterize_regions_rgba()), damit 2D und 3D optisch uebereinstimmen.
+        """
+        if self.current_data is None or region_map is None or heightmap is None:
+            return
+
+        for artist in getattr(self, '_region_overlay_artists', []):
+            try:
+                artist.remove()
+            except (ValueError, NotImplementedError):
+                pass
+        self._region_overlay_artists = []
+
+        rgba = rasterize_regions_rgba(region_map, heightmap, alpha=alpha)
+        im = self.ax.imshow(rgba, origin='lower', interpolation='nearest', zorder=3)
+        self._region_overlay_artists.append(im)
         self.canvas.draw()
 
     def overlay_potential_field(self, potential_field, alpha=0.9):
@@ -1215,6 +1605,39 @@ class MapDisplay2D(QWidget):
 
         self.ax.imshow(river_mask, cmap=plt.cm.Blues, origin='lower',
                         interpolation='bilinear', alpha=0.7, vmin=threshold)
+        self.canvas.draw()
+
+    def overlay_river_generations(self, generation_map, zeige_mikro=False):
+        """
+        Das Flussnetz nach GENERATION eingefaerbt: Makro rot, Meso gruen.
+
+        `generation_map` kommt aus terrain.redistribution/river_generation:
+        3 = Makro (die Stroeme), 2 = Meso (Nebenfluesse), 1 = Mikro (Baeche),
+        0 = kein Fluss.
+
+        MIKRO BLEIBT NORMALERWEISE WEG. Auf einer 21-km-Weltkarte sind das
+        Rinnsale von wenigen hundert Metern - sie fuellen das Bild, ohne etwas
+        auszusagen. Der Nutzer am 2026-08-06: "die kleineren fluesse (gelb?)
+        sind nicht zu sehen, zu insignifikant."
+
+        Gezeichnet wird von fein nach grob, damit ein Strom ueber seinem
+        Nebenfluss liegt und nicht umgekehrt.
+        """
+        if self.current_data is None:
+            return
+        if not isinstance(generation_map, np.ndarray) or generation_map.ndim != 2:
+            return
+
+        stufen = [(1.0, "#e8c020", 1.4, 5)] if zeige_mikro else []
+        stufen += [(2.0, "#25a03a", 2.0, 6), (3.0, "#e03030", 3.0, 7)]
+
+        for wert, farbe, breite, zorder in stufen:
+            treffer = generation_map == wert
+            if not treffer.any():
+                continue
+            yy, xx = np.nonzero(treffer)
+            self.ax.scatter(xx, yy, s=breite, c=farbe, marker='s',
+                            linewidths=0, zorder=zorder)
         self.canvas.draw()
 
     def overlay_elevation_contours(self, heightmap):

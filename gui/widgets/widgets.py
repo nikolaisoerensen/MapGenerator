@@ -172,6 +172,31 @@ class ParameterSlider(QWidget):
 
         self.setup_ui(label)
         self.setValue(default_val)
+        self.stilllegungsgrund = None
+
+    def stilllegen(self, grund: str):
+        """
+        Den Regler sperren und sagen, warum.
+
+        Ein Regler, der sich bewegen laesst und nichts bewirkt, ist schlimmer
+        als keiner: der Nutzer stellt etwas ein, die Karte aendert sich nicht,
+        und er kann nicht unterscheiden, ob das Absicht oder ein Fehler ist.
+        Gemessen am 2026-08-06 traf das auf 49 von 109 Reglern zu.
+
+        Bewusst SPERREN und nicht ausblenden: der alte Pfad
+        (WELTKARTE_AKTIV = False) braucht sie weiterhin, und ein Regler, der
+        einfach verschwindet, wirft dieselbe Frage nur andersherum auf.
+        """
+        self.stilllegungsgrund = grund
+        self.setEnabled(False)
+        self.setToolTip(grund)
+        if hasattr(self, "label") and self.label is not None:
+            self.label.setStyleSheet(
+                "font-size: 11px; font-weight: bold; color: #7f8c8d;")
+            if not self.label.text().endswith(" — ohne Wirkung"):
+                self.label.setText(self.label.text() + " — ohne Wirkung")
+        if hasattr(self, "value_display") and self.value_display is not None:
+            self.value_display.setStyleSheet("font-size: 11px; color: #7f8c8d;")
 
     def setup_ui(self, label: str):
         """

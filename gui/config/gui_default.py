@@ -88,8 +88,14 @@ class CanvasSettings:
         # damit z.B. ein 200m-Hügel und ein 3500m-Berg nicht dieselbe volle
         # Farbspanne bekommen - entspricht realen topografischen Karten.
         # Werte oberhalb von elevation_vmax clippen auf die höchste Farbe.
-        "elevation_vmin": 0.0,
-        "elevation_vmax": 4000.0,
+        "elevation_vmin": -400.0,
+        # 2026-08-05 von 4000 auf 1000: die Regionenwelt reicht von rund -330 bis
+        # +805 m. Mit 4000 landete das gesamte Land im untersten Fuenftel der
+        # Farbskala und sah einheitlich gruen aus - die Gebirge waren nicht von
+        # der Kuestenebene zu unterscheiden. Wer den alten Pfad mit hoher
+        # Amplitude fahren will, hebt den Wert wieder an; alles darueber
+        # klemmt auf Weiss.
+        "elevation_vmax": 1000.0,
         # Feste Farbskalen pro Daten-Layer (colormap_name, vmin, vmax) - ersetzt
         # die bisherige Auto-Skalierung pro Frame (matplotlib nimmt sonst das
         # aktuelle Min/Max der gerade angezeigten Daten), die bei wechselnden
@@ -106,14 +112,22 @@ class CanvasSettings:
         # (ColorSchemes.BIOME_COLOR_TABLE etc.), keine kontinuierliche Skala.
         "layer_ranges": {
             "temp_map": ("RdBu_r", -30.0, 40.0),        # Blau=kalt, Rot=warm
-            # Nutzer-Abstimmung 2026-07-24 (Revision der Zwischen-Kalibrierung
-            # vom 2026-07-23): precip_map ist keine Jahresmenge, sondern eine
-            # Perioden-Akkumulation mit ~50 als typischem Maximalwert (siehe
-            # PRECIP_ANNUAL_SCALE_FACTOR=0.5 in core/weather_generator.py) -
-            # vmax mit etwas Puffer über diesem typischen Maximum, damit
-            # seltene, legitime Ausreißer noch sichtbar differenzierbar
-            # bleiben statt sofort auf die volle Sättigungsfarbe zu clippen.
-            "precip_map": ("Greens", 0.0, 70.0),
+            # NEU KALIBRIERT 2026-08-11 (Live-App-Befund: "auf dem meer ist
+            # immer gleichviel regen zu erkennen"). Der alte Wert (0-70) war
+            # von 2026-07-24 - VOR der Umstellung auf die Niederschlags-
+            # Festlegung (1.3, niederschlagsfeld_festgelegt() normiert direkt
+            # auf NIEDERSCHLAG_ZIEL/KLIMA_ZIEL statt auf eine Perioden-
+            # Akkumulation). Gemessen (256px, Seed 20260804, Standardregler):
+            # precip_map liegt zwischen 10 und 978, Regionsmittel 77
+            # (Steppe) bis 354 (Fjordland) - komplett ausserhalb der alten
+            # 0-70-Skala. Die GESAMTE Karte saettigte dadurch auf die
+            # oberste Farbe und sah ueberall gleich aus, an Land UND auf See
+            # - kein Datenproblem, ein reines Farbskalen-Problem. Neue Skala
+            # deckt den typischen Bereich (Regionsmittel) mit etwas Puffer
+            # fuer Luv-Spitzen ab, ohne den Ausreisser bei 978 als Massstab
+            # zu nehmen (der haette die uebrige Karte wieder zu dunkel
+            # gemacht - derselbe Fehler, nur andersherum).
+            "precip_map": ("Greens", 0.0, 500.0),
             "humid_map": ("Blues", 0.0, 100.0),
             "wind_map": ("plasma", 0.0, 40.0),           # Windstärke m/s - EINE Farbskala für Heatmap-Hintergrund, Stromlinien UND Pfeile in _render_wind_map (siehe dortiger Docstring: vorher hatte die Colorbar keinen Bezug zu den tatsächlichen Pfeil-/Stromlinien-Farben)
             "water_map": ("Blues", 0.0, 10.0),
@@ -297,23 +311,32 @@ class ColorSchemes:
     # SuperBiomeOverrideSystem.super_biome_offset=15). Vorher hatten Legende und
     # Darstellung getrennte, auseinandergelaufene Farbdefinitionen.
     BIOME_COLOR_TABLE = [
-        # Base Biomes (Index 0-14)
-        ("Ice Cap", "#f8f9fa"),
-        ("Tundra", "#e9ecef"),
-        ("Taiga", "#228b22"),
-        ("Grassland", "#90ee90"),
-        ("Temperate Forest", "#006400"),
-        ("Mediterranean", "#9acd32"),
-        ("Desert", "#daa520"),
-        ("Semi Arid", "#d2691e"),
-        ("Tropical Rainforest", "#008000"),
-        ("Tropical Seasonal", "#32cd32"),
-        ("Savanna", "#bdb76b"),
-        ("Montane Forest", "#2e8b57"),
-        ("Swamp", "#556b2f"),
-        ("Coastal Dunes", "#f4a460"),
-        ("Badlands", "#a0522d"),
-        # Super Biomes (Index 15-25)
+        # =====================================================================
+        # Base Biomes (Index 0-14) - DIE FUENFZEHN EUROPAEISCHEN (2026-08-07)
+        # =====================================================================
+        # Reihenfolge und Namen MUESSEN zu
+        # core/biome_generator.BaseBiomeClassifier.biome_definitions passen -
+        # die Anzeige greift ueber den Index zu, nicht ueber den Namen.
+        #
+        # Farbwahl: feucht und kalt nach Blaugruen, feucht und mild nach
+        # Sattgruen, trocken nach Ocker und Braun. Fjell und Bergwald heben
+        # sich in Richtung Grau ab, damit man die Hoehenstufen erkennt.
+        ("Hochmoor", "#5d6b52"),
+        ("Bruchwald", "#3d6b45"),
+        ("Feuchtwiese", "#7fbf7f"),
+        ("Grasland", "#9ccb6a"),
+        ("Heide", "#a68bbf"),
+        ("Fjell", "#9aa89c"),
+        ("Nadelwald", "#2f6b4f"),
+        ("Mischwald", "#5a9445"),
+        ("Buchenwald", "#4a7d2c"),
+        ("Eichenwald", "#6f9235"),
+        ("Bergwald", "#3a5f52"),
+        ("Macchia", "#b0a24e"),
+        ("Steineichenwald", "#7a8f3a"),
+        ("Trockensteppe", "#d4b05e"),
+        ("Halbwueste", "#c98f52"),
+        # Wasser und Superbiome (Index 15+)
         ("Ocean", "#0077be"),
         ("Lake", "#4da6ff"),
         ("Grand River", "#0066cc"),
@@ -325,6 +348,11 @@ class ColorSchemes:
         ("River Bank", "#98fb98"),
         ("Snow Level", "#fffafa"),
         ("Alpine Level", "#d3d3d3"),
+        # Index 26 (2026-08-11): eigene Farbe statt Ocean-Blau oder Snow-Weiss
+        # - beide waeren mit dem jeweiligen Nachbarn verwechselbar. Helles
+        # Eisblau, deutlich heller als Ocean, aber nicht reinweiss wie Snow
+        # Level (das ist eine LAND-Kategorie, Verwechslung waere irrefuehrend).
+        ("Sea Ice", "#c8e8f5"),
     ]
 
 
