@@ -179,6 +179,24 @@ class SettlementTab(BaseMapTab):
         self.settlement_stats = SettlementStatisticsWidget()
         layout.addWidget(self.settlement_stats)
 
+        # Anzeige des angeklickten Objekts (docs/OFFENE_PUNKTE.md 6.29).
+        # Gehoert in die Statistik-Spalte, nicht ins Parameter-Panel: es ist
+        # eine Ausgabe, kein Regler.
+        auswahl_box = QGroupBox("Auswahl (3D)")
+        auswahl_layout = QVBoxLayout()
+        self.auswahl_anzeige = QLabel("Nichts ausgewählt.<br>Linksklick auf Ort oder Weg.")
+        self.auswahl_anzeige.setWordWrap(True)
+        self.auswahl_anzeige.setTextFormat(Qt.TextFormat.RichText)
+        auswahl_layout.addWidget(self.auswahl_anzeige)
+        auswahl_box.setLayout(auswahl_layout)
+        layout.addWidget(auswahl_box)
+
+        # Signal erst hier verbinden - das 3D-Widget steht zu diesem Zeitpunkt
+        # bereits (BaseMapTab.create_ui laeuft davor).
+        if self.map_display_3d is not None and hasattr(
+                self.map_display_3d.display, "objekt_gewaehlt"):
+            self.map_display_3d.display.objekt_gewaehlt.connect(self._on_objekt_gewaehlt)
+
     def _add_slider_group(self, layout: QVBoxLayout, title: str, param_names: list,
                            default_step: float = 0.1) -> QGroupBox:
         """
@@ -332,25 +350,21 @@ class SettlementTab(BaseMapTab):
         sieht man einfach so wie in anderen tabs nur die heightmap
         (combined)"). Plot-Kerne/-Nodes/-Kanten/Wildnis-/Stadtgrenze werden
         immer als Overlay gezeichnet (siehe update_settlement_display()),
-        nicht mehr an einen Radio-Modus gekoppelt. Nur Civ-Value und
-        Potential-Field bleiben als unabhängig kombinierbare Overlay-
-        Checkboxen bestehen.
+        nicht mehr an einen Radio-Modus gekoppelt.
+
+        Civ-Value und Potential-Field standen bis 2026-08-13 ebenfalls hier -
+        nach der Sichtpruefung vom Nutzer entfernt ("Civ-Value und Potential
+        Field sind NUR regional. koennen hier entfernt und bei regional
+        hinzugefuegt werden"), sie sind jetzt in SettlementRegionalTab. Beides
+        sind FLAECHIGE Felder, und dieser Reiter zeigt bewusst nur
+        Punkt-/Linienhaftes (siehe _create_settlement_filter_controls()).
         """
         layout = QHBoxLayout()
 
-        self.civ_overlay_cb = QCheckBox("Civ Value")
-        self.civ_overlay_cb.toggled.connect(self.update_display_mode)
-        layout.addWidget(self.civ_overlay_cb)
-
-        self.potential_overlay_cb = QCheckBox("Potential Field")
-        self.potential_overlay_cb.toggled.connect(self.update_display_mode)
-        layout.addWidget(self.potential_overlay_cb)
-
         # Regionsfaerbung + weisse Grenzen (2026-08-11, docs/OFFENE_PUNKTE.md
         # 6.1) - AUS per Default ("nur wenn man Regionen ausgewaehlt"), in
-        # subtilem Ton (siehe REGIONS_OVERLAY_ALPHA_SETTLEMENT in
-        # _apply_settlement_overlays()), damit Staedte/Strassen im Vordergrund
-        # bleiben.
+        # zurueckhaltendem Ton (alpha 0.30, siehe _apply_settlement_overlays()),
+        # damit Staedte/Strassen im Vordergrund bleiben.
         self.regions_overlay_cb = QCheckBox("Regionen")
         self.regions_overlay_cb.toggled.connect(self.update_display_mode)
         layout.addWidget(self.regions_overlay_cb)
@@ -711,12 +725,18 @@ class SettlementTab(BaseMapTab):
             return
         display = current_display.display
 
-        # Gelbes 3x3-Ausschnittsgitter (docs/OFFENE_PUNKTE.md 6.2): Global UND Regional,
-        # nicht der Terrain-Reiter - dort laege es neben den Kulturfarben.
+        # Grenzen der neun Regionalkarten (docs/OFFENE_PUNKTE.md 6.2/5.15):
+        # Global UND Regional, nicht der Terrain-Reiter - dort laege es neben
+        # den Kulturfarben. Seit 2026-08-13 werden die TATSAECHLICHEN
+        # Vieleck-Grenzen gezeichnet, wenn die Zerlegung vorliegt; sonst
+        # weiterhin das alte gerade 3x3-Raster. Ein gerades Gitter neben einer
+        # Vieleck-Zerlegung waere eine zweite, falsche Neunerteilung.
         if hasattr(display, 'overlay_region_grid'):
             heightmap = self.data_lod_manager.get_terrain_data("heightmap")
             if heightmap is not None:
-                display.overlay_region_grid(heightmap.shape[0])
+                display.overlay_region_grid(
+                    heightmap.shape[0],
+                    spielkarte=self.data_lod_manager.get_terrain_data("spielkarte"))
 
         if hasattr(display, 'overlay_settlements') and (
                 self.show_settlements_cb.isChecked() or self.show_landmarks_cb.isChecked()
@@ -742,27 +762,24 @@ class SettlementTab(BaseMapTab):
             if sea_roads:
                 display.overlay_roads(sea_roads, color='royalblue', linestyle='--')
 
-        # Civ-Value/Potenzialfeld-Overlays (Punkt c, siehe
-        # [[project-settlement-physics-lab-parity]]) - kombinierbar mit jedem
-        # Basis-Layer, analog zu den Filter-Checkboxen oben.
-        if hasattr(display, 'overlay_civ_map') and self.civ_overlay_cb.isChecked():
-            civ_map = self.data_lod_manager.get_settlement_data("civ_map")
-            if civ_map is not None:
-                display.overlay_civ_map(civ_map)
+        # Civ-Value/Potenzialfeld: 2026-08-13 nach SettlementRegionalTab
+        # gewandert (Nutzer-Vorgabe nach der Sichtpruefung: "Civ-Value und
+        # Potential Field sind NUR regional. koennen hier entfernt und bei
+        # regional hinzugefuegt werden") - dieselbe Trennung wie schon bei
+        # Stadtgrenze/Plot-Feingewebe, siehe
+        # _create_settlement_filter_controls()-Docstring.
 
-        if hasattr(display, 'overlay_potential_field') and self.potential_overlay_cb.isChecked():
-            potential_field = self.data_lod_manager.get_settlement_data("potential_field")
-            if potential_field is not None:
-                display.overlay_potential_field(potential_field)
-
-        # Regionen (docs/OFFENE_PUNKTE.md 6.1) - subtiler Ton hier, damit
-        # Staedte/Strassen im Vordergrund bleiben (Nutzer-Vorgabe, siehe
-        # _create_settlement_overlay_toggle_controls()-Kommentar).
+        # Regionen (docs/OFFENE_PUNKTE.md 6.1) - Deckkraft 2026-08-13 von 0.25
+        # auf 0.40 angehoben (Nutzer nach der Sichtpruefung: "etwas zu subtil,
+        # mach mal 20% mehr", nach dem ersten Versuch mit 0.30 dann
+        # ausdruecklich "nein mach mal 0.4"). Bleibt unter dem Wert des
+        # Terrain-Reiters (0.55), damit Staedte/Strassen im Vordergrund
+        # bleiben.
         if hasattr(display, 'overlay_regions') and self.regions_overlay_cb.isChecked():
             heightmap = self.data_lod_manager.get_terrain_data("heightmap")
             region_map = self.data_lod_manager.get_terrain_data("region_map")
             if heightmap is not None and region_map is not None:
-                display.overlay_regions(region_map, heightmap, alpha=0.25)
+                display.overlay_regions(region_map, heightmap, alpha=0.40)
 
     def apply_3d_overlays(self):
         """
@@ -774,10 +791,151 @@ class SettlementTab(BaseMapTab):
         3D-Widget, siehe base_tab.py create_ui()) - ein frueher hier gesetzter
         Plot-Layer wuerde also nicht von selbst verschwinden, wenn er nicht
         mehr gefuellt wird. Explizit ausblenden statt nur "nicht mehr fuellen".
+
+        SEIT 2026-08-13 zeichnet dieser Reiter dafuer die globale
+        Siedlungsuebersicht in 3D (Nutzer-Vorgabe nach der Sichtpruefung:
+        "3D Settlements global sollte jetzt umgesetzt werden"): Staedte,
+        Landmarken, Roadsites und die Land-/Seewege werden mit
+        `rasterize_settlements_rgba()` auf eine RGBA-Textur gezeichnet und als
+        Alpha-Skin auf das Gelaende gelegt - derselbe Weg wie Regionen und
+        Kuestentypen im Terrain-Reiter, kein neuer GLSL-Code. Die drei
+        `settlements`/`landmarks`/`roads`-Layer der 3D-Anzeige bleiben
+        ungenutzt: ihr Renderer `_render_settlement_markers()` ist seit jeher
+        ein leerer TODO-Stub, und echte 3D-Marker-Geometrie waere deutlich
+        mehr Arbeit als dieselbe Zeichnung als Textur.
+
+        Die Auswahl folgt DENSELBEN Checkboxen wie die 2D-Ansicht - was in 2D
+        ausgeschaltet ist, fehlt auch auf dem Skin.
         """
         if not self.map_display_3d or not hasattr(self.map_display_3d.display, 'set_layer_visibility'):
             return
-        self.map_display_3d.display.set_layer_visibility("settlement", "plots", False)
+
+        display_3d = self.map_display_3d.display
+        display_3d.set_layer_visibility("settlement", "plots", False)
+
+        if not hasattr(display_3d, 'update_overlay_data'):
+            return
+
+        heightmap = self.data_lod_manager.get_terrain_data("heightmap")
+        if heightmap is None:
+            display_3d.set_layer_visibility("settlement", "uebersicht", False)
+            return
+
+        settlements = (self.data_lod_manager.get_settlement_data("settlement_list") or []
+                       if self.show_settlements_cb.isChecked() else [])
+        landmarks = (self.data_lod_manager.get_settlement_data("landmark_list") or []
+                     if self.show_landmarks_cb.isChecked() else [])
+        roadsites = (self.data_lod_manager.get_settlement_data("roadsite_list") or []
+                     if self.show_roadsites_cb.isChecked() else [])
+        if self.show_roads_cb.isChecked():
+            roads = self.data_lod_manager.get_settlement_data("roads") or []
+            sea_roads = self.data_lod_manager.get_settlement_data("sea_roads") or []
+        else:
+            roads, sea_roads = [], []
+
+        # WEGE ALS ECHTE BANDGEOMETRIE, NICHT MEHR ALS TEXTUR (2026-08-13,
+        # docs/OFFENE_PUNKTE.md 6.28). Sie werden deshalb aus dem Textur-Skin
+        # HERAUSGENOMMEN - lagen beide uebereinander, saehe man die pixelige
+        # Texturfassung durch das scharfe Band hindurch, und der ganze Zweck
+        # waere dahin. Der Skin traegt weiterhin die Punktobjekte (Staedte,
+        # Landmarken, Roadsites), fuer die er voellig genuegt.
+        hat_punkte = bool(settlements or landmarks or roadsites)
+        if hat_punkte:
+            from gui.widgets.map_display_2d import rasterize_settlements_rgba
+            rgba = rasterize_settlements_rgba(
+                settlements, landmarks, roadsites, [], [],
+                map_size=heightmap.shape[0], resolution=heightmap.shape[0])
+            display_3d.update_overlay_data("settlement", "uebersicht", rgba)
+        display_3d.set_layer_visibility("settlement", "uebersicht", hat_punkte)
+
+        hat_wege = bool(roads or sea_roads)
+        if hat_wege:
+            display_3d.update_overlay_data(
+                "settlement", "wegbaender",
+                {"wege": roads, "seewege": sea_roads})
+        display_3d.set_layer_visibility("settlement", "wegbaender", hat_wege)
+
+        # ANKLICKBARE OBJEKTE hinterlegen (docs/OFFENE_PUNKTE.md 6.29).
+        # Die Kennung ist ein fertiges dict - der Reiter kennt die Bedeutung
+        # der Felder, das Anzeige-Widget muss sie nicht kennen.
+        if hasattr(display_3d, "setze_auswahlobjekte"):
+            welt_km = float(self.data_lod_manager.get_map_distance_km())
+            groesse = heightmap.shape[0]
+            auswahl_orte = []
+            for gruppe, art in ((settlements, "Siedlung"),
+                                (landmarks, "Landmark"),
+                                (roadsites, "Roadsite")):
+                for ort in gruppe:
+                    auswahl_orte.append((
+                        float(getattr(ort, "x", 0.0)), float(getattr(ort, "y", 0.0)),
+                        self._auswahl_beschreibung(ort, art)))
+
+            from gui.widgets.karten_auswahl import weglaenge_km
+            auswahl_wege = []
+            for liste, art in ((roads, "Landweg"), (sea_roads, "Seeweg")):
+                for nummer, pfad in enumerate(liste or [], start=1):
+                    punkte = [(p[0], p[1]) for p in pfad]
+                    auswahl_wege.append((punkte, {
+                        "art": art,
+                        "titel": f"{art} {nummer}",
+                        "zeilen": [f"Länge {weglaenge_km(punkte, welt_km, groesse):.1f} km",
+                                   f"{len(punkte)} Stützpunkte"],
+                    }))
+            display_3d.setze_auswahlobjekte(auswahl_orte, auswahl_wege)
+
+    def _auswahl_beschreibung(self, ort, art):
+        """
+        Was beim Anklicken eines Ortes angezeigt wird (docs/OFFENE_PUNKTE.md
+        6.29). Nur Felder, die tatsaechlich belegt SIND - eine Zeile
+        "Einwohner: 0" waere schlechter als gar keine.
+        """
+        from core.settlement_generator import STADTTYPEN
+        zeilen = []
+        # Stadttyp NUR bei Siedlungen und NUR, wenn er etwas aussagt.
+        # `Location.settlement_type` traegt auch bei Landmarks und Roadsites
+        # den Vorgabewert "sonstige" - der wuerde dort als "Ort" erscheinen,
+        # obwohl diese Objekte gar keinen Stadttyp haben (gemessen beim
+        # Bauen: ein Steinkreis wurde als "Ort" beschriftet). "sonstige" ist
+        # zudem der Auffangtyp und auch bei echten Siedlungen keine Auskunft.
+        typ = getattr(ort, "settlement_type", "") or ""
+        if art == "Siedlung" and typ and typ != "sonstige":
+            zeilen.append(STADTTYPEN.get(typ, {}).get("name", typ))
+        if getattr(ort, "culture", ""):
+            zeilen.append(f"Kultur: {ort.culture}")
+        if getattr(ort, "rank", ""):
+            zeilen.append(f"Rang: {ort.rank}")
+        if getattr(ort, "house_count", 0):
+            zeilen.append(f"{ort.house_count} Häuser")
+        eigenschaften = getattr(ort, "properties", None) or {}
+        for schluessel, beschriftung in (("landmark_type", ""),
+                                          ("roadsite_type", ""),
+                                          ("kategorie", "Lage")):
+            wert = eigenschaften.get(schluessel)
+            if wert:
+                zeilen.append(f"{beschriftung}: {wert}" if beschriftung else str(wert))
+        titel = (eigenschaften.get("landmark_type")
+                 or eigenschaften.get("roadsite_type")
+                 or f"{art} {getattr(ort, 'location_id', '')}".strip())
+        return {"art": art, "titel": titel, "zeilen": zeilen,
+                "id": getattr(ort, "location_id", None)}
+
+    def _on_objekt_gewaehlt(self, treffer):
+        """Zeigt das angeklickte Objekt an - oder leert die Anzeige beim Klick
+        ins Leere. Kein Fehlerfall: nichts zu treffen ist ein gueltiges
+        Ergebnis."""
+        if not hasattr(self, "auswahl_anzeige") or self.auswahl_anzeige is None:
+            return
+        if not treffer:
+            # <br> statt \n: das Feld steht auf RichText (siehe
+            # create_statistics_controls), dort ist \n kein Zeilenumbruch.
+            self.auswahl_anzeige.setText("Nichts ausgewählt.<br>"
+                                          "Linksklick auf Ort oder Weg.")
+            return
+        kennung = treffer.get("kennung") or {}
+        zeilen = [f"<b>{kennung.get('titel', '?')}</b>",
+                  f"<i>{kennung.get('art', '')}</i>"]
+        zeilen.extend(kennung.get("zeilen", []))
+        self.auswahl_anzeige.setText("<br>".join(str(z) for z in zeilen))
 
     @pyqtSlot()
     def update_display_mode(self):

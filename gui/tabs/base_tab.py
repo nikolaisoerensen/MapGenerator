@@ -411,6 +411,44 @@ class BaseMapTab(QWidget):
 
         # Display aktualisieren
         self.update_display_mode()
+
+        # NACHZIEHENDES NEUZEICHNEN FUER DIE 3D-ANSICHT (2026-08-13,
+        # docs/OFFENE_PUNKTE.md 6.25). Nutzerbefund: "klicke auf 3D-View (hier
+        # wird dann nie automatisch schon 3D geladen oder es wird nicht
+        # dargestellt, erst wenn ich mich bewege ist es zu sehen)".
+        #
+        # `update_heightmap()` ruft am Ende zwar bereits `self.update()` - aber
+        # zu diesem Zeitpunkt hat Qt den `setCurrentIndex()`-Wechsel oben noch
+        # nicht verarbeitet, das QOpenGLWidget ist also formal noch nicht
+        # sichtbar. Qt verwirft Neuzeichnen-Anforderungen fuer unsichtbare
+        # Widgets, die Anforderung verpufft. Das erste `paintGL()` kommt dann
+        # erst durch das naechste Ereignis - und das ist in der Praxis die
+        # erste Mausbewegung des Nutzers, genau wie berichtet.
+        #
+        # Hier, nach `update_display_mode()`, ist der Stapelwechsel
+        # abgeschlossen.
+        #
+        # NACHTRAG 2026-08-16: `update()` allein reichte nicht - Nutzerbefund
+        # weiterhin "Wege werden gezeichnet, das Mesh aber nicht, erst nach
+        # Drehen/Bewegen". `update()` PLANT ein Neuzeichnen nur fuer die
+        # naechste Gelegenheit, in der Qt seine Ereignisschlange abarbeitet -
+        # kommt vorher (oder durch einen anderen Timer/Slot) noch etwas
+        # dazwischen, wird die Anforderung mit dem naechsten `update()`
+        # zusammengefasst, ohne dass zwischendurch tatsaechlich gezeichnet
+        # wurde. `repaint()` erzwingt das Zeichnen STATTDESSEN sofort und
+        # synchron, an Ort und Stelle - genau das fehlende Stueck.
+        #
+        # HEADLESS NICHT PRUEFBAR: ob es im laufenden Programm wirklich greift,
+        # muss am Bildschirm bestaetigt werden (CLAUDE.md - GL-Rendering).
+        if view_type == "3d" and self.map_display_3d is not None:
+            for ziel in (self.map_display_3d,
+                         getattr(self.map_display_3d, "display", None)):
+                if ziel is not None and hasattr(ziel, "repaint"):
+                    try:
+                        ziel.repaint()
+                    except Exception as e:
+                        self.logger.debug(f"3D-Neuzeichnen nach Ansichtswechsel: {e}")
+
         self.view_switched.emit(view_type)
         self.logger.debug(f"Switched to {view_type} view")
 
@@ -466,6 +504,12 @@ class BaseMapTab(QWidget):
         "terrain_hub_delta": "terrain_hub_delta", "tilt_delta": "tilt_delta",
         "fold_delta": "fold_delta", "fault_delta": "fault_delta",
         "intrusion_delta": "intrusion_delta",
+        # Regionen/Kuestentypen (2026-08-13, Nutzer-Vorgabe "die 3D
+        # darstellung ALLER 2D maps, aber vor allem der Kuesten auf die 3D
+        # Terrains bekommen") - der gepushte Wert ist hier bewusst das ROHE
+        # Payload-Dict (wie fuer 2D), nicht ein fertiges Array. Siehe
+        # MapDisplay3DWidget._render_dict_rgba_overlay().
+        "region_map": "region_overlay", "kuesten_archetyp": "kuesten_overlay",
     }
 
     # Für welche Tabs die radio buttons ÜBER dem Canvas die EINZIGE Quelle
@@ -480,7 +524,7 @@ class BaseMapTab(QWidget):
     # (mehrere gleichzeitig sichtbar), kein Radio-Button-artiges
     # "genau ein Layer"-Muster wie bei den übrigen Tabs.
     _LAYER_SELECTION_KEYS_3D = {
-        "terrain": {"slope"},
+        "terrain": {"slope", "region_overlay", "kuesten_overlay"},
         "geology": {"rock_map", "hardness_map", "terrain_hub_delta", "tilt_delta",
                     "fold_delta", "fault_delta", "intrusion_delta"},
         "weather": {"precipitation", "temperature", "wind", "humidity"},
@@ -519,15 +563,18 @@ class BaseMapTab(QWidget):
             return
 
         # get_terrain_data_combined() statt get_terrain_data(): für jede visuelle
-        # Referenz auf "die Heightmap" AUSSER Terrains eigenem "Terrain Heightmap"-
-        # Rohmodus wollen wir das tatsächliche Endergebnis nach Geology-Tektonik/
+        # Referenz auf "die Heightmap" AUSSER Terrains eigenem "Terrain Rohform"-
+        # Modus wollen wir das tatsächliche Endergebnis nach Geology-Tektonik/
         # Water-Erosion/-Sedimentation sehen (dieselbe Datenbasis, die auch alle
         # nachgelagerten Generatoren als heightmap_combined bekommen). Terrains
-        # "Terrain Heightmap"/"Heightmap Combined"-Radios sollen sich in 3D genauso
-        # unterscheidbar zeigen wie in 2D (Nutzer-Vorgabe) - für beide wird deshalb
-        # `data` direkt verwendet, nur alle anderen Layer-Typen (Slope etc., wo eine
-        # rohe Heightmap als 3D-Mesh keinen Sinn ergäbe) fallen weiterhin auf die
-        # kombinierte Heightmap zurück.
+        # "Terrain Rohform"/"Heightmap"-Radios (bis 2026-08-13 "Terrain
+        # Heightmap"/"Heightmap Combined" - auf Nutzerwunsch umbenannt, klangen
+        # wie zwei Varianten desselben Dings statt zweier verschiedener Quellen)
+        # sollen sich in 3D genauso unterscheidbar zeigen wie in 2D (Nutzer-
+        # Vorgabe) - für beide wird deshalb `data` direkt verwendet, nur alle
+        # anderen Layer-Typen (Slope etc., wo eine rohe Heightmap als 3D-Mesh
+        # keinen Sinn ergäbe) fallen weiterhin auf die kombinierte Heightmap
+        # zurück.
         if self.current_view == "3d" and hasattr(current_display.display, 'update_heightmap'):
             _t_fetch = _time.time()
             heightmap = data if layer_type in ("heightmap", "heightmap_combined") else (

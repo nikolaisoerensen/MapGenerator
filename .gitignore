@@ -24,3 +24,6 @@ lab_output/
 
 # Laufzeit-Logs (2026-08-12)
 logs/
+
+# Heruntergeladene Hoehenmodelle (tools/kuestenprofil_holen.py)
+tools/_dem_cache/

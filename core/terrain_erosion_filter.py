@@ -477,6 +477,79 @@ def demo_heightmap(size: int = 256, parameters: Optional[Dict[str, Any]] = None,
 # Anwendung auf unsere eigene Heightmap
 # =============================================================================
 
+def _erosion_filter_bandweise(px, py, hoehe, sx, sy, fade_target, p,
+                              baender=None):
+    """
+    `erosion_filter()` in waagerechten Baendern - SEQUENZIELL, nicht parallel.
+
+    WARUM ES SCHNELLER IST. Die Oktavenschleife legt je Oktave ein gutes
+    Dutzend Zwischenfelder von voller Kartengroesse an. Bei 1024 px sind
+    das 8 MB je Feld; nichts davon bleibt im Cache, jede Operation liest
+    und schreibt den Hauptspeicher. In Baendern von 1/8 der Karte bleiben
+    dieselben Zwischenfelder klein genug, um zwischen zwei Operationen
+    warm zu bleiben. Gemessen 2026-08-23 auf echtem Gelaende, 512 px:
+    **5.7 s einteilig, 2.0 s bandweise** - Faktor 2.8, ohne dass sich an
+    der Rechnung selbst irgendetwas aendert.
+
+    WARUM ES NICHT PARALLEL LAEUFT - und das ist die eigentliche Lehre
+    dieses Umbaus. Der erste Anlauf verteilte die Baender ueber einen
+    ThreadPoolExecutor auf alle 22 Kerne. Der Filter selbst wurde damit
+    5x schneller (9.9 s -> 1.3 s). GEMESSEN WAR ES TROTZDEM EIN VERLUST:
+    JEDE nachfolgende numpy-Rechnung im selben Prozess lief danach
+    dauerhaft 2.4x langsamer (Referenzlast 1.47 s -> 3.55 s, ohne sich zu
+    erholen). Im Pipelinelauf stieg `weltfluesse` dadurch von 8.4 s ueber
+    17.9 s auf 31.7 s - der Knoten terrain.redistribution wurde als Ganzes
+    LANGSAMER, obwohl sein teuerster Teilschritt schneller geworden war.
+
+    Ursache ist nicht der Threadpool an sich - ein leerer Pool mit
+    harmloser numpy-Arbeit richtet nachweislich keinen Schaden an -,
+    sondern die gleichzeitige Allokation vieler grosser Felder aus 22
+    Threads, die den Allokator dauerhaft fragmentiert.
+
+    Das war nur zu sehen, weil die Teilschritt-Messung den ganzen Knoten
+    aufschluesselt. Eine Messung, die nur den Filter betrachtet haette,
+    haette den Umbau als Erfolg ausgewiesen.
+    """
+    n = hoehe.shape[0]
+    if baender is None:
+        # Rund 1/8 der Karte je Band; nicht unter 64 Zeilen, damit der
+        # Aufrufaufwand bei kleinen Karten nicht ueberwiegt.
+        baender = max(1, min(8, n // 64))
+    if baender <= 1:
+        return erosion_filter(px, py, hoehe, sx, sy, fade_target, p)
+
+    grenzen = np.linspace(0, n, baender + 1).astype(int)
+    teile = []
+    for i in range(baender):
+        a, b = grenzen[i], grenzen[i + 1]
+        if b <= a:
+            continue
+        teile.append(erosion_filter(px[a:b], py[a:b], hoehe[a:b], sx[a:b],
+                                    sy[a:b], fade_target[a:b], p))
+
+    # SKALARE AUSGABEN GESONDERT. `magnitude` ist je nach Parametrierung ein
+    # Skalar statt eines Feldes (Broadcast aus einer Konstanten). Ein Skalar
+    # laesst sich nicht zusammensetzen - und waere er das Ergebnis einer
+    # REDUKTION ueber die ganze Karte, waere die bandweise Rechnung schlicht
+    # falsch. Deshalb wird geprueft, ob alle Baender denselben Wert liefern,
+    # statt stillschweigend den ersten zu nehmen: ein stiller Griff waere von
+    # einem richtigen Ergebnis nicht zu unterscheiden (CLAUDE.md).
+    ergebnis = {}
+    for schluessel in teile[0]:
+        werte = [np.asarray(t[schluessel]) for t in teile]
+        if werte[0].ndim == 0:
+            if not all(np.array_equal(w, werte[0]) for w in werte[1:]):
+                raise ValueError(
+                    f"erosion_filter: '{schluessel}' ist skalar, aber je Band "
+                    f"verschieden ({[float(w) for w in werte]}) - das waere "
+                    f"eine Reduktion ueber die ganze Karte und bandweise "
+                    f"nicht zerlegbar.")
+            ergebnis[schluessel] = werte[0]
+        else:
+            ergebnis[schluessel] = np.concatenate(werte, axis=0)
+    return ergebnis
+
+
 def filter_heightmap(heightmap: np.ndarray, meters_per_pixel: float,
                      parameters: Optional[Dict[str, Any]] = None
                      ) -> Dict[str, np.ndarray]:
@@ -560,7 +633,8 @@ def filter_heightmap(heightmap: np.ndarray, meters_per_pixel: float,
     streuung = max(float(np.std(normiert)), 1e-6)
     fade_target = np.clip((normiert - mitte) / (2.0 * streuung), -1.0, 1.0)
 
-    ergebnis = erosion_filter(px, py, normiert, slope_x, slope_y, fade_target, p)
+    ergebnis = _erosion_filter_bandweise(px, py, normiert, slope_x, slope_y,
+                                         fade_target, p)
 
     offset_p = tuple(float(v) for v in p["terrain_height_offset"])
     offset = _mix(offset_p[0], -ergebnis["fade_target"],

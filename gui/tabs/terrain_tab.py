@@ -304,12 +304,20 @@ class TerrainTab(BaseMapTab):
         # nicht Terrains eigene, unveränderte Heightmap - siehe
         # [[project-terrain-review]]. Jetzt zwei getrennte Optionen: die reine
         # Terrain-Rohform (Default) und explizit das kombinierte Endergebnis.
-        height_radio = QRadioButton("Terrain Heightmap")
+        # Beschriftungen 2026-08-13 auf Nutzerwunsch geschärft ("Terrain
+        # Heightmap"/"Heightmap Combined" klangen wie zwei Varianten
+        # desselben Dings): "Terrain Rohform" macht deutlich, dass hier NUR
+        # Terrains eigener Anteil steht (KEIN Perlin-Rauschen - bei aktivem
+        # WELTKARTE_AKTIV kommt die Form aus weltfeld(), das Rauschen aus
+        # terrain.noise wird dabei gar nicht verwendet), "Heightmap" ohne
+        # Zusatz ist das eigentliche Endergebnis, das alle anderen Reiter
+        # auch sehen.
+        height_radio = QRadioButton("Terrain Rohform")
         height_radio.setChecked(True)
         height_radio.toggled.connect(lambda checked: self._on_display_mode_changed("height", checked))
         self.display_mode_group.addButton(height_radio, 0)
 
-        combined_radio = QRadioButton("Heightmap Combined")
+        combined_radio = QRadioButton("Heightmap")
         combined_radio.toggled.connect(lambda checked: self._on_display_mode_changed("combined", checked))
         self.display_mode_group.addButton(combined_radio, 2)
 
@@ -335,11 +343,22 @@ class TerrainTab(BaseMapTab):
         kuesten_radio.toggled.connect(lambda checked: self._on_display_mode_changed("kuestentypen", checked))
         self.display_mode_group.addButton(kuesten_radio, 4)
 
+        # Spielkarten-Zerlegung (2026-08-13, docs/OFFENE_PUNKTE.md 5.15) - die
+        # neun Vielecke, in die die Welt fuer Regionalansicht und spaeteren
+        # Export zerschnitten wird. Gehoert in DIESEN Reiter, weil der
+        # Zuschnitt aus dem Gelaende folgt (Landmasse, Kuestensee), nicht aus
+        # den Siedlungen.
+        spielkarten_radio = QRadioButton("Spielkarten")
+        spielkarten_radio.toggled.connect(
+            lambda checked: self._on_display_mode_changed("spielkarten", checked))
+        self.display_mode_group.addButton(spielkarten_radio, 5)
+
         layout.addWidget(height_radio)
         layout.addWidget(combined_radio)
         layout.addWidget(slope_radio)
         layout.addWidget(region_radio)
         layout.addWidget(kuesten_radio)
+        layout.addWidget(spielkarten_radio)
 
         return layout
 
@@ -495,6 +514,14 @@ class TerrainTab(BaseMapTab):
                 hoehe = self.data_lod_manager.get_terrain_data("heightmap")
                 data_type = "region_map"
                 display_data = ({"regionen": data, "heightmap": hoehe}
+                                if data is not None and hoehe is not None else None)
+            elif self.current_display_mode == "spielkarten":
+                # Rohdaten-Payload wie bei "Regionen"/"Kuestentypen" - der
+                # Renderer braucht die Hoehen, um Land von Meer zu trennen.
+                data = self.data_lod_manager.get_terrain_data("spielkarte")
+                hoehe = self.data_lod_manager.get_terrain_data("heightmap")
+                data_type = "spielkarte"
+                display_data = ({"spielkarte": data, "heightmap": hoehe}
                                 if data is not None and hoehe is not None else None)
             elif self.current_display_mode == "kuestentypen":
                 # Regionsfarbe (wie "Regionen") x Helligkeit nach Archetyp-

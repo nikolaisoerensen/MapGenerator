@@ -1,7 +1,7 @@
 """
 Path: tests/smoke_test_regionen_welt.py
 
-Prueft die Regionenwelt (tools/regionen_welt.py, Stufe A des
+Prueft die Regionenwelt (core/terrain_weltkarte.py, Stufe A des
 docs/INTEGRATIONSPLAN.md).
 
 "Sieht gut aus" ist nicht pruefbar - der Charakter einer Landschaft schon.
@@ -37,7 +37,6 @@ import numpy as np
 
 _WURZEL = r"C:\Lokale Dateien\Projects\Python\MapGenerator"
 sys.path.insert(0, _WURZEL)
-sys.path.insert(0, os.path.join(_WURZEL, "tools"))
 
 # Die Qt-Anwendung MUSS modulweit gehalten werden - als lokale Variable raeumt
 # Python sie ab, waehrend der GL-Kontext noch lebt (Segfault ohne Meldung).
@@ -107,7 +106,7 @@ FINGERABDRUCK_SEEDS = (20260804, 12345, 4242, 777001, 31415)
 
 def lauf():
     _qt()
-    import regionen_welt as rw
+    import core.terrain_weltkarte as rw
     from managers.shader_manager import ShaderManager
 
     manager = ShaderManager()

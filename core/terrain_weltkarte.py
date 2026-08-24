@@ -1,5 +1,5 @@
 """
-Path: tools/regionen_welt.py
+Path: core/terrain_weltkarte.py
 
 DIE REGIONENWELT - Rechenkern, ohne Fenster.
 
@@ -243,72 +243,154 @@ KLIMA_ZIEL = {
 # Die Jahresspanne traegt den Unterschied zwischen See- und Kontinentalklima
 # von selbst: Huegelland 9.5 K, Taiga 29.0 K. Niemand muss das modellieren.
 
+# FLAECHENEICHUNG, eingeregelt am 2026-08-24 mit tools/flaeche_eichen.py.
+#
+# `flaeche_soll` steuert, wieviel GRUNDflaeche eine Region bekommt. Sie ist
+# noetig, weil Grundflaeche und NUTZWERT nicht linear zusammenhaengen:
+# Fjordland verliert erst rund ein Drittel ans Wasser und dann die Haelfte
+# des Rests an zu steile Haenge, die Griechischen Inseln zwei Drittel ans
+# Wasser. Ohne Ausgleich haetten sie ein Vielfaches weniger besiedelbaren
+# Raum als die Steppe.
+#
+# ES IST EIN NULLSUMMENSPIEL - die Werte verteilen den Kontinent um, sie
+# vergroessern ihn nicht. Wer waechst, nimmt allen anderen etwas weg.
+# Deshalb von Hand kaum einzustellen: jede Aenderung verschiebt alle
+# anderen mit. `tools/flaeche_eichen.py` regelt sie in wenigen Runden ein
+# (gemessen: groesste Abweichung 0.261 -> 0.102 in drei Runden).
+#
+# DIE ZIELWERTE selbst stehen NICHT hier, sondern in
+# tests/smoke_test_regionen_fairness.py - sie sind eine Entscheidung ueber
+# das Zielbild (Alpenland und Fjordland 0.80, alle anderen 1.00), nicht
+# ueber die Rechnung.
 REGIONEN = [
     [   # ---------------------------------------------------------- NORD
         dict(name="Huegelland", farbe="#8ab661", volk="Kelten",
              bemerkung="sanfte Wellen, breite Sohlen, dichtes Bachnetz",
              hoehe_m=165.3, relief_m=79.5, formgroesse_m=1600.0,
-             rauheit=0.52, potenz=1.0, wasser_soll=0.0, kuestenform=1.45,
+             rauheit=0.52, potenz=1.0, wasser_soll=0.0, flaeche_soll=1.11, kuestenform=1.45,
              temp_mittel_m0=10.9, temp_spanne=9.5,
-             niederschlag_mm=1200, wind_mittel_ms=4.5),
+             niederschlag_mm=1200, wind_mittel_ms=4.5,
+             hang_trockenheit=0.15,
+             talform=1.3),
         dict(name="Fjordland", farbe="#5fa8a0", volk="Wikinger",
              bemerkung="EIN Hauptfjord, Hochflaeche, steile Waende",
              hoehe_m=-52.0, relief_m=484.9, formgroesse_m=1400.0,
-             rauheit=0.45, potenz=0.55, wasser_soll=20.0, kuestenform=1.90,
+             rauheit=0.45, potenz=0.55, wasser_soll=20.0, flaeche_soll=1.09, kuestenform=1.90,
              temp_mittel_m0=8.6, temp_spanne=13.0,
-             niederschlag_mm=2250, wind_mittel_ms=3.0),
+             niederschlag_mm=2250, wind_mittel_ms=3.0,
+             hang_trockenheit=0.1,
+             talform=2.6),
         dict(name="Taiga", farbe="#3f6b4a", volk="Slawen",
              bemerkung="flaches Hochland, weite Mulden, traege Maeander",
              hoehe_m=293.6, relief_m=118.1, formgroesse_m=3000.0,
-             rauheit=0.42, potenz=0.9, wasser_soll=0.0, kuestenform=0.45,
+             rauheit=0.42, potenz=0.9, wasser_soll=0.0, flaeche_soll=1.00, kuestenform=0.45,
              temp_mittel_m0=3.8, temp_spanne=29.0,
-             niederschlag_mm=600, wind_mittel_ms=3.2),
+             niederschlag_mm=600, wind_mittel_ms=3.2,
+             hang_trockenheit=0.2,
+             talform=2.0),
     ],
     [   # ---------------------------------------------------------- MITTE
         dict(name="Atlantikkueste", farbe="#9b5fb5", volk="Franken",
              bemerkung="Kuestenebene mit Aestuar, Kliff im Norden",
              hoehe_m=-80.9, relief_m=147.1, formgroesse_m=2400.0,
-             rauheit=0.50, potenz=1.3, wasser_soll=45.0, flaeche_soll=1.75, kuestenform=1.00,
+             rauheit=0.50, potenz=1.3, wasser_soll=45.0, flaeche_soll=1.44, kuestenform=1.00,
              temp_mittel_m0=13.6, temp_spanne=14.0,
-             niederschlag_mm=780, wind_mittel_ms=4.5),
+             niederschlag_mm=780, wind_mittel_ms=4.5,
+             hang_trockenheit=0.12,
+             talform=1.5),
         dict(name="Alpenland", farbe="#b5aca0", volk="Alemannen",
              bemerkung="Trogtaeler, scharfe Grate, grosse Massive",
              hoehe_m=1000.0, relief_m=1050.0, formgroesse_m=3800.0,
-             rauheit=0.68, potenz=1.5, wasser_soll=0.0, kuestenform=1.00,
+             rauheit=0.68, potenz=1.5, wasser_soll=0.0, flaeche_soll=1.21, kuestenform=1.00,
              temp_mittel_m0=12.8, temp_spanne=18.5,
-             niederschlag_mm=850, wind_mittel_ms=2.2),
+             niederschlag_mm=850, wind_mittel_ms=2.2,
+             hang_trockenheit=0.3,
+             talform=0.8),
         dict(name="Mittelgebirge", farbe="#8a5a33", volk="Sachsen",
              bemerkung="dichte dendritische Zertalung",
              hoehe_m=350.0, relief_m=134.7, formgroesse_m=1400.0,
-             rauheit=0.62, potenz=1.0, wasser_soll=0.0, kuestenform=0.45,
+             rauheit=0.62, potenz=1.0, wasser_soll=0.0, flaeche_soll=1.09, kuestenform=0.45,
              temp_mittel_m0=11.2, temp_spanne=18.5,
-             niederschlag_mm=640, wind_mittel_ms=3.0),
+             niederschlag_mm=640, wind_mittel_ms=3.0,
+             hang_trockenheit=0.2,
+             talform=1.3),
     ],
     [   # ---------------------------------------------------------- SUED
         dict(name="Steppe", farbe="#d9a05b", volk="Andalusier",
              bemerkung="Trockentaeler, weite Flaechen, wenig Netz",
              hoehe_m=230.0, relief_m=109.4, formgroesse_m=2600.0,
-             rauheit=0.48, potenz=1.4, wasser_soll=0.0, kuestenform=1.10,
+             rauheit=0.48, potenz=1.4, wasser_soll=0.0, flaeche_soll=0.92, kuestenform=1.10,
              temp_mittel_m0=20.0, temp_spanne=19.0,
-             niederschlag_mm=430, wind_mittel_ms=3.0),
+             niederschlag_mm=430, wind_mittel_ms=3.0,
+             hang_trockenheit=0.45,
+             talform=1.1),
         dict(name="Mittelmeer", farbe="#d1603d", volk="Italiener",
              bemerkung="Kuestengebirge direkt am Meer, kurze steile Laeufe",
              hoehe_m=0.6, relief_m=312.9, formgroesse_m=1800.0,
-             rauheit=0.60, potenz=1.2, wasser_soll=40.0, flaeche_soll=1.50, kuestenform=1.00,
+             rauheit=0.60, potenz=1.2, wasser_soll=40.0, flaeche_soll=1.39, kuestenform=1.00,
              temp_mittel_m0=16.9, temp_spanne=17.5,
-             niederschlag_mm=800, wind_mittel_ms=3.5),
+             niederschlag_mm=800, wind_mittel_ms=3.5,
+             hang_trockenheit=0.35,
+             talform=0.9),
         dict(name="Griechische Inseln", farbe="#a8447e", volk="Byzantiner",
              bemerkung="Archipel, viel Wasser, kleine steile Inseln",
              hoehe_m=-67.8, relief_m=403.6, formgroesse_m=1100.0,
-             rauheit=0.58, potenz=1.1, wasser_soll=65.0, flaeche_soll=1.50, kuestenform=1.00,
+             rauheit=0.58, potenz=1.1, wasser_soll=65.0, flaeche_soll=1.22, kuestenform=1.00,
              temp_mittel_m0=19.7, temp_spanne=14.0,
-             niederschlag_mm=480, wind_mittel_ms=4.5),
+             niederschlag_mm=480, wind_mittel_ms=4.5,
+             hang_trockenheit=0.3,
+             talform=0.9),
     ],
 ]
 
 REGLER = ("hoehe_m", "relief_m", "formgroesse_m", "rauheit",
           "potenz", "kuestenform",
-          "temp_mittel_m0", "temp_spanne", "niederschlag_mm", "wind_mittel_ms")
+          "temp_mittel_m0", "temp_spanne", "niederschlag_mm", "wind_mittel_ms",
+          "hang_trockenheit", "talform")
+
+# DIE TALFORM JE REGION (Nutzervorgabe 2026-08-24):
+#
+#   *"ja flusstypen sollte es geben, nach region. zB alpen eher V.
+#   Fjordland U und im Atlantik irgendwas dazwischen zB."*
+#
+# `talform` ist der Exponent der Querschnittskurve in
+# `taeler_eingraben()`: `profil = (1 - exp(-abstand/breite)) ** talform`.
+#
+#   klein (0.8-1.1)  V-Tal  - das Profil steigt sofort, die Sohle ist
+#                             schmal, die Flanken stehen steil. Fluvial
+#                             eingeschnitten: Alpenland, Mittelmeer.
+#   mittel (1.3-1.5) dazwischen: Huegelland, Atlantikkueste.
+#   gross (2.0-2.6)  U-Tal  - das Profil steigt traege, die Sohle ist
+#                             breit und flach. Glazial ausgeschuerft:
+#                             Fjordland, Taiga.
+#
+# Der bisherige Festwert war 1.3 fuer alle Regionen; er bleibt der
+# Rueckfall, wenn das Feld fehlt.
+
+# WIE STARK DER SUEDHANG AUSTROCKNET (Nutzervorgabe 2026-08-24):
+#
+#   *"Fjordland, voronoi mit viel suedhang ist etwas trockener als
+#   fjordland nordhang, dann Steppe suedhang total trocken, nordhang etwas
+#   feuchter."*
+#
+# `hang_trockenheit` je Region ist der Anteil, um den ein voller Suedhang
+# trockener wird als die Ebene - ein voller Nordhang wird um denselben
+# Betrag feuchter. Bei 0.45 (Steppe) schwankt der Niederschlag also
+# zwischen 55 % und 145 % des Regionswerts, bei 0.10 (Fjordland) nur
+# zwischen 90 % und 110 %.
+#
+# DIE MODULATION IST RELATIV, nicht absolut: ein Suedhang in der Steppe
+# bleibt trockener als ein Suedhang im Fjordland, weil beide von ihrem
+# eigenen Regionswert ausgehen (471 mm gegen 1967 mm).
+#
+# Angewandt wird sie am Ende von weltfeld(), wo das Gelaende steht - die
+# Parameterfelder entstehen vorher und kennen noch keine Haenge.
+
+# Ab welcher Neigung die Hangausrichtung voll wirkt. Darunter waechst sie
+# linear an: eine Ebene hat keine Exposition, und ohne diese Kopplung
+# bekaeme flaches Land zufaellige Feuchteunterschiede aus dem
+# Rundungsrauschen des Gradienten.
+HANG_VOLL_GRAD = 12.0
 
 
 def regionsname(zeile, spalte):
@@ -358,7 +440,7 @@ def regionsbox_px(zeile, spalte, size, rand_anteil=0.0):
 _STAPEL_CACHE = {}
 
 
-def oktavenstapel(size, seed, shader_manager=None):
+def oktavenstapel(size, seed, shader_manager=None, mpp=None):
     """
     Die einzelnen Rauschoktaven als (OKTAVEN, size, size).
 
@@ -368,12 +450,21 @@ def oktavenstapel(size, seed, shader_manager=None):
 
     Wellenlaenge der Oktave k: GRUNDFORM_M / 2^k, in METERN. Damit haengt das
     Ergebnis an der Wirklichkeit und nicht an der Pixelzahl (SPEZIFIKATION §10).
+
+    `mpp` ueberschreibt die aus WELT_KM abgeleitete Pixelgroesse. Gebraucht
+    von Pruefwerkzeugen, die einen ANDEREN Weltausschnitt betrachten als die
+    Karte (tools/inseltest.py zeigt Inseln von 150 m bis 10 km). Ohne diesen
+    Weg muesste dort ein zweiter Rauschgenerator gebaut werden - und zwei
+    Rauschquellen waeren eine zweite Wahrheit (SPEZIFIKATION §4.5): das
+    Testgelaende saehe anders aus als das Programm, und niemand wuesste,
+    welches der beiden man gerade beurteilt.
     """
-    schluessel = (size, seed, shader_manager is not None)
+    schluessel = (size, seed, shader_manager is not None, mpp)
     if schluessel in _STAPEL_CACHE:
         return _STAPEL_CACHE[schluessel]
 
-    mpp = WELT_KM * 1000.0 / size
+    if mpp is None:
+        mpp = WELT_KM * 1000.0 / size
     stapel = np.zeros((OKTAVEN, size, size), dtype=np.float32)
     for k in range(OKTAVEN):
         wellenlaenge = GRUNDFORM_M / (2.0 ** k)
@@ -1014,55 +1105,97 @@ def randabfall(size, seed=0, unruhe_m=1100.0, shader_manager=None):
 # Kuestenumfang der Region - garantiert per Quote, nicht nur wahrscheinlich.
 KUESTEN_ARCHETYPEN = {
     "Huegelland": (
-        dict(name="Moher-Klippen", hoehe_faktor=1.4, winkel_grad=82, kantig=False, strand_anteil=0.10, max_anteil=0.25),
-        dict(name="West-Cork-Buchten", hoehe_faktor=0.8, winkel_grad=65, kantig=False, strand_anteil=0.35, max_anteil=0.40),
-        dict(name="Dingle-Straende", hoehe_faktor=0.4, winkel_grad=45, kantig=False, strand_anteil=0.55, max_anteil=0.35),
+        dict(name="Moher-Klippen", hoehe_faktor=1.4, winkel_grad=82, kantig=False, strand_anteil=0.10, max_anteil=0.25, reichweite_km=0.60),
+        dict(name="West-Cork-Buchten", hoehe_faktor=0.8, winkel_grad=65, kantig=False, strand_anteil=0.35, max_anteil=0.40, reichweite_km=0.40),
+        dict(name="Dingle-Straende", hoehe_faktor=0.4, winkel_grad=45, kantig=False, strand_anteil=0.55, max_anteil=0.35, reichweite_km=0.22),
     ),
     "Fjordland": (
-        dict(name="Fjordwand", hoehe_faktor=1.8, winkel_grad=78, kantig=True, strand_anteil=0.05, max_anteil=0.30),
-        dict(name="Schaerenkueste", hoehe_faktor=0.5, winkel_grad=55, kantig=True, strand_anteil=0.30, max_anteil=0.40),
-        dict(name="Fjordbucht", hoehe_faktor=0.3, winkel_grad=40, kantig=False, strand_anteil=0.60, max_anteil=0.30),
+        dict(name="Fjordwand", hoehe_faktor=1.8, winkel_grad=78, kantig=True, strand_anteil=0.05, max_anteil=0.30, reichweite_km=0.70),
+        dict(name="Schaerenkueste", hoehe_faktor=0.5, winkel_grad=55, kantig=True, strand_anteil=0.30, max_anteil=0.40, reichweite_km=0.30),
+        dict(name="Fjordbucht", hoehe_faktor=0.3, winkel_grad=40, kantig=False, strand_anteil=0.60, max_anteil=0.30, reichweite_km=0.20),
     ),
     "Taiga": (
-        dict(name="Kola-Steilkueste", hoehe_faktor=1.1, winkel_grad=70, kantig=True, strand_anteil=0.15, max_anteil=0.30),
-        dict(name="Weissmeer-Flachkueste", hoehe_faktor=0.25, winkel_grad=30, kantig=False, strand_anteil=0.65, max_anteil=0.40),
-        dict(name="Labrador-Buchten", hoehe_faktor=0.7, winkel_grad=55, kantig=False, strand_anteil=0.35, max_anteil=0.30),
+        dict(name="Kola-Steilkueste", hoehe_faktor=1.1, winkel_grad=70, kantig=True, strand_anteil=0.15, max_anteil=0.30, reichweite_km=0.45),
+        dict(name="Weissmeer-Flachkueste", hoehe_faktor=0.25, winkel_grad=30, kantig=False, strand_anteil=0.65, max_anteil=0.40, reichweite_km=0.15),
+        dict(name="Labrador-Buchten", hoehe_faktor=0.7, winkel_grad=55, kantig=False, strand_anteil=0.35, max_anteil=0.30, reichweite_km=0.35),
     ),
     "Atlantikkueste": (
-        dict(name="Bretagne-Klippen", hoehe_faktor=0.9, winkel_grad=72, kantig=False, strand_anteil=0.20, max_anteil=0.25),
-        dict(name="Vendee-Straende", hoehe_faktor=0.3, winkel_grad=35, kantig=False, strand_anteil=0.70, max_anteil=0.45),
-        dict(name="Ile-de-Re-Watt", hoehe_faktor=0.35, winkel_grad=30, kantig=False, strand_anteil=0.60, max_anteil=0.30),
+        dict(name="Bretagne-Klippen", hoehe_faktor=0.9, winkel_grad=72, kantig=False, strand_anteil=0.20, max_anteil=0.25, reichweite_km=0.42),
+        dict(name="Vendee-Straende", hoehe_faktor=0.3, winkel_grad=35, kantig=False, strand_anteil=0.70, max_anteil=0.45, reichweite_km=0.18),
+        dict(name="Ile-de-Re-Watt", hoehe_faktor=0.35, winkel_grad=30, kantig=False, strand_anteil=0.60, max_anteil=0.30, reichweite_km=0.20),
     ),
     "Alpenland": (
-        dict(name="Kotor-Steilfjord", hoehe_faktor=1.7, winkel_grad=80, kantig=False, strand_anteil=0.05, max_anteil=0.25),
-        dict(name="Dalmatien-Klippen", hoehe_faktor=1.2, winkel_grad=75, kantig=False, strand_anteil=0.20, max_anteil=0.40),
-        dict(name="Alpine-Flussmuendung", hoehe_faktor=0.4, winkel_grad=40, kantig=False, strand_anteil=0.55, max_anteil=0.35),
+        dict(name="Kotor-Steilfjord", hoehe_faktor=1.7, winkel_grad=80, kantig=False, strand_anteil=0.05, max_anteil=0.25, reichweite_km=0.68),
+        dict(name="Dalmatien-Klippen", hoehe_faktor=1.2, winkel_grad=75, kantig=False, strand_anteil=0.20, max_anteil=0.40, reichweite_km=0.50),
+        dict(name="Alpine-Flussmuendung", hoehe_faktor=0.4, winkel_grad=40, kantig=False, strand_anteil=0.55, max_anteil=0.35, reichweite_km=0.24),
     ),
     "Mittelgebirge": (
-        dict(name="Ruegen-Kreidekueste", hoehe_faktor=0.85, winkel_grad=70, kantig=False, strand_anteil=0.25, max_anteil=0.25),
-        dict(name="Ostsee-Flachkueste", hoehe_faktor=0.3, winkel_grad=30, kantig=False, strand_anteil=0.65, max_anteil=0.50),
-        dict(name="Foerdenkueste", hoehe_faktor=0.35, winkel_grad=35, kantig=False, strand_anteil=0.60, max_anteil=0.25),
+        dict(name="Ruegen-Kreidekueste", hoehe_faktor=0.85, winkel_grad=70, kantig=False, strand_anteil=0.25, max_anteil=0.25, reichweite_km=0.40),
+        dict(name="Ostsee-Flachkueste", hoehe_faktor=0.3, winkel_grad=30, kantig=False, strand_anteil=0.65, max_anteil=0.50, reichweite_km=0.18),
+        dict(name="Foerdenkueste", hoehe_faktor=0.35, winkel_grad=35, kantig=False, strand_anteil=0.60, max_anteil=0.25, reichweite_km=0.22),
     ),
     "Steppe": (
-        dict(name="Algarve-Klippen", hoehe_faktor=1.3, winkel_grad=80, kantig=False, strand_anteil=0.15, max_anteil=0.30),
-        dict(name="Costa-Brava-Buchten", hoehe_faktor=0.9, winkel_grad=68, kantig=True, strand_anteil=0.35, max_anteil=0.35),
-        dict(name="San-Sebastian-Bucht", hoehe_faktor=0.5, winkel_grad=40, kantig=False, strand_anteil=0.55, max_anteil=0.35),
+        dict(name="Algarve-Klippen", hoehe_faktor=1.3, winkel_grad=80, kantig=False, strand_anteil=0.15, max_anteil=0.30, reichweite_km=0.58),
+        dict(name="Costa-Brava-Buchten", hoehe_faktor=0.9, winkel_grad=68, kantig=True, strand_anteil=0.35, max_anteil=0.35, reichweite_km=0.42),
+        dict(name="San-Sebastian-Bucht", hoehe_faktor=0.5, winkel_grad=40, kantig=False, strand_anteil=0.55, max_anteil=0.35, reichweite_km=0.28),
     ),
     "Mittelmeer": (
-        dict(name="Amalfi-Steilkueste", hoehe_faktor=1.6, winkel_grad=82, kantig=False, strand_anteil=0.10, max_anteil=0.30),
-        dict(name="Cinque-Terre-Buchten", hoehe_faktor=1.0, winkel_grad=70, kantig=False, strand_anteil=0.30, max_anteil=0.35),
-        dict(name="Toskana-Straende", hoehe_faktor=0.4, winkel_grad=35, kantig=False, strand_anteil=0.60, max_anteil=0.35),
+        dict(name="Amalfi-Steilkueste", hoehe_faktor=1.6, winkel_grad=82, kantig=False, strand_anteil=0.10, max_anteil=0.30, reichweite_km=0.65),
+        dict(name="Cinque-Terre-Buchten", hoehe_faktor=1.0, winkel_grad=70, kantig=False, strand_anteil=0.30, max_anteil=0.35, reichweite_km=0.45),
+        dict(name="Toskana-Straende", hoehe_faktor=0.4, winkel_grad=35, kantig=False, strand_anteil=0.60, max_anteil=0.35, reichweite_km=0.24),
     ),
     "Griechische Inseln": (
-        dict(name="Santorini-Kliff", hoehe_faktor=1.7, winkel_grad=84, kantig=False, strand_anteil=0.05, max_anteil=0.25),
-        dict(name="Kreta-Buchten", hoehe_faktor=0.8, winkel_grad=65, kantig=False, strand_anteil=0.35, max_anteil=0.40),
-        dict(name="Kykladen-Strand", hoehe_faktor=0.45, winkel_grad=40, kantig=False, strand_anteil=0.55, max_anteil=0.35),
+        # hoehe_faktor 2026-08-13 von 1.7 auf 1.15 gesenkt (Nutzer-Vorgabe:
+        # "das ist viel zu extrem an der stelle") - 1.7 ergibt 765 m Zielhoehe,
+        # deutlich ueber jeder anderen Klippe der Tabelle (naechsthoechste
+        # Fjordwand 810m*1.8 raeumt aber ueber die volle Fjordlaenge auf, nicht
+        # in einer 0.68km-Kuestenzone). 1.15 ergibt rund 520 m - immer noch die
+        # hoechste Steilkueste der Steppe/Griechische-Inseln-Gruppe, aber ohne
+        # den Ausreisser gegenueber dem Rest der Tabelle.
+        dict(name="Santorini-Kliff", hoehe_faktor=1.15, winkel_grad=84, kantig=False, strand_anteil=0.05, max_anteil=0.25, reichweite_km=0.68),
+        dict(name="Kreta-Buchten", hoehe_faktor=0.8, winkel_grad=65, kantig=False, strand_anteil=0.35, max_anteil=0.40, reichweite_km=0.38),
+        dict(name="Kykladen-Strand", hoehe_faktor=0.45, winkel_grad=40, kantig=False, strand_anteil=0.55, max_anteil=0.35, reichweite_km=0.25),
     ),
 }
 
 MAX_KLIPPENWINKEL_GRAD = 85.0   # nie eine reine 90-Grad-Wand
 KUESTEN_ARCHETYP_PUNKTE_JE_REGION = 24  # Saatpunkte laengs der Kueste je Region
-KUESTEN_BAND_KM = 1.2            # Reichweite der Umformung ab der Kuestenlinie, beidseitig
+
+# LOKALE TERRAINHOEHE MISCHT SICH IN DIE ZIELHOEHE EIN (3.11, Nutzer-Vorgabe
+# 2026-08-13: "Cliffs of Moher stehen im Rohgelaende auf flachem Land - das
+# bekommt auch ein Gradient nicht logisch hin ... die hoehe der klippen soll
+# von der lokalen terrainhoehe abhaengen, aber abgeschwaecht"). 0 = reine
+# Tabelle wie bisher, 1 = die Klippe waere nur noch das lokale Rohgelaende.
+KUESTEN_LOKALER_EINFLUSS = 0.35
+
+# Wie weit die AEUSSERE Blendmaske (kuesten_staerke) mindestens ueber das
+# INNERE Anstiegsprofil (skala_m, siehe unten) hinausreicht - 3.5 deckt rund
+# 97% des exponentiellen Anstiegs ab (1-exp(-3.5)=0.970). Nutzer-Vorgabe:
+# "wenn die klippen sehr hoch sind, dann strahlen diese auch etwas weiter
+# rein, damit es realistischer aussieht (nicht so steil ueberall)".
+KUESTEN_REICHWEITE_SKALA_FAKTOR = 3.5
+
+# REICHWEITE: frueher EINE Zahl fuer alle (KUESTEN_BAND_KM = 1.2 km, im
+# Bandtest sogar mal 1.5 = 1.8 km). Das war der Fehler hinter 3.9 UND 3.10:
+# auf einer 21.3-km-Karte mit stark gegliederter Kueste liegt fast jeder
+# Landpunkt naeher als 1.8 km am Wasser - gemessen trugen 96 % der Landflaeche
+# einen Kuesten-Archetyp. Die "Kuestenregel" war damit faktisch eine
+# Inselregel und hat die Regions-Hangeichung mitverschoben.
+#
+# Jetzt traegt JEDER Archetyp seine eigene `reichweite_km` (Nutzer-Vorgabe
+# 2026-08-13: "die strahlwirkung soll je nach kuestentyp auch unterschiedlich
+# stark strahlen. manche kuestenformen sind ja tiefer vielleicht") - eine
+# Fjordwand wirkt 0.70 km ins Land, eine Ostsee-Flachkueste 0.18 km. Diese
+# Konstante ist nur noch die OBERGRENZE fuers Zonen-Suchband.
+KUESTEN_BAND_KM = 0.70
+
+# MINDESTTIEFE FUER DEN NEUEN, VEREINHEITLICHTEN SEETIEFE-PROZESS (Redesign
+# 2026-08-13, siehe _seetiefe_aus_archetyp() weiter unten). Ersetzt die
+# vorherige eigenstaendige Unterwasser-Eintiefung in _kuesten_umformen() plus
+# die anschliessende Ring-Ausbreitung (_meerestiefe_monoton, hatte messbare
+# Kreuz-vs-Diagonal-Artefakte) durch eine einzige Formel direkt aus dem
+# Voronoi-Seegrad-Feld.
+SEETIEFE_MINDEST_M = 10.0
 
 
 def _kuesten_rauschen_lokal(zone, seed, sigma):
@@ -1091,6 +1224,151 @@ def _kuesten_rauschen_lokal(zone, seed, sigma):
     return ergebnis
 
 
+def _hauptmeer_maske(H):
+    """
+    Trennt das durchgehende Hauptmeer von abgeschlossenen Binnengewaessern
+    (Nutzer-Vorgabe 2026-08-13: "an einem Binnensee soll keine Klippe
+    entstehen ... wenn es Kontakt zum Hauptmeer hat dann ist das ok").
+
+    Hauptmeer = die Zusammenhangskomponente von H<=0, die den Kartenrand
+    beruehrt. In diesem Weltmodell liegt der Kontinent immer zentral, von
+    Ozean bis zum Kartenrand umgeben (kontinentform()) - randberuehrend ist
+    hier also ein zuverlaessiges Kriterium, keine Naeherung. Ein Meeresarm,
+    der sich weit ins Land zieht, bleibt Teil dieser EINEN Komponente,
+    solange er durchgaengig unter 0 m liegt - ein echter Binnensee ist per
+    Definition davon getrennt (sonst waere er kein Binnensee).
+    """
+    see = H <= 0.0
+    beschriftet, _ = ndimage.label(see, structure=np.ones((3, 3), dtype=bool))
+    rand_ids = set(beschriftet[0, :].tolist()) | set(beschriftet[-1, :].tolist())
+    rand_ids |= set(beschriftet[:, 0].tolist()) | set(beschriftet[:, -1].tolist())
+    rand_ids.discard(0)
+    if not rand_ids:
+        return see
+    return np.isin(beschriftet, list(rand_ids))
+
+
+# Ueber welche Strecke die Tiefe von der Wasserlinie auf die Seegrad-Tiefe
+# laeuft - siehe _seetiefe_aus_archetyp(). Entspricht UEBERGANG_MEER_M in
+# core/vektor_kueste.py; beide beschreiben dieselbe Zone von der Vorgabe
+# 2026-08-24, nur von je einer Seite.
+UFERUEBERGANG_M = 200.0
+
+
+def _seetiefe_aus_archetyp(H, felder):
+    """
+    Meerestiefe in EINER Formel, direkt aus dem Voronoi-Seegrad-Prozess
+    (Redesign 2026-08-13, Nutzer-Vorgabe: "ALLE Meerestiefe wird jetzt
+    einfach nur noch ueber die Voronoi-Seetiefen-Prozesse erzeugt, also nicht
+    im Klippenteil oder so ... die Seetiefe kann die negative Amplitude der
+    Klippenhoehen sein (min. -10 m) und einem Seegradfaktor - je weiter weg,
+    umso tiefer wird das Meer. Ganz einfach alles in einer Funktion").
+
+    Ersetzt die vorherige eigenstaendige Unterwasser-Eintiefung in
+    `_kuesten_umformen()` PLUS die anschliessende Ring-Ausbreitung
+    (`_meerestiefe_monoton`, gemessen: Kreuz-vs-Diagonal-Ungleichgewicht bis
+    69 m, 7% der Seepixel > 5m Abweichung - die vom Nutzer bemerkten
+    diagonalen Linien/Stufen im Wasser). Diese Formel ist NICHT iterativ,
+    dadurch auch nicht anfaellig fuer die Gitter-Achsen-Verzerrung einer
+    Dilation-basierten Ausbreitung.
+
+        tiefe = -max(SEETIEFE_MINDEST_M, amplitude_des_naechsten_kuestentyps)
+                * seegrad_faktor
+
+    `amplitude_des_naechsten_kuestentyps`: die Zielhoehe (`KUESTENHOEHE_M *
+    hoehe_faktor`) des naechstgelegenen Kuesten-Archetyps, ueber eine exakte
+    euklidische Distanztransformation gefunden (nicht ringweise angenaehert -
+    an einer Insel/Bucht bleibt das exakt, ohne Sonderfall-Code).
+    `seegrad_faktor`: `felder["seegrad_tiefe"]` (schon vorhandenes, ueber die
+    Seegrad-Zellgrenzen geglaettetes Feld aus `seegliederung()`) geteilt durch
+    die tiefste Tabellentiefe - 0 knapp an der Kueste, waechst zum offenen
+    Meer hin. Kein neues Feld, keine neue Distanztransformation fuer den
+    Ferntiefe-Anteil - nur die naechste-Archetyp-Suche ist neu.
+    """
+    archetyp = felder.get("kuesten_archetyp")
+    region_map = felder.get("regionen")
+    seegrad_tiefe = felder.get("seegrad_tiefe")
+    if archetyp is None or region_map is None or seegrad_tiefe is None:
+        return H
+
+    hauptmeer = _hauptmeer_maske(H)
+    if not hauptmeer.any():
+        return H
+
+    land = H > 0.0
+    amplitude_land = np.zeros(H.shape, dtype=np.float64)
+    hat_archetyp = np.zeros(H.shape, dtype=bool)
+    for i, (_z, _s, r) in enumerate(alle_regionen()):
+        archetypen = KUESTEN_ARCHETYPEN.get(r["name"])
+        if not archetypen:
+            continue
+        for lokal_index, typ in enumerate(archetypen):
+            treffer = land & (region_map == i) & (archetyp == lokal_index)
+            if not treffer.any():
+                continue
+            amplitude_land[treffer] = KUESTENHOEHE_M * typ["hoehe_faktor"]
+            hat_archetyp |= treffer
+
+    if not hat_archetyp.any():
+        return H
+
+    # Exakte naechste-Archetyp-Suche (euklidisch, nicht ringweise angenaehert)
+    # - liefert fuer jeden Punkt der Karte den naechstgelegenen Land-Archetyp,
+    # unabhaengig von der (jetzt kurzen) Reichweite des Archetyp-Bands selbst.
+    _abst, index = ndimage.distance_transform_edt(~hat_archetyp, return_indices=True)
+    amplitude_je_pixel = amplitude_land[index[0], index[1]]
+
+    # GEGLAETTET - eine reine Naechster-Nachbar-Zuordnung hat selbst harte
+    # Kanten, genau dort, wo zwei Archetyp-Zonen sich die Naehe zu einem
+    # Seepixel teilen (Voronoi-Grenze zwischen "naechste Klippe A" und "B").
+    # Erstmessung ohne Glaettung: Kreuz-vs-Diagonal-Max SCHLECHTER als die
+    # vorherige Ring-Loesung (342 m statt 69 m) - die Sprungstelle war nur
+    # verschoben, nicht weg. `mpp`-bezogenes Sigma haengt sich an dieselbe
+    # Groessenordnung wie die Archetyp-Reichweiten selbst (0.18-0.70 km).
+    size = H.shape[0]
+    mpp = WELT_KM * 1000.0 / size
+    sigma_px = max(2.0, 1200.0 / mpp)
+    amplitude_je_pixel = ndimage.gaussian_filter(amplitude_je_pixel, sigma=sigma_px)
+
+    tiefste_tabellentiefe = abs(min(TIEFE_JE_SEEGRAD.values()))
+    seegrad_faktor = np.clip(seegrad_tiefe / -tiefste_tabellentiefe, 0.0, 1.5)
+
+    tiefe = -np.maximum(SEETIEFE_MINDEST_M, amplitude_je_pixel) * seegrad_faktor
+    tiefe = np.minimum(tiefe, -SEETIEFE_MINDEST_M)
+
+    # DER UFERUEBERGANG (Nutzervorgabe 2026-08-24, woertlich):
+    #
+    #   *"Wenn x < 0 (Meer): Blende ueber eine Distanz von 200m (x = 0 bis
+    #   x = -200) sanft mittels Smoothstep von coast_profile(x) zu
+    #   ocean_profile(x) ueber. Fuer x < -200 gilt 100% ocean_profile(x)."*
+    #
+    # GEMESSEN, was vorher passierte: die Tiefe stand ab dem ersten
+    # Seepixel konstant auf -10 m (SEETIEFE_MINDEST_M) und blieb es bis
+    # 500 m hinaus, danach -34 m. Es gab also gar keinen Uebergang,
+    # sondern eine 10-m-Stufe direkt an der Wasserlinie - im Schnitt eine
+    # senkrechte Wand unter Wasser, egal ob dahinter ein Strand oder eine
+    # Klippe liegt.
+    #
+    # `coast_profile` ist auf der Seeseite die Wasserlinie selbst, also 0.
+    # Nicht aus Bequemlichkeit: die Vorbildprofile geben unter Wasser
+    # nichts her. COP30 ist ein OBERFLAECHENmodell und setzt offenes Meer
+    # auf 0 - gemessen liegen alle 27 Archetypen zwischen -0.1 und -1.8 m
+    # und aendern sich ueber 250 m nicht. Bathymetrie ist in diesen Daten
+    # nicht enthalten; ein gemessenes Seeprofil waere eine Erfindung.
+    #
+    # Bleibt der Smoothstep von 0 auf die Seegrad-Tiefe ueber
+    # UFERUEBERGANG_M. Das ist ein Schelf statt einer Wand, und es ist
+    # genau das, was die Vorgabe verlangt.
+    if UFERUEBERGANG_M > 0.0:
+        mpp = WELT_KM * 1000.0 / float(H.shape[0])
+        abstand_m = ndimage.distance_transform_edt(H <= 0.0) * mpp
+        t = np.clip(abstand_m / UFERUEBERGANG_M, 0.0, 1.0)
+        anteil = t * t * (3.0 - 2.0 * t)
+        tiefe = tiefe * anteil
+
+    return np.where(hauptmeer, tiefe, H)
+
+
 def _kuesten_umformen(H, felder, seed, size):
     """
     Formt die Kuestenzone je Region nach KUESTEN_ARCHETYPEN um. Ablauf je
@@ -1116,10 +1394,24 @@ def _kuesten_umformen(H, felder, seed, size):
     # Signierte Distanz zur Kuestenlinie: positiv an Land, negativ auf See,
     # 0 an der Linie selbst (gleiche Bauform wie
     # biome_generator._calculate_beach_probabilities()).
+    #
+    # NUR GEGEN DAS HAUPTMEER, NICHT GEGEN BINNENSEEN (Nutzer-Vorgabe
+    # 2026-08-13). Vorher mass `dist_land` den Abstand zum naechsten Gewaesser
+    # ueberhaupt - ein Ufer am Binnensee zaehlte damit genauso als "Kueste"
+    # wie eines am offenen Meer, und bekam dieselben Klippen-Archetypen. Jetzt
+    # zaehlt als Ziel nur `_hauptmeer_maske(H)`: Land neben einem See, das weit
+    # vom echten Meer entfernt liegt, faellt automatisch aus dem Kuestenband -
+    # dort bleibt das rohe Rauschen unveraendert, wie gewuenscht.
     land = H > 0.0
-    dist_land = ndimage.distance_transform_edt(land) * mpp
+    hauptmeer = _hauptmeer_maske(H)
+    binnensee = (~land) & (~hauptmeer)
+    dist_land = ndimage.distance_transform_edt(~hauptmeer) * mpp
     dist_see = ndimage.distance_transform_edt(~land) * mpp
     distanz_m = np.where(land, dist_land, -dist_see)
+    # Binnenseen komplett aus dem Kuestenband ausschliessen - ohne diese
+    # Zeile koennten Seeuferpixel (kleiner Abstand zu IHREM eigenen Ufer)
+    # trotzdem als "Kuestenlinie" durchrutschen.
+    distanz_m = np.where(binnensee, -np.inf, distanz_m)
 
     im_band = np.abs(distanz_m) <= band_m * 1.5
     # DIAGNOSE-FELDER FUERS 2D-ANZEIGE (2026-08-12, Nutzer-Vorgabe: "kann man
@@ -1137,6 +1429,9 @@ def _kuesten_umformen(H, felder, seed, size):
 
     ziel_hoehe = H.copy()
     veraendert = np.zeros(H.shape, dtype=bool)
+    # Reichweite je Pixel - gefuellt aus der `reichweite_km` des dort
+    # zugeordneten Archetyps (3.10). Ersetzt die frueher globale Bandbreite.
+    reichweite_karte = np.zeros(H.shape, dtype=np.float32)
     basis_seed = int(seed) ^ 0x4B57
 
     for i, (_z, _s, r) in enumerate(alle_regionen()):
@@ -1191,9 +1486,17 @@ def _kuesten_umformen(H, felder, seed, size):
         _abst, naechster = baum.query(pixel_xy)
 
         archetyp_id_karte = np.full(H.shape, -1, dtype=np.int16)
+        # Lokale Terrainhoehe je Pixel (3.11) - dieselbe naechster-Saatpunkt-
+        # Zuordnung wie fuer den Archetyp, nur mit dem schon vorhandenen
+        # `lokale_hoehe`-Wert des Saatpunkts statt seinem Archetyp-Index.
+        # Stueckweise konstant je Saatpunkt-Zelle, wird von der Zonengrenzen-
+        # Glaettung am Ende der Funktion mitgeglaettet - kein eigener
+        # Glaettungsschritt noetig.
+        lokale_hoehe_karte = np.zeros(H.shape, dtype=np.float32)
         for pixel_idx, punkt_idx in enumerate(naechster):
             y, x = idx_pixel_y[pixel_idx], idx_pixel_x[pixel_idx]
             archetyp_id_karte[y, x] = name_zu_index[zuordnung[punkt_idx]["name"]]
+            lokale_hoehe_karte[y, x] = lokale_hoehe[punkt_idx]
         felder["kuesten_archetyp"][region_maske] = archetyp_id_karte[region_maske].astype(np.int8)
 
         # Strand-Luecken: eigener grober, seed-fester Rauschanteil markiert
@@ -1238,23 +1541,87 @@ def _kuesten_umformen(H, felder, seed, size):
             # bis 530 m). Zusaetzlicher Mindestwert an der Pixelgroesse
             # ausgerichtet, damit auch bei sehr niedriger Aufloesung nie unter
             # rund 2 Pixel Reichweite gefallen wird.
-            ziel_hoehe_m = KUESTENHOEHE_M * archetyp["hoehe_faktor"]
-            skala_m = max(2.0 * mpp, ziel_hoehe_m / max(np.tan(np.radians(winkel)), 0.05))
-            hoehe_faktor_lokal = np.where(
-                strand_feld[zone], archetyp["hoehe_faktor"] * 0.25, archetyp["hoehe_faktor"])
+            # ZIELHOEHE ALS MISCHUNG AUS TABELLE UND LOKALEM ROHGELAENDE (3.11,
+            # Nutzer-Vorgabe 2026-08-13: "Cliffs of Moher stehen auf flachem
+            # Terrain, das bekommt auch ein Gradient nicht logisch hin - die
+            # klippenhoehe soll von der lokalen terrainhoehe abhaengen, aber
+            # abgeschwaecht"). Ein weicherer UEBERGANG loest das Problem nicht,
+            # weil nicht die KANTE falsch war, sondern die absolute Zielhoehe
+            # selbst, unabhaengig vom Umfeld. `lokale_hoehe_karte` (oben, aus
+            # der ohnehin schon berechneten Saatpunkt-Hoehe) liefert die lokale
+            # Referenz je Pixel; negative (See-)Werte werden nicht als
+            # Referenz zugelassen, sonst koennte tiefes Wasser die Klippe nach
+            # unten ziehen.
+            ziel_hoehe_tabelle = KUESTENHOEHE_M * archetyp["hoehe_faktor"]
+            lokal_ref = np.clip(lokale_hoehe_karte[zone], 0.0, None)
+            ziel_hoehe_effektiv = (ziel_hoehe_tabelle * (1.0 - KUESTEN_LOKALER_EINFLUSS)
+                                   + lokal_ref * KUESTEN_LOKALER_EINFLUSS)
+
+            winkel = min(archetyp["winkel_grad"], MAX_KLIPPENWINKEL_GRAD)
+            # Reichweite aus dem gewuenschten Neigungswinkel abgeleitet, statt
+            # aus einer festen, hoehenunabhaengigen Konstante (Nutzerbefund
+            # 2026-08-12: gezackte "Mauer" an jeder Kueste in 3D). Fuer
+            # `H0*(1-exp(-d/L))` ist die Anfangssteigung bei d=0 genau H0/L -
+            # `L = H0/tan(winkel)` setzt also direkt die tatsaechliche Steigung
+            # an der Kuestenlinie auf den gewuenschten Winkel. `H0` ist jetzt
+            # `ziel_hoehe_effektiv` (Array, je Pixel) statt der festen
+            # Tabellenzahl - eine durch die lokale Referenz gedaempfte Klippe
+            # bekommt automatisch eine kuerzere, eine durch eine hohe lokale
+            # Referenz verstaerkte automatisch eine laengere Anstiegsstrecke.
+            skala_m = np.maximum(2.0 * mpp,
+                                 ziel_hoehe_effektiv / max(np.tan(np.radians(winkel)), 0.05))
+            hoehe_lokal = np.where(strand_feld[zone], ziel_hoehe_effektiv * 0.25, ziel_hoehe_effektiv)
             d = distanz_m[zone]
             d_land = np.clip(d, 0.0, None)
-            profil = KUESTENHOEHE_M * hoehe_faktor_lokal * (1.0 - np.exp(-d_land / skala_m))
-            # Auf der Seeseite sanft zur Kuestenlinie hin auslaufen - die
-            # eigentliche Tiefe uebernimmt gleich danach die Seegrad-Tabelle
-            # (siehe Aufrufstelle in weltfeld()), dieser Pass soll die
-            # Kuestenlinie selbst nur nicht zerreissen.
-            profil = np.where(d < 0, d * 0.5, profil)
+            profil = hoehe_lokal * (1.0 - np.exp(-d_land / skala_m))
             if archetyp["kantig"]:
                 facetten_seed = basis_seed + i * 97 + name_zu_index[archetyp["name"]] * 13 + 1
                 facetten = _kuesten_rauschen_lokal(zone, facetten_seed, sigma=max(1.0, band_px * 0.15))
-                profil = profil + (facetten[zone] - 0.5) * 2.0 * KUESTENHOEHE_M * hoehe_faktor_lokal * 0.15
-            ziel_hoehe[zone] = profil
+                # RAUSCHEN AN DER WASSERLINIE AUSBLENDEN (3.11, Ursache der
+                # "zelligen"/blobartigen Kueste nach dem Reichweiten-Fix - siehe
+                # Bild vom 2026-08-13). Die Facette wurde bisher mit VOLLER
+                # Staerke ueberall in der Zone addiert, auch exakt bei d=0, wo
+                # das Basisprofil bewusst gegen 0 geht, damit die Kuestenlinie
+                # sauber definiert bleibt. Eine Wackelamplitude von ±zig Metern
+                # GENAU an der Stelle, wo ueber Land/See entschieden wird, kippt
+                # das Vorzeichen zufaellig hin und her - sichtbar als winzige
+                # Inseln/Buchten statt einer glatten Linie. Jetzt faehrt die
+                # Staerke von 0 an der Wasserlinie auf voll hoch, sobald der
+                # Anstieg im Wesentlichen abgeschlossen ist (d_land >= skala_m)-
+                # Textur an der KlippenFLAECHE bleibt, die Kuestenlinie selbst
+                # bleibt sauber.
+                rausch_gewicht = np.clip(d_land / skala_m, 0.0, 1.0)
+                profil = profil + (facetten[zone] - 0.5) * 2.0 * hoehe_lokal * 0.15 * rausch_gewicht
+
+            # NUR NOCH DAS LAND FORMEN (Redesign 2026-08-13, Nutzer-Vorgabe:
+            # "ALLE Meerestiefe wird jetzt einfach nur noch ueber die Voronoi-
+            # Seetiefen-Prozesse erzeugt. also nicht im Klippenteil oder so").
+            # Die Seeseite wurde hier zuvor eigenstaendig eingestochen und
+            # anschliessend per Ring-Ausbreitung monoton gebuegelt
+            # (`_meerestiefe_monoton()`, 3.13) - GEMESSEN erzeugte diese
+            # Ausbreitung ein Kreuz-vs-Diagonal-Ungleichgewicht (median 0.12 m,
+            # aber bis 69 m, 7% der Seepixel > 5m Abweichung) - sichtbar als
+            # die vom Nutzer bemerkten diagonalen Linien/Stufen im Wasser.
+            # `_seetiefe_aus_archetyp()` (weiter unten) ersetzt das durch eine
+            # einzige, nicht-iterative Formel direkt aus dem Voronoi-Seegrad-
+            # Feld - dieser Block schreibt die Seeseite deshalb gar nicht mehr,
+            # `veraendert` bleibt dort False und die Zonenglaettung/-blendung
+            # weiter unten laesst diese Pixel folgerichtig unangetastet.
+            land_in_zone = d >= 0.0
+            ziel_hoehe[zone] = np.where(land_in_zone, profil, ziel_hoehe[zone])
+            veraendert[zone] = veraendert[zone] | land_in_zone
+
+            # Reichweite der Blendmaske waechst mit der effektiven Hoehe mit
+            # (3.11, Nutzer-Vorgabe "wenn die klippen sehr hoch sind, dann
+            # strahlen diese auch etwas weiter rein, damit es realistischer
+            # aussieht"): mindestens die Tabellenreichweite, aber nie kuerzer
+            # als das, was das Anstiegsprofil selbst braucht, um weitgehend
+            # anzukommen (KUESTEN_REICHWEITE_SKALA_FAKTOR * skala_m deckt rund
+            # 97% des Anstiegs ab) - sonst wuerde die AEUSSERE Maske vor dem
+            # INNEREN Profil abschneiden.
+            reichweite_karte[zone] = np.maximum(
+                archetyp["reichweite_km"] * 1000.0,
+                KUESTEN_REICHWEITE_SKALA_FAKTOR * skala_m)
             veraendert[zone] = True
 
     if not np.any(veraendert):
@@ -1262,11 +1629,75 @@ def _kuesten_umformen(H, felder, seed, size):
 
     # Zonengrenzen (Naechster-Punkt-Zuordnung hat harte Kanten) entschaerfen -
     # gleiche Ueberlegung wie bei den geglaetteten Klimafeldern.
-    ziel_hoehe_glatt = ndimage.gaussian_filter(ziel_hoehe, sigma=max(1.0, band_px * 0.2))
+    #
+    # GETRENNT FUER LAND UND SEE (2026-08-13). Vorher lief EIN gaussian_filter
+    # ueber das ganze Feld und damit quer ueber die Kuestenlinie: dort stossen
+    # Landwerte von mehreren hundert Metern auf Seewerte von -175 m, das
+    # Mittel daraus landet nahe null. Der absichtlich tief eingestochene
+    # Klippenfuss wurde so wieder hochgezogen und anschliessend von der
+    # Vorzeichen-Klemme unten auf -0.5 m gepinnt - gemessen kam die Seetiefe
+    # an der Kueste dadurch auf -1.7 m statt der erwarteten Tiefe, also
+    # FLACHER als ganz ohne den Pass (-8.1 m). Maskiertes Glaetten
+    # (normalisierte Faltung je Seite) haelt die Kante an der Wasserlinie und
+    # glaettet trotzdem die Zonengrenzen INNERHALB jeder Seite.
+    # SIGMA KLEIN HALTEN (Fehlerbehebung 2026-08-13). Vorher `band_px * 0.2`,
+    # bei 384 px also rund 140 m - in derselben Groessenordnung wie die
+    # Anstiegsstrecke einer Klippe (Moher: 172 m). Die Glaettung hat das
+    # Profil damit praktisch eingeebnet: gemessen kamen von 82 Grad Sollwinkel
+    # nur 26.5 Grad an, ueber alle 23 Zonen im Mittel 29 Grad zu flach.
+    # Diese Glaettung soll die SEITLICHEN Zonennaehte entschaerfen (harte
+    # Kanten der Naechster-Punkt-Zuordnung), nicht die Klippenfront - dafuer
+    # genuegen ein bis zwei Pixel. Nach oben gedeckelt, damit sie bei jeder
+    # Bandbreite und Aufloesung klein gegen die Profilstrecke bleibt.
+    # Gemessen 2026-08-13: mit sigma = 2 px (bei 384 px sind das 111 m) lag
+    # die Glaettung GENAU auf der Anstiegsstrecke der Klippen (Moher 111 m,
+    # Bretagne 132 m) und ebnete sie ein - steile Typen kamen mit 34.8 statt
+    # 74 Grad an. Mit 0.8 px bleiben die Zonennaehte weich, das Profil aber
+    # erhalten (steile Typen danach 46.5 Grad gemessen).
+    sigma_zone = float(np.clip(band_px * 0.2, 0.5, 0.8))
 
-    staerke = np.clip(1.0 - np.abs(distanz_m) / band_m, 0.0, 1.0)
-    staerke = np.where(im_band & veraendert, staerke * 0.85, 0.0)
+    def _glaetten_in_maske(feld, maske):
+        m = maske.astype(np.float32)
+        gewicht = ndimage.gaussian_filter(m, sigma=sigma_zone)
+        summe = ndimage.gaussian_filter(feld * m, sigma=sigma_zone)
+        return np.where(gewicht > 1e-6, summe / np.maximum(gewicht, 1e-6), feld)
+
+    ist_land = H > 0.0
+    ziel_hoehe_glatt = np.where(
+        ist_land,
+        _glaetten_in_maske(ziel_hoehe, ist_land),
+        _glaetten_in_maske(ziel_hoehe, ~ist_land))
+
+    # BLENDSTAERKE JE ARCHETYP STATT GLOBAL (3.10). Vorher lief hier eine
+    # lineare Rampe ueber die EINE globale Bandbreite (1.2 km) - dadurch trugen
+    # 96 % der Landflaeche einen Kuestenwert und der Pass verschob die
+    # Regions-Hangeichung (3.9). Jetzt zaehlt die `reichweite_km` des jeweils
+    # zugeordneten Archetyps, und der Abfall ist quadratisch statt linear:
+    # kraeftig direkt an der Wasserlinie, dann zuegig verblassend - genau die
+    # Vorgabe "kraeftige farbe an der kueste, dann verblassen ins land hinein".
+    with np.errstate(divide="ignore", invalid="ignore"):
+        anteil = np.where(reichweite_karte > 0.0,
+                          np.abs(distanz_m) / np.maximum(reichweite_karte, 1e-6),
+                          np.inf)
+    # VERLAUF: innen voll, aussen weich auslaufend (Fehlerbehebung 2026-08-13).
+    # Die vorherige quadratische Rampe fiel schon direkt an der Wasserlinie
+    # ab - der Median der Staerke im Kuestensaum lag bei 0.56, es kam also nur
+    # gut die Haelfte des vorgegebenen Profils an, der Rest blieb Rohgelaende.
+    # Genau deshalb trafen die festgelegten `winkel_grad` nicht. Jetzt bleibt
+    # die Staerke im inneren Viertel der Reichweite nahezu voll und faellt
+    # danach glatt (Smoothstep) auf null - die Klippe bekommt ihren Winkel,
+    # der Uebergang ins Landesinnere bleibt trotzdem ohne Kante.
+    t = np.clip((anteil - 0.25) / 0.75, 0.0, 1.0)
+    staerke = (1.0 - t * t * (3.0 - 2.0 * t)) * 0.95
+    staerke = np.where(veraendert, staerke, 0.0)
     felder["kuesten_staerke"] = staerke.astype(np.float32)
+
+    # Archetyp-Zuordnung dort zuruecknehmen, wo der Pass praktisch nicht mehr
+    # wirkt - sonst meldet das Feld einen Kuestentyp fuer Land, an dem nichts
+    # geformt wurde (genau der Eindruck "die kuestenbereiche erstrecken sich
+    # ueber das gesamte land"). Die 2D-Anzeige liest dasselbe Feld.
+    felder["kuesten_archetyp"] = np.where(
+        staerke > 0.02, felder["kuesten_archetyp"], -1).astype(np.int8)
 
     ergebnis = H * (1.0 - staerke) + ziel_hoehe_glatt * staerke
 
@@ -1294,19 +1725,50 @@ def _kuesten_umformen(H, felder, seed, size):
 # DAS GELAENDE
 # =============================================================================
 
-def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=None):
+# Gemessene Anteile am 2026-08-22, 1024 px - Grundlage der Ladebalken-
+# verteilung in weltfeld(). Beim naechsten groesseren Umbau nachfuehren.
+WELTFELD_PLAN = (
+    ("kontinentform", 3.0),
+    ("voronoi_regionen", 6.0),
+    ("parameterfelder", 2.0),
+    ("seegliederung", 8.0),
+    ("oktavenstapel", 4.0),
+    ("oktaven_mischen", 6.0),
+    ("potenzkurve", 2.0),
+    ("grundhoehe_und_schelf", 3.0),
+    ("kuestenform_potenz", 2.0),
+    ("vk_linie_bauen", 25.0),
+    ("vk_als_raster", 25.0),
+    ("vk_archetyp_felder", 10.0),
+    ("kuesten_umformen_raster", 60.0),
+    ("seetiefe", 4.0),
+)
+
+
+def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=None,
+             schritte=None):
     """
     Die Hoehenkarte der ganzen Welt, in Metern. Unter 0 ist Meer.
 
     Rueckgabe: (H, felder) - felder enthaelt jeden Regler als volles Feld,
     damit spaetere Stufen (Fluesse, Taeler) ortsabhaengig arbeiten koennen.
+
+    `schritte` ist ein optionales managers.teilschritte.Teilschritte-Objekt.
+    Ohne eines aendert sich nichts - Tools und Smoke-Tests rufen weltfeld()
+    unveraendert auf.
     """
-    maske, sdf = kontinentform(size, seed, shader_manager)
-    gewichte = voronoi_regionen(maske, seed, punktzahl=punktzahl,
-                                shader_manager=shader_manager)
+    from managers.teilschritte import schritt as _s
+
+    with _s(schritte, "kontinentform"):
+        maske, sdf = kontinentform(size, seed, shader_manager)
+    with _s(schritte, "voronoi_regionen"):
+        gewichte = voronoi_regionen(maske, seed, punktzahl=punktzahl,
+                                    shader_manager=shader_manager)
 
     felder = {}
     KLIMAFELDER = ("temp_mittel_m0", "temp_spanne", "niederschlag_mm", "wind_mittel_ms")
+    _p_ctx = _s(schritte, "parameterfelder")
+    _p_ctx.__enter__()
     for name in REGLER:
         # Die Klimafelder schaerfer mischen als die Gelaendefelder - siehe
         # KLIMA_SCHAERFE. Das Relief braucht die breite Ueberblendung, das
@@ -1331,20 +1793,23 @@ def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=Non
     # Kontinent - das Wasser vor den Griechischen Inseln gehoert zu ihnen. Die
     # Seewege des Siedlungsnetzes brauchen genau das.
     felder["regionen"] = np.argmax(gewichte, axis=0).astype(np.int16)
+    _p_ctx.__exit__(None, None, None)
 
     # SEEGLIEDERUNG (docs/KLIMA_UND_SEE.md §2) - braucht `maske` (Kontinentform)
     # und `gewichte` (fuer die Uferregionen), beide stehen jetzt. Das Ergebnis
     # (seegrad_tiefe) wird weiter unten anstelle des alten Kuestenschelfs
     # angewandt - siehe "SEEGRAD-SCHELF" dort.
-    see = seegliederung(maske, gewichte, seed, punktzahl_land=punktzahl,
-                        shader_manager=shader_manager)
+    with _s(schritte, "seegliederung"):
+        see = seegliederung(maske, gewichte, seed, punktzahl_land=punktzahl,
+                            shader_manager=shader_manager)
     felder["seegrad"] = see["seegrad"]
     felder["seegrad_tiefe"] = see["seegrad_tiefe"]
     felder["ufer_region_a"] = see["ufer_region_a"]
     felder["ufer_region_b"] = see["ufer_region_b"]
     felder["see_eis"] = see["see_eis"]
 
-    stapel = oktavenstapel(size, seed, shader_manager)
+    with _s(schritte, "oktavenstapel"):
+        stapel = oktavenstapel(size, seed, shader_manager)
     wellen = _wellenlaengen()
 
     # OKTAVENGEWICHTE JE PIXEL.
@@ -1353,6 +1818,8 @@ def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=Non
     # Region passt. Der Uebergang ist weich - eine harte Grenze wuerde beim
     # Wandern ueber eine Regionsgrenze schlagartig eine ganze Oktave zu- oder
     # abschalten, und das saehe man als Kante.
+    _o_ctx = _s(schritte, "oktaven_mischen")
+    _o_ctx.__enter__()
     relief = np.zeros((size, size), dtype=np.float64)
     summe = np.zeros((size, size), dtype=np.float64)
     form = felder["formgroesse_m"]
@@ -1366,6 +1833,9 @@ def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=Non
 
     # Auf 0..1 mit FESTER Spreizung, dann die Potenzkurve. <1 hebt an
     # (Hochflaeche), >1 drueckt herunter (weite Ebene mit einzelnen Gipfeln).
+    _o_ctx.__exit__(None, None, None)
+    _q_ctx = _s(schritte, "potenzkurve")
+    _q_ctx.__enter__()
     t = np.clip(0.5 + SPREIZUNG * relief, 0.0, 1.0)
     potenz = np.clip(felder["potenz"], 0.2, 4.0)
 
@@ -1409,6 +1879,9 @@ def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=Non
     # Angewandt wird sie weiter unten, sobald H steht - siehe "KUESTENFORM
     # ANWENDEN" nach dem Meeresgradienten.
 
+    _q_ctx.__exit__(None, None, None)
+    _g_ctx = _s(schritte, "grundhoehe_und_schelf")
+    _g_ctx.__enter__()
     # hoehe_m ist die MITTE, nicht der Boden - deshalb t - 0.5.
     H = felder["hoehe_m"] + (t - 0.5) * felder["relief_m"]
 
@@ -1465,6 +1938,9 @@ def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=Non
     #
     # DAS VORZEICHEN BLEIBT ERHALTEN, also auch die Kuestenlinie und der
     # Wasseranteil jeder Region.
+    _g_ctx.__exit__(None, None, None)
+    _k_ctx = _s(schritte, "kuestenform_potenz")
+    _k_ctx.__enter__()
     kuestenform = np.clip(felder["kuestenform"], 0.2, 3.0)
     p = 1.0 / kuestenform
     # Die Untergrenze verhindert, dass der Faktor bei p < 1 direkt an der
@@ -1478,115 +1954,114 @@ def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=Non
     # Tiefe: formt die Kuestenzone lokal nach realen Vorbildern um
     # (Klippenhoehe/-winkel/Kantigkeit/Strandhaeufigkeit wechseln laengs der
     # Kueste), ohne dass die Seegrad-Tabelle gleich danach uebersteuert wird.
-    H = _kuesten_umformen(H, felder, seed, size)
+    # DIE KUESTENFORMUNG - Raster oder Vektor (docs/KUESTENMODELL.md).
+    #
+    # `_kuesten_umformen()` arbeitet auf Pixelmasken und zieht seine
+    # Saatpunkte per Index aus einer Pixelliste; dadurch haengt das Ergebnis
+    # an der Aufloesung (gemessen: 34.7 m mittlere Abweichung zwischen 256
+    # und 512 px gegen 11.9 m ohne diesen Pass).
+    #
+    # Der Vektorweg (core/vektor_kueste.py) beschreibt dieselbe Kueste als
+    # Polylinie mit Stationen in METERN, bekommt Profilform, Zielhoehe und
+    # Reichweite aus den an 19 realen Vorbildkuesten gemessenen Werten, und
+    # ist an beliebigen Fliesskommakoordinaten auswertbar - dieselbe Funktion
+    # bedient Rasterkarte und Mesh.
+    #
+    # Umschaltbar, weil das ein Eingriff in die Gelaendeform ist und die
+    # Regionseichung daran haengt (docs/OFFENE_PUNKTE.md 3.9).
+    _k_ctx.__exit__(None, None, None)
+    from gui.config.value_default import VEKTOR_KUESTE_AKTIV
+    if VEKTOR_KUESTE_AKTIV:
+        from core.vektor_kueste import VektorKueste, als_raster
+        # DREI Teilschritte statt einem: der Bau der Kuestenlinie (Konturen,
+        # Saaten, Segmente), das Abtasten auf das Raster und die
+        # Archetypfelder sind voellig verschiedene Arbeiten, und nur die
+        # Aufteilung zeigt, welche davon die Zeit frisst.
+        with _s(schritte, "vk_linie_bauen"):
+            _vk = VektorKueste(H, felder["regionen"], seed, welt_km=WELT_KM)
+        felder["vektor_kueste"] = _vk
+        with _s(schritte, "vk_als_raster"):
+            H = als_raster(_vk)
+        # ARCHETYPFELDER NACHTRAGEN - Pflicht, nicht Kosmetik:
+        # `_seetiefe_aus_archetyp()` gleich darunter braucht sie, um ueberhaupt
+        # zu wirken, und die 2D-Anzeige liest sie fuer den Kuestentypen-Modus
+        # (docs/OFFENE_PUNKTE.md 3.8/3.13). Mit leerem Feld blieb die See
+        # gemessen auf Meereshoehe stehen.
+        with _s(schritte, "vk_archetyp_felder"):
+            felder["kuesten_archetyp"], felder["kuesten_staerke"] = \
+                _vk.archetyp_felder(H)
+    else:
+        with _s(schritte, "kuesten_umformen_raster"):
+            H = _kuesten_umformen(H, felder, seed, size)
 
-    # SEEGRAD-SCHELF (docs/OFFENE_PUNKTE.md 3.2) - eine Mindesttiefe, die mit
-    # dem SEEGRAD waechst statt mit dem blossen euklidischen Kuestenabstand.
+    # SEETIEFE - EINE FORMEL FUER DAS GANZE HAUPTMEER (Redesign 2026-08-13,
+    # siehe _seetiefe_aus_archetyp() weiter oben fuer die volle Begruendung).
     #
-    # Der Gradient oben wirkt nur AUSSERHALB der Kontinentform. In Buchten und
-    # hinter Klippen, die innerhalb der Form unter 0 fallen, blieb das Wasser
-    # so flach, wie das Regionenfeld es zufaellig machte. Gemessen am
-    # 2026-08-06: 14 % der Wasserflaeche flacher als 1 m, und noch 800 m vor
-    # der Kueste waren 39 % flacher als 2 m. Der Nutzer sah das als gruene
-    # Flecken im Wasser - bei Tiefen um 0 liegt die Farbe genau auf der Grenze
-    # zwischen Meer und Land, und die bilineare Glaettung der Anzeige macht
-    # daraus Gruen.
-    #
-    # URSPRUENGLICH ein Distanzgradient `-t*(1-exp(-d/L))` mit zwei freien
-    # Konstanten, dessen Ergebnis an der Aufloesung der Distanztransformation
-    # hing - eine Formel statt einer Festlegung (docs/KLIMA_UND_SEE.md §0).
-    # Ersetzt durch `felder["seegrad_tiefe"]`: eine TABELLE (0/-40/-90/-150/
-    # -200 m je Seegrad, `seegliederung()`), ueber den Zellnachbarschaftsgraphen
-    # der See-Voronoi-Gliederung statt einer reinen Abstandsmetrik gebildet.
-    # Setzt weiterhin nur eine Untergrenze - `minimum` kann nur vertiefen.
-    #
-    # ROHES RAUSCHEN VORHER AUF -10 M ANHEBEN (2026-08-12, Nutzer-Vorgabe):
-    # `minimum(H, seegrad_tiefe)` LAESST tiefere Rauschwerte unangetastet -
-    # steht die rohe Kontinuitaets-/Redistribution-Hoehe an einer Zelle
-    # zufaellig bei -180 m, obwohl ihr Seegrad nur -90 m verlangt, gewinnt
-    # weiterhin die tiefere Zahl. Das erzeugt unregelmaessige, kleinraeumige
-    # Vertiefungen quer durch die geglaettete Seegrad-Zonierung - sichtbar an
-    # zusaetzlichen Dreiecken im 3D-Mesh, besonders bei vielen kleinen Inseln
-    # dicht beieinander (Nutzer-Beispiel: Griechische Inseln). Indem das rohe
-    # H VOR der Seegrad-Anwendung auf hoechstens -10 m angehoben wird, bleibt
-    # ausschliesslich die glatte Seegrad-Tabelle als Tiefenquelle bestehen -
-    # eine flache Vorstufe, aus der `minimum` mit `felder["seegrad_tiefe"]`
-    # praktisch immer den Seegrad-Wert zieht.
-    H = np.where(H <= 0.0, np.maximum(H, -10.0), H)
+    # Vorgeschichte, zur Einordnung: hier standen bis zum 2026-08-13 drei
+    # aufeinander aufbauende Schritte - eine Mindesttiefe aus der reinen
+    # Seegrad-TABELLE (docs/OFFENE_PUNKTE.md 3.2), eine Anhebung des rohen
+    # Rauschens auf -10 m davor (3.7), und ein weicher Uebergang zur
+    # Kuestenform (3.10/3.11) - gefolgt von einer nachtraeglichen Ring-
+    # Ausbreitung, die Monotonie erzwang (3.13). Die Ring-Ausbreitung
+    # erzeugte dabei ein GEMESSENES Kreuz-vs-Diagonal-Ungleichgewicht (median
+    # 0.12 m, bis 69 m, 7% der Seepixel > 5m) - im 3D-Bild sichtbar als
+    # diagonale Linien/Stufen im Wasser (Nutzerbefund 2026-08-13). Die
+    # Kuestenform selbst wird seither ausschliesslich vom Archetyp bestimmt,
+    # die Seegrad-TABELLE (`TIEFE_JE_SEEGRAD`) liefert nur noch den reinen
+    # Ferntiefe-Faktor - beides in einer einzigen, nicht-iterativen Formel.
+    with _s(schritte, "seetiefe"):
+        H = _seetiefe_aus_archetyp(H, felder)
 
-    # WEICHER UEBERGANG STATT HARTEM SCHNITT AN DER KUESTE (Nutzerbefund
-    # 2026-08-12, 3D-Ansicht: gezackte "Mauer" ringsum jede Kueste). Ein
-    # direktes `minimum(H, seegrad_tiefe)` liess unmittelbar am Ufer die grobe
-    # Seegrad-Tabelle (Sprünge 0/-40/-90/-150/-200 m je Grad) gegen den sanften
-    # Strand-/Klippen-Verlauf aus `_kuesten_umformen()` gewinnen - gemessen 63 m
-    # Hoehensprung (Median, teils >500 m) auf einem einzigen Pixel direkt an
-    # der Kuestenlinie. `kuesten_staerke` (oben, 0..0.85) sagt bereits genau,
-    # wie stark ein Pixel vom Kuesten-Pass geformt wurde - je naeher an der
-    # Kueste, desto hoeher. Denselben Wert hier als Blendgewicht wiederverwendet
-    # (kein neues Feld, keine neue Distanztransformation): nahe der Kueste
-    # bleibt ueberwiegend die glatte Kuestenform bestehen, mit wachsendem
-    # Abstand uebernimmt zunehmend die Seegrad-Tiefe - wie zuvor, nur nicht
-    # mehr als harter Schnitt an der Nulllinie.
-    seegrad_ziel = np.minimum(H, felder["seegrad_tiefe"])
-    kuesten_schutz = felder["kuesten_staerke"]
-    H = np.where(H <= 0.0, H * kuesten_schutz + seegrad_ziel * (1.0 - kuesten_schutz), H)
+    with _s(schritte, "hangfeuchte"):
+        felder["niederschlag_mm"] = _hangfeuchte(H, felder, size)
 
     return H.astype(np.float64), felder
 
 
-def fingerabdruck(H, size):
+def _hangfeuchte(H, felder, size):
     """
-    Fuenf Zahlen, die den Charakter einer Landschaft messbar machen.
+    Suedhaenge trocknen aus, Nordhaenge bleiben feucht.
 
-    "Sieht gut aus" ist nicht pruefbar, das hier schon - und damit wird eine
-    spaetere Verschlechterung messbar statt nur gefuehlt
-    (docs/INTEGRATIONSPLAN.md, Abschnitt 7).
+    NUTZERVORGABE 2026-08-24: *"Fjordland, voronoi mit viel suedhang ist
+    etwas trockener als fjordland nordhang, dann Steppe suedhang total
+    trocken, nordhang etwas feuchter."*
+
+    WARUM ERST HIER, am Ende von weltfeld(). Die Parameterfelder entstehen
+    weiter oben aus den Voronoi-Gewichten, und zu dem Zeitpunkt gibt es
+    noch gar kein Gelaende - `H` steht erst ab der Grundhoehenbildung. Eine
+    Hangausrichtung braucht aber Haenge.
+
+    NICHT JE VORONOI-ZELLE, sondern PUNKTWEISE. Der Nutzer hatte nach
+    Zellen gefragt; die werden aber nicht behalten (`voronoi_regionen()`
+    verrechnet sie zu Gewichten). Der Gradient ist ohnehin feiner und
+    trifft die Sache genauer: eine Zelle kann Nord- und Suedhaenge
+    enthalten.
+
+    DIE STAERKE koppelt an die Hangneigung. Auf einer Ebene gibt es keine
+    Exposition, und ohne diese Kopplung bekaeme flaches Land zufaellige
+    Feuchteunterschiede aus Rundungsrauschen im Gradienten.
+
+    Y WAECHST NACH SUEDEN in diesem Projekt (Zeile 0 ist Norden, siehe
+    regionsname()). Ein Suedhang faellt also mit wachsendem y ab, hat
+    demnach dH/dy < 0 - deshalb das Minuszeichen.
     """
-    mpp = WELT_KM * 1000.0 / size
-    land = H > 0.0
-    if land.sum() < 16:
-        return dict(relief_m=0.0, median_hang=0.0, ueber30=0.0,
-                    landanteil=0.0, hoehe_median=float(np.median(H)))
-    dy, dx = np.gradient(H, mpp)
-    hang = np.rad2deg(np.arctan(np.hypot(dx, dy)))
-    return dict(
-        relief_m=float(H[land].max() - H[land].min()),
-        median_hang=float(np.median(hang[land])),
-        ueber30=float(100.0 * np.mean(hang[land] > 30.0)),
-        landanteil=float(100.0 * land.mean()),
-        hoehe_median=float(np.median(H[land])),
-    )
+    staerke_feld = felder.get("hang_trockenheit")
+    nied = np.asarray(felder["niederschlag_mm"], dtype=np.float64)
+    if staerke_feld is None:
+        return nied
 
+    mpp = WELT_KM * 1000.0 / float(size)
+    dy, dx = np.gradient(np.asarray(H, dtype=np.float64), mpp)
+    betrag = np.hypot(dx, dy)
 
-def regionskern(feld, zeile, spalte, size, anteil=0.55):
-    """
-    Der innere Teil einer Region, ohne den Rand.
+    # Suedexposition: +1 voller Suedhang, -1 voller Nordhang, 0 eben.
+    sued = np.where(betrag > 1e-9, -dy / np.maximum(betrag, 1e-9), 0.0)
 
-    Gemessen wird bewusst NICHT der volle 4-km-Kasten: dort blendet die
-    Nachbarregion bereits herein, und das Alpenland macht dann das Relief der
-    Taiga kaputt. `anteil` gibt an, wieviel der Kantenlaenge der Kern hat.
-    """
-    kante = REGION_KM * 1000.0 / (WELT_KM * 1000.0 / size)
-    # MINUS, nicht plus: `zeile` 0 ist Norden, und Norden ist die HOHE
-    # Zeilennummer (siehe die Begruendung in voronoi_regionen). Mit einem Plus
-    # haette diese Pruefung ab dem 2026-08-06 die jeweils gegenueberliegende
-    # Region gemessen und den Fjordland-Wasseranteil am Mittelmeer geprueft.
-    mitte_y = 0.5 * size - (zeile - 1) * kante
-    mitte_x = 0.5 * size + (spalte - 1) * kante
-    halb = 0.5 * anteil * kante
-    y0, y1 = int(mitte_y - halb), int(mitte_y + halb)
-    x0, x1 = int(mitte_x - halb), int(mitte_x + halb)
-    return feld[max(y0, 0):y1, max(x0, 0):x1]
+    # Auf flachem Land keine Exposition. HANG_VOLL_GRAD ist die Neigung,
+    # ab der die Modulation voll wirkt - darunter waechst sie linear an.
+    neigung = np.degrees(np.arctan(betrag))
+    wirkung = np.clip(neigung / HANG_VOLL_GRAD, 0.0, 1.0)
 
+    faktor = 1.0 - np.asarray(staerke_feld, dtype=np.float64) * sued * wirkung
+    return nied * np.clip(faktor, 0.05, 3.0)
 
-def pruefe_regionen(H, size):
-    """Fingerabdruck je Region gegen den Sollwasseranteil."""
-    zeilen = []
-    for zeile, spalte, r in alle_regionen():
-        kern = regionskern(H, zeile, spalte, size)
-        f = fingerabdruck(kern, size)
-        wasser = 100.0 - f["landanteil"]
-        zeilen.append(dict(name=r["name"], soll=r["wasser_soll"], ist=wasser,
-                           relief=f["relief_m"], hang=f["median_hang"],
-                           ueber30=f["ueber30"], hoehe=f["hoehe_median"]))
-    return zeilen

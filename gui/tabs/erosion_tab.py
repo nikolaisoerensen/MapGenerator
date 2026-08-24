@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
     QButtonGroup, QLabel
 )
-from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtCore import pyqtSlot, Qt
 from PyQt6.QtGui import QFont
 import logging
 import numpy as np
@@ -27,7 +27,7 @@ from typing import Dict, Any
 
 from gui.tabs.base_tab import BaseMapTab
 from gui.widgets.widgets import ParameterSlider, StatusIndicator
-from gui.config.value_default import get_parameter_config
+from gui.config.value_default import get_parameter_config, EROSION_AKTIV
 
 
 class ErosionTab(BaseMapTab):
@@ -100,6 +100,8 @@ class ErosionTab(BaseMapTab):
             self.logger.info("Control panel layout was detached - reinstalled")
 
         try:
+            self._create_stilllegungs_hinweis()
+
             # Gruppiert nach dem, was der Nutzer beim Kalibrieren zusammen
             # anfasst - nicht nach der internen Struktur des Simulators.
             self._create_parameter_group(
@@ -122,6 +124,42 @@ class ErosionTab(BaseMapTab):
 
         except Exception as e:
             self.logger.error(f"Parameter control creation failed: {e}")
+
+    def _create_stilllegungs_hinweis(self):
+        """
+        Hinweisstreifen, solange die Erosionskette abgeschaltet ist
+        (docs/OFFENE_PUNKTE.md 12.2).
+
+        WARUM. `EROSION_AKTIV = False` macht 9 Ansichten und 13 Regler
+        wirkungslos. Das ist eine Entscheidung des Nutzers vom 2026-08-06
+        ("vorerst nein"), SIEHT im Programm aber aus wie ein Fehler: man stellt
+        etwas ein, die Karte bleibt gleich, und man kann Absicht nicht von
+        Defekt unterscheiden. Die Regler sind bereits gesperrt (base_tab
+        `_regler_stilllegen()` meldet "13 von 13"), es fehlte nur die
+        sichtbare Begruendung.
+
+        AN DEN SCHALTER GEKOPPELT, nicht fest verdrahtet - dasselbe Muster wie
+        bei der Sperrliste. Wird `EROSION_AKTIV` wieder True, verschwindet der
+        Streifen von selbst, ohne dass jemand daran denken muss.
+        """
+        if EROSION_AKTIV:
+            return
+
+        hinweis = QLabel(
+            "<b>Die Erosionskette ist abgeschaltet.</b><br>"
+            "Alle <i>erosion.*</i>-Knoten liefern Nullkarten, die Regler "
+            "unten sind deshalb gesperrt und die Ansichten bleiben leer. "
+            "Das ist so eingestellt, kein Fehler.<br>"
+            "<span style='color:#7a6a4a;'>Umschalten: "
+            "<tt>EROSION_AKTIV</tt> in gui/config/value_default.py</span>")
+        hinweis.setWordWrap(True)
+        hinweis.setTextFormat(Qt.TextFormat.RichText)
+        hinweis.setStyleSheet(
+            "QLabel { background-color: #fff4d6; color: #5a4a2a; "
+            "border: 1px solid #e0c88a; border-radius: 4px; padding: 8px; }")
+        self.control_panel_content_layout.addWidget(hinweis)
+        self.logger.info("Erosionsreiter: Stilllegungs-Hinweis angezeigt "
+                         "(EROSION_AKTIV ist False)")
 
     def _create_parameter_group(self, title: str, param_keys):
         """Erstellt eine Parameter-GroupBox für eine Teilmenge der Erosion-Parameter."""

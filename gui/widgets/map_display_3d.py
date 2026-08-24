@@ -384,6 +384,10 @@ class MapDisplay3D(QOpenGLWidget):
     camera_changed = pyqtSignal(float, float, float)  # (rotation_x, rotation_y, zoom)
     vertex_selected = pyqtSignal(int, int)  # (x, y)
     rendering_error = pyqtSignal(str)  # Error-Messages
+    # Anklicken von Orten/Wegen (docs/OFFENE_PUNKTE.md 6.29). Traegt das
+    # Treffer-dict aus karten_auswahl.treffer_suchen() bzw. None beim Klick
+    # ins Leere - der Reiter entscheidet, was er damit anzeigt.
+    objekt_gewaehlt = pyqtSignal(object)
 
     # Reale Weltgröße, die die Karte immer abdeckt (unabhängig von map_size/
     # Pixelauflösung) - siehe _calculate_terrain_scaling(). Zentral in
@@ -494,6 +498,14 @@ class MapDisplay3D(QOpenGLWidget):
         # shaders/3d_display/wind_vector.vert/.frag. Vorher zeigte "wind" in 3D nur
         # eine schwache Magnitude-Heatmap ohne Richtung ("nichts zu erkennen").
         self.wind_shader_program = None
+
+        # Eigenes Mini-Shader-Programm fuer die Wegbaender (6.28,
+        # Nutzerfeedback 2026-08-16: das bisherige wind_shader_program ist
+        # komplett unlit - die Baender sahen dadurch "fake" aus und passten
+        # nicht zur Terrain-Beleuchtung). Braucht Normalen (fuer echtes
+        # Licht) und eine Auswahl-Einfaerbung, die wind_vector.vert/.frag
+        # nicht kennen - siehe shaders/3d_display/wegband.vert/.frag.
+        self.wegband_shader_program = None
         self.current_tab = "terrain"  # Aktueller Tab-Typ
 
         # Mesh-Daten
@@ -501,6 +513,30 @@ class MapDisplay3D(QOpenGLWidget):
         self.mesh_indices = None
         self.vertex_buffer = None
         self.index_buffer = None
+
+        # OVERLAY-TEXTUR-ZWISCHENSPEICHER (2026-08-13, Nutzerbefund "Kuestentyp
+        # ruckelt im 3D, Slope auch noch"). Gemessen: `_colorize_layer()` fuer
+        # Slope und `rasterize_kuesten_archetypen_rgba()` brauchen bei 1024px
+        # je rund 0.6s - VOR diesem Fix wurde das bei JEDEM paintGL()-Aufruf
+        # neu gerechnet, also bei jeder Mausbewegung waehrend des Drehens.
+        # Schluessel (tab_type, layer_name) -> (Objekt-ID der Quelldaten,
+        # Textur-ID). Objekt-Identitaet genuegt hier als Cache-Schluessel
+        # (anders als beim Heightmap-Vergleich in update_heightmap(), wo
+        # get_terrain_data_combined() bei JEDEM Aufruf eine Kopie liefert) -
+        # overlay_data[tab_type][layer_name] wird nur bei einem echten Push
+        # (update_overlay_data()) durch ein NEUES Objekt ersetzt, zwischen
+        # zwei Frames waehrend des Kamera-Drehens bleibt es dasselbe Array.
+        self._overlay_texture_cache = {}
+        # Zwischenspeicher der Wegband-Geometrie (6.28) - sie je Frame neu
+        # zu bauen waere derselbe Fehler wie bei den Overlays (6.21).
+        self._wegband_cache = {}
+        # Auswaehlbare Objekte in WELTkoordinaten, gefuellt von
+        # setze_auswahlobjekte() (6.29). Getrennt von overlay_data, weil hier
+        # die fertigen Weltpositionen stehen und nicht die Rohdaten.
+        self._auswahl_orte = np.zeros((0, 3), dtype=np.float64)
+        self._auswahl_orte_kennung = []
+        self._auswahl_wege = []
+        self._auswahl_wege_kennung = []
         self.vao = None  # Vertex Array Object
 
         # Shader-System
@@ -514,7 +550,15 @@ class MapDisplay3D(QOpenGLWidget):
 
         # Layer-Visibility für verschiedene Tabs
         self.layer_visibility = {
-            "terrain": {"base": True, "slope": False},
+            "terrain": {"base": True, "slope": False,
+                        "region_overlay": False, "kuesten_overlay": False,
+                        # AUS als Vorgabe. Der Fluss-Reiter schaltet es
+                        # ein, wenn sein Modus "Flussnetz" ist, und wieder
+                        # AUS, sobald der Nutzer auf "Gelaende" oder
+                        # "Ordnung" wechselt (Nutzerbefund 2026-08-24:
+                        # *"wenn man auf Ordnung geht dann aendert sich
+                        # nichts"* - das Netz lag ueber allem).
+                        "river_overlay": False},
             "geology": {"rock_map": True, "hardness_map": False,
                         "terrain_hub_delta": False, "tilt_delta": False, "fold_delta": False,
                         "fault_delta": False, "intrusion_delta": False},
@@ -525,12 +569,26 @@ class MapDisplay3D(QOpenGLWidget):
             "water": {"water_map": True, "soil_moisture": False, "erosion": False, "sedimentation": False,
                       "flow_map": False},
             "biome": {"biome_map": True, "super_biome_mask": False},
-            "settlement": {"plots": True, "settlements": True, "landmarks": True, "roads": True, "civ_map": False}
+            "settlement": {"plots": True, "settlements": True, "landmarks": True, "roads": True, "civ_map": False,
+                           # "uebersicht": globale Siedlungsuebersicht als RGBA-Skin
+                           # (Staedte/Landmarken/Roadsites als Punkte, Land-/Seewege als
+                           # Linien) - 2026-08-13, Nutzer-Vorgabe "3D Settlements global
+                           # sollte jetzt umgesetzt werden". Ersetzt funktional die drei
+                           # nie implementierten Marker-Layer darueber (siehe
+                           # _render_settlement_markers(), ein leerer TODO-Stub).
+                           "uebersicht": False,
+                           # Wege als echte Bandgeometrie (6.28)
+                           "wegbaender": False}
         }
 
         # Overlay-Daten für verschiedene Tabs
         self.overlay_data = {
-            "terrain": {"slope": None},
+            # `river_overlay` liegt unter "terrain", NICHT unter einem
+            # eigenen "river"-Eintrag: `gui/tabs/river_tab.py` setzt
+            # `generator_type = "terrain"` und meldet sich im 3D genau so
+            # an. Ein eigener Tab-Typ waere nie erreicht worden.
+            "terrain": {"slope": None, "region_overlay": None,
+                        "kuesten_overlay": None, "river_overlay": None},
             "geology": {"rock_map": None, "hardness_map": None,
                         "terrain_hub_delta": None, "tilt_delta": None, "fold_delta": None,
                         "fault_delta": None, "intrusion_delta": None},
@@ -541,7 +599,8 @@ class MapDisplay3D(QOpenGLWidget):
             "water": {"water_map": None, "soil_moisture": None, "erosion": None, "sedimentation": None,
                       "flow_map": None},
             "biome": {"biome_map": None, "super_biome_mask": None},
-            "settlement": {"plots": None, "settlements": [], "landmarks": [], "roads": [], "civ_map": None}
+            "settlement": {"plots": None, "settlements": [], "landmarks": [], "roads": [], "civ_map": None,
+                           "uebersicht": None, "wegbaender": None}
         }
 
         # Mouse-Interaction
@@ -563,6 +622,40 @@ class MapDisplay3D(QOpenGLWidget):
         # Heightmaps mit Kantenlaenge 2^n+1 aktiv, sonst automatischer
         # Rueckfall auf das Gleichmaessig-Gitter (siehe _generate_terrain_mesh).
         self._adaptive_mesh_fehler_toleranz_m = 6.0
+
+        # ALTERNATIVER NETZBAUER, normalerweise aus.
+        #
+        # Ein Aufrufer kann hier eine Funktion
+        # `(heightmap, scale_factor, height_scale) -> (vertices, indices, stats)`
+        # hinterlegen; sie hat dann Vorrang vor dem Quadtree. Gedacht fuer
+        # `tools/mesh_werkstatt.py`, wo die Netzarten live verglichen werden -
+        # und spaeter fuer eine Umschaltung in der App selbst.
+        #
+        # Voreinstellung None heisst: exakt das bisherige Verhalten. Liefert
+        # der Bauer None, wird das LAUT gemeldet und auf das Quadtree
+        # zurueckgefallen - ein stiller Rueckfall waere von Erfolg nicht zu
+        # unterscheiden (siehe CLAUDE.md, dieselbe Falle wie bei den
+        # GPU-Fallbacks und der 2^n+1-Bedingung).
+        self._mesh_bauer = None
+
+        # Index des angeklickten Weges in der Liste aus setze_auswahlobjekte()
+        # (erst Landwege, dann Seewege - dieselbe Reihenfolge wie im
+        # Zeichenpuffer). None = nichts gewaehlt.
+        self._ausgewaehlter_weg = None
+
+    def setze_mesh_bauer(self, bauer):
+        """
+        Netzbauer setzen (oder mit None zuruecksetzen) und Mesh neu bauen.
+        """
+        self._mesh_bauer = bauer
+        if self.heightmap is not None:
+            self.makeCurrent()
+            try:
+                # legt die GL-Buffer am Ende selbst an
+                self._generate_terrain_mesh()
+            finally:
+                self.doneCurrent()
+            self.update()
 
     def initializeGL(self):
         """
@@ -600,6 +693,7 @@ class MapDisplay3D(QOpenGLWidget):
             print("DEBUG: Loading shaders...")
             self._load_shaders()
             self._compile_wind_shader()
+            self._compile_wegband_shader()
 
             # Lighting-Setup
             if self.shader_program:
@@ -668,10 +762,25 @@ class MapDisplay3D(QOpenGLWidget):
         if self.mesh_vertices is None:
             return False
 
-        # Shader aktivieren (falls verfügbar)
-        if self.shader_program:
-            gl.glUseProgram(self.shader_program)
-            self._upload_matrices()
+        # OHNE SHADERPROGRAMM WIRD NICHT GEZEICHNET.
+        #
+        # Vorher lief es hier mit `return True` weiter und rief anschliessend
+        # glDrawElements ohne aktives Programm - im Core-Profile undefiniert,
+        # in der Praxis ein harter Prozessabbruch (0xC0000409). Lieber ein
+        # leeres Fenster mit einer klaren Meldung als ein Absturz ohne
+        # Traceback.
+        if self.shader_program is None:
+            if not getattr(self, "_shader_fehlt_gemeldet", False):
+                self._shader_fehlt_gemeldet = True
+                print("FEHLER: kein Shaderprogramm - es wird nichts gezeichnet. "
+                      "Meist bedeutet das, dass die Dateien unter "
+                      "shaders/3d_display/ nicht gefunden wurden.")
+                self.rendering_error.emit(
+                    "Kein Shaderprogramm - shaders/3d_display/ nicht gefunden?")
+            return False
+
+        gl.glUseProgram(self.shader_program)
+        self._upload_matrices()
 
         return True
 
@@ -679,6 +788,14 @@ class MapDisplay3D(QOpenGLWidget):
         """
         Funktionsweise: Aktiviert Fallback-Rendering ohne Shader
         Aufgabe: Einfaches Wireframe/Point-Rendering wenn Shader fehlschlagen
+
+        DER NAME VERSPRICHT MEHR, ALS DIE FUNKTION HAELT: sie schaltet nur den
+        Polygonmodus auf Linien um. Ein Ersatz-Shaderprogramm baut sie nicht.
+        Ohne Programm ist `glDrawElements` im Core-Profile aber undefiniert -
+        am 2026-08-16 starb der Prozess dadurch hart mit 0xC0000409, ganz ohne
+        Python-Traceback (Ursache waren nicht gefundene Shaderdateien, siehe
+        `_load_shader_from_file`). Deshalb meldet `_prepare_rendering()` jetzt
+        False, statt ohne Programm weiterzuzeichnen.
         """
         self.shader_fallback_active = True
         gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_LINE)  # Wireframe-Modus
@@ -835,6 +952,53 @@ class MapDisplay3D(QOpenGLWidget):
             self._calculate_terrain_scaling()
             self.update()
 
+    def overlay_river_generations(self, generation_map, zeige_mikro=False):
+        """
+        Das Flussnetz im 3D - Gegenstueck zur gleichnamigen 2D-Methode.
+
+        WARUM ES SIE BRAUCHTE (Nutzerbefund 2026-08-24): *"dass man im 3D
+        modus bei dem Flussnetzwerk keine fluesse sehn kann."*
+
+        `gui/tabs/river_tab.py` ruft diese Methode ueber ein `hasattr` auf.
+        In der 2D-Anzeige gab es sie seit dem 2026-08-06, in der 3D-Anzeige
+        nie - der Aufruf fiel damit LAUTLOS aus, ohne Fehler und ohne
+        Warnung. Genau das Muster, vor dem CLAUDE.md warnt: ein stiller
+        Rueckfall ist von Erfolg nicht zu unterscheiden.
+
+        Gezeichnet wird als RGBA-Textur auf dem Gelaende, mit derselben
+        Farblogik wie in 2D (`rasterize_fluesse_rgba` in map_display_2d) -
+        EINE Funktion fuer beide Ansichten, damit keine zweite Wahrheit
+        entsteht.
+        """
+        if self.heightmap is None:
+            return
+        if not isinstance(generation_map, np.ndarray) or generation_map.ndim != 2:
+            return
+        self.set_layer_visibility("terrain", "river_overlay", True)
+        self.update_overlay_data("terrain", "river_overlay", {
+            "river_generation": generation_map,
+            "heightmap": self.heightmap,
+            "zeige_mikro": bool(zeige_mikro),
+            # Im 3D verschwindet ein einzelnes Pixel auf der schraeg
+            # betrachteten Textur - die 2D-Ansicht zeichnet mit `scatter`
+            # ohnehin groessere Marker.
+            "breite_px": 1,
+        })
+        self.update()
+
+    def clear_river_overlay(self):
+        """
+        Das Flussnetz wieder abschalten.
+
+        Der Fluss-Reiter ruft das, sobald sein Modus nicht mehr
+        "Flussnetz" ist. Ohne diesen Weg blieb das Netz ueber JEDER
+        Ansicht des Reiters liegen - der Nutzerbefund vom 2026-08-24
+        (*"wenn man auf Ordnung geht dann aendert sich nichts und wenn man
+        wieder auf gelaende geht aendert sich auch nichts"*).
+        """
+        self.set_layer_visibility("terrain", "river_overlay", False)
+        self.update()
+
     def update_overlay_data(self, tab_type, layer_name, data):
         """
         Funktionsweise: Aktualisiert Overlay-Daten für spezifische Tabs
@@ -850,6 +1014,15 @@ class MapDisplay3D(QOpenGLWidget):
         if tab_type == "settlement" and layer_name in ["settlements", "landmarks", "roads"]:
             if not _validate_settlement_data(data):
                 self.rendering_error.emit(f"Invalid settlement data for {layer_name}")
+                return
+        elif layer_name in ("region_overlay", "kuesten_overlay", "wegbaender",
+                            "river_overlay"):
+            # Rohes Payload-Dict wie fuer den 2D-Renderer (regionen/heightmap/
+            # ggf. kuesten_archetyp/kuesten_staerke), KEIN fertiges Array -
+            # wird erst beim Zeichnen rasterisiert, siehe
+            # _render_dict_rgba_overlay() (2026-08-13).
+            if data is not None and not isinstance(data, dict):
+                self.rendering_error.emit(f"Invalid overlay payload for {tab_type}.{layer_name}")
                 return
         else:
             if not _validate_overlay_data(data, expected_shape):
@@ -945,11 +1118,33 @@ class MapDisplay3D(QOpenGLWidget):
             print(f"DEBUG: Shader file does not exist: {corrected_path}")
             print(f"DEBUG: Current working directory: {os.getcwd()}")
 
+            # ALLE PFADE HIER WAREN RELATIV ZUM ARBEITSVERZEICHNIS.
+            #
+            # Damit lud das 3D-Display seine Shader NUR, wenn das Programm aus
+            # dem Projektstamm gestartet wurde. Aufgefallen am 2026-08-16 beim
+            # Start von `tools/mesh_werkstatt.py`: keiner der sechs Shader
+            # wurde gefunden, danach zeichnete `_prepare_rendering()` ohne
+            # Shaderprogramm weiter (`_activate_fallback_rendering()` schaltet
+            # nur den Polygonmodus um) - und `glDrawElements` mit Programm 0
+            # ist im Core-Profile undefiniert. Der Prozess starb hart mit
+            # 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN), ohne Python-Traceback.
+            #
+            # Deshalb zusaetzlich vom Projektstamm aus suchen, der aus
+            # __file__ kommt (diese Datei liegt in gui/widgets/, also drei
+            # Ebenen hoch). Die Reihenfolge bleibt: erst das bisherige
+            # Verhalten, dann der absolute Pfad - was heute laeuft, laeuft
+            # unveraendert weiter.
+            wurzel = os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))))
+            name = os.path.basename(filepath)
+
             # Versuche alternative Pfade
             alternative_paths = [
                 filepath,  # Original
                 f"shaders/{os.path.basename(filepath)}",  # Nur shaders/
-                f"gui/shaders/{os.path.basename(filepath)}"  # gui/shaders/
+                f"gui/shaders/{os.path.basename(filepath)}",  # gui/shaders/
+                os.path.join(wurzel, "shaders", "3d_display", name),
+                os.path.join(wurzel, "shaders", name),
             ]
 
             for alt_path in alternative_paths:
@@ -1036,6 +1231,30 @@ class MapDisplay3D(QOpenGLWidget):
             self.rendering_error.emit(f"Wind vector shader compilation failed: {str(e)}")
             self.wind_shader_program = None
 
+    def _compile_wegband_shader(self):
+        """
+        Kompiliert das Mini-Shader-Programm fuer die Wegbaender (6.28,
+        Nutzerfeedback 2026-08-16) - eigenes Paar statt des unlit
+        wind_shader_program, siehe self.wegband_shader_program oben und
+        shaders/3d_display/wegband.vert/.frag. Scheitert die Kompilierung,
+        bleibt self.wegband_shader_program None - _render_wegbaender() no-opt
+        dann still (die Punkt-/Linien-Uebersicht aus 6.23 bleibt trotzdem
+        sichtbar).
+        """
+        vertex_shader_code = self._load_shader_from_file("shader/wegband.vert")
+        fragment_shader_code = self._load_shader_from_file("shader/wegband.frag")
+
+        if vertex_shader_code is None or fragment_shader_code is None:
+            return
+
+        try:
+            vertex_shader = shaders.compileShader(vertex_shader_code, gl.GL_VERTEX_SHADER)
+            fragment_shader = shaders.compileShader(fragment_shader_code, gl.GL_FRAGMENT_SHADER)
+            self.wegband_shader_program = shaders.compileProgram(vertex_shader, fragment_shader)
+        except Exception as e:
+            self.rendering_error.emit(f"Wegband shader compilation failed: {str(e)}")
+            self.wegband_shader_program = None
+
     def _load_fallback_shaders(self):
         """
         Funktionsweise: Lädt einfache Fallback-Shader für Wireframe-Rendering
@@ -1101,16 +1320,62 @@ class MapDisplay3D(QOpenGLWidget):
         # dieses Projekts erfuellen das); sonst automatischer Rueckfall auf
         # das bisherige Gleichmaessig-Gitter unten.
         adaptives_ergebnis = None
-        if ist_fuer_adaptives_mesh_geeignet(heightmap):
+
+        # KUESTENSCHNITT (gui/widgets/kuesten_schnitt.py, docs/KUESTENMODELL.md
+        # §8): das Gitter zellweise entlang der Nullkontur schneiden, damit die
+        # Kuestenlinie eine echte Dreieckskante wird statt einer Rastertreppe.
+        #
+        # Gemessen bei 384 px: 4240 Konturvertices, davon 99.7 % NICHT auf
+        # einer Pixelecke (Median-Versatz 0.164 px); das Quadtree liegt bei
+        # 0.000004 px, also exakt darauf. Dicht (keine Kante an mehr als zwei
+        # Dreiecken, Flaeche exakt), Konturhoehen exakt 0.
+        #
+        # PREIS, ehrlich benannt: der Schnitt geht vom VOLLEN Gitter aus und
+        # kostet dadurch rund fuenfmal so viele Dreiecke wie das adaptive
+        # Quadtree (das nur etwa ein Fuenftel des vollen Gitters braucht).
+        # Deshalb umschaltbar, Vorgabe siehe value_default.py.
+        try:
+            from gui.config.value_default import KUESTEN_SCHNITT_AKTIV
+        except ImportError:
+            KUESTEN_SCHNITT_AKTIV = False
+        if KUESTEN_SCHNITT_AKTIV and self._mesh_bauer is None:
+            hat_kueste = bool((heightmap > 0).any() and (heightmap <= 0).any())
+            if hat_kueste:
+                from gui.widgets.kuesten_schnitt import baue_schnitt_mesh
+                adaptives_ergebnis = baue_schnitt_mesh(
+                    heightmap, self.terrain_scale_factor,
+                    self.terrain_height_scale)
+                if adaptives_ergebnis is None:
+                    print("DEBUG: Kuestenschnitt lieferte nichts - "
+                          "Rueckfall auf das Quadtree")
+
+        # Alternativer Netzbauer (siehe setze_mesh_bauer) hat Vorrang.
+        if adaptives_ergebnis is None and self._mesh_bauer is not None:
+            adaptives_ergebnis = self._mesh_bauer(
+                heightmap, self.terrain_scale_factor, self.terrain_height_scale)
+            if adaptives_ergebnis is None:
+                print("DEBUG: Alternativer Netzbauer lieferte nichts - "
+                      "Rueckfall auf das Quadtree")
+
+        if adaptives_ergebnis is None and ist_fuer_adaptives_mesh_geeignet(heightmap):
             adaptives_ergebnis = build_adaptive_mesh(
                 heightmap, self.terrain_scale_factor, self.terrain_height_scale,
                 fehler_toleranz_m=self._adaptive_mesh_fehler_toleranz_m)
 
         if adaptives_ergebnis is not None:
             self.mesh_vertices, self.mesh_indices, mesh_stats = adaptives_ergebnis
-            print(f"DEBUG: Adaptives Terrain-Mesh: {mesh_stats['dreiecke']}/{mesh_stats['voll_dreiecke']} "
+            herkunft = "aus Zwischenspeicher" if mesh_stats.get("aus_cache") else "neu gerechnet"
+            # `blaetter` gibt es nur beim Quadtree - der alternative Netzbauer
+            # liefert andere Kennzahlen, deshalb .get() statt [].
+            zusatz = (f"{mesh_stats['blaetter']} Blaetter, "
+                      if "blaetter" in mesh_stats else "")
+            if "frei_verschoben" in mesh_stats:
+                zusatz += (f"{mesh_stats['frei_verschoben']:.1%} Vertices frei "
+                           f"verschoben (Median {mesh_stats['versatz_median_px']:.3f} px), ")
+            print(f"DEBUG: Adaptives Terrain-Mesh ({herkunft}): "
+                  f"{mesh_stats['dreiecke']}/{mesh_stats['voll_dreiecke']} "
                   f"Dreiecke ({mesh_stats['dreiecke'] / mesh_stats['voll_dreiecke']:.1%}), "
-                  f"{mesh_stats['blaetter']} Blaetter, {mesh_stats['vertices']}/{mesh_stats['voll_vertices']} Vertices")
+                  f"{zusatz}{mesh_stats['vertices']}/{mesh_stats['voll_vertices']} Vertices")
         else:
             print("DEBUG: Adaptives Mesh nicht anwendbar (Heightmap-Groesse) - Gleichmaessig-Gitter")
             # Vertex-Positionen (vectorized, (height, width) Grids)
@@ -1261,6 +1526,53 @@ class MapDisplay3D(QOpenGLWidget):
             gl.glDeleteBuffers(1, [self.index_buffer])
             self.index_buffer = None
 
+        self._cleanup_overlay_texturen()
+        # Wegband-Puffer mit freigeben: sie haengen an derselben Heightmap.
+        # Der naechste Frame legt sie aus den zwischengespeicherten
+        # Python-Arrays neu an, falls die Geometrie noch gilt.
+        self._wegband_puffer_freigeben()
+
+    def _wegband_puffer_freigeben(self):
+        """
+        GL-Puffer der Wegbaender loeschen.
+
+        Gehoert zu der Zwischenspeicherung in `_render_wegbaender()`: solange
+        die Geometrie gleich bleibt, ueberleben VAO/VBO/EBO viele Frames.
+        Aendert sie sich - oder wird das Widget abgeraeumt -, muessen sie weg,
+        sonst waechst der VRAM-Verbrauch bei jedem neuen Wegnetz. Genau dieser
+        Fehler ist am 2026-08-11 schon einmal beim Wasser-VAO passiert (siehe
+        _generate_terrain_mesh): dort stand nur `= None`, was die
+        Python-Referenz verwirft, aber nicht das GL-Objekt.
+        """
+        gepuffert = self._wegband_cache.get("gl") if self._wegband_cache else None
+        if not gepuffert:
+            return
+        vao, vbo, ebo = gepuffert
+        try:
+            gl.glDeleteBuffers(1, [vbo])
+            gl.glDeleteBuffers(1, [ebo])
+            gl.glDeleteVertexArrays(1, [vao])
+        except Exception:                       # noqa: BLE001
+            pass
+        self._wegband_cache["gl"] = None
+
+    def _cleanup_overlay_texturen(self):
+        """
+        Funktionsweise: Loescht alle im Overlay-Textur-Cache (siehe
+        self._overlay_texture_cache in __init__) gehaltenen GL-Texturen und
+        leert den Cache.
+        Aufgabe: Verhindert, dass bei jeder Neugenerierung verwaiste
+        Texturen im VRAM liegen bleiben - der Cache hebt Texturen ueber
+        Objekt-Identitaet der Quelldaten auf (siehe _render_overlay()/
+        _render_dict_rgba_overlay()); eine Neugenerierung ersetzt diese
+        Objekte immer, das alte Eintraege danach nie wieder trifft. Wird von
+        _cleanup_mesh_buffers() aus aufgerufen, also bei jedem Mesh-Neubau
+        (_generate_terrain_mesh()), nicht erst beim Schliessen des Widgets.
+        """
+        for _, texture_id in self._overlay_texture_cache.values():
+            gl.glDeleteTextures(1, [texture_id])
+        self._overlay_texture_cache.clear()
+
     def _update_projection_matrix(self):
         """
         Funktionsweise: Aktualisiert Projection-Matrix bei Fenster-Resize
@@ -1270,17 +1582,46 @@ class MapDisplay3D(QOpenGLWidget):
             return
 
         aspect_ratio = self.width() / self.height()
+
+        # NEAR- UND FAR-PLANE WANDERN MIT DEM ZOOM (2026-08-24).
+        #
+        # Hier stand vorher fest `near=0.1, far=2000.0` mit dem Kommentar, das
+        # Verhaeltnis 0.1:2000 sei "fuer einen 24-Bit-Tiefenpuffer
+        # unkritisch". **Das war falsch, und es hat Geld gekostet:** die
+        # Tiefengenauigkeit haengt fast allein an der NEAR-Plane, nicht am
+        # Verhaeltnis. Nachgerechnet fuer einen 24-Bit-Puffer, Welt 10
+        # Einheiten breit:
+        #
+        #     Kameraabstand 17 (Vorgabe):  0.000172 Welteinheiten
+        #     Kameraabstand 30:            0.000536
+        #     Kameraabstand 60:            0.002146
+        #
+        # Das Wegband schwebt 0.001 Einheiten ueber dem Gelaende. Ab
+        # Kameraabstand ~45 ist die Tiefenaufloesung also GROESSER als der
+        # Abstand - und genau das war der Nutzerbefund vom 2026-08-24: "der
+        # weg verschwindet bei vielen kamera-bewegungs-aktionen ... auf
+        # distanz kann er auch mal gestueckelt sein". Kein Fehler der
+        # Wegdarstellung, sondern ein Praezisionsproblem der Projektion.
+        #
+        # Mitwandernd wird daraus (gemessen, gleiche Rechnung):
+        #
+        #     Kameraabstand 17:  0.000020  ( 8.6x genauer)
+        #     Kameraabstand 30:  0.000035  (15.3x genauer)
+        #     Kameraabstand 60:  0.000070  (30.8x genauer)
+        #
+        # `near = Abstand/20` ist reichlich sicher: das Gelaende ist 10
+        # Einheiten breit, bei Abstand 17 liegt der naechste Punkt also rund
+        # 10 Einheiten entfernt, die Near-Plane bei 0.85. Die Untergrenze
+        # 0.1 haelt das bisherige Verhalten bei maximalem Hereinzoomen
+        # (min_distance = 2.0, siehe zoom-Handler).
+        abstand = float(getattr(self, "camera_distance", 17.0) or 17.0)
+        near = max(0.1, abstand / 20.0)
+        # Far grosszuegig hinter das Gelaende, aber nicht bei 2000 festgenagelt -
+        # der Zuschlag deckt Panning und die Kartenausdehnung ab.
+        far = abstand + 200.0
+
         self.projection_matrix = _create_perspective_matrix(
-            fov=self.fov,
-            aspect=aspect_ratio,
-            near=0.1,
-            # 2026-07-28 von 100 auf 2000 angehoben, zusammen mit der
-            # Zoom-Obergrenze: sobald man den Blickpunkt wegfliegen kann,
-            # verschwand das Gelaende ab 100 Einheiten schlicht hinter der
-            # Far-Plane. Die Near-Plane bleibt bei 0.1, das Verhaeltnis
-            # 0.1:2000 ist fuer einen 24-Bit-Tiefenpuffer unkritisch.
-            far=2000.0
-        )
+            fov=self.fov, aspect=aspect_ratio, near=near, far=far)
 
     # Die View-Matrix wird am Ende von _update_view_matrix() in ihrer X-Zeile
     # NEGIERT (Ost-West-Korrektur, dort ausfuehrlich begruendet). Bildschirm-
@@ -1442,6 +1783,25 @@ class MapDisplay3D(QOpenGLWidget):
         if self.layer_visibility["terrain"]["slope"]:
             self._render_overlay("terrain", "slope")
 
+        # Regionen/Kuestentypen als RGBA-Skin (2026-08-13, Nutzer-Vorgabe "die
+        # 3D darstellung ALLER 2D maps, aber vor allem der Kuesten auf die 3D
+        # Terrains bekommen") - dieselbe Rasterisierung wie 2D, siehe
+        # _render_dict_rgba_overlay().
+        if self.layer_visibility["terrain"].get("region_overlay"):
+            self._render_dict_rgba_overlay("terrain", "region_overlay")
+        if self.layer_visibility["terrain"].get("kuesten_overlay"):
+            self._render_dict_rgba_overlay("terrain", "kuesten_overlay")
+
+        # DAS FLUSSNETZ (2026-08-24, Nutzerbefund *"dass man im 3D modus bei
+        # dem Flussnetzwerk keine fluesse sehn kann"*).
+        #
+        # Es liegt im Terrain-Zweig, weil `gui/tabs/river_tab.py`
+        # `generator_type = "terrain"` setzt und sich im 3D so anmeldet.
+        # Gezeichnet wird nur, wenn der Fluss-Reiter Daten geschickt hat -
+        # `_render_dict_rgba_overlay` kehrt bei leerem Slot von selbst um.
+        if self.layer_visibility["terrain"].get("river_overlay", True):
+            self._render_dict_rgba_overlay("terrain", "river_overlay")
+
     def _render_geology_tab(self):
         """
         Funktionsweise: Rendert Geology-Tab mit Rock- und Hardness-Maps
@@ -1529,6 +1889,17 @@ class MapDisplay3D(QOpenGLWidget):
 
         if self.layer_visibility["settlement"]["plots"]:
             self._render_plot_boundaries()
+
+        # Globale Siedlungsuebersicht als Alpha-Skin (2026-08-13) - derselbe
+        # Weg wie Plots/Regionen/Kuestentypen, gecacht ueber die Objekt-
+        # Identitaet des RGBA-Arrays (siehe _overlay_cache_pruefen()).
+        if self.layer_visibility["settlement"].get("uebersicht"):
+            self._render_settlement_uebersicht()
+
+        # Wege als echte Bandgeometrie (6.28) - NACH dem Skin, damit sie
+        # darauf liegen, und mit eigenem Draw-Call.
+        if self.layer_visibility["settlement"].get("wegbaender"):
+            self._render_wegbaender()
 
         if self.layer_visibility["settlement"]["settlements"]:
             self._render_settlement_markers("settlements")
@@ -1763,26 +2134,42 @@ class MapDisplay3D(QOpenGLWidget):
         if overlay_data is None or not self.shader_program or self.vertex_buffer is None:
             return
 
-        try:
-            rgb = _colorize_layer(np.asarray(overlay_data), layer_name)
-        except Exception:
-            return
+        # ZWISCHENGESPEICHERTE TEXTUR WIEDERVERWENDEN, WENN DIE QUELLDATEN
+        # DIESELBEN SIND (2026-08-13, siehe self._overlay_texture_cache in
+        # __init__ fuer die volle Begruendung - 0.6s/Frame ohne diesen Cache).
+        # `water_map` haengt zusaetzlich von `water_biomes_reference` ab, das
+        # unabhaengig vom Overlay selbst wechseln kann - beide Objekt-IDs
+        # gehen in den Vergleich ein.
+        cache_schluessel = (tab_type, layer_name)
+        wasser_id = (id(self.water_biomes_reference)
+                    if layer_name == "water_map" else None)
+        daten_id = (id(overlay_data), wasser_id)
+        alter_eintrag = self._overlay_texture_cache.get(cache_schluessel)
 
-        # See-Pixel klar absetzen (analog zu map_display_2d.py's _render_water_map()
-        # Lake-Overlay-Pass, alpha=0.85) - ohne das teilen sich Seen und Flüsse
-        # dieselbe flache Blues-Tiefenskala und flache Seen sind kaum von Land zu
-        # unterscheiden (siehe set_water_biomes_reference()).
-        if layer_name == "water_map" and self.water_biomes_reference is not None:
-            water_biomes = np.asarray(self.water_biomes_reference)
-            if water_biomes.shape[:2] == rgb.shape[:2]:
-                lake_mask = water_biomes == 4
-                lake_color = np.array([11, 61, 145], dtype=np.float32)  # #0b3d91
-                rgb = rgb.astype(np.float32)
-                rgb[lake_mask] = rgb[lake_mask] * 0.15 + lake_color * 0.85
-                rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+        if alter_eintrag is not None and alter_eintrag[0] == daten_id:
+            texture_id = alter_eintrag[1]
+        else:
+            try:
+                rgb = _colorize_layer(np.asarray(overlay_data), layer_name)
+            except Exception:
+                return
 
-        texture_id = gl.glGenTextures(1)
-        try:
+            # See-Pixel klar absetzen (analog zu map_display_2d.py's _render_water_map()
+            # Lake-Overlay-Pass, alpha=0.85) - ohne das teilen sich Seen und Flüsse
+            # dieselbe flache Blues-Tiefenskala und flache Seen sind kaum von Land zu
+            # unterscheiden (siehe set_water_biomes_reference()).
+            if layer_name == "water_map" and self.water_biomes_reference is not None:
+                water_biomes = np.asarray(self.water_biomes_reference)
+                if water_biomes.shape[:2] == rgb.shape[:2]:
+                    lake_mask = water_biomes == 4
+                    lake_color = np.array([11, 61, 145], dtype=np.float32)  # #0b3d91
+                    rgb = rgb.astype(np.float32)
+                    rgb[lake_mask] = rgb[lake_mask] * 0.15 + lake_color * 0.85
+                    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+
+            if alter_eintrag is not None:
+                gl.glDeleteTextures(1, [alter_eintrag[1]])
+            texture_id = gl.glGenTextures(1)
             gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
             gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, rgb.shape[1], rgb.shape[0],
                              0, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, np.ascontiguousarray(rgb))
@@ -1790,7 +2177,9 @@ class MapDisplay3D(QOpenGLWidget):
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+            self._overlay_texture_cache[cache_schluessel] = (daten_id, texture_id)
 
+        try:
             gl.glActiveTexture(gl.GL_TEXTURE1)
             gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
 
@@ -1826,7 +2215,13 @@ class MapDisplay3D(QOpenGLWidget):
             if use_overlay_location >= 0:
                 gl.glUniform1i(use_overlay_location, 0)
         finally:
-            gl.glDeleteTextures(1, [texture_id])
+            # KEIN glDeleteTextures mehr hier (2026-08-13) - die Textur bleibt
+            # im Cache fuer den naechsten Frame stehen, siehe
+            # self._overlay_texture_cache oben. Aufgeraeumt wird sie erst,
+            # wenn neue Quelldaten sie ersetzen (oben, "alter_eintrag") oder
+            # beim naechsten Mesh-Neubau (_cleanup_overlay_texturen(), von
+            # _generate_terrain_mesh() aus aufgerufen).
+            pass
 
     def _sample_field_bilinear(self, field: np.ndarray, xs: np.ndarray, ys: np.ndarray,
                                 width: int, height: int) -> np.ndarray:
@@ -2079,6 +2474,326 @@ class MapDisplay3D(QOpenGLWidget):
             gl.glDeleteBuffers(1, [vbo])
             gl.glDeleteVertexArrays(1, [vao])
 
+    def setze_auswahlobjekte(self, orte, wege, welt_km=None):
+        """
+        Hinterlegt, was angeklickt werden kann (docs/OFFENE_PUNKTE.md 6.29).
+
+        `orte` ist eine Liste von (x_px, y_px, kennung), `wege` eine Liste von
+        (pfad_px, kennung). Die Umrechnung nach Weltkoordinaten passiert HIER
+        und EINMAL - beim Klick soll nur noch projiziert und verglichen werden,
+        nicht erst gerechnet.
+
+        Verwendet dieselbe Pixel->Welt-Formel wie Terrain-Mesh und Wegbaender.
+        Eine eigene Rechnung waere eine dritte Wahrheit; sie wuerde die
+        Trefferflaechen unauffaellig gegen das verschieben, was man sieht.
+        """
+        self._auswahl_orte = np.zeros((0, 3), dtype=np.float64)
+        self._auswahl_orte_kennung = []
+        self._auswahl_wege = []
+        self._auswahl_wege_kennung = []
+        if self.heightmap is None:
+            return
+
+        from gui.widgets.wege_geometrie import _hoehe_an, SCHWEBE_ANTEIL
+        hoehe_px, breite_px = self.heightmap.shape
+        tsf = self.terrain_scale_factor
+        ths = self.terrain_height_scale
+        # Etwas ueber dem Boden, damit ein Ort auf einer Kuppe nicht im
+        # Gelaende sitzt - derselbe Aufschlag wie bei den Wegbaendern.
+        schwebe = SCHWEBE_ANTEIL * hoehe_px * tsf
+
+        def nach_welt(xs, ys):
+            xs = np.asarray(xs, dtype=np.float64)
+            ys = np.asarray(ys, dtype=np.float64)
+            h = _hoehe_an(np.asarray(self.heightmap, dtype=np.float32), xs, ys)
+            return np.stack([
+                (np.clip(xs, 0, breite_px - 1) / (breite_px - 1) - 0.5) * breite_px * tsf,
+                h * ths + schwebe,
+                (np.clip(ys, 0, hoehe_px - 1) / (hoehe_px - 1) - 0.5) * hoehe_px * tsf,
+            ], axis=1)
+
+        if orte:
+            xs = [float(o[0]) for o in orte]
+            ys = [float(o[1]) for o in orte]
+            self._auswahl_orte = nach_welt(xs, ys)
+            self._auswahl_orte_kennung = [o[2] for o in orte]
+
+        for pfad, kennung in (wege or []):
+            punkte = np.asarray(pfad, dtype=np.float64).reshape(-1, 2)
+            if len(punkte) < 2:
+                continue
+            self._auswahl_wege.append(nach_welt(punkte[:, 0], punkte[:, 1]))
+            self._auswahl_wege_kennung.append(kennung)
+
+    def _auswahl_pruefen(self, position):
+        """Sucht das Objekt unter dem Mauszeiger und meldet es per Signal."""
+        if self.model_matrix is None or self.view_matrix is None \
+                or self.projection_matrix is None:
+            return
+        try:
+            from gui.widgets.karten_auswahl import treffer_suchen
+            treffer = treffer_suchen(
+                position.x(), position.y(),
+                self._auswahl_orte, self._auswahl_orte_kennung,
+                self._auswahl_wege, self._auswahl_wege_kennung,
+                self.model_matrix, self.view_matrix, self.projection_matrix,
+                max(self.width(), 1), max(self.height(), 1))
+            # GEWAEHLTEN WEG MERKEN und neu zeichnen lassen - sonst
+            # passiert beim Klick zwar etwas im Textfeld, aber im Bild ist
+            # nichts markiert (Nutzerbefund 2026-08-24: "nicht markierbar").
+            # Der Shader kann die Einfaerbung seit dem 2026-08-16, sie wurde
+            # nur nie eingeschaltet.
+            vorher = self._ausgewaehlter_weg
+            if treffer and treffer.get("art") == "weg":
+                self._ausgewaehlter_weg = treffer.get("index")
+            else:
+                self._ausgewaehlter_weg = None
+            if vorher != self._ausgewaehlter_weg:
+                self.update()
+
+            self.objekt_gewaehlt.emit(treffer)
+        except Exception as fehler:                        # pragma: no cover
+            # KEIN self.logger hier - diese Klasse hat keinen (geprueft), ein
+            # Zugriff darauf wuerde im Fehlerfall SELBST scheitern und die
+            # eigentliche Ursache verschlucken. Das vorhandene Fehlersignal
+            # ist der Weg, den auch die uebrigen Methoden dieser Klasse gehen.
+            self.rendering_error.emit(f"Auswahl fehlgeschlagen: {fehler}")
+
+    # Farbe je Wegkategorie, gemeinsam mit der 2D-Textur-Fassung (6.23) -
+    # eine zweite Farbwahl waere eine zweite Wahrheit.
+    _WEGBAND_FARBEN = {"wege": (0.82, 0.47, 0.13),      # darkorange
+                       "seewege": (0.25, 0.41, 0.88)}   # royalblue
+
+    # Deckkraft der Baender (2026-08-16, Nutzerfeedback: "so dass die
+    # unregelmaessige form sich schoen auf die textur schmiegt" statt
+    # blickdicht auf dem Gelaende zu "kleben") - unter 1.0, damit ein Rest
+    # Terraintextur durchscheint wie bei einem echten Decal.
+    _WEGBAND_ALPHA = 0.88
+
+    def _render_wegbaender(self):
+        """
+        Wege als echte Bandgeometrie statt als Textur (docs/OFFENE_PUNKTE.md
+        6.28, Nutzerwunsch 2026-08-13: "es sieht nicht so schoen aus mit den
+        strassen als textur ... ich will fuer den editor ein bisschen
+        schoenere optik").
+
+        NUTZT DAS EIGENE `wegband_shader_program` (2026-08-16), nicht mehr
+        das geteilte `wind_shader_program`. Nutzerbefund an der ersten
+        Fassung: "die wege sehen auch schlecht aus, passen nicht ins
+        lighting, sehen total fake aus" - das unlit Position+Farbe-Programm
+        der Windpfeile hat keine Normalen und keine Lichtrechnung. Ein
+        eigenes Paar (shaders/3d_display/wegband.vert/.frag) statt den
+        geteilten Shader zu erweitern, damit die Windpfeile im Wetter-Reiter
+        unangetastet bleiben.
+
+        Die Geometrie kommt aus `gui/widgets/wege_geometrie.py` (inklusive
+        Normalen, bilinear aus dem Terrain-Normalenfeld) und wird ueber die
+        Objekt-Identitaet der Wegliste zwischengespeichert - sie pro Frame
+        neu zu bauen waere derselbe Fehler wie bei den Overlays (6.21), nur
+        teurer. Land- und Seewege liegen im selben Puffer, werden aber mit
+        ZWEI Draw-Calls gezeichnet (je Kategorie eine Farbe als Uniform statt
+        als Vertex-Attribut - ein Wegband hat ohnehin nur eine Farbe, ein
+        drittes Attribut haette den Puffer nur unnoetig vergroessert).
+        """
+        payload = self.overlay_data["settlement"].get("wegbaender")
+        if not isinstance(payload, dict):
+            return
+        if not self.wegband_shader_program:
+            # LAUT MELDEN, nicht still aussteigen. Ohne das ist "der Shader
+            # liess sich nicht uebersetzen" von "es gibt gerade keine Wege"
+            # nicht zu unterscheiden - dieselbe Falle wie bei den
+            # GPU-Rueckfaellen und der 2^n+1-Bedingung (siehe CLAUDE.md).
+            if not getattr(self, "_wegband_shader_fehlt_gemeldet", False):
+                self._wegband_shader_fehlt_gemeldet = True
+                print("FEHLER: wegband-Shaderprogramm fehlt - Wege werden "
+                      "NICHT gezeichnet (Uebersetzung fehlgeschlagen?).")
+                self.rendering_error.emit("Wegband-Shader fehlt - keine Wege in 3D")
+            return
+        if self.heightmap is None or self.model_matrix is None:
+            return
+
+        wege = payload.get("wege") or []
+        seewege = payload.get("seewege") or []
+        if not wege and not seewege:
+            return
+
+        schluessel = (id(payload), self.heightmap.shape,
+                      round(float(self.terrain_scale_factor), 9),
+                      round(float(self.terrain_height_scale), 12))
+        gepuffert = self._wegband_cache.get("schluessel")
+        if gepuffert != schluessel:
+            from gui.widgets.wege_geometrie import (
+                baue_wegbaender, WEG_BREITE_M, SEEWEG_BREITE_M)
+            welt_km = float(getattr(self, "world_size_km", 21.3) or 21.3)
+
+            v_alle, i_alle, kategorien = [], [], []
+            weg_bereiche = {}
+            vertex_versatz, index_versatz = 0, 0
+            for name, liste, breite in (
+                    ("wege", wege, WEG_BREITE_M),
+                    ("seewege", seewege, SEEWEG_BREITE_M)):
+                if not liste:
+                    continue
+                v, i, bereiche = baue_wegbaender(
+                    liste, self.heightmap, welt_km,
+                    self.terrain_scale_factor, self.terrain_height_scale,
+                    breite_m=breite)
+                if len(v) == 0:
+                    continue
+                kategorien.append((name, index_versatz, len(i)))
+                # Je EINZELNEM Weg merken, wo er im gemeinsamen Indexpuffer
+                # liegt - das ist die Grundlage fuers Einfaerben des
+                # angeklickten Weges. Der Schluessel ist die Position in der
+                # Auswahlliste (erst Landwege, dann Seewege), damit er zum
+                # Index aus `treffer_suchen` passt.
+                versatz_in_auswahl = 0 if name == "wege" else len(wege)
+                for weg_index, start, anzahl in bereiche:
+                    weg_bereiche[versatz_in_auswahl + weg_index] = (
+                        index_versatz + start, anzahl)
+                v_alle.append(v)
+                i_alle.append(i + vertex_versatz)
+                vertex_versatz += len(v)
+                index_versatz += len(i)
+
+            if not v_alle:
+                self._wegband_puffer_freigeben()
+                self._wegband_cache = {"schluessel": schluessel, "daten": None}
+            else:
+                self._wegband_puffer_freigeben()
+                self._wegband_cache = {
+                    "schluessel": schluessel,
+                    "daten": (np.ascontiguousarray(np.concatenate(v_alle)),
+                              np.ascontiguousarray(np.concatenate(i_alle)),
+                              kategorien, weg_bereiche),
+                }
+
+        daten = self._wegband_cache.get("daten")
+        if not daten:
+            return
+        vertex_data, index_data, kategorien, weg_bereiche = daten
+
+        # GL-PUFFER NUR EINMAL JE GEOMETRIE, NICHT JE FRAME (2026-08-24).
+        #
+        # Vorher legte diese Funktion bei JEDEM Frame VAO/VBO/EBO neu an, lud
+        # die kompletten Baender zur GPU und loeschte alles wieder. Kein Leck
+        # - der finally-Zweig raeumte sauber auf -, aber der Cache
+        # daruber sparte damit nur das Rechnen in Python, nicht die
+        # Uebertragung. Jetzt haengen die Puffer am Cache und werden erst
+        # freigegeben, wenn sich die Geometrie wirklich aendert.
+        gepuffert = self._wegband_cache.get("gl")
+        if gepuffert is None:
+            vao = gl.glGenVertexArrays(1)
+            vbo = gl.glGenBuffers(1)
+            ebo = gl.glGenBuffers(1)
+            gl.glBindVertexArray(vao)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, vbo)
+            gl.glBufferData(gl.GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data,
+                            gl.GL_STATIC_DRAW)
+            gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, ebo)
+            gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, index_data.nbytes,
+                            index_data, gl.GL_STATIC_DRAW)
+            # [Position xyz | Normale xyz | Deckung] = 7 float je Vertex
+            stride = 7 * 4
+            gl.glEnableVertexAttribArray(0)
+            gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, stride, None)
+            gl.glEnableVertexAttribArray(1)
+            gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, stride,
+                                     gl.GLvoidp(3 * 4))
+            gl.glEnableVertexAttribArray(2)
+            gl.glVertexAttribPointer(2, 1, gl.GL_FLOAT, gl.GL_FALSE, stride,
+                                     gl.GLvoidp(6 * 4))
+            gl.glBindVertexArray(0)
+            self._wegband_cache["gl"] = (vao, vbo, ebo)
+            gepuffert = self._wegband_cache["gl"]
+        vao, vbo, ebo = gepuffert
+
+        try:
+            gl.glUseProgram(self.wegband_shader_program)
+            for name, matrix in (("model", self.model_matrix),
+                                 ("view", self.view_matrix),
+                                 ("projection", self.projection_matrix)):
+                if matrix is None:
+                    continue
+                ort = gl.glGetUniformLocation(self.wegband_shader_program, name)
+                if ort >= 0:
+                    gl.glUniformMatrix4fv(ort, 1, gl.GL_TRUE, matrix.flatten())
+
+            licht_ort = gl.glGetUniformLocation(self.wegband_shader_program, "lightPos")
+            if licht_ort >= 0:
+                gl.glUniform3f(licht_ort, *self._light_pos)
+            alpha_ort = gl.glGetUniformLocation(self.wegband_shader_program, "wegAlpha")
+            if alpha_ort >= 0:
+                gl.glUniform1f(alpha_ort, self._WEGBAND_ALPHA)
+            # Auswahl-Einfaerbung (6.29/Nutzerwunsch) ist im Shader vorbereitet,
+            # aber das Anklicken einzelner Wege setzt hier noch nichts - siehe
+            # docs/OFFENE_PUNKTE.md 6.27 (Teil 2, Anklicken).
+            ausgewaehlt_ort = gl.glGetUniformLocation(self.wegband_shader_program, "ausgewaehlt")
+            if ausgewaehlt_ort >= 0:
+                gl.glUniform1i(ausgewaehlt_ort, 0)
+
+            gl.glBindVertexArray(vao)
+
+            # Baender sind einseitig gewickelt wie das Terrain, aber sie von
+            # unten zu sehen ist beim Drehen normal - deshalb hier KEIN
+            # Backface-Culling.
+            war_culling = gl.glIsEnabled(gl.GL_CULL_FACE)
+            if war_culling:
+                gl.glDisable(gl.GL_CULL_FACE)
+
+            # ALPHA-BLENDING FUER DEN DECAL-EFFEKT (2026-08-16) - vorher
+            # deckend (Alpha im Fragment-Shader war immer 1.0). GL_BLEND ist
+            # sonst im gesamten 3D-Renderpfad nirgends aktiv, deshalb hier
+            # einfach an- und danach wieder ausschalten statt den vorherigen
+            # Zustand/Blendfaktor zu sichern.
+            gl.glEnable(gl.GL_BLEND)
+            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+
+            # TIEFENVERSATZ STATT WELTVERSATZ (2026-08-24).
+            #
+            # Bisher hielt allein `SCHWEBE_ANTEIL` das Band ueber dem
+            # Gelaende - ein Versatz in der WELT. Der hat zwei Nachteile: bei
+            # flachem Blickwinkel sieht man unter die Strasse, und er muss
+            # gross genug fuer den schlimmsten Querhang sein, wirkt also
+            # ueberall sonst zu hoch. `glPolygonOffset` verschiebt die
+            # Fragmente nur im TIEFENPUFFER. Das Band liegt damit
+            # geometrisch auf dem Boden und gewinnt trotzdem den Tiefentest.
+            # Negative Werte ziehen zur Kamera hin.
+            gl.glEnable(gl.GL_POLYGON_OFFSET_FILL)
+            gl.glPolygonOffset(-3.0, -6.0)
+
+            for name, index_start, index_count in kategorien:
+                farbe = self._WEGBAND_FARBEN.get(name, (0.7, 0.7, 0.7))
+                farbe_ort = gl.glGetUniformLocation(self.wegband_shader_program, "wegFarbe")
+                if farbe_ort >= 0:
+                    gl.glUniform3f(farbe_ort, *farbe)
+                gl.glDrawElements(gl.GL_TRIANGLES, index_count, gl.GL_UNSIGNED_INT,
+                                  gl.GLvoidp(index_start * 4))
+
+            # DER GEWAEHLTE WEG NOCH EINMAL, roetlich eingefaerbt.
+            #
+            # Zweiter Draw-Call statt einer Farbe je Vertex: die Auswahl
+            # aendert sich pro Klick, die Geometrie aber nicht - ein
+            # Vertexattribut muesste bei jeder Auswahl neu hochgeladen werden.
+            # Der Shader hat dafuer den `ausgewaehlt`-Schalter.
+            bereich = weg_bereiche.get(self._ausgewaehlter_weg)
+            if bereich is not None and ausgewaehlt_ort >= 0:
+                start, anzahl = bereich
+                gl.glUniform1i(ausgewaehlt_ort, 1)
+                gl.glDrawElements(gl.GL_TRIANGLES, anzahl, gl.GL_UNSIGNED_INT,
+                                  gl.GLvoidp(start * 4))
+                gl.glUniform1i(ausgewaehlt_ort, 0)
+
+            gl.glPolygonOffset(0.0, 0.0)
+            gl.glDisable(gl.GL_POLYGON_OFFSET_FILL)
+            gl.glDisable(gl.GL_BLEND)
+            if war_culling:
+                gl.glEnable(gl.GL_CULL_FACE)
+            gl.glBindVertexArray(0)
+        finally:
+            # Puffer bleiben am Cache haengen, siehe oben - hier NICHT
+            # loeschen, sonst ist der Sinn der Zwischenspeicherung dahin.
+            gl.glBindVertexArray(0)
+
     def _render_plot_boundaries(self):
         """
         Funktionsweise: Rendert das PlotPhysicsSystem-Ergebnis als texturierten
@@ -2088,64 +2803,220 @@ class MapDisplay3D(QOpenGLWidget):
         Teil 4) - overlay_data["settlement"]["plots"] enthält bereits die
         fertig gerasterte (H,W,4)-RGBA-Textur (siehe map_display_2d.py's
         rasterize_plot_boundaries_rgba(), gepusht von settlement_tab.py's
-        apply_3d_overlays()). Hier nur noch Hochladen + zweiter Draw-Call mit
-        useAlphaOverlay=1 (siehe terrain.frag) - echte Transparenz an
-        unbemalten Stellen statt des pauschalen overlayStrength-Mix der
-        übrigen Scalar-Overlays.
+        apply_3d_overlays()).
         Aufgabe: Zeichnet Plot-Kantennetz/Straßen-Tiers/Wildnisgrenzen/Kerne/
         Nodes auf der Terrain-Oberfläche.
         """
         rgba = self.overlay_data["settlement"]["plots"]
-        if (rgba is None or not isinstance(rgba, np.ndarray) or rgba.ndim != 3 or rgba.shape[2] != 4
-                or not self.shader_program or self.vertex_buffer is None):
+        if rgba is None or not isinstance(rgba, np.ndarray) or rgba.ndim != 3 or rgba.shape[2] != 4:
+            return
+        cache_schluessel = ("settlement", "plots")
+        texture_id = self._overlay_cache_pruefen(cache_schluessel, id(rgba))
+        if texture_id is None:
+            texture_id = self._overlay_textur_hochladen(cache_schluessel, id(rgba), rgba)
+        self._render_rgba_textur(texture_id)
+
+    def _render_settlement_uebersicht(self):
+        """
+        Funktionsweise: Zeichnet die globale Siedlungsuebersicht (Staedte,
+        Landmarken, Roadsites, Land- und Seewege) als fertig rasterisierten
+        RGBA-Skin auf das Gelaende - gefuellt von
+        SettlementTab.apply_3d_overlays() ueber
+        `rasterize_settlements_rgba()` (map_display_2d.py), also aus
+        derselben Zeichenlogik wie die 2D-Ansicht.
+        Aufgabe: 3D-Darstellung des globalen Siedlungsreiters (Nutzer-Vorgabe
+        2026-08-13). Bewusst ein Skin und keine echte 3D-Marker-Geometrie:
+        `_render_settlement_markers()` war seit jeher ein leerer TODO-Stub,
+        und eigene Zylinder/Icons haetten neuen GLSL- und Geometriecode
+        gebraucht - der Alpha-Overlay-Pfad steht dagegen bereits und wird
+        von Plots, Regionen und Kuestentypen genauso genutzt.
+        """
+        rgba = self.overlay_data["settlement"].get("uebersicht")
+        if rgba is None or not isinstance(rgba, np.ndarray) or rgba.ndim != 3 or rgba.shape[2] != 4:
+            return
+        cache_schluessel = ("settlement", "uebersicht")
+        texture_id = self._overlay_cache_pruefen(cache_schluessel, id(rgba))
+        if texture_id is None:
+            texture_id = self._overlay_textur_hochladen(cache_schluessel, id(rgba), rgba)
+        self._render_rgba_textur(texture_id)
+
+    def _render_dict_rgba_overlay(self, tab_type, layer_name):
+        """
+        Funktionsweise: Wie _render_plot_boundaries(), aber fuer Overlays, die
+        NICHT schon fertig rasterisiert ankommen, sondern als dasselbe rohe
+        Payload-Dict, das auch der 2D-Renderer bekommt (Nutzer-Vorgabe
+        2026-08-13: "die 3D darstellung ALLER 2D maps, aber vor allem der
+        Kuesten auf die 3D Terrains bekommen"). Rasterisiert ueber dieselben
+        Funktionen wie die 2D-Seite (`rasterize_regions_rgba()`/
+        `rasterize_kuesten_archetypen_rgba()` in map_display_2d.py) - EINE
+        Farblogik fuer beide Ansichten statt einer zweiten, die auseinander-
+        laufen koennte.
+
+        DIE RASTERISIERUNG SELBST WIRD GECACHT (2026-08-13, Nutzerbefund
+        "Kuestentyp ruckelt im 3D") - gemessen 0.6s bei 1024px, bei jedem
+        paintGL()-Aufruf (jede Mausbewegung waehrend des Drehens) neu
+        gerechnet, ohne dass sich die Daten geaendert haetten. Der
+        Cache-Check laeuft deshalb VOR dem Rasterisieren, nicht nur vor dem
+        Hochladen - ein reiner Textur-Cache haette das eigentliche Problem
+        nicht geloest.
+        Aufgabe: Baut bei Bedarf die RGBA-Textur aus dem Rohdaten-Dict und
+        zeichnet sie wie jeden anderen Alpha-Overlay.
+        """
+        payload = self.overlay_data.get(tab_type, {}).get(layer_name)
+        if not isinstance(payload, dict):
+            return
+        cache_schluessel = (tab_type, layer_name)
+        # CACHE-SCHLUESSEL AUS DEM INHALT, NICHT AUS DEM DICT.
+        #
+        # `id(payload)` war fuer die Regionen-/Kuesten-Overlays richtig -
+        # dort wird EIN Dict gebaut und wiederverwendet. Das Flussnetz
+        # baut bei jedem Aufruf ein NEUES Dict (siehe
+        # overlay_river_generations), damit war `id()` jedes Mal anders,
+        # der Cache griff nie, und die Textur wurde bei JEDEM Frame neu
+        # gerastert und hochgeladen. Gemessener Nutzerbefund 2026-08-24:
+        # *"fluesse 3d ist ziemlich langsam"*.
+        #
+        # Die enthaltenen Arrays sind dagegen stabil - sie kommen direkt
+        # aus dem DataLODManager und werden nur weitergereicht.
+        if layer_name == "river_overlay":
+            daten_id = (id(payload.get("river_generation")),
+                        bool(payload.get("zeige_mikro")),
+                        int(payload.get("breite_px", 1)))
+        else:
+            daten_id = id(payload)
+        texture_id = self._overlay_cache_pruefen(cache_schluessel, daten_id)
+
+        if texture_id is None:
+            hoehe = payload.get("heightmap")
+            if hoehe is None:
+                return
+
+            from gui.widgets.map_display_2d import (
+                rasterize_regions_rgba, rasterize_kuesten_archetypen_rgba,
+                rasterize_fluesse_rgba)
+            # DAS FLUSSNETZ ZUERST, denn es braucht `regionen` NICHT.
+            # Die Pruefung auf `regionen` steht deshalb erst darunter -
+            # stuende sie oben, kaeme dieser Zweig nie zum Zug.
+            if layer_name == "river_overlay":
+                gen = payload.get("river_generation")
+                if gen is None:
+                    return
+                rgba = rasterize_fluesse_rgba(
+                    gen, hoehe,
+                    zeige_mikro=bool(payload.get("zeige_mikro")),
+                    breite_px=int(payload.get("breite_px", 1)))
+                texture_id = self._overlay_textur_hochladen(
+                    cache_schluessel, daten_id, rgba)
+                if texture_id is not None:
+                    self._render_rgba_textur(texture_id)
+                return
+
+            regionen = payload.get("regionen")
+            if regionen is None:
+                return
+            if layer_name == "region_overlay":
+                rgba = rasterize_regions_rgba(regionen, hoehe, alpha=0.55, border_alpha=0.9)
+            elif layer_name == "kuesten_overlay":
+                archetyp = payload.get("kuesten_archetyp")
+                if archetyp is None:
+                    return
+                rgba = rasterize_kuesten_archetypen_rgba(
+                    regionen, hoehe, archetyp, payload.get("kuesten_staerke"))
+            else:
+                return
+            texture_id = self._overlay_textur_hochladen(cache_schluessel, daten_id, rgba)
+
+        self._render_rgba_textur(texture_id)
+
+    def _overlay_cache_pruefen(self, cache_schluessel, daten_id):
+        """Rueckgabe: die zwischengespeicherte Textur-ID, wenn die Quelldaten
+        seit dem letzten Aufbau dieselben sind (Objekt-Identitaet - siehe
+        self._overlay_texture_cache in __init__), sonst None."""
+        eintrag = self._overlay_texture_cache.get(cache_schluessel)
+        if eintrag is not None and eintrag[0] == daten_id:
+            return eintrag[1]
+        return None
+
+    def _overlay_textur_hochladen(self, cache_schluessel, daten_id, rgba):
+        """Laedt `rgba` als (H,W,4)-Textur hoch, loescht eine evtl. vorhandene
+        aeltere Textur desselben Cache-Schluessels und hinterlegt die neue.
+        Gibt die neue Textur-ID zurueck."""
+        if (rgba is None or not isinstance(rgba, np.ndarray) or rgba.ndim != 3
+                or rgba.shape[2] != 4):
+            return None
+        alt = self._overlay_texture_cache.get(cache_schluessel)
+        if alt is not None:
+            gl.glDeleteTextures(1, [alt[1]])
+        texture_id = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, rgba.shape[1], rgba.shape[0],
+                         0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, np.ascontiguousarray(rgba))
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        self._overlay_texture_cache[cache_schluessel] = (daten_id, texture_id)
+        return texture_id
+
+    def _render_rgba_textur(self, texture_id):
+        """
+        Funktionsweise: Zeichnet eine BEREITS HOCHGELADENE (H,W,4)-RGBA-Textur
+        als zweiten Draw-Call mit useAlphaOverlay=1 (siehe terrain.frag) -
+        echte Transparenz an unbemalten Stellen statt des pauschalen
+        overlayStrength-Mix der uebrigen Scalar-Overlays. Verallgemeinert aus
+        der urspruenglich plot-spezifischen Fassung (2026-08-13), damit jeder
+        weitere vorgerasterte 2D-"Skin" (Regionen, Kuestentypen, ...) denselben
+        Weg ohne neuen GLSL-Code nutzen kann. Die Textur selbst bleibt ueber
+        Frames hinweg bestehen (siehe _overlay_textur_hochladen()) - hier wird
+        nur noch gebunden und gezeichnet, kein Upload mehr.
+        Aufgabe: Gemeinsamer Zeichenpfad fuer alle RGBA-Skin-Overlays.
+        """
+        if texture_id is None or not self.shader_program or self.vertex_buffer is None:
             return
 
-        texture_id = gl.glGenTextures(1)
-        try:
-            gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
-            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, rgba.shape[1], rgba.shape[0],
-                             0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, np.ascontiguousarray(rgba))
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        gl.glActiveTexture(gl.GL_TEXTURE1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
 
-            gl.glActiveTexture(gl.GL_TEXTURE1)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+        overlay_tex_location = gl.glGetUniformLocation(self.shader_program, "overlayTexture")
+        if overlay_tex_location >= 0:
+            gl.glUniform1i(overlay_tex_location, 1)
 
-            overlay_tex_location = gl.glGetUniformLocation(self.shader_program, "overlayTexture")
-            if overlay_tex_location >= 0:
-                gl.glUniform1i(overlay_tex_location, 1)
+        use_overlay_location = gl.glGetUniformLocation(self.shader_program, "useOverlay")
+        if use_overlay_location >= 0:
+            gl.glUniform1i(use_overlay_location, 1)
 
-            use_overlay_location = gl.glGetUniformLocation(self.shader_program, "useOverlay")
-            if use_overlay_location >= 0:
-                gl.glUniform1i(use_overlay_location, 1)
+        use_alpha_overlay_location = gl.glGetUniformLocation(self.shader_program, "useAlphaOverlay")
+        if use_alpha_overlay_location >= 0:
+            gl.glUniform1i(use_alpha_overlay_location, 1)
 
-            use_alpha_overlay_location = gl.glGetUniformLocation(self.shader_program, "useAlphaOverlay")
-            if use_alpha_overlay_location >= 0:
-                gl.glUniform1i(use_alpha_overlay_location, 1)
+        overlay_strength_location = gl.glGetUniformLocation(self.shader_program, "overlayStrength")
+        if overlay_strength_location >= 0:
+            gl.glUniform1f(overlay_strength_location, 1.0)
 
-            overlay_strength_location = gl.glGetUniformLocation(self.shader_program, "overlayStrength")
-            if overlay_strength_location >= 0:
-                gl.glUniform1f(overlay_strength_location, 1.0)
+        render_mode_location = gl.glGetUniformLocation(self.shader_program, "renderMode")
+        if render_mode_location >= 0:
+            # IMMER 5 (Settlement), unabhaengig vom aufrufenden Tab -
+            # terrain.frag behandelt nur in getSettlementColor() den
+            # Alpha-Kanal der Overlay-Textur (useAlphaOverlay), jeder
+            # andere renderMode-Zweig (0-4) mischt nur mit fester
+            # overlayStrength und wuerde transparente Bereiche der
+            # RGBA-Textur trotzdem einfaerben. Ohne neuen GLSL-Code zu
+            # schreiben (Projekt-Vorgeschichte mit Shader-Aenderungen)
+            # ist 5 deshalb fuer JEDEN Alpha-Skin-Overlay der einzig
+            # richtige Wert, nicht nur fuer Settlement-Plots.
+            gl.glUniform1i(render_mode_location, 5)
 
-            render_mode_location = gl.glGetUniformLocation(self.shader_program, "renderMode")
-            if render_mode_location >= 0:
-                gl.glUniform1i(render_mode_location, 5)  # settlement
+        gl.glDepthFunc(gl.GL_LEQUAL)
+        gl.glBindVertexArray(self.vao)
+        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.index_buffer)
+        gl.glDrawElements(gl.GL_TRIANGLES, len(self.mesh_indices), gl.GL_UNSIGNED_INT, None)
+        gl.glBindVertexArray(0)
+        gl.glDepthFunc(gl.GL_LESS)
 
-            gl.glDepthFunc(gl.GL_LEQUAL)
-            gl.glBindVertexArray(self.vao)
-            gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.index_buffer)
-            gl.glDrawElements(gl.GL_TRIANGLES, len(self.mesh_indices), gl.GL_UNSIGNED_INT, None)
-            gl.glBindVertexArray(0)
-            gl.glDepthFunc(gl.GL_LESS)
-
-            if use_overlay_location >= 0:
-                gl.glUniform1i(use_overlay_location, 0)
-            if use_alpha_overlay_location >= 0:
-                gl.glUniform1i(use_alpha_overlay_location, 0)
-        finally:
-            gl.glDeleteTextures(1, [texture_id])
+        if use_overlay_location >= 0:
+            gl.glUniform1i(use_overlay_location, 0)
+        if use_alpha_overlay_location >= 0:
+            gl.glUniform1i(use_alpha_overlay_location, 0)
 
     def _render_settlement_markers(self, marker_type):
         """
@@ -2187,6 +3058,13 @@ class MapDisplay3D(QOpenGLWidget):
         # die Tasten landen sonst beim zuletzt angeklickten Bedienelement.
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         self.last_mouse_pos = event.pos()
+
+        # AUSWAHL nur bei der LINKEN Taste und nur, wenn etwas hinterlegt ist
+        # (6.29). Die rechte/mittlere Taste drehen und schieben die Kamera -
+        # dort waere eine Auswahl stoerend.
+        if event.button() == Qt.MouseButton.LeftButton and (
+                len(self._auswahl_orte) or self._auswahl_wege):
+            self._auswahl_pruefen(event.pos())
 
     # Grenzen der Neigung. Bei genau +-90 Grad steht die Blickrichtung parallel
     # zur Hoch-Achse (0,1,0), das Kreuzprodukt in _create_lookat_matrix() wird
@@ -2314,6 +3192,9 @@ class MapDisplay3D(QOpenGLWidget):
         # kommt dann nie an.
         self._pressed_keys.clear()
         self.flight_timer.stop()
+        # Projektion mitziehen - sie haengt am Kameraabstand, siehe
+        # _update_projection_matrix().
+        self._update_projection_matrix()
         super().focusOutEvent(event)
 
     def _advance_flight(self):
@@ -2382,6 +3263,10 @@ class MapDisplay3D(QOpenGLWidget):
         min_distance = 2.0
         max_distance = 400.0
         self.camera_distance = max(min_distance, min(max_distance, new_distance))
+
+        # Die Projektion haengt jetzt am Kameraabstand (siehe
+        # _update_projection_matrix) und muss deshalb hier mitgezogen werden.
+        self._update_projection_matrix()
 
         self.camera_changed.emit(self.camera_elevation, self.camera_azimuth, self.camera_distance)
         self.update()
@@ -2625,6 +3510,24 @@ class MapDisplay3DWidget(QWidget):
         Aufgabe: Interface-Methode für externe Overlay-Updates
         """
         self.display_3d.update_overlay_data(tab_type, layer_name, data)
+
+    def clear_river_overlay(self):
+        """Das Flussnetz abschalten - Weiterleitung an die GL-Anzeige."""
+        self.display_3d.clear_river_overlay()
+
+    def overlay_river_generations(self, generation_map, zeige_mikro=False):
+        """
+        Das Flussnetz - Weiterleitung an die GL-Anzeige.
+
+        DIESE WEITERLEITUNG IST DER PUNKT, an dem es beim ersten Anlauf
+        scheiterte. `gui/tabs/base_tab.py` legt das 3D-Widget in einen
+        `DisplayWrapper`, und `river_tab._anzeigeziel()` greift ueber
+        `.display` darauf zu - das ist DIESE Klasse, nicht die innere
+        `MapDisplay3D`. Die Methode allein in der GL-Klasse zu haben
+        genuegt also nicht; `hasattr` schlaegt hier fehl und der Aufruf
+        faellt lautlos aus - genau der Fehler, der behoben werden sollte.
+        """
+        self.display_3d.overlay_river_generations(generation_map, zeige_mikro)
 
     def set_layer_visibility(self, tab_type, layer_name, visible):
         """

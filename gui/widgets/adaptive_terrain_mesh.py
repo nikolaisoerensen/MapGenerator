@@ -7,6 +7,30 @@ _generate_terrain_mesh() (map_display_3d.py). Flache Bereiche (offenes Meer,
 Ebenen) bekommen wenige grosse Dreiecke, Klippen/Detailbereiche bleiben bei
 voller Pixel-Aufloesung.
 
+WAS DIESES MODUL NICHT KANN, UND WARUM DAS KEIN FEHLER IST
+(docs/OFFENE_PUNKTE.md 6.19, Nutzerbefund 2026-08-13: "die kuesten sind
+immernoch 90 Grad ... ich habe nicht das gefuehl dass das mesh ausser x und y
+auch z in betracht zieht")
+
+Die Beobachtung stimmt, die Ursache liegt aber eine Ebene tiefer: **eine
+Heightmap speichert je (x,y) GENAU EINEN Hoehenwert.** Zwei benachbarte Pixel
+mit 180 m und -3 m ergeben zwangslaeufig eine senkrechte Flaeche von einem
+Pixel Breite. Und weil die Kuestenlinie dem Pixelraster folgt, wird daraus
+die sichtbare Treppe.
+
+Dieses Modul kann das PRINZIPIELL nicht beheben und war nie dafuer gedacht -
+es fasst Rasterzellen zusammen, seine Vertices liegen gemessen 0.000004 px
+von einer Pixelecke entfernt, also exakt darauf. Wer die Treppe loswerden
+will, braucht Vertices, die frei liegen duerfen:
+
+  * `gui/widgets/terrain_remesh.py` (6.33) verschiebt sie per
+    QEM-Decimation - hilft ueber die Flaeche, loest die Kuestenlinie aber
+    NICHT vom Raster (dort nachgemessen).
+  * Wirklich rasterfrei wird die Kueste erst mit ihr als Zwangskante
+    (Constrained Delaunay) oder ueber den Vektorweg
+    (`core/vektor_kueste.py`), der die Kueste als Polylinie mit Stationen in
+    Metern fuehrt statt als Pixelmaske.
+
 Algorithmus (bewusst KEIN RTIN/Martini-Bit-Trick - siehe Begruendung unten):
 1. Quadtree ueber die Heightmap, rekursiv geteilt nach Hoehen-Abweichung
    (bilineare Eckpunkt-Interpolation vs. tatsaechliche Zwischenwerte).
@@ -105,10 +129,117 @@ def _quad_fehler(H, x0, y0, size, cache):
     return fehler
 
 
+def _fehler_pyramide(H, N):
+    """
+    Funktionsweise: Bit-identisches Ergebnis zu `_quad_fehler()`, aber
+    ebenenweise bottom-up als numpy-Arrays statt rekursiv je Quadrant
+    (2026-08-13, OFFENE_PUNKTE 6.18b). Rueckgabe: dict Groesse -> (N/s, N/s)
+    float64-Array mit dem Fehlerwert jedes Quadranten dieser Groesse.
+
+    Aufgabe: `_quad_fehler()` war nach der Vektorisierung von Balancierung und
+    Triangulierung der verbliebene Engpass - gemessen 0.835 s von 0.883 s
+    Gesamtzeit bei 1024 px, weil es fuer jeden der rund 1.4 Mio.
+    Quadtree-Knoten einen Python-Funktionsaufruf samt dict-Zugriff macht. Hier
+    stattdessen: je Groessenebene EIN Satz Slices ueber das ganze Gitter.
+
+    ZUR BIT-IDENTITAET: die alte Fassung rechnet `float(h00+h10+h01+h11)` -
+    die Summe entsteht also in float32 (numpy-Skalare), erst danach wird auf
+    Python-float (float64) erweitert und mit 0.25 multipliziert. Genau diese
+    Reihenfolge wird hier nachgebaut (Summe in float32, dann `.astype(float64)`),
+    sonst weicht das Ergebnis in den letzten Stellen ab und die
+    Blatt-Auswahl an der Toleranzgrenze koennte kippen.
+    """
+    ebenen = {1: np.zeros((N, N), dtype=np.float64)}
+    size = 2
+    while size <= N:
+        s = size
+        half = s // 2
+        # Eckpunkte des Quadranten - H hat (N+1, N+1) Punkte, die Slices
+        # liefern je (N/s, N/s) Werte, einen je Quadrant dieser Ebene.
+        h00 = H[0:N:s, 0:N:s]
+        h10 = H[0:N:s, s::s]
+        h01 = H[s::s, 0:N:s]
+        h11 = H[s::s, s::s]
+
+        mitte = H[half:N:s, half:N:s]
+        kante_oben = H[0:N:s, half:N:s]
+        kante_unten = H[s::s, half:N:s]
+        kante_links = H[half:N:s, 0:N:s]
+        kante_rechts = H[half:N:s, s::s]
+
+        # float32-Summen zuerst (wie die alte Fassung), dann auf float64
+        eigen = np.abs(mitte.astype(np.float64)
+                       - 0.25 * (h00 + h10 + h01 + h11).astype(np.float64))
+        eigen = np.maximum(eigen, np.abs(kante_oben.astype(np.float64)
+                                         - 0.5 * (h00 + h10).astype(np.float64)))
+        eigen = np.maximum(eigen, np.abs(kante_unten.astype(np.float64)
+                                         - 0.5 * (h01 + h11).astype(np.float64)))
+        eigen = np.maximum(eigen, np.abs(kante_links.astype(np.float64)
+                                         - 0.5 * (h00 + h01).astype(np.float64)))
+        eigen = np.maximum(eigen, np.abs(kante_rechts.astype(np.float64)
+                                         - 0.5 * (h10 + h11).astype(np.float64)))
+
+        kinder = ebenen[half]
+        kinder_max = np.maximum(
+            np.maximum(kinder[0::2, 0::2], kinder[0::2, 1::2]),
+            np.maximum(kinder[1::2, 0::2], kinder[1::2, 1::2]))
+
+        ebenen[s] = np.maximum(eigen, kinder_max)
+        size *= 2
+    return ebenen
+
+
+def _blaetter_sammeln_pyramide(ebenen, N, toleranz, min_size):
+    """
+    Funktionsweise: Top-down Blattauswahl wie `_blaetter_sammeln()`, aber
+    ebenenweise ueber die Fehler-Pyramide statt rekursiv je Quadrant.
+    Ein Quadrant wird zum Blatt, wenn er die Mindestgroesse erreicht hat oder
+    sein Fehler die Toleranz unterschreitet - sonst wandern seine vier Kinder
+    eine Ebene tiefer.
+    Rueckgabe: (x0s, y0s, sizes) als drei parallele int64-Arrays.
+    """
+    x0s_teile, y0s_teile, sizes_teile = [], [], []
+
+    # Startebene: der eine Wurzelquadrant (0,0,N), in Quadrant-Koordinaten (0,0).
+    offen_i = np.zeros(1, dtype=np.int64)
+    offen_j = np.zeros(1, dtype=np.int64)
+    size = N
+
+    while True:
+        fehler = ebenen[size][offen_j, offen_i]
+        ist_blatt = (size <= min_size) | (fehler <= toleranz)
+
+        if ist_blatt.any():
+            x0s_teile.append(offen_i[ist_blatt] * size)
+            y0s_teile.append(offen_j[ist_blatt] * size)
+            sizes_teile.append(np.full(int(ist_blatt.sum()), size, dtype=np.int64))
+
+        weiter_i = offen_i[~ist_blatt]
+        weiter_j = offen_j[~ist_blatt]
+        if len(weiter_i) == 0:
+            break
+
+        # Vier Kinder je offenem Quadranten, in den Koordinaten der naechsten Ebene
+        offen_i = np.concatenate([weiter_i * 2, weiter_i * 2 + 1,
+                                  weiter_i * 2, weiter_i * 2 + 1])
+        offen_j = np.concatenate([weiter_j * 2, weiter_j * 2,
+                                  weiter_j * 2 + 1, weiter_j * 2 + 1])
+        size //= 2
+
+    if not sizes_teile:
+        return (np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64),
+                np.empty(0, dtype=np.int64))
+    return (np.concatenate(x0s_teile), np.concatenate(y0s_teile),
+            np.concatenate(sizes_teile))
+
+
 def _blaetter_sammeln(cache, x0, y0, size, toleranz, min_size, blaetter):
     """Top-down Auswahl: Blatt wird zu einem Blatt, wenn seine Groesse die
     Mindestgroesse erreicht hat oder sein (gecachter) Fehler die Toleranz
-    unterschreitet - sonst rekursiv in 4 Kinder teilen."""
+    unterschreitet - sonst rekursiv in 4 Kinder teilen.
+    Rekursive dict-Fassung, seit 2026-08-13 nur noch vom Vergleichstest
+    (tests/smoke_test_adaptive_mesh_vectorized.py) als Referenz benutzt - der
+    Aufbau laeuft ueber `_blaetter_sammeln_pyramide()`."""
     fehler = cache[(x0, y0, size)]
     if size <= min_size or fehler <= toleranz:
         blaetter[(x0, y0)] = size
@@ -123,7 +254,11 @@ def _blaetter_sammeln(cache, x0, y0, size, toleranz, min_size, blaetter):
 
 def _besitzer_gitter(blaetter, zellen, min_size):
     """(zellen x zellen) Gitter in min_size-Einheiten: welche Blattgroesse
-    besitzt jede kleinste Zelle - die Nachschlage-Struktur fuer Nachbar-Abfragen."""
+    besitzt jede kleinste Zelle - die Nachschlage-Struktur fuer Nachbar-Abfragen.
+    Dict-Fassung, nur noch fuer den headless-Vergleichstest gegen die
+    vektorisierte Fassung unten (`_besitzer_gitter_aus_arrays`) gebraucht -
+    der eigentliche Aufbau (`_blaetter_balancieren`/`_dreiecke_aus_blaettern`)
+    nutzt seit 2026-08-13 nur noch die Array-Fassung, siehe dort."""
     besitzer = np.zeros((zellen, zellen), dtype=np.int64)
     for (x0, y0), size in blaetter.items():
         c = size // min_size
@@ -132,7 +267,87 @@ def _besitzer_gitter(blaetter, zellen, min_size):
     return besitzer
 
 
-def _blaetter_balancieren(blaetter, N, min_size):
+def _besitzer_gitter_aus_arrays(x0s, y0s, sizes, zellen, min_size):
+    """
+    Funktionsweise: Bit-identisches Ergebnis zu `_besitzer_gitter()`, aber EIN
+    Durchgang je VORKOMMENDER Blattgroesse statt je Blatt (2026-08-13,
+    OFFENE_PUNKTE 6.18b - bei echtem 1024px-Gelaende 194068 Blaetter, aber
+    nur ~11 verschiedene Groessen, da jede eine Zweierpotenz zwischen
+    min_size und N ist). Fuer jede Groesse werden alle ihre Blaetter in EINEM
+    numpy-Aufruf per Broadcasting eingetragen (kein Python-Loop ueber
+    einzelne Blaetter) - Ueberlappungen zwischen Gruppen sind ausgeschlossen,
+    weil Blaetter den Raum ueberlappungsfrei zerlegen.
+    """
+    besitzer = np.zeros((zellen, zellen), dtype=np.int64)
+    if len(sizes) == 0:
+        return besitzer
+    cxs = x0s // min_size
+    cys = y0s // min_size
+    cs = sizes // min_size
+    for c in np.unique(cs):
+        c = int(c)
+        maske = cs == c
+        cx = cxs[maske]
+        cy = cys[maske]
+        s = int(sizes[maske][0])
+        off = np.arange(c)
+        zeilen = cy[:, None, None] + off[None, :, None]
+        spalten = cx[:, None, None] + off[None, None, :]
+        besitzer[zeilen, spalten] = s
+    return besitzer
+
+
+def _kanten_minima_je_seite(besitzer, cx, cy, c, zellen, eigene_groesse):
+    """
+    Funktionsweise: Fuer eine Gruppe gleich grosser Blaetter (Zellkoordinaten
+    `cx`/`cy`, Ausdehnung `c` Zellen) die kleinste angrenzende Blattgroesse je
+    Seite - vier Arrays der Laenge len(cx), in der Reihenfolge
+    (links, rechts, oben, unten). Wo es keinen Nachbarn gibt (Kartenrand),
+    steht `eigene_groesse` (neutral - kann nie kleiner sein als man selbst).
+
+    Aufgabe: Ersetzt die Slice-Abfrage `besitzer[cy:cy+c, cx-1].min()` der
+    alten, blattweisen Fassung durch EIN Gather ueber alle Blaetter der Gruppe.
+    Bewusst gezieltes Gathern (`besitzer[zeilen, spalten]`, K*c Elemente)
+    statt eines gleitenden Minimums ueber das ganze Gitter - letzteres war der
+    erste Anlauf und skalierte mit `zellen**2` statt mit der beruehrten
+    Kantenlaenge, gemessen halb so schnell wie die alte Fassung bei wenigen
+    grossen Blaettern (siehe _blaetter_balancieren()-Docstring).
+    """
+    anzahl = len(cx)
+    off = np.arange(c)
+    zeilen = cy[:, None] + off[None, :]      # (K, c) - Zeilenband des Blattes
+    spalten = cx[:, None] + off[None, :]     # (K, c) - Spaltenband des Blattes
+
+    def seite(hat_nachbar, zeilen_idx, spalten_idx):
+        werte = np.full(anzahl, eigene_groesse, dtype=np.int64)
+        if hat_nachbar.any():
+            werte[hat_nachbar] = besitzer[zeilen_idx, spalten_idx].min(axis=1)
+        return werte
+
+    hat_links = cx > 0
+    links = seite(hat_links, zeilen[hat_links], (cx[hat_links] - 1)[:, None])
+
+    hat_rechts = (cx + c) < zellen
+    rechts = seite(hat_rechts, zeilen[hat_rechts], (cx[hat_rechts] + c)[:, None])
+
+    hat_oben = cy > 0
+    oben = seite(hat_oben, (cy[hat_oben] - 1)[:, None], spalten[hat_oben])
+
+    hat_unten = (cy + c) < zellen
+    unten = seite(hat_unten, (cy[hat_unten] + c)[:, None], spalten[hat_unten])
+
+    return links, rechts, oben, unten
+
+
+def _kanten_minima(besitzer, cx, cy, c, zellen, eigene_groesse):
+    """Kleinste angrenzende Blattgroesse ueber ALLE vier Seiten - genau der
+    `kleinster_nachbar`-Wert der alten, blattweisen Balancier-Schleife."""
+    links, rechts, oben, unten = _kanten_minima_je_seite(
+        besitzer, cx, cy, c, zellen, eigene_groesse)
+    return np.minimum(np.minimum(links, rechts), np.minimum(oben, unten))
+
+
+def _blaetter_balancieren(x0s, y0s, sizes, N, min_size):
     """
     Funktionsweise: Erzwingt die "restricted quadtree"-Eigenschschaft - kein
     Blatt darf mehr als doppelt so gross sein wie sein feinster angrenzender
@@ -141,108 +356,189 @@ def _blaetter_balancieren(blaetter, N, min_size):
     Aufgabe: Ist Voraussetzung fuer die Kanten-Faecher-Triangulierung unten -
     ohne diese Balance koennte ein Blatt einen um 2+ Stufen feineren
     Nachbarn haben, was ein einzelner Kanten-Mittelpunkt nicht mehr flicken kann.
+
+    VEKTORISIERT (2026-08-13, OFFENE_PUNKTE 6.18b, Nachricht des Nutzers "dann
+    weiter"): die alte Fassung lief in einem Python-Loop ueber jedes einzelne
+    Blatt - bei 194068 Blaettern (echtes 1024px-Gelaende, Nutzerlog
+    2026-08-13) der gemessene Hauptanteil der 15.7s/33.3s Netzaufbauzeit.
+    Ersetzt durch: Blaetter nach Groesse gruppiert (Python-Loop nur ueber die
+    ~11 VORKOMMENDEN Groessen), pro Gruppe die vier Kanten-Minima fuer ALLE
+    Blaetter der Gruppe gleichzeitig ueber `_kanten_minima()` geholt.
+
+    ERSTER ANLAUF WAR MESSBAR LANGSAMER und wurde verworfen: er nutzte
+    `sliding_window_view(besitzer, c).min(axis=-1)`, was ein gleitendes
+    Minimum ueber das GESAMTE Gitter rechnet - also mit `zellen**2` skaliert,
+    unabhaengig davon, wie wenige Blaetter dieser Groesse es gibt. Gemessen
+    bei 1024px/3019 Blaettern: 1.63s alt gegen 3.24s neu, also **halb so
+    schnell**. Aufgefallen nur, weil der Vergleichstest die Zeiten beider
+    Fassungen nebeneinander ausgibt statt nur die Gleichheit zu pruefen. Die
+    jetzige Fassung gathert stattdessen gezielt die `K*c` Randzellen der
+    Gruppe (siehe `_kanten_minima()`) und skaliert damit mit der tatsaechlich
+    beruehrten Kantenlaenge statt mit der Gitterflaeche.
+
+    Ergebnis bit-identisch zur alten Fassung, siehe
+    tests/smoke_test_adaptive_mesh_vectorized.py (Vergleich alt/neu auf
+    echten Kartengroessen, nicht nur synthetischen Testgroessen - siehe
+    CLAUDE.md-Lehre zu 6.16, dieselbe Falle sollte hier nicht wiederholt werden).
     """
     zellen = N // min_size
+
     while True:
-        besitzer = _besitzer_gitter(blaetter, zellen, min_size)
-        neue_blaetter = {}
-        musste_teilen = False
+        besitzer = _besitzer_gitter_aus_arrays(x0s, y0s, sizes, zellen, min_size)
+        cxs = x0s // min_size
+        cys = y0s // min_size
+        cs = sizes // min_size
 
-        for (x0, y0), size in blaetter.items():
-            c = size // min_size
-            cx, cy = x0 // min_size, y0 // min_size
+        muss_teilen = np.zeros(len(sizes), dtype=bool)
 
-            kleinster_nachbar = size
-            if cx > 0:
-                kleinster_nachbar = min(kleinster_nachbar, int(besitzer[cy:cy + c, cx - 1].min()))
-            if cx + c < zellen:
-                kleinster_nachbar = min(kleinster_nachbar, int(besitzer[cy:cy + c, cx + c].min()))
-            if cy > 0:
-                kleinster_nachbar = min(kleinster_nachbar, int(besitzer[cy - 1, cx:cx + c].min()))
-            if cy + c < zellen:
-                kleinster_nachbar = min(kleinster_nachbar, int(besitzer[cy + c, cx:cx + c].min()))
+        for c in np.unique(cs):
+            c = int(c)
+            if c >= zellen:
+                continue  # einziges Blatt deckt die ganze Karte, kein Nachbar moeglich
 
-            if size > min_size and kleinster_nachbar < size // 2:
-                musste_teilen = True
-                half = size // 2
-                xm, ym = x0 + half, y0 + half
-                neue_blaetter[(x0, y0)] = half
-                neue_blaetter[(xm, y0)] = half
-                neue_blaetter[(x0, ym)] = half
-                neue_blaetter[(xm, ym)] = half
-            else:
-                neue_blaetter[(x0, y0)] = size
+            idx = np.nonzero(cs == c)[0]
+            s = int(sizes[idx[0]])
+            if s <= min_size:
+                continue  # kann nicht weiter geteilt werden, Nachbarwert irrelevant
 
-        blaetter = neue_blaetter
-        if not musste_teilen:
-            return blaetter
+            kleinster = _kanten_minima(besitzer, cxs[idx], cys[idx], c, zellen, s)
+            teilen_lokal = kleinster < (s // 2)
+            if teilen_lokal.any():
+                muss_teilen[idx[teilen_lokal]] = True
+
+        if not muss_teilen.any():
+            return x0s, y0s, sizes
+
+        bleiben = ~muss_teilen
+        halbe = sizes[muss_teilen] // 2
+        x0_teil = x0s[muss_teilen]
+        y0_teil = y0s[muss_teilen]
+
+        x0s = np.concatenate([x0s[bleiben], x0_teil, x0_teil + halbe, x0_teil, x0_teil + halbe])
+        y0s = np.concatenate([y0s[bleiben], y0_teil, y0_teil, y0_teil + halbe, y0_teil + halbe])
+        sizes = np.concatenate([sizes[bleiben], halbe, halbe, halbe, halbe])
 
 
-def _dreiecke_aus_blaettern(blaetter, N, min_size):
+def _dreiecke_aus_blaettern(x0s, y0s, sizes, N, min_size):
     """
     Funktionsweise: Baut Vertex-Liste (Gitterkoordinaten) + Dreiecks-Liste
     (Vertex-Indices) aus den balancierten Blaettern. Fasst geteilte
-    Eckpunkte/Kanten-Mittelpunkte ueber ein Koordinaten->Index-Dict zusammen
-    (dadurch automatisch identische Vertices auf beiden Seiten einer
-    gemeinsamen Kante - Voraussetzung fuer Risslosigkeit).
+    Eckpunkte/Kanten-Mittelpunkte automatisch zu identischen Vertices auf
+    beiden Seiten einer gemeinsamen Kante zusammen - Voraussetzung fuer
+    Risslosigkeit.
     Aufgabe: Fächer-Reihenfolge (BL,BR,TR,TL) reproduziert exakt die Diagonale
     und Wicklung des bisherigen Gleichmaessig-Gitters (dort: Dreieck1 =
     TL,BL,TR; Dreieck2 = TR,BL,BR - beide nutzen die BL-TR-Diagonale), was bei
     aktivem Backface-Culling (glCullFace(GL_BACK), glFrontFace(GL_CW) in
     map_display_3d.py) zwingend ist, sonst wuerden neue Dreiecke von hinten
     weggeschnitten.
+
+    VEKTORISIERT (2026-08-13, OFFENE_PUNKTE 6.18b): die alte Fassung baute
+    Polygon und Dreiecke in einem Python-Loop ueber jedes einzelne Blatt samt
+    einem dict-basierten Koordinaten->Index-Cache fuer die Vertex-
+    Zusammenfassung - bei 194068 Blaettern der zweite Hauptanteil der
+    gemessenen Netzaufbauzeit. Ersetzt durch: Blaetter zunaechst nach den
+    VIER Nachbar-Flags gruppiert (max. 16 Kombinationen: hat ein Blatt an
+    Unten/Rechts/Oben/Links einen feineren Nachbarn oder nicht - bestimmt,
+    welche Kanten-Mittelpunkte ins Polygon kommen). Jede Kombination hat eine
+    FESTE Polygon-Vertex-Schablone (z.B. nur BL/BR/TR/TL ohne jeden
+    Mittelpunkt fuer ein min_size-Blatt), deshalb kann die Fächer-
+    Triangulierung fuer alle Blaetter EINER Kombination gleichzeitig gebaut
+    werden statt Blatt fuer Blatt. Die Vertex-Zusammenfassung selbst laeuft
+    am Ende in einem einzigen `numpy.unique()` ueber die kodierten (x,y)-
+    Koordinaten aller Dreieckspunkte, statt ueber ein Python-dict.
+    Reihenfolge der Vertex-Indizes weicht dadurch von der alten (dict-
+    Einfuegereihenfolge-basierten) Fassung ab - das ist folgenlos, kein
+    Downstream-Code haengt an konkreten Index-Werten, nur an der
+    Dreiecksgeometrie selbst. Bit-identische Geometrie zur alten Fassung
+    verifiziert in tests/smoke_test_adaptive_mesh_vectorized.py.
     """
+    n_blaetter = len(sizes)
+    if n_blaetter == 0:
+        return [], []
+
     zellen = N // min_size
-    besitzer = _besitzer_gitter(blaetter, zellen, min_size)
+    besitzer = _besitzer_gitter_aus_arrays(x0s, y0s, sizes, zellen, min_size)
 
-    def nachbar_groesse(cx, cy, c, richtung):
-        if richtung == "links":
-            return int(besitzer[cy:cy + c, cx - 1].min()) if cx > 0 else None
-        if richtung == "rechts":
-            return int(besitzer[cy:cy + c, cx + c].min()) if cx + c < zellen else None
-        if richtung == "oben":
-            return int(besitzer[cy - 1, cx:cx + c].min()) if cy > 0 else None
-        return int(besitzer[cy + c, cx:cx + c].min()) if cy + c < zellen else None
+    x1s = x0s + sizes
+    y1s = y0s + sizes
+    xms = x0s + sizes // 2
+    yms = y0s + sizes // 2
 
-    vertex_index = {}
-    positionen = []
+    hat_unten = np.zeros(n_blaetter, dtype=bool)
+    hat_rechts = np.zeros(n_blaetter, dtype=bool)
+    hat_oben = np.zeros(n_blaetter, dtype=bool)
+    hat_links = np.zeros(n_blaetter, dtype=bool)
 
-    def vidx(punkt):
-        i = vertex_index.get(punkt)
-        if i is None:
-            i = len(positionen)
-            vertex_index[punkt] = i
-            positionen.append(punkt)
-        return i
+    cxs = x0s // min_size
+    cys = y0s // min_size
+    cs = sizes // min_size
 
-    dreiecke = []
-    for (x0, y0), size in blaetter.items():
-        c = size // min_size
-        cx, cy = x0 // min_size, y0 // min_size
-        x1, y1 = x0 + size, y0 + size
-        xm, ym = x0 + size // 2, y0 + size // 2
+    for c in np.unique(cs):
+        c = int(c)
+        idx = np.nonzero(cs == c)[0]
+        s = int(sizes[idx[0]])
+        if s <= min_size or c >= zellen:
+            continue  # min_size-Blaetter bekommen nie einen Mittelpunkt
 
-        n_links = nachbar_groesse(cx, cy, c, "links")
-        n_rechts = nachbar_groesse(cx, cy, c, "rechts")
-        n_oben = nachbar_groesse(cx, cy, c, "oben")
-        n_unten = nachbar_groesse(cx, cy, c, "unten")
+        links, rechts, oben, unten = _kanten_minima_je_seite(
+            besitzer, cxs[idx], cys[idx], c, zellen, s)
+        # `< s` entspricht exakt der alten Bedingung `n_richtung < size` -
+        # wo es keinen Nachbarn gibt, steht `s` selbst und die Bedingung ist
+        # damit False, genau wie das alte `n_richtung is not None`.
+        hat_links[idx] = links < s
+        hat_rechts[idx] = rechts < s
+        hat_oben[idx] = oben < s
+        hat_unten[idx] = unten < s
 
-        polygon = [(x0, y1)]  # BL - Faecher-Ursprung
-        if size > min_size and n_unten is not None and n_unten < size:
-            polygon.append((xm, y1))
-        polygon.append((x1, y1))  # BR
-        if size > min_size and n_rechts is not None and n_rechts < size:
-            polygon.append((x1, ym))
-        polygon.append((x1, y0))  # TR
-        if size > min_size and n_oben is not None and n_oben < size:
-            polygon.append((xm, y0))
-        polygon.append((x0, y0))  # TL
-        if size > min_size and n_links is not None and n_links < size:
-            polygon.append((x0, ym))
+    # Feste Vertex-Formeln je Schablonen-Position (siehe Docstring-Grafik:
+    # BL -> [mid_unten] -> BR -> [mid_rechts] -> TR -> [mid_oben] -> TL -> [mid_links]).
+    schablonen_positionen = {
+        "BL": (x0s, y1s), "mid_unten": (xms, y1s), "BR": (x1s, y1s),
+        "mid_rechts": (x1s, yms), "TR": (x1s, y0s), "mid_oben": (xms, y0s),
+        "TL": (x0s, y0s), "mid_links": (x0s, yms),
+    }
 
-        idxs = [vidx(p) for p in polygon]
-        for i in range(1, len(idxs) - 1):
-            dreiecke.append((idxs[0], idxs[i], idxs[i + 1]))
+    kombi = (hat_unten.astype(np.int8) | (hat_rechts.astype(np.int8) << 1) |
+             (hat_oben.astype(np.int8) << 2) | (hat_links.astype(np.int8) << 3))
+
+    alle_dreieck_xy = []
+    for k in np.unique(kombi):
+        idx = np.nonzero(kombi == k)[0]
+        reihenfolge = ["BL"]
+        if k & 1:
+            reihenfolge.append("mid_unten")
+        reihenfolge.append("BR")
+        if k & 2:
+            reihenfolge.append("mid_rechts")
+        reihenfolge.append("TR")
+        if k & 4:
+            reihenfolge.append("mid_oben")
+        reihenfolge.append("TL")
+        if k & 8:
+            reihenfolge.append("mid_links")
+
+        polygon_x = np.stack([schablonen_positionen[name][0][idx] for name in reihenfolge], axis=1)
+        polygon_y = np.stack([schablonen_positionen[name][1][idx] for name in reihenfolge], axis=1)
+
+        for i in range(1, len(reihenfolge) - 1):
+            dreieck_xy = np.stack([
+                np.stack([polygon_x[:, 0], polygon_y[:, 0]], axis=1),
+                np.stack([polygon_x[:, i], polygon_y[:, i]], axis=1),
+                np.stack([polygon_x[:, i + 1], polygon_y[:, i + 1]], axis=1),
+            ], axis=1)  # (K, 3, 2)
+            alle_dreieck_xy.append(dreieck_xy)
+
+    dreieck_xy = np.concatenate(alle_dreieck_xy, axis=0)  # (Dreiecke, 3, 2)
+    flach = dreieck_xy.reshape(-1, 2)  # (Dreiecke*3, 2)
+
+    schluessel = flach[:, 0].astype(np.int64) * (N + 2) + flach[:, 1].astype(np.int64)
+    eindeutige_schluessel, inverse = np.unique(schluessel, return_inverse=True)
+
+    positionen = list(zip((eindeutige_schluessel // (N + 2)).tolist(),
+                          (eindeutige_schluessel % (N + 2)).tolist()))
+    dreieck_indizes = inverse.reshape(-1, 3)
+    dreiecke = [tuple(t) for t in dreieck_indizes.tolist()]
 
     return positionen, dreiecke
 
@@ -277,16 +573,20 @@ def baue_adaptives_mesh_roh(heightmap, fehler_toleranz_m, min_leaf_size=1):
 
     H, N = _gepolsterte_hoehen(heightmap)
 
-    cache = {}
-    _quad_fehler(H, 0, 0, N, cache)
+    # Durchgehend als parallele Arrays statt als dicts (2026-08-13,
+    # OFFENE_PUNKTE 6.18b) - Fehlerberechnung, Blattauswahl, Balancierung und
+    # Triangulierung arbeiten alle vektorisiert.
+    ebenen = _fehler_pyramide(H, N)
+    x0s, y0s, sizes = _blaetter_sammeln_pyramide(ebenen, N, fehler_toleranz_m, min_leaf_size)
+    if len(sizes) == 0:
+        return None
 
-    blaetter = {}
-    _blaetter_sammeln(cache, 0, 0, N, fehler_toleranz_m, min_leaf_size, blaetter)
-    blaetter = _blaetter_balancieren(blaetter, N, min_leaf_size)
+    x0s, y0s, sizes = _blaetter_balancieren(x0s, y0s, sizes, N, min_leaf_size)
 
-    positionen, dreiecke = _dreiecke_aus_blaettern(blaetter, N, min_leaf_size)
+    positionen, dreiecke = _dreiecke_aus_blaettern(x0s, y0s, sizes, N, min_leaf_size)
     if not dreiecke:
         return None
+    blaetter = dict(zip(zip(x0s.tolist(), y0s.tolist()), sizes.tolist()))
     return positionen, dreiecke, blaetter, N
 
 
@@ -321,6 +621,35 @@ def _normalen_voll(H, terrain_height_scale, terrain_scale_factor):
     return normal_x, normal_y, normal_z
 
 
+# ZWISCHENSPEICHER UEBER ALLE REITER (2026-08-13, OFFENE_PUNKTE 6.18).
+# Jeder Reiter hat ein eigenes MapDisplay3D-Widget und baute deshalb dasselbe
+# Netz erneut - im Nutzerlog meldeten Terrain und Geologie exakt dieselben
+# Zahlen (450193 Dreiecke, 194068 Blaetter), bei 15.7 s bzw. 33.3 s. Bei zehn
+# Reitern zehnmal dieselbe Rechnung. Der Schluessel geht ueber den INHALT der
+# Heightmap, nicht ueber die Objektidentitaet.
+_MESH_CACHE = {}
+_MESH_CACHE_MAX = 3   # Terrain-Rohform, kombinierte Form, eine Reserve
+
+
+def _cache_schluessel(heightmap, terrain_scale_factor, terrain_height_scale,
+                      fehler_toleranz_m, min_leaf_size):
+    """
+    Funktionsweise: Inhaltsschluessel aus der Heightmap plus allen Groessen,
+    die das Ergebnis beeinflussen.
+    Aufgabe: `hash(bytes)` ueber ein 1024x1024-float32-Feld kostet rund 1 ms -
+    gegenueber 15 s Netzaufbau vernachlaessigbar. Bewusst der INHALT und nicht
+    `id()`: `get_terrain_data_combined()` liefert bei jedem Aufruf ein neues
+    Array (`.copy()`), eine Identitaetspruefung ginge also immer daneben.
+    """
+    h = heightmap
+    if not h.flags["C_CONTIGUOUS"]:
+        h = np.ascontiguousarray(h)
+    return (h.shape, h.dtype.str, hash(h.tobytes()),
+            round(float(terrain_scale_factor), 9),
+            round(float(terrain_height_scale), 12),
+            round(float(fehler_toleranz_m), 6), int(min_leaf_size))
+
+
 def build_adaptive_mesh(heightmap, terrain_scale_factor, terrain_height_scale,
                          fehler_toleranz_m, min_leaf_size=1):
     """
@@ -332,7 +661,23 @@ def build_adaptive_mesh(heightmap, terrain_scale_factor, terrain_height_scale,
     Aufgabe: Rueckgabe (vertices float32, indices uint32, stats dict) oder
     None wenn ungeeignet/leer - der Aufrufer faellt dann auf das
     Gleichmaessig-Gitter zurueck.
+
+    Ergebnisse werden ueber den Heightmap-INHALT zwischengespeichert (siehe
+    _MESH_CACHE) - alle Reiter teilen sich dasselbe Netz, statt es je Reiter
+    neu zu bauen. `stats["aus_cache"]` sagt, ob gerechnet wurde.
     """
+    if ist_fuer_adaptives_mesh_geeignet(heightmap):
+        schluessel = _cache_schluessel(heightmap, terrain_scale_factor,
+                                       terrain_height_scale, fehler_toleranz_m,
+                                       min_leaf_size)
+        treffer = _MESH_CACHE.get(schluessel)
+        if treffer is not None:
+            vertices, indices, stats = treffer
+            stats = dict(stats, aus_cache=True)
+            return vertices, indices, stats
+    else:
+        schluessel = None
+
     roh = baue_adaptives_mesh_roh(heightmap, fehler_toleranz_m, min_leaf_size)
     if roh is None:
         return None
@@ -374,5 +719,15 @@ def build_adaptive_mesh(heightmap, terrain_scale_factor, terrain_height_scale,
         "blaetter": len(blaetter),
         "voll_dreiecke": 2 * (width - 1) * (height - 1),
         "voll_vertices": width * height,
+        "aus_cache": False,
     }
+
+    if schluessel is not None:
+        # Aeltesten Eintrag verwerfen, wenn voll (einfaches FIFO - bei maximal
+        # drei Eintraegen lohnt keine echte LRU-Buchfuehrung). Die Arrays
+        # werden von den Reitern nur gelesen und an OpenGL uebergeben.
+        if len(_MESH_CACHE) >= _MESH_CACHE_MAX:
+            _MESH_CACHE.pop(next(iter(_MESH_CACHE)))
+        _MESH_CACHE[schluessel] = (vertices, indices, stats)
+
     return vertices, indices, stats

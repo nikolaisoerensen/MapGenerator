@@ -40,7 +40,15 @@ def check(label, condition):
 # Layer, die bewusst NICHT ueber layer_ranges laufen, weil sie kategorisch
 # oder bereits RGB sind - _colorize_layer() behandelt sie gesondert
 # (Index-Tabelle bzw. Direktuebernahme), identisch zur 2D-Seite.
-_CATEGORICAL_LAYERS_3D = {"rock_map", "biome_map", "super_biome_mask"}
+#
+# region_overlay/kuesten_overlay (2026-08-13): laufen NIE durch
+# _colorize_layer() - eigener Pfad ueber _render_dict_rgba_overlay(), der die
+# RGBA-Textur direkt aus demselben Rohdaten-Dict wie der 2D-Renderer baut
+# (rasterize_regions_rgba()/rasterize_kuesten_archetypen_rgba(), siehe
+# map_display_2d.py). Eine Farbskala waere hier ohnehin sinnlos, die Farben
+# kommen aus den Regionsfarben der Tabelle, nicht aus einem Skalarwert.
+_CATEGORICAL_LAYERS_3D = {"rock_map", "biome_map", "super_biome_mask",
+                          "region_overlay", "kuesten_overlay"}
 
 
 def run_every_3d_layer_has_a_range():

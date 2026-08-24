@@ -211,6 +211,16 @@ class RiverTab(BaseMapTab):
                             zeige_mikro=bool(self.mikro_checkbox
                                              and self.mikro_checkbox.isChecked()))
             else:
+                # DAS FLUSSNETZ ABSCHALTEN, sonst liegt es ueber jeder
+                # anderen Ansicht dieses Reiters (Nutzerbefund 2026-08-24:
+                # *"wenn man auf Ordnung geht dann aendert sich nichts und
+                # wenn man wieder auf gelaende geht aendert sich auch
+                # nichts"*). Die 2D-Ansicht zeichnet bei jedem Wechsel
+                # ohnehin neu; im 3D bleibt eine einmal gesetzte Textur
+                # liegen, bis sie ausgeschaltet wird.
+                ziel = self._anzeigeziel()
+                if ziel is not None and hasattr(ziel, "clear_river_overlay"):
+                    ziel.clear_river_overlay()
                 art = ("heightmap" if self.current_display_mode == "height"
                        else self.current_display_mode)
                 daten = self.data_lod_manager.get_terrain_data(art)

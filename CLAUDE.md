@@ -4,10 +4,16 @@
 
 | Datei | Wofuer |
 |---|---|
-| `docs/UEBERGABE.md` | **Neue Sitzung oder neuer Rechner: hier anfangen.** Umgebung, Stand, wichtigster offener Punkt. |
+| `docs/SITZUNGSLOG.md` | **Fortlaufendes Protokoll aller Sitzungen, neueste oben. Hier anfangen.** Was gemacht, was gemessen, was NICHT funktioniert hat. |
+| `docs/UEBERGABE_SITZUNG_2026-08-24.md` | **JÜNGSTE SITZUNG — HIER ANFANGEN.** 88 uncommittete Dateien, drei größere Fehler behoben (8 von 27 Küstentypen fehlten, keine großen Flüsse, Flächeneichung), nächste Schritte, offene Nutzerentscheidung. |
+| `docs/UEBERGABE_SITZUNG_2026-08-16.md` | Sitzung davor (Remesh): zwei behobene App-Bugs, offene Zustimmung zu `fast-simplification`. |
+| `docs/ANZEIGE_UND_SEEN.md` | Anzeige im 3D und Binnenseen — Blöcke A/B/C mit Reihenfolge. |
+| `docs/UEBERGABE.md` | Umgebung und Gesamtstand (Stand 2026-08-12). |
 | `docs/SPEZIFIKATION.md` | Ziele und Invarianten — vor der Arbeit lesen (siehe unten) |
+| `docs/FLUESSE_UND_WASSER.md` | **Fluesse und Wasserverteilung — die Ordnung dieses Themas.** Befund, geklaerte Fakten, Bloecke 1-5 mit Reihenfolge. Was dort nicht steht, ist nicht beschlossen. |
 | `docs/OFFENE_PUNKTE.md` | **Die einzige Aufgabenliste.** `docs/TODO.md` gibt es nicht mehr, sie ist dort in Abschnitt 12 aufgegangen. |
 | `docs/TESTBERICHT.md` | Was gerade gruen ist und was nicht, mit Erklaerung je Fehlschlag |
+| `docs/PRUEFLISTE_LIVE.md` | Was am laufenden Programm zu pruefen ist — alles, was headless nicht geht |
 | `docs/archiv/` | Historisch, gilt nicht mehr — nicht als Beschreibung des Ist-Zustands lesen |
 
 
@@ -204,6 +210,34 @@ Zwei Regeln daraus:
    Ergebnis liefert, ist von Erfolg nicht zu unterscheiden. Dieselbe Lektion
    steht weiter unten schon einmal, fuer die GPU-Fallbacks nach dem
    Dateiumzug - sie hat sich hier unabhaengig wiederholt.
+
+
+## Wenn alle Einzelprüfungen grün sind und das Ergebnis falsch ist
+
+Am 2026-08-24 traten drei Fehler auf, die alle dasselbe Muster hatten:
+**eine Kette aus lauter einzeln richtigen Teilen, die als Ganzes falsch
+ist.**
+
+Beim schwersten davon kamen **8 von 27 Küsten-Archetypen auf der fertigen
+Karte überhaupt nicht vor**. Nacheinander geprüft und für korrekt
+befunden wurden: Profil, Mischung, Reichweite, Höhendeckel,
+Inselschluss, Stärke. Jedes Glied war grün. Der Fehler saß in der
+**Zuordnung dazwischen** — eine Einzelgliedprüfung kann das prinzipiell
+nicht sehen.
+
+Gefunden wurde er erst, als eine Messung **zwei Enden der Kette
+gegeneinander hielt**: Anteil an Saatstationen gegen Anteil an fertiger
+Küstenlänge. Das fand ihn in einem Schritt, nachdem sechs
+Einzelhypothesen ergebnislos geblieben waren.
+
+**Regel: sind mehrere Prüfungen grün und das Ergebnis trotzdem falsch,
+aufhören Einzelglieder zu prüfen. Zwei Enden gegeneinander messen.**
+
+Die beiden anderen Fehler desselben Tages — `river` und `grand_river`
+kamen nie vor (Perzentilschwelle mit absoluten Faktoren multipliziert),
+und `flaeche_soll` war bei sechs von neun Regionen ungesetzt — liefen
+ebenfalls fehlerfrei durch und lieferten plausible Ergebnisse. Nichts
+stürzte ab, nichts warnte, alle bestehenden Tests blieben grün.
 
 
 ## Gelaendeaenderungen verstimmen zuerst die Regionseichung

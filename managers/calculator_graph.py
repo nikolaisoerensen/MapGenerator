@@ -64,7 +64,7 @@ _CALCULATOR_SPECS = [
     # NUR bei aktiver Weltkarte belegt - im alten Pfad gibt es keine Regionen.
     CalculatorSpec("terrain.redistribution", "terrain", ["terrain.noise"],
                    ["heightmap", "ridge_map", "river_mask", "river_order",
-                    "river_generation", "region_map", "klima_map"]),
+                    "river_generation", "region_map", "klima_map", "spielkarte"]),
     CalculatorSpec("terrain.slope", "terrain", ["terrain.redistribution"], ["slopemap"]),
     CalculatorSpec("terrain.shadow", "terrain", ["terrain.redistribution"], ["shadowmap"]),
 

@@ -286,14 +286,21 @@ class WeatherTab(BaseMapTab):
         """
         Erstellt Weather-spezifische Visualization Controls.
         Überschreibt Optional-Method von BaseMapTab.
+
+        ZWEI GETRENNTE ZEILEN (docs/OFFENE_PUNKTE.md 6.3), nicht eine lange
+        Reihe: die Messgröße (Height/Temperature/Precipitation/Humidity/Wind)
+        und die Atmosphäre-Schicht (Ground/Mid/High) sind zwei unabhängige
+        Auswahlen mit je eigener QButtonGroup - in einer Reihe nebeneinander
+        sahen sie aus wie EIN zusammenhängender Regler.
         """
         controls_widget = QWidget()
-        controls_layout = QHBoxLayout()
-        controls_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(0, 0, 0, 0)
 
-        display_mode_layout = self._create_display_mode_controls()
-        controls_layout.addLayout(display_mode_layout)
-        controls_layout.addWidget(self._create_vertical_separator())
+        display_mode_row = QWidget()
+        display_mode_row.setLayout(self._create_display_mode_controls())
+        outer_layout.addWidget(display_mode_row)
+
         self.layer_controls_widget = QWidget()
         self.layer_controls_widget.setLayout(self._create_layer_controls())
         # "Height" ist der initial gewählte Modus (siehe _create_display_mode_controls()) -
@@ -301,9 +308,9 @@ class WeatherTab(BaseMapTab):
         # existierte damals noch nicht, siehe hasattr-Guard in
         # _on_display_mode_changed()), deshalb hier explizit den Ausgangszustand setzen.
         self.layer_controls_widget.setVisible(self.current_display_mode != "height")
-        controls_layout.addWidget(self.layer_controls_widget)
+        outer_layout.addWidget(self.layer_controls_widget)
 
-        controls_widget.setLayout(controls_layout)
+        controls_widget.setLayout(outer_layout)
         return controls_widget
 
     def _create_display_mode_controls(self):
@@ -351,13 +358,6 @@ class WeatherTab(BaseMapTab):
             layout.addWidget(radio)
 
         return layout
-
-    def _create_vertical_separator(self):
-        """Erstellt vertikalen Separator für UI-Layout"""
-        separator = QWidget()
-        separator.setFixedWidth(1)
-        separator.setStyleSheet("background-color: #bdc3c7;")
-        return separator
 
     # =============================================================================
     # EVENT HANDLERS
@@ -492,8 +492,27 @@ class WeatherTab(BaseMapTab):
             self._month_cycle_timer.stop()
 
     def _on_month_cycle_tick(self):
-        """Wird jede Sekunde vom _month_cycle_timer aufgerufen - schaltet auf
-        die nächste der 6 saisonalen Monats-Karten um und stößt ein Redraw an."""
+        """
+        Wird jede Sekunde vom _month_cycle_timer aufgerufen - schaltet auf
+        die naechste der 6 saisonalen Monats-Karten um und stoesst ein Redraw an.
+
+        NUR WENN DER REITER SICHTBAR IST (docs/OFFENE_PUNKTE.md 6.22).
+        Vorher lief der Zyklus weiter, auch wenn laengst ein anderer Reiter
+        vorn war - jede Sekunde ein vollstaendiger Push- und Zeichendurchgang
+        fuer ein Bild, das niemand sieht. Im Konsolenlog vom 2026-08-11 waren
+        das wiederholte, zunehmend langsamer werdende
+        `weather.precip_map`/`wind_map`/`temp_map`-Pushes (0.36 s -> 0.85 s).
+        Dieselbe Ueberlegung wie bei 6.14, wo dasselbe Muster 187 s gekostet
+        hat: nur der sichtbare Reiter zeichnet.
+
+        Der Monatsindex laeuft dabei bewusst NICHT weiter. Sonst springt die
+        Anzeige beim Zurueckwechseln auf einen willkuerlichen Monat, statt
+        dort weiterzulaufen, wo der Nutzer sie verlassen hat.
+        """
+        sichtbar = getattr(self, "viewport_widget", None)
+        if sichtbar is not None and not sichtbar.isVisible():
+            return
+
         monthly_list = self.data_lod_manager.get_weather_data(self._current_monthly_key())
         if not monthly_list:
             self._month_cycle_timer.stop()

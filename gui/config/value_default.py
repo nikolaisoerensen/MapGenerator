@@ -886,6 +886,33 @@ class RIVER_NETWORK:
 # das reine Regionengelaende.
 WELTKARTE_AKTIV = True
 
+# Kuestenformung ueber die VEKTORBESCHREIBUNG statt ueber Pixelmasken
+# (core/vektor_kueste.py, docs/KUESTENMODELL.md).
+#
+# Aus bei True bleibt `_kuesten_umformen()` in core/terrain_weltkarte.py
+# unbenutzt. Der Vektorweg ist aufloesungsunabhaengig (Stationen in Metern
+# statt per Pixelindex gezogen) und bezieht Profilform, Zielhoehe und
+# Reichweite aus Messungen an 19 realen Vorbildkuesten statt aus geschaetzten
+# Katalogwerten - der Katalog lag stellenweise um Faktor 16 daneben (Taiga
+# 495 m gegen gemessene 30 m).
+#
+# UMSCHALTBAR, weil es die Gelaendeform aendert und die Regionseichung daran
+# haengt (docs/OFFENE_PUNKTE.md 3.9, CLAUDE.md "Gelaendeaenderungen
+# verstimmen zuerst die Regionseichung").
+VEKTOR_KUESTE_AKTIV = True
+
+# Das 3D-Netz entlang der Kuestenlinie SCHNEIDEN, damit sie eine echte
+# Dreieckskante wird statt einer Rastertreppe
+# (gui/widgets/kuesten_schnitt.py, docs/KUESTENMODELL.md §8).
+#
+# Gemessen bei 384 px: 99.7 % der Konturvertices liegen NICHT auf einer
+# Pixelecke (Quadtree: 0 %). Naht dicht, Konturhoehen exakt 0.
+#
+# PREIS: der Schnitt geht vom VOLLEN Gitter aus. Das adaptive Quadtree
+# braucht nur rund ein Fuenftel davon - bei 1024 px also grob 2.1 Mio
+# Dreiecke statt 0.41 Mio. Wer die Treppe hinnimmt, spart das.
+KUESTEN_SCHNITT_AKTIV = True
+
 # Fluesse und Taeler der Weltkarte (Stufe P2). Getrennt schaltbar, damit sich
 # das reine Regionengelaende auch ohne sie ansehen laesst - und damit bei einem
 # Fehler klar ist, welcher der beiden Schritte ihn verursacht.
@@ -1265,9 +1292,20 @@ class WATER:
                         "hergestellt wird - die Gesamtmenge an Erosion bleibt "
                         "dabei gleich."
     }
+    # ACHTUNG, DOPPELTER SCHLUESSEL (docs/OFFENE_PUNKTE.md 12.3).
+    #
+    # `erosion_strength` gibt es ZWEIMAL: hier (Droplet-Altbestand, 0.1-5.0,
+    # Vorgabe 2.5) und in class EROSION (Feld-Erosion, 0.0-2.0, Vorgabe 0.5).
+    # Beide schreiben nach parameters['erosion_strength']; welcher gewinnt,
+    # haengt an der Reihenfolge der Zusammenstellung. Das ist ausdruecklich
+    # KEIN Zustand, den man uebersehen soll - `DOPPELTE_SCHLUESSEL` unten
+    # fuehrt ihn, und tests/smoke_test_parameter_eindeutig.py schlaegt fehl,
+    # sobald ein NEUER unangemeldeter Doppelschluessel dazukommt.
     EROSION_STRENGTH = {
         "min": 0.1, "max": 5.0, "default": 2.5, "step": 0.1,
-        "description": "Genereller Multiplikator dafür, wie stark ein "
+        "description": "[ALTBESTAND DROPLET-EROSION - siehe Kommentar oben; "
+                        "der wirksame Regler gleichen Namens steht in class "
+                        "EROSION] Genereller Multiplikator dafür, wie stark ein "
                         "Erosions-Partikel das Gelände abträgt (siehe "
                         "core/water_generator.py DropletErosionSystem, "
                         "Droplet-basierte Erosion seit 2026-07-25 - ersetzt "
@@ -1445,6 +1483,30 @@ class VALIDATION_RULES:
 
 
 # Utility Functions für Parameter-Handling
+# BEKANNTE, ABSICHTLICH DOPPELTE PARAMETERSCHLUESSEL.
+#
+# Schluessel -> (Klassen, Begruendung). Alles, was hier NICHT steht und
+# trotzdem in zwei Klassen auftaucht, ist ein Versehen und wird von
+# tests/smoke_test_parameter_eindeutig.py gemeldet. Ohne dieses Register
+# waere ein neuer Doppeleintrag genau das, was 12.3 beschreibt: eine stille
+# Mehrdeutigkeit, die spaeter als unerklaerliches Verhalten zurueckkommt.
+DOPPELTE_SCHLUESSEL = {
+    "erosion_strength": (
+        ("EROSION", "WATER"),
+        "ECHTE Mehrdeutigkeit: beide schreiben nach "
+        "parameters['erosion_strength']. WATER ist Altbestand der "
+        "Droplet-Erosion (stillgelegt 2026-07-28), wirksam ist EROSION "
+        "(0.0-2.0, Vorgabe 0.5) gegen WATER (0.1-5.0, Vorgabe 2.5)."),
+    "octaves": (
+        ("EROSION_FILTER", "TERRAIN"),
+        "HARMLOS - nur der Attributname ist gleich, der Parameterschluessel "
+        "nicht: TERRAIN.OCTAVES laeuft als 'octaves', EROSION_FILTER.OCTAVES "
+        "als 'erosion_filter_octaves' (gui/tabs/terrain_tab.py:117 und :141). "
+        "Steht hier, damit die Pruefung nicht bei jedem Lauf darueber "
+        "stolpert - und damit sichtbar bleibt, dass es geprueft wurde."),
+}
+
+
 def get_parameter_config(generator_type, parameter_name):
     """
     Funktionsweise: Holt Parameter-Konfiguration für spezifischen Generator und Parameter
@@ -1590,6 +1652,26 @@ def stillgelegte_regler():
                            "smoothing", "talus_angle_scale",
                            "thermal_strength", "thermal_variant"):
             gesperrt[schluessel] = grund_erosion
+
+    # ALTBESTAND DROPLET-EROSION (docs/OFFENE_PUNKTE.md 12.3/12.4).
+    #
+    # Diese Schluessel gehoeren zu `water.erosion_sedimentation` und
+    # `water.thermal_erosion` - im Berechnungsgraphen als "ALTBESTAND
+    # DROPLET-EROSION (stillgelegt 2026-07-28)" gefuehrt und ausdruecklich
+    # "ersetzt durch erosion.hydraulic". Sie stehen in keinem Reiter, werden
+    # von `core/water_generator.py` aber weiterhin ueber
+    # `parameters.get(...)` mit fest eingebauten Vorgaben gelesen - deshalb
+    # sind sie hier NICHT geloescht, sondern benannt. Ein Loeschen wuerde die
+    # dokumentierte Spanne entfernen und den stillen Rueckfall auf die
+    # Literalwerte im Generator zuruecklassen.
+    grund_droplet = (
+        "Gehoert zur abgeloesten Droplet-Erosion (water.erosion_sedimentation "
+        "/ water.thermal_erosion, stillgelegt 2026-07-28, ersetzt durch "
+        "erosion.hydraulic). Steht in keinem Reiter und wirkt nicht.")
+    for schluessel in ("erosion_passes", "sediment_capacity_factor",
+                       "settling_velocity", "thermal_erosion_strength",
+                       "evaporation_base_rate", "diffusion_radius"):
+        gesperrt.setdefault(schluessel, grund_droplet)
 
     # `frequency` ist ABGELOEST, nicht kaputt.
     #

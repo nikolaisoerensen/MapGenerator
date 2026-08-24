@@ -3342,7 +3342,7 @@ class DataLODManager(QObject):
         for schluessel in ("river_mask", "river_order", "river_generation",
                            "region_map", "klima_map", "seegrad",
                            "ufer_region_a", "ufer_region_b", "see_eis",
-                           "kuesten_archetyp", "kuesten_staerke"):
+                           "kuesten_archetyp", "kuesten_staerke", "spielkarte"):
             wert = getattr(terrain_data, schluessel, None)
             if wert is not None:
                 self.set_terrain_data_lod(schluessel, wert, lod_level, parameters)

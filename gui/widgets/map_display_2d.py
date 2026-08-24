@@ -269,6 +269,102 @@ def rasterize_plot_boundaries_rgba(plot_nodes, plot_edges, plot_cores, wildernes
     return np.flipud(buffer)
 
 
+def rasterize_settlements_rgba(settlement_list, landmark_list, roadsite_list,
+                                roads, sea_roads, map_size, resolution=None):
+    """
+    Funktionsweise: Rendert dieselbe globale Siedlungsuebersicht wie
+    MapDisplay2D.overlay_settlements()/overlay_roads() (Staedte/Landmarken/
+    Roadsites als Punkte, Land- und Seewege als Linien), aber headless auf
+    eine (resolution, resolution, 4)-RGBA-Textur - transparent ueberall dort,
+    wo nichts gezeichnet wurde, damit das Terrain durchscheint.
+    Aufgabe: 3D-Darstellung des globalen Siedlungsreiters (Nutzer-Vorgabe
+    2026-08-13 nach der Sichtpruefung: "3D Settlements global sollte jetzt
+    umgesetzt werden"), ueber denselben Alpha-Overlay-Pfad wie Regionen und
+    Kuestentypen - KEIN neuer GLSL-Code, keine eigene 3D-Marker-Geometrie.
+
+    Farben, Marker und Linienstile sind bewusst DIESELBEN wie auf der
+    2D-Seite (rot/Kreis fuer Staedte, gold/Dreieck fuer Landmarken,
+    saddlebrown/Quadrat fuer Roadsites, darkorange fuer Landwege,
+    royalblue gestrichelt fuer Seewege) - eine zweite Farbwahl hier waere
+    eine zweite Wahrheit, die beim naechsten Umfaerben auseinanderlaufen
+    wuerde.
+
+    Marker sind GROESSER als in 2D (s=40 -> s=110): das 2D-Bild wird auf ein
+    Canvas von wenigen hundert Pixeln gezeichnet, die 3D-Textur dagegen auf
+    map_size (bis 1024) - bei gleicher Punktgroesse waeren die Staedte auf
+    dem 3D-Gelaende kaum zu finden.
+
+    Return: (resolution, resolution, 4) uint8 RGBA, Zeile 0 = y=0
+    (row-index==y wie heightmap, siehe rasterize_plot_boundaries_rgba()).
+    """
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    if resolution is None:
+        resolution = int(map_size)
+
+    hat_inhalt = bool(settlement_list or landmark_list or roadsite_list
+                      or roads or sea_roads)
+    if not hat_inhalt:
+        return np.zeros((resolution, resolution, 4), dtype=np.uint8)
+
+    dpi = 100
+    fig = Figure(figsize=(resolution / dpi, resolution / dpi), dpi=dpi)
+    canvas = FigureCanvasAgg(fig)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, map_size)
+    ax.set_ylim(0, map_size)
+    ax.set_axis_off()
+    fig.patch.set_alpha(0.0)
+    ax.patch.set_alpha(0.0)
+
+    def _coords(items):
+        xs, ys = [], []
+        for item in items or []:
+            x = getattr(item, 'x', None)
+            y = getattr(item, 'y', None)
+            if x is None and isinstance(item, (tuple, list)) and len(item) >= 2:
+                x, y = item[0], item[1]
+            if x is not None and y is not None:
+                xs.append(x)
+                ys.append(y)
+        return xs, ys
+
+    def _wege_zeichnen(pfade, farbe, linestyle, linewidth):
+        segmente = []
+        for pfad in pfade or []:
+            if not pfad or len(pfad) < 2:
+                continue
+            punkte = [(p[0], p[1]) for p in pfad]
+            segmente.extend((punkte[i], punkte[i + 1]) for i in range(len(punkte) - 1))
+        if segmente:
+            ax.add_collection(LineCollection(
+                segmente, colors=farbe, linewidths=linewidth, alpha=0.9,
+                linestyles=linestyle, zorder=3))
+
+    _wege_zeichnen(roads, 'darkorange', '-', 3.0)
+    _wege_zeichnen(sea_roads, 'royalblue', '--', 2.5)
+
+    rs_x, rs_y = _coords(roadsite_list)
+    if rs_x:
+        ax.scatter(rs_x, rs_y, c='saddlebrown', marker='s', s=45,
+                    edgecolors='black', linewidths=0.8, zorder=4)
+
+    lm_x, lm_y = _coords(landmark_list)
+    if lm_x:
+        ax.scatter(lm_x, lm_y, c='gold', marker='^', s=85,
+                    edgecolors='black', linewidths=1.0, zorder=5)
+
+    st_x, st_y = _coords(settlement_list)
+    if st_x:
+        ax.scatter(st_x, st_y, c='red', marker='o', s=110,
+                    edgecolors='white', linewidths=1.4, zorder=6)
+
+    canvas.draw()
+    buffer = np.asarray(canvas.buffer_rgba(), dtype=np.uint8)
+    return np.flipud(buffer)
+
+
 def rasterize_regions_rgba(region_map, heightmap, resolution=None, alpha=0.55, border_alpha=0.9):
     """
     (H,W,4) RGBA-Array: die neun Regionsfarben als Flaechenfuellung (nur auf
@@ -322,6 +418,122 @@ def rasterize_regions_rgba(region_map, heightmap, resolution=None, alpha=0.55, b
     rgba[grenzen, 1] = 255
     rgba[grenzen, 2] = 255
     rgba[grenzen, 3] = int(round(border_alpha * 255))
+
+    return rgba
+
+
+def rasterize_fluesse_rgba(generation_map, heightmap, zeige_mikro=False,
+                           breite_px=1):
+    """
+    (H,W,4) RGBA-Array des Flussnetzes, nach GENERATION eingefaerbt.
+
+    DIESELBE FARBLOGIK wie `MapDisplay2D.overlay_river_generations()`, aber
+    als eigenstaendiges Array statt als Achsen-Zeichnung - damit die
+    3D-Ansicht dasselbe Netz in denselben Farben zeigt und nicht eine
+    zweite Wahrheit entsteht.
+
+    ANLASS (Nutzerbefund 2026-08-24): *"dass man im 3D modus bei dem
+    Flussnetzwerk keine fluesse sehn kann. ich will in den jeweiligen
+    reitern die fluesse auf dem boden sehen."* Die 2D-Fassung gibt es seit
+    dem 2026-08-06; im 3D fehlte sie ersatzlos. `river_tab` ruft
+    `overlay_river_generations()` ueber ein `hasattr` auf - im 3D schlug
+    das fehl, und zwar LAUTLOS.
+
+    `generation_map` kommt aus terrain.redistribution/river_generation:
+    3 = Makro (die Stroeme), 2 = Meso (Nebenfluesse), 1 = Mikro (Baeche),
+    0 = kein Fluss.
+
+    MIKRO BLEIBT NORMALERWEISE WEG - auf einer 21-km-Karte sind das
+    Rinnsale von wenigen hundert Metern (Nutzer 2026-08-06: "die kleineren
+    fluesse sind nicht zu sehen, zu insignifikant").
+
+    `breite_px` verdickt die Laeufe. Im 3D ist das noetig: ein einzelnes
+    Pixel verschwindet auf einer schraeg betrachteten Textur, waehrend die
+    2D-Ansicht mit `scatter` ohnehin groessere Marker zeichnet.
+    """
+    from scipy import ndimage
+
+    leer = np.zeros((1, 1, 4), dtype=np.uint8)
+    if not isinstance(generation_map, np.ndarray) or generation_map.ndim != 2:
+        return leer
+    rgba = np.zeros(generation_map.shape + (4,), dtype=np.uint8)
+
+    # Von FEIN nach GROB, damit ein Strom ueber seinem Nebenfluss liegt.
+    stufen = [(1.0, (232, 192, 32))] if zeige_mikro else []
+    stufen += [(2.0, (37, 160, 58)), (3.0, (224, 48, 48))]
+
+    for wert, farbe in stufen:
+        treffer = generation_map == wert
+        if not treffer.any():
+            continue
+        if breite_px > 0:
+            treffer = ndimage.binary_dilation(treffer, iterations=int(breite_px))
+        rgba[treffer, 0] = farbe[0]
+        rgba[treffer, 1] = farbe[1]
+        rgba[treffer, 2] = farbe[2]
+        rgba[treffer, 3] = 235
+
+    # NUR AUF LAND. Ein Lauf reicht konstruktionsbedingt bis
+    # MUENDUNGSTIEFE_M (-50 m) ins Meer hinein, damit die Muendungsrichtung
+    # stimmt; gezeichnet wird nur der Teil ueber Wasser (siehe Modulkopf
+    # von core/terrain_weltfluesse.py).
+    if isinstance(heightmap, np.ndarray) and heightmap.shape == generation_map.shape:
+        rgba[heightmap <= 0.0, 3] = 0
+    return rgba
+
+
+def rasterize_kuesten_archetypen_rgba(region_map, heightmap, archetyp, staerke=None):
+    """
+    (H,W,4) RGBA-Array der Kuesten-Archetypen - dieselbe Farblogik wie
+    MapDisplay2D._render_kuesten_archetypen() (Regionsfarbe x Helligkeit nach
+    Steilheit, Deckkraft nach `kuesten_staerke`, weisse Zonengrenzen), aber
+    als eigenstaendiges Array statt als Achsen-Zeichnung - fuer den 3D-Skin-
+    Textur-Upload (map_display_3d.py, Nutzer-Vorgabe 2026-08-13: "die 3D
+    darstellung ALLER 2D maps, aber vor allem der Kuesten auf die 3D Terrains
+    bekommen"), analog zu `rasterize_regions_rgba()`.
+
+    Transparent (alpha=0) ausserhalb von Land und ausserhalb jeder Zone -
+    laesst die Terrain-Basisfarbe darunter durchscheinen.
+    """
+    from core.terrain_weltkarte import alle_regionen, KUESTEN_ARCHETYPEN
+
+    region_map = np.asarray(region_map)
+    heightmap = np.asarray(heightmap, dtype=np.float32)
+    archetyp = np.asarray(archetyp)
+    staerke = np.asarray(staerke) if staerke is not None else np.ones_like(heightmap)
+    land = heightmap > 0.0
+
+    HOEHE_FAKTOR_MIN, HOEHE_FAKTOR_MAX = 0.2, 2.0
+    rgba = np.zeros(region_map.shape + (4,), dtype=np.uint8)
+    gebiete = [r for _z, _s, r in alle_regionen()]
+    for i, region in enumerate(gebiete):
+        archetypen = KUESTEN_ARCHETYPEN.get(region["name"])
+        if not archetypen:
+            continue
+        basis_rgb = np.array(to_rgba(region["farbe"])[:3], dtype=np.float32)
+        for lokal_index, typ in enumerate(archetypen):
+            treffer = land & (region_map == i) & (archetyp == lokal_index)
+            if not treffer.any():
+                continue
+            norm = np.clip(
+                (typ["hoehe_faktor"] - HOEHE_FAKTOR_MIN) / (HOEHE_FAKTOR_MAX - HOEHE_FAKTOR_MIN),
+                0.0, 1.0)
+            helligkeit = 1.3 - norm * 0.8
+            rgb = np.clip(basis_rgb * helligkeit, 0.0, 1.0)
+            alpha = 0.25 + 0.55 * np.clip(staerke[treffer], 0.0, 1.0)
+            rgba[treffer, 0] = np.round(rgb[0] * 255).astype(np.uint8)
+            rgba[treffer, 1] = np.round(rgb[1] * 255).astype(np.uint8)
+            rgba[treffer, 2] = np.round(rgb[2] * 255).astype(np.uint8)
+            rgba[treffer, 3] = np.round(alpha * 255).astype(np.uint8)
+
+    zonen_id = region_map.astype(np.int32) * 8 + np.where(archetyp >= 0, archetyp, 0)
+    grenzen = np.zeros_like(land)
+    grenzen[:, :-1] |= (zonen_id[:, :-1] != zonen_id[:, 1:]) & land[:, :-1] & land[:, 1:]
+    grenzen[:-1, :] |= (zonen_id[:-1, :] != zonen_id[1:, :]) & land[:-1, :] & land[1:, :]
+    rgba[grenzen, 0] = 255
+    rgba[grenzen, 1] = 255
+    rgba[grenzen, 2] = 255
+    rgba[grenzen, 3] = 128
 
     return rgba
 
@@ -436,6 +648,26 @@ class MapDisplay2D(QWidget):
         self.canvas.mpl_connect('motion_notify_event', self._on_mouse_move)
         self.canvas.mpl_connect('scroll_event', self._on_mouse_scroll)
 
+    # ZEICHNEN IMMER UEBER draw_idle(), NIE UEBER draw()
+    #
+    # `draw()` rendert sofort und synchron. Beim Umschalten einer
+    # Overlay-Checkbox im Siedlungsreiter passiert aber zweierlei
+    # nacheinander: erst wird die Basiskarte neu gepusht (ein draw), dann
+    # werden die Overlays gezeichnet (noch ein draw) - zwei volle
+    # Renderdurchgaenge fuer ein einziges sichtbares Ergebnis. Gemessen am
+    # 2026-08-24 bei 512 px: `canvas.draw()` allein 90.6 ms von 150.3 ms des
+    # gesamten `update_display()`, der Rest ist der Aufbau der Artists.
+    #
+    # `draw_idle()` merkt sich nur, dass neu gezeichnet werden muss; Qt fuehrt
+    # es einmal aus, wenn die Ereignisschlange leerlaeuft. Mehrere Anfragen
+    # in derselben Runde fallen damit zu EINEM Durchgang zusammen
+    # (docs/OFFENE_PUNKTE.md 6.26).
+    #
+    # ACHTUNG: das gilt nur fuer `self.canvas`. Die Modulfunktionen
+    # `rasterize_*` weiter oben zeichnen auf EIGENE Offscreen-Canvases und
+    # lesen direkt danach `buffer_rgba()` - die brauchen `draw()` synchron
+    # und bleiben unveraendert.
+
     def update_display(self, data, layer_type="heightmap"):
         """
         Funktionsweise: Aktualisiert 2D-Display mit neuen Generator-Daten
@@ -465,7 +697,7 @@ class MapDisplay2D(QWidget):
             # Titel/Grid werden deshalb hier direkt gesetzt statt geteilt.
             self.ax.grid(True, alpha=0.3, color=CanvasSettings.CANVAS_2D["grid_color"])
             self.ax.set_title("Geology: Layer Cross-Section", fontsize=14, fontweight='bold')
-            self.canvas.draw()
+            self.canvas.draw_idle()
             return
 
         # region_map kommt als dict (regionen + heightmap), weil der Renderer
@@ -474,7 +706,20 @@ class MapDisplay2D(QWidget):
         # Styling und Hoehenlinien sollen unveraendert gelten. Deshalb kein
         # eigener Zweig, sondern nur ein Auspacken fuer alles, was ein Array
         # erwartet.
-        raster = data["regionen"] if isinstance(data, dict) else data
+        #
+        # `spielkarte` (2026-08-13) kommt nach demselben Muster, aber unter
+        # eigenem Schluessel - und darf FEHLEN (None), solange die Zerlegung
+        # noch nicht gerechnet ist; dann traegt die Heightmap das Bild und der
+        # Renderer zeigt sie schlicht ohne Einfaerbung. Ein blosses
+        # `data["regionen"]` warf hier einen KeyError.
+        if isinstance(data, dict):
+            raster = data.get("regionen")
+            if raster is None:
+                raster = data.get("spielkarte")
+            if raster is None:
+                raster = data.get("heightmap")
+        else:
+            raster = data
 
         # Datenvalidierung
         if not _validate_input_data(raster):
@@ -519,6 +764,8 @@ class MapDisplay2D(QWidget):
             self._render_region_map(data)
         elif layer_type == "kuesten_archetyp":
             self._render_kuesten_archetypen(data)
+        elif layer_type == "spielkarte":
+            self._render_spielkarten(data)
         elif layer_type == "water_map":
             self._render_water_map(data)
         elif layer_type == "temp_map":
@@ -543,7 +790,7 @@ class MapDisplay2D(QWidget):
             self._draw_contour_lines(self._contour_reference_heightmap)
 
         self._apply_styling()
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def set_contour_reference_heightmap(self, heightmap):
         """
@@ -879,6 +1126,69 @@ class MapDisplay2D(QWidget):
                 ha="center", va="center", fontsize=8, color="white",
                 linespacing=1.2, zorder=6,
                 path_effects=[pe.withStroke(linewidth=2.5, foreground="black")])
+
+    def _render_spielkarten(self, payload):
+        """
+        Die neun Spielkarten (docs/OFFENE_PUNKTE.md 5.15, core/spielkarten.py):
+        konvexe Vielecke mit etwa gleicher Landmasse, jede in eigener Farbe,
+        weisse Grenzen dazwischen und die Nummer in der Mitte.
+
+        BEWUSST EINE EIGENE FARBREIHE (tab10) statt der Regionsfarben: die
+        Spielkarten sind NICHT die neun Kulturregionen, auch wenn beide neun
+        Stueck sind. Regionen bestimmen Gelaende und Kultur, Spielkarten sind
+        der Zuschnitt fuer Anzeige und Export - dieselben Farben zu benutzen
+        wuerde nahelegen, dass Karte 3 die Region 3 ist, was nicht stimmt.
+
+        Meer wird nur schwach getoent: die Kartengrenzen laufen zwar durchs
+        Wasser, aber gespielt wird an Land, und ein volldeckendes Meer wuerde
+        die Kuestenlinie verschlucken.
+        """
+        heightmap = np.asarray(payload["heightmap"], dtype=np.float32)
+        karten = payload.get("spielkarte")
+        if karten is None:
+            self._render_heightmap(heightmap)
+            return
+        karten = np.asarray(karten)
+        land = heightmap > 0.0
+
+        self.ax.imshow(
+            heightmap, cmap=self.heightmap_cmap, origin='lower',
+            interpolation='bilinear',
+            vmin=CanvasSettings.CANVAS_2D["elevation_vmin"],
+            vmax=CanvasSettings.CANVAS_2D["elevation_vmax"])
+
+        anzahl = int(karten.max()) + 1 if karten.size else 0
+        farbreihe = plt.get_cmap("tab10")
+        farbig = np.zeros(karten.shape + (4,), dtype=np.float32)
+        for i in range(anzahl):
+            treffer = karten == i
+            if not treffer.any():
+                continue
+            rgb = np.array(to_rgba(farbreihe(i % 10))[:3], dtype=np.float32)
+            farbig[treffer, :3] = rgb
+            farbig[treffer & land, 3] = 0.45
+            farbig[treffer & ~land, 3] = 0.13
+        self.ax.imshow(farbig, origin='lower', interpolation='nearest')
+
+        grenzen = np.zeros(karten.shape, dtype=bool)
+        grenzen[:, :-1] |= karten[:, :-1] != karten[:, 1:]
+        grenzen[:-1, :] |= karten[:-1, :] != karten[1:, :]
+        linien = np.zeros(karten.shape + (4,), dtype=np.float32)
+        linien[grenzen] = (1.0, 1.0, 1.0, 0.95)
+        self.ax.imshow(linien, origin='lower', interpolation='nearest')
+
+        import matplotlib.patheffects as pe
+        for i in range(anzahl):
+            treffer = karten == i
+            if not (treffer & land).any():
+                continue
+            ys, xs = np.nonzero(treffer & land)
+            self.ax.text(xs.mean(), ys.mean(), str(i), color='white',
+                          ha='center', va='center', fontsize=13, weight='bold',
+                          path_effects=[pe.withStroke(linewidth=2.5, foreground='black')])
+
+        self.ax.set_title(f"Spielkarten ({anzahl} Vielecke, gleiche Landmasse)",
+                          color=CanvasSettings.CANVAS_2D.get("title_color", "white"))
 
     def _render_kuesten_archetypen(self, payload):
         """
@@ -1304,7 +1614,7 @@ class MapDisplay2D(QWidget):
 
         if settle_x or landmark_x or roadsite_x:
             self.ax.legend(loc='upper right', fontsize=8, framealpha=0.7)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def overlay_roads(self, roads, color='darkorange', linewidth=1.2, alpha=0.85, zorder=4,
                       linestyle='-'):
@@ -1330,25 +1640,53 @@ class MapDisplay2D(QWidget):
             self.ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha,
                          zorder=zorder, linestyle=linestyle)
 
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def overlay_region_grid(self, size, color='yellow', linewidth=1.0, alpha=0.6,
-                             zorder=3, linestyle=(0, (5, 4))):
+                             zorder=3, linestyle=(0, (5, 4)), spielkarte=None):
         """
-        Funktionsweise: Zeichnet das gelbe 3x3-Ausschnittsgitter (Kontinent in
-        neun feste, gleich grosse Kaesten geteilt - docs/OFFENE_PUNKTE.md 6.2,
-        docs/OFFENE_PUNKTE.md 6.2). Nur in Siedlungen Global und Regional
-        aufgerufen, NICHT im Terrain-Reiter (dort laege es neben den
-        Kulturfarben, siehe D2: "man liest zwei verschiedene Neunerteilungen
-        als eine").
-        Aufgabe: Macht sichtbar, wie die Regionalkarten-Kaesten liegen, gegen
-        die Orte/Landmarks/Roadsites einen weichen Randabstand einhalten
+        Funktionsweise: Zeichnet die Grenzen der neun Regionalkarten. Nur in
+        Siedlungen Global und Regional aufgerufen, NICHT im Terrain-Reiter
+        (dort laege es neben den Kulturfarben, siehe D2: "man liest zwei
+        verschiedene Neunerteilungen als eine").
+        Aufgabe: Macht sichtbar, wie die Regionalkarten liegen, gegen deren
+        Rand Orte/Landmarks/Roadsites einen weichen Abstand einhalten
         (settlement_generator._randfaktor).
-        Parameter: size (int) - Kantenlaenge der aktuell angezeigten Karte in
-        Pixeln, fuer core.terrain_weltkarte.gitterlinien_px().
+
+        ZWEI QUELLEN, in dieser Reihenfolge (2026-08-13, docs/OFFENE_PUNKTE
+        5.15):
+
+        1. `spielkarte` (H,W) - die tatsaechliche Vieleck-Zerlegung. Deren
+           Grenzen werden als Umriss gezeichnet.
+        2. sonst das alte, starre 3x3-Raster aus `gitterlinien_px()`.
+
+        Der Rueckfall ist noetig, weil die Zerlegung im alten Nicht-Weltkarten-
+        Pfad fehlt. **Beide Faelle nebeneinander zu zeigen waere der Fehler**:
+        seit der Regionalreiter auf die Vielecke zoomt, wuerde ein weiterhin
+        gerades Gitter eine ZWEITE, andere Neunerteilung behaupten - genau die
+        Verwechslung, die der D2-Hinweis oben vermeiden wollte.
+        Parameter: size (int) - Kantenlaenge der angezeigten Karte in Pixeln.
         """
         if self.current_data is None:
             return
+
+        if spielkarte is not None:
+            karten = np.asarray(spielkarte)
+            if karten.shape[0] == size:
+                grenzen = np.zeros(karten.shape, dtype=bool)
+                grenzen[:, :-1] |= karten[:, :-1] != karten[:, 1:]
+                grenzen[:-1, :] |= karten[:-1, :] != karten[1:, :]
+                bild = np.zeros(karten.shape + (4,), dtype=np.float32)
+                rgb = to_rgba(color)[:3]
+                bild[grenzen, 0] = rgb[0]
+                bild[grenzen, 1] = rgb[1]
+                bild[grenzen, 2] = rgb[2]
+                bild[grenzen, 3] = alpha
+                self.ax.imshow(bild, origin='lower', interpolation='nearest',
+                                zorder=zorder)
+                self.canvas.draw_idle()
+                return
+
         from core.terrain_weltkarte import gitterlinien_px
         linien = gitterlinien_px(size)
         for position in linien:
@@ -1356,7 +1694,7 @@ class MapDisplay2D(QWidget):
                             alpha=alpha, zorder=zorder, linestyle=linestyle)
             self.ax.axhline(position, color=color, linewidth=linewidth,
                             alpha=alpha, zorder=zorder, linestyle=linestyle)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def overlay_city_boundary_contour(self, city_mask, color='gold', linewidth=2.2):
         """
@@ -1377,7 +1715,7 @@ class MapDisplay2D(QWidget):
             return
 
         self.ax.contour(inside, levels=[0.5], colors=[color], linewidths=linewidth, zorder=6)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def overlay_civ_map(self, civ_map, alpha=0.35):
         """
@@ -1407,7 +1745,7 @@ class MapDisplay2D(QWidget):
         im = self.ax.imshow(civ_map, cmap=plt.get_cmap(cmap_name or "plasma"), origin='lower',
                              alpha=alpha, zorder=2, vmin=vmin, vmax=vmax)
         self._civ_overlay_artists.append(im)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def overlay_regions(self, region_map, heightmap, alpha=0.55):
         """
@@ -1436,7 +1774,7 @@ class MapDisplay2D(QWidget):
         rgba = rasterize_regions_rgba(region_map, heightmap, alpha=alpha)
         im = self.ax.imshow(rgba, origin='lower', interpolation='nearest', zorder=3)
         self._region_overlay_artists.append(im)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def overlay_potential_field(self, potential_field, alpha=0.9):
         """
@@ -1478,7 +1816,7 @@ class MapDisplay2D(QWidget):
                                  alpha=0.95, zorder=3)
         self._potential_field_artists.append(quiver)
 
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def draw_plot_physics_snapshot(self, snapshot: dict):
         """
@@ -1521,7 +1859,7 @@ class MapDisplay2D(QWidget):
                                           edgecolors='white', linewidths=0.3, zorder=5)
                 self._plot_physics_scatter_artists.append(artist)
 
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def overlay_plot_boundaries(self, plot_nodes, plot_edges=None, plot_cores=None, wilderness_polygons=None):
         """
@@ -1588,7 +1926,7 @@ class MapDisplay2D(QWidget):
                                           edgecolors='white', linewidths=0.4, zorder=5)
                 self._plot_boundary_artists.append(artist)
 
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def overlay_river_network(self, flow_map):
         """
@@ -1605,7 +1943,7 @@ class MapDisplay2D(QWidget):
 
         self.ax.imshow(river_mask, cmap=plt.cm.Blues, origin='lower',
                         interpolation='bilinear', alpha=0.7, vmin=threshold)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def overlay_river_generations(self, generation_map, zeige_mikro=False):
         """
@@ -1638,7 +1976,7 @@ class MapDisplay2D(QWidget):
             yy, xx = np.nonzero(treffer)
             self.ax.scatter(xx, yy, s=breite, c=farbe, marker='s',
                             linewidths=0, zorder=zorder)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def overlay_elevation_contours(self, heightmap):
         """
@@ -1654,7 +1992,7 @@ class MapDisplay2D(QWidget):
         contours = self.ax.contour(heightmap, levels=contour_levels, colors='white',
                                     linewidths=0.5, alpha=0.6)
         self.ax.clabel(contours, inline=True, fontsize=7)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def _apply_styling(self):
         """
@@ -1804,7 +2142,7 @@ class MapDisplay2D(QWidget):
 
         self.ax.set_xlim(new_xlim)
         self.ax.set_ylim(new_ylim)
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def reset_view(self):
         """
@@ -1814,4 +2152,4 @@ class MapDisplay2D(QWidget):
         if self.current_data is not None:
             self.ax.set_xlim(0, self.current_data.shape[1])
             self.ax.set_ylim(0, self.current_data.shape[0])
-            self.canvas.draw()
+            self.canvas.draw_idle()

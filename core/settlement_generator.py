@@ -103,6 +103,24 @@ from shapely.geometry import box, LineString, Point, Polygon, MultiPolygon
 from skimage import measure
 import heapq
 import logging
+
+from core.wegsuche_schnell import NUMBA_DA as _NUMBA_WEGSUCHE_DA
+
+# GEWICHTETE HEURISTIK (Punkt 2.4 der Leistungsliste, docs/PERFORMANCE_2026-08-23.md).
+#
+# f = g + w*h. Mit w > 1 wird der Suchbaum schmaler; der gefundene Weg ist
+# dafuer hoechstens w-mal teurer als der optimale - das ist eine Schranke,
+# kein Erfahrungswert, und smoke_test_wegsuche_schnell prueft sie.
+#
+# STEHT BEWUSST AUF 1.0. Gemessen am 2026-08-23 auf echtem Gelaende brachte
+# w = 1.2 und w = 1.5 zwar 1.1x bzw. 1.7x weniger Rechenzeit, aber der
+# numba-Kern ist mit w = 1.0 bereits bei 0.007 s je Route - der Gewinn ist
+# absolut bedeutungslos, und die Optimalitaet des Weges ist es nicht: eine
+# Handelsstrasse, die 20 % teurer verlaeuft als noetig, widerspricht dem
+# Bereitschaftstest in calculate_road_network(), der Wegkosten mit
+# Bereitschaft VERGLEICHT. Der Regler bleibt fuer den Fall, dass sehr viel
+# groessere Karten kommen.
+WEGSUCHE_H_GEWICHT = 1.0
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Any
 import random
@@ -430,6 +448,12 @@ class Location:
     culture: str = ""
     rank: str = ""
     house_count: int = 0
+    # Stadttyp (2026-08-13, docs/OFFENE_PUNKTE.md 5.16): "bergdorf",
+    # "marktstadt", "agrarstadt" oder "sonstige" - nur fuer
+    # location_type == 'settlement' belegt. Bestimmt die erlaubte Groesse
+    # (STADTTYPEN[...]["rang_erlaubt"]) und das Handelsinteresse gegenueber
+    # anderen Orten (handelsgewicht()).
+    settlement_type: str = "sonstige"
 
 
 @dataclass
@@ -721,6 +745,95 @@ class TerrainSuitabilityAnalyzer:
         combined = np.where(land_mask, lage_guete * daempfung, 0.0)
         return combined.astype(np.float32)
 
+    def stadttyp_eignungen(self, heightmap, slopemap, water_map,
+                            progress_callback=None):
+        """
+        Eine Eignungskarte je Stadttyp (Nutzer-Vorgabe 2026-08-13,
+        docs/OFFENE_PUNKTE.md 5.16) - Rueckgabe dict typ -> (H,W) float32 in
+        0..1, ausserhalb von Land ueberall 0.
+
+        BAUT AUF DEN VORHANDENEN TEILFAKTOREN AUF, rechnet nichts neu:
+        `calculate_water_proximity`, `analyze_slope_suitability`,
+        `evaluate_elevation_fitness` und `evaluate_farmland_radius` liefern
+        bereits genau die vier Groessen, aus denen sich die Typen ableiten
+        lassen. Eine zweite, eigene Gelaendeanalyse waere eine zweite Wahrheit.
+
+        Die Kriterien folgen der Vorgabe woertlich:
+          Bergdorf   "In den Bergen"                    -> hohe Lage, steiler
+          Marktstadt "liegt am Wasser oder kann viele Staedte gut erreichen"
+          Agrarstadt "Hat viel flaches Land und fruchtbare Biome in der Naehe"
+          sonstige   "alle staedte die nicht reinpassen" -> konstante Grundguete
+
+        `hoehe_suit` ist eine EIGNUNG (hoch = gute, also maessige Hoehe), nicht
+        die Hoehe selbst - fuer das Bergdorf wird sie deshalb invertiert.
+
+        FRUCHTBARKEIT OHNE BIOMKARTE: `biome_map` steht diesem Knoten nicht zur
+        Verfuegung (settlement.settlements haengt laut Calculator-Graph an
+        settlement.suitability und terrain.redistribution, nicht an biome.*).
+        Als Ersatz dient `acker_suit` (evaluate_farmland_radius), das genau
+        dafuer gedacht ist - flaches, nicht zu hoch gelegenes Umland. Eine
+        echte Biom-Abhaengigkeit waere eine neue Graph-Kante und ein eigener
+        Schritt.
+        """
+        land_mask = heightmap > 0.0
+        wasser_suit = self.calculate_water_proximity(water_map, heightmap, progress_callback)
+        flach_suit = self.analyze_slope_suitability(slopemap, progress_callback)
+        hoehe_suit = self.evaluate_elevation_fitness(heightmap, progress_callback)
+        acker_suit = self.evaluate_farmland_radius(flach_suit, hoehe_suit, land_mask,
+                                                   progress_callback)
+
+        # BERGIGKEIT AUS DER ECHTEN HOEHE, RELATIV ZU DIESER KARTE - nicht aus
+        # `hoehe_suit`. Der erste Anlauf nahm `1 - hoehe_suit`, was falsch war
+        # und gemessen fast nichts lieferte: `evaluate_elevation_fitness()` ist
+        # eine EIGNUNG (hoch = angenehme Wohnhoehe), ihr Median liegt auf
+        # dieser Karte bei 0.94, die Invertierung also bei 0.06 - nur 2.6 % der
+        # Landflaeche kamen ueberhaupt als Bergdorf in Frage, obwohl 34.6 %
+        # des Landes ueber 200 m liegen.
+        #
+        # Stattdessen der Rang der Hoehe zwischen Median und 95. Perzentil des
+        # LANDES: relativ zur jeweiligen Karte, damit eine flache Steppenwelt
+        # ebenso ihre "Berge" hat wie das Alpenland, und unabhaengig von
+        # absoluten Metergrenzen, die je Region ohnehin verschieden gemeint
+        # waeren.
+        land_hoehen = heightmap[land_mask]
+        if land_hoehen.size:
+            unten = float(np.percentile(land_hoehen, 50))
+            oben = float(np.percentile(land_hoehen, 95))
+        else:
+            unten, oben = 0.0, 1.0
+        spanne = max(oben - unten, 1e-6)
+        bergig = np.clip((heightmap - unten) / spanne, 0.0, 1.0)
+        steil = 1.0 - np.clip(flach_suit, 0.0, 1.0)
+
+        eignungen = {
+            # In den Bergen: hohe Lage UND spuerbare Hangneigung. Beides
+            # multiplikativ, damit ein flaches Hochplateau nicht schon als
+            # Bergdorf zaehlt.
+            "bergdorf": bergig * (0.4 + 0.6 * steil),
+            # Am Wasser (der staerkste Anteil) - "oder kann viele Staedte gut
+            # erreichen" steckt in der Ebenheit, die zugleich fuer gute
+            # Wegverbindungen steht.
+            "marktstadt": np.clip(wasser_suit, 0.0, 1.0) * (0.6 + 0.4 * np.clip(flach_suit, 0.0, 1.0)),
+            # Viel flaches Land plus fruchtbares Umland.
+            "agrarstadt": np.clip(acker_suit, 0.0, 1.0) * (0.5 + 0.5 * np.clip(flach_suit, 0.0, 1.0)),
+            # Fischersiedlung: unmittelbar am Wasser, aber OHNE den
+            # Ebenheits-/Hinterlandanteil der Marktstadt. Genau das ist der
+            # Unterschied zwischen beiden: eine Marktstadt braucht ein
+            # Umland und gute Landverbindungen, ein Fischerdorf braucht nur
+            # die Kueste - und steht deshalb auch dort, wo fuer eine
+            # Marktstadt nichts zu holen waere (Steilkueste, kleine Insel).
+            # Der Deckel haelt sie unter der Marktstadt, wo BEIDE moeglich
+            # sind: an einer guten Hafenlage mit Hinterland soll die
+            # Marktstadt gewinnen, die Fischersiedlung bekommt die Reste.
+            "fischersiedlung": np.clip(wasser_suit, 0.0, 1.0) * FISCHER_DECKEL,
+            # Auffangtyp: konstant mittelmaessig. Er gewinnt genau dort, wo
+            # kein anderer Typ ueber diese Schwelle kommt - deshalb ein fester
+            # Wert und keine eigene Gelaendeformel.
+            "sonstige": np.full(heightmap.shape, TYP_GRUNDGUETE, dtype=np.float32),
+        }
+        return {typ: np.where(land_mask, np.clip(k, 0.0, 1.0), 0.0).astype(np.float32)
+                for typ, k in eignungen.items()}
+
 
 def _voronoi_edge_distance_map(cell_map):
     """
@@ -754,17 +867,53 @@ WASSER_SPERRE_M = -10.0      # tiefer: gesperrt
 WEGERABATT = 0.4             # auf einem bereits gebauten Weg
 
 
+# Steigungskosten fuer den Wegebau (2026-08-13, docs/OFFENE_PUNKTE.md 5.19).
+#
+# Die Kosten wachsen EXPONENTIELL mit dem Neigungswinkel in Grad, nicht mehr
+# quadratisch mit dem Gradientenbetrag. Nutzer-Vorgabe: "keiner wuerde eine
+# strasse bauen die zB mehr als x Grad steigung hat. und 5 Grad weniger ist
+# schon wesentlich besser quasi. also irgendwann wird es einfach
+# unpassierbar."
+#
+# STEIGUNG_SKALA_GRAD ist die Skala des Exponenten: je STEIGUNG_SKALA_GRAD
+# Grad mehr vervielfachen sich die Zusatzkosten um e. Bei 8 Grad bedeutet
+# das zwischen 15 und 20 Grad rund den doppelten Preis - genau das gewuenschte
+# "5 Grad weniger ist wesentlich besser".
+STEIGUNG_SKALA_GRAD = 8.0
+
+# Ab hier gilt ein Hang als fuer den Wegebau unbrauchbar.
+MAX_WEG_STEIGUNG_GRAD = 30.0
+
+# ... und kostet dann WEGEBAU_UNMOEGLICH statt np.inf. BEWUSST ENDLICH:
+# eine harte Sperre wuerde ganze Landesteile abschneiden, wenn ein Ort hinter
+# einem durchgehend steilen Wall liegt - der Ort waere dann gar nicht mehr
+# ans Netz anzubinden. Mit einem sehr hohen, aber endlichen Wert nimmt A*
+# einen solchen Uebergang nur, wenn es wirklich keine Alternative gibt, und
+# sucht sonst zuverlaessig den Umweg.
+WEGEBAU_UNMOEGLICH = 500.0
+
+
 def bau_kostenfeld(heightmap, slopemap, slope_distance_ratio, weg_maske=None):
     """
     Das Kostenfeld EINMAL bauen, docs/SIEDLUNGEN_ENTWURF.md §4.1 ("Kostenfeld
     zuerst") - nicht wie in der Vorlage je A*-Schritt neu aus slopemap
     ausrechnen (`calculate_movement_cost` tat das bei jedem einzelnen
-    Nachbarn). Ebener Grund kostet 1.0, Hangkosten wachsen mit dem QUADRAT der
-    Neigung ("ein doppelt so steiler Hang kostet deutlich mehr als das
-    Doppelte - genau deshalb suchen sich Wege Saettel"), Wasser in drei Stufen,
-    ein bereits vorhandener Weg kostet nur WEGERABATT so viel wie sonst -
-    "der wichtigste Trick": Wege buendeln sich zu Hauptstrecken, statt
-    parallel zu laufen.
+    Nachbarn). Ebener Grund kostet 1.0, Wasser in drei Stufen, ein bereits
+    vorhandener Weg kostet nur WEGERABATT so viel wie sonst - "der wichtigste
+    Trick": Wege buendeln sich zu Hauptstrecken, statt parallel zu laufen.
+
+    STEIGUNGSKOSTEN SEIT 2026-08-13 EXPONENTIELL (docs/OFFENE_PUNKTE.md 5.19,
+    Nutzerbefund "die hoehenkosten sind zu niedrig. es gibt strassen die ueber
+    hohe berge gehen"). Die alte Formel `1 + ratio * hang^2` war als Strafe
+    praktisch wirkungslos: gemessen kostete ein 30-Grad-Hang nur das
+    **1.5-fache** eines ebenen Pixels, ein 40-Grad-Hang das 2.06-fache. Ein
+    Umweg von schon 50 % Mehrlaenge war damit teurer als die Direttissima
+    ueber den Berg - genau das, was der Nutzer auf der Karte sah.
+
+    Jetzt: `1 + ratio * (exp(winkel / STEIGUNG_SKALA_GRAD) - 1)`, gerechnet
+    ueber den WINKEL in Grad statt ueber den Gradientenbetrag. Ab
+    MAX_WEG_STEIGUNG_GRAD gilt der Hang als unbrauchbar und kostet
+    WEGEBAU_UNMOEGLICH.
 
     Rueckgabe: (H,W) float64, np.inf wo gesperrt (Wasser tiefer als
     WASSER_SPERRE_M).
@@ -772,7 +921,11 @@ def bau_kostenfeld(heightmap, slopemap, slope_distance_ratio, weg_maske=None):
     dz_dx = slopemap[:, :, 0].astype(np.float64)
     dz_dy = slopemap[:, :, 1].astype(np.float64)
     hang = np.hypot(dz_dx, dz_dy)
-    kosten = 1.0 + slope_distance_ratio * hang ** 2
+    winkel_grad = np.degrees(np.arctan(hang))
+    kosten = 1.0 + slope_distance_ratio * (
+        np.expm1(winkel_grad / STEIGUNG_SKALA_GRAD))
+    kosten = np.where(winkel_grad >= MAX_WEG_STEIGUNG_GRAD,
+                      np.maximum(kosten, WEGEBAU_UNMOEGLICH), kosten)
 
     if heightmap is not None:
         h = heightmap.astype(np.float64)
@@ -874,7 +1027,512 @@ def _seeweg_anteil_tief(pfad, heightmap, seegrad=None):
 # Staedte (3*3=9) verbinden sich damit praktisch immer, zwei Doerfer
 # verschiedener Kultur (1*1*0.45=0.45) fast nie.
 RANG_ZAHL = {"dorf": 1, "siedlung": 2, "stadt": 3}
+
+
+# =============================================================================
+# STADTTYPEN (Nutzer-Vorgabe 2026-08-13, docs/OFFENE_PUNKTE.md 5.16)
+# =============================================================================
+#
+# Jede Siedlung bekommt einen von vier Typen. Der Typ folgt aus der LAGE (in
+# den Bergen -> Bergdorf, am Wasser/gut erreichbar -> Marktstadt, viel flaches
+# Ackerland -> Agrarstadt, sonst "sonstige") und bestimmt danach zweierlei:
+# die moegliche Groesse und das Handelsinteresse gegenueber anderen Orten.
+#
+# WARUM DER TYP NACH DER PLATZIERUNG BESTIMMT WIRD und nicht davor: der
+# Nutzer hat die bestehende Platzierung ausdruecklich als gut bezeichnet
+# ("Die Siedlungen sind ziemlich gut gesetzt worden bisher"). Sie bleibt
+# deshalb unveraendert; die Typzuweisung liest nur die Lage der bereits
+# gesetzten Orte aus. Einzige Ausnahme ist die Marktstadt, die je Region
+# genau einmal vorkommt - dort wird unter den vorhandenen Orten der mit der
+# besten Marktstadt-Eignung ausgewaehlt.
+#
+# `rang_erlaubt` schraenkt ein, welche Groessen ein Typ annehmen darf:
+#   Bergdorf   "Klein bis mittel"  -> dorf/siedlung
+#   Marktstadt "Mittel bis gross"  -> siedlung/stadt
+#   Agrarstadt "Mittel bis gross"  -> siedlung/stadt
+#   sonstige   alles
+# Grundguete des Auffangtyps "sonstige". Ein Ort wird nur dann Bergdorf/
+# Marktstadt/Agrarstadt, wenn seine Lage dort BESSER als dieser Wert ist -
+# sonst bleibt es ein gewoehnlicher Ort. Zu niedrig gewaehlt bekaeme fast
+# jeder Ort einen Sondertyp, zu hoch gaebe es nur noch "sonstige".
+TYP_GRUNDGUETE = 0.42
+
+# Obergrenze der Landmark-Kategorie "abgelegen" (siehe landmark_eignungen()).
+# Sie ist der Auffangtyp: ein markanter Gipfel oder ein Kliff soll sie
+# stechen, eine unauffaellige Wildnis nicht. Ohne Deckel gewaenne sie fast
+# ueberall, weil `civ_map` auf weiten Teilen der Karte 0 ist.
+ABGELEGEN_DECKEL = 0.55
+
+# Daempfungsfaktor, mit dem eine Landmark-Kategorie nach jeder Wahl INNERHALB
+# derselben Region abgewertet wird (siehe calculate_landmarks()). Sorgt fuer
+# gemischte Landmarks je Region, statt dass die flaechenmaessig staerkste
+# Kategorie alles belegt. 1.0 waere keine Vielfalt, 0.0 ein hartes Verbot
+# jeder Wiederholung - beides unerwuenscht.
+KATEGORIE_WIEDERHOLUNG = 0.45
+
+# Ab wievielen zusammentreffenden Wegen eine Kreuzung als echte WEGSCHEIDE
+# gilt (siehe kreuzungsgrade(), Nutzer-Vorgabe "taverne an einer kreuzung mit
+# min. drei wegen"). Solche Kreuzungen werden bei der Roadsite-Platzierung
+# bevorzugt; die uebrigen bleiben als schwaechere Kandidaten erhalten.
+KREUZUNG_MIN_WEGE = 3
+
+# Schwelle fuer den bedarfsgetriebenen Netzausbau (siehe kanten_nach_bedarf(),
+# docs/OFFENE_PUNKTE.md 5.21): eine zusaetzliche Strecke wird nur gebaut, wenn
+# ihr Gesamtnutzen fuer ALLE Handelspaare mindestens das so-und-sovielfache
+# ihrer Baukosten betraegt. Groesser = sparsameres Netz.
+NETZAUSBAU_MINDESTNUTZEN = 3.0
+
+# Hoechstzahl zusaetzlicher Strecken je Kultur aus dem Bedarfsausbau - eine
+# Sicherung dagegen, dass aus dem sparsamen Gabriel-Netz ein Vollgraph wird.
+NETZAUSBAU_MAX_KANTEN = 3
+
+# Obergrenze der Fischersiedlungs-Eignung (siehe stadttyp_eignungen()). Haelt
+# sie unter der Marktstadt, wo beide moeglich waeren - an einer guten
+# Hafenlage MIT Hinterland soll die Marktstadt gewinnen. Ueber TYP_GRUNDGUETE
+# (0.42), damit sie den Auffangtyp "sonstige" an der Kueste dennoch sticht.
+FISCHER_DECKEL = 0.62
+
+# Fixe Kosten fuer den Wechsel Land<->Schiff, JE HAFEN (also zweimal je
+# Seeweg). Nutzer-Vorgabe 2026-08-13: "die kosten allgemein auf ein schiff
+# umzusteigen sind quasi fix und dann sind die kosten auf der see halbwegs
+# guenstig. ich will nur nicht das alle nur noch per see transportieren,
+# deshalb muss die 'umsteigekosten' eingestellt werden, so dass nur 35%
+# seehandel besteht oder sowas".
+#
+# IN KILOMETERN ANGEGEBEN, NICHT IN ROHEN KOSTENPUNKTEN. Ein ebenes Pixel
+# kostet 1.0, die Kosten eines Weges wachsen also mit seiner PIXELzahl - bei
+# doppelter Aufloesung kostet derselbe Weg doppelt so viel. Ein fester
+# Kostenwert waere damit bei 1024 px eine ganz andere Bremse als bei 384 px.
+# Gemessen ist das beim Eichen aufgefallen: dieselbe Zahl ergab bei 320 px und
+# 384 px deutlich verschiedene Seehandelsanteile. Ueber `hafenkosten(mpp)`
+# unten wird daraus ein aufloesungsunabhaengiger Wert.
+#
+# Bedeutung: ein Hafenwechsel ist so teuer wie so viele Kilometer ebener
+# Landweg. Groesser = weniger Seehandel.
+# GEEICHT, nicht geraten: gemessen ueber vier Faelle (320/384 px, vier
+# Seeds) faellt der Seehandelsanteil monoton 68 % (0 km) -> 50 % (22) ->
+# 43 % (30) -> 33 % (45) -> 20 % (70). 40 km trifft das 35-%-Ziel im MITTEL.
+#
+# EHRLICHE EINSCHRAENKUNG: der Anteil streut je Karte stark (bei 45 km
+# zwischen 0 % und 53 %). Das ist nicht zu beheben und auch richtig so - eine
+# Karte ohne vorgelagerte Inseln hat keinen Seehandel, egal wie billig die
+# Haefen sind, und eine Inselwelt hat viel. Der Regler stellt den DURCHSCHNITT
+# ein, nicht den Wert jeder einzelnen Karte. Genau das entspricht der
+# Nutzer-Vorgabe: "so dass nur 35% seehandel besteht oder sowas (insgesamt,
+# manche inselorte sind natuerlich bei 100% seehandel)".
+HAFEN_UMSTEIGEKOSTEN_KM = 40.0
+
+
+def hafenkosten(meter_pro_pixel):
+    """Umsteigekosten je Hafen in Kostenpunkten, aus HAFEN_UMSTEIGEKOSTEN_KM.
+
+    Ein ebenes Pixel kostet 1.0 - die Umrechnung ist deshalb schlicht "wie
+    viele Pixel sind diese Kilometer". Dadurch bremst der Hafenwechsel bei
+    jeder Kartengroesse gleich stark, statt bei feiner Aufloesung faktisch zu
+    verschwinden."""
+    return HAFEN_UMSTEIGEKOSTEN_KM * 1000.0 / max(float(meter_pro_pixel), 1e-6)
+
+# Zielanteil des Handels, der ueber See laufen soll (Nutzer: "35%").
+SEEHANDEL_ZIEL = 0.35
+
+STADTTYPEN = {
+    "bergdorf":   {"name": "Bergdorf",   "rang_erlaubt": ("dorf", "siedlung")},
+    "marktstadt": {"name": "Marktstadt", "rang_erlaubt": ("siedlung", "stadt")},
+    "agrarstadt": {"name": "Agrarstadt", "rang_erlaubt": ("siedlung", "stadt")},
+    # Fischersiedlung (2026-08-13, Nutzervorschlag: "vielleicht macht ein typ
+    # 'fischersiedlung' noch sinn fuer kleine hafenstaedte oder seedoerfern
+    # auf inseln?"). Sie fuellt eine echte Luecke: die Marktstadt ist per
+    # Definition mittel bis gross und hoechstens einmal je Region - eine
+    # Insel mit drei Haeusern kann also gar keine sein, braucht aber einen
+    # Hafen, sonst ist sie ueberhaupt nicht ans Netz anzubinden. Deshalb
+    # AUSDRUECKLICH klein ("die ortschaften sind immer recht klein"): nur
+    # dorf/siedlung, nie stadt.
+    "fischersiedlung": {"name": "Fischersiedlung", "rang_erlaubt": ("dorf", "siedlung")},
+    "sonstige":   {"name": "Ort",        "rang_erlaubt": ("dorf", "siedlung", "stadt")},
+}
+
+
+def _handelsinteresse_einseitig(a, b):
+    """
+    Wie stark Ort `a` am Handel mit Ort `b` interessiert ist - die EINE
+    Richtung, exakt nach der Nutzer-Vorgabe vom 2026-08-13.
+
+    Die Vorgabe ist je Typ einseitig formuliert und ergibt paarweise zwei
+    verschiedene Werte (Bergdorf sieht die eigene Marktstadt mit 5, die
+    Marktstadt das Bergdorf mit 3). `handelsgewicht()` unten bildet daraus
+    die SUMME - so vom Nutzer entschieden.
+
+    Wo die Vorgabe groessenabhaengige Spannen nennt ("von 2 (kleiner Ort) bis
+    6 (grosser Ort)"), ist die Groesse des ZIELS `b` gemeint: wie attraktiv
+    der Handelspartner ist. Ein nicht ausdruecklich geregelter Fall bekommt
+    1 - kein Handel waere falsch, Orte handeln immer ein wenig.
+    """
+    gleiche_kultur = bool(a.culture) and a.culture == b.culture
+    typ_a = getattr(a, "settlement_type", "sonstige") or "sonstige"
+    typ_b = getattr(b, "settlement_type", "sonstige") or "sonstige"
+    # 0..1 ueber die drei Raenge - Grundlage der groessenabhaengigen Spannen
+    groesse_b = (RANG_ZAHL.get(b.rank, 1) - 1) / 2.0
+
+    if typ_a == "bergdorf":
+        # "Handel 2 zu jeder Marktstadt, 2 zu sonstigen Staedten eigener
+        #  Fraktion, 5 zur Marktstadt eigener Fraktion."
+        if typ_b == "marktstadt":
+            return 5.0 if gleiche_kultur else 2.0
+        return 2.0 if gleiche_kultur else 1.0
+
+    if typ_a == "marktstadt":
+        # "10 Handel zu Marktstaedten, 3 Handel zu Staedten eigener Fraktion."
+        if typ_b == "marktstadt":
+            return 10.0
+        return 3.0 if gleiche_kultur else 1.0
+
+    if typ_a == "fischersiedlung":
+        # Eigene Handelswerte (Nutzer: "mit eigenen tradewerten"). Eine
+        # Fischersiedlung lebt vom Absatz an groessere Orte und vom
+        # Kuestenhandel untereinander: zur Marktstadt am staerksten (dort
+        # geht der Fang hin), zu anderen Fischersiedlungen mittel (Austausch
+        # entlang der Kueste), zum Binnenland wenig.
+        if typ_b == "marktstadt":
+            return 6.0 if gleiche_kultur else 3.0
+        if typ_b == "fischersiedlung":
+            return 3.0 if gleiche_kultur else 2.0
+        return 1.5 if gleiche_kultur else 1.0
+
+    if typ_a == "agrarstadt":
+        # "Handel zu Staedten von 2 (kleiner Ort) bis 6 (grosser Ort) mit
+        #  Faktor 1.5 fuer eigene Fraktion."
+        wert = 2.0 + 4.0 * groesse_b
+        return wert * (1.5 if gleiche_kultur else 1.0)
+
+    # "alle staedte die nicht reinpassen. Handel ist groessenabhaengig von
+    #  1 fremde Fraktion klein bis 4 fremde Fraktion gross mit faktor 1.5
+    #  fuer eigene Fraktion."
+    wert = 1.0 + 3.0 * groesse_b
+    return wert * (1.5 if gleiche_kultur else 1.0)
+
+
+# Kantenlaenge des GROBEN Gitters, auf dem die Erreichbarkeit gerechnet wird.
+# Siehe erreichbarkeits_matrix() - fuer eine Eignungs-RANGFOLGE genuegt ein
+# sehr grobes Feld, gemessen 0.997 Rangkorrelation gegen die volle Aufloesung
+# bei 92-fachem Tempo.
+ERREICHBARKEIT_GITTER_PX = 128
+
+
+def erreichbarkeits_matrix(kostenfeld, positionen, grob_px=ERREICHBARKEIT_GITTER_PX):
+    """
+    Wegkosten-Matrix (n,n) zwischen allen `positionen` (Liste von (x, y)).
+
+    WARUM MULTI-SOURCE-DIJKSTRA UND NICHT A* JE PAAR (2026-08-13,
+    docs/OFFENE_PUNKTE.md 5.17): A*s einziger Vorteil ist seine Zielheuristik,
+    die auf EIN Ziel zulenkt. Fuer eine ganze Kostenmatrix gibt es kein
+    einzelnes Ziel; A* faellt dort auf Dijkstra zurueck, macht das aber
+    n*(n-1)/2 mal statt n mal. Eine Dijkstra-Welle je Startpunkt
+    (`skimage.graph.MCP_Geometric.find_costs`) liefert dagegen in EINEM Lauf
+    die Kosten zu ALLEN uebrigen Punkten. Gemessen bei 12 Orten/1024 px:
+    4.07 s fuer alle Wellen gegen 14.30 s hochgerechnet fuer die A*-Paare.
+
+    WARUM AUF EINEM GROBEN GITTER: hier wird BEWERTET, nicht gezeichnet - es
+    zaehlt die Rangfolge ("welcher Ort ist besser angebunden"), nicht der
+    Meterwert und schon gar nicht die Weggeometrie. Gemessen (30 Orte,
+    1024 px): auf 128 px gerechnet ist die Rangfolge der Zentralitaet zu
+    0.997 dieselbe wie auf voller Aufloesung, bei 92-fachem Tempo (7.8 s ->
+    0.08 s). Die tatsaechlichen WEGE entstehen weiterhin per feinem A* in
+    calculate_road_network() - das hier ersetzt sie nicht.
+
+    Nicht erreichbare Paare stehen als np.inf in der Matrix.
+    """
+    from scipy.ndimage import zoom
+    from skimage.graph import MCP_Geometric
+
+    n = len(positionen)
+    if n == 0:
+        return np.zeros((0, 0), dtype=np.float64)
+
+    feld = np.asarray(kostenfeld, dtype=np.float64)
+    feld = np.where(np.isfinite(feld), feld, 1e6)
+    size = feld.shape[0]
+
+    faktor = min(1.0, float(grob_px) / max(1, size))
+    if faktor < 1.0:
+        grob = zoom(feld, faktor, order=1)
+        grob = np.maximum(grob, 1e-6)
+    else:
+        grob = feld
+        faktor = 1.0
+
+    hoehe_g, breite_g = grob.shape
+    knoten = []
+    for x, y in positionen:
+        xi = int(np.clip(round(float(x) * faktor), 0, breite_g - 1))
+        yi = int(np.clip(round(float(y) * faktor), 0, hoehe_g - 1))
+        knoten.append((yi, xi))
+
+    matrix = np.full((n, n), np.inf, dtype=np.float64)
+    for i, start in enumerate(knoten):
+        mcp = MCP_Geometric(grob, fully_connected=True)
+        kosten, _ = mcp.find_costs([start])
+        for j, ziel in enumerate(knoten):
+            matrix[i, j] = kosten[ziel]
+    # Zurueck auf die Skala des feinen Gitters, damit die Zahlen mit
+    # Pfadkosten anderswo vergleichbar bleiben.
+    if faktor < 1.0:
+        matrix = matrix / faktor
+    np.fill_diagonal(matrix, 0.0)
+    return matrix
+
+
+def zentralitaet(matrix):
+    """
+    Je Ort ein Wert in 0..1: wie gut er die uebrigen Orte erreicht (1 = am
+    besten angebunden). Grundlage ist die Summe der Wegkosten zu allen
+    anderen (Closeness) - unerreichbare Ziele zaehlen mit dem hoechsten
+    vorkommenden endlichen Wert, damit eine abgeschnittene Insel nicht
+    versehentlich als "gut angebunden" durchgeht (inf wuerde beim
+    Normieren sonst zu NaN).
+    """
+    n = len(matrix)
+    if n <= 1:
+        return np.ones(n, dtype=np.float64)
+    endlich = matrix[np.isfinite(matrix)]
+    strafe = float(endlich.max()) if endlich.size else 1.0
+    gefuellt = np.where(np.isfinite(matrix), matrix, strafe)
+    summe = gefuellt.sum(axis=1)
+    lo, hi = float(summe.min()), float(summe.max())
+    if hi - lo < 1e-9:
+        return np.ones(n, dtype=np.float64)
+    # kleine Summe = gut erreichbar -> invertieren
+    return 1.0 - (summe - lo) / (hi - lo)
+
+
+def handelsgewicht(a, b):
+    """
+    Handelsinteresse der KANTE zwischen zwei Orten: die Summe beider
+    einseitiger Interessen (Nutzerentscheidung 2026-08-13 - Alternativen
+    waeren Maximum oder Mittel gewesen).
+
+    Tritt im Bereitschaftstest des Wegenetzes an die Stelle des frueheren
+    `rang_a * rang_b * kulturfaktor`.
+    """
+    return _handelsinteresse_einseitig(a, b) + _handelsinteresse_einseitig(b, a)
 BEREITSCHAFT_FREMDKULTUR = 0.45
+
+
+def netzdistanzen(kanten, anzahl):
+    """
+    Kuerzeste Wege ZWISCHEN ALLEN ORTEN UEBER DAS GEBAUTE NETZ (nicht Luftlinie,
+    nicht Direktkosten) - (n,n)-Matrix, np.inf wo unverbunden.
+
+    Laeuft auf dem GRAPHEN der Orte, nicht auf der Pixelkarte: bei rund 30
+    Knoten ist das ein Wimpernschlag, waehrend dieselbe Frage auf Pixelebene
+    Sekunden kosten wuerde. Genau deshalb ist der Grenznutzen-Ausbau unten
+    ueberhaupt bezahlbar (docs/OFFENE_PUNKTE.md 5.21).
+
+    Parameter: `kanten` als dict {(i,j): kosten} mit i<j, `anzahl` = Zahl der Orte.
+    """
+    import heapq
+
+    nachbarn = [[] for _ in range(anzahl)]
+    for (i, j), kosten in kanten.items():
+        if not np.isfinite(kosten):
+            continue
+        nachbarn[i].append((j, float(kosten)))
+        nachbarn[j].append((i, float(kosten)))
+
+    D = np.full((anzahl, anzahl), np.inf, dtype=np.float64)
+    for start in range(anzahl):
+        D[start, start] = 0.0
+        halde = [(0.0, start)]
+        while halde:
+            dist, k = heapq.heappop(halde)
+            if dist > D[start, k]:
+                continue
+            for nachbar, kosten in nachbarn[k]:
+                neu = dist + kosten
+                if neu < D[start, nachbar]:
+                    D[start, nachbar] = neu
+                    heapq.heappush(halde, (neu, nachbar))
+    return D
+
+
+def umwegfaktoren(netz_D, direkt_C):
+    """
+    Je Ortspaar: Netzdistanz geteilt durch die Kosten des DIREKTEN Weges.
+
+    Der billige Detektor fuer "hier fehlt eine Verbindung" (docs/OFFENE_PUNKTE
+    5.21, Nutzerbeobachtung am Kartenbild: zwei Doerfer beiderseits eines
+    Berges, die nur ueber den ganzen Umweg unten herum zusammenkommen). Ein
+    Wert nahe 1 heisst "das Netz bildet den direkten Weg gut ab", ein grosser
+    Wert heisst "die beiden sind eigentlich nah beieinander, das Netz macht
+    einen weiten Bogen".
+
+    Unverbundene Paare bekommen np.inf, Paare ohne endlichen Direktweg NaN
+    (dort ist die Frage sinnlos - es gibt keinen Weg, den man abkuerzen
+    koennte).
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        faktor = netz_D / direkt_C
+    faktor = np.where(np.isfinite(direkt_C) & (direkt_C > 0), faktor, np.nan)
+    np.fill_diagonal(faktor, 1.0)
+    return faktor
+
+
+def kanten_traffic(kanten, handel_W, anzahl):
+    """
+    Wieviel Handel laeuft ueber jede Kante des Netzes.
+
+    Fuer jedes Ortspaar wird der kuerzeste Weg IM NETZ bestimmt und sein
+    Handelsvolumen `w_ij` auf alle Kanten dieses Weges aufgeschlagen. Das ist
+    gewichtete Kanten-Betweenness.
+
+    Zwei Verwendungen (docs/OFFENE_PUNKTE.md 5.22 und 6.27):
+      * der Anteil des Handels, der ueber SEEwege laeuft - die Groesse, gegen
+        die die Hafen-Umsteigekosten geeicht werden ("nur 35 % seehandel")
+      * die "Traffic"-Angabe, die spaeter beim Anklicken einer Strasse
+        angezeigt werden soll. Vorher waere jede solche Zahl erfunden.
+
+    Rueckgabe: dict {(i,j): volumen} mit i<j, nur fuer Kanten mit Verkehr.
+    """
+    import heapq
+
+    nachbarn = [[] for _ in range(anzahl)]
+    for (i, j), kosten in kanten.items():
+        if not np.isfinite(kosten):
+            continue
+        nachbarn[i].append((j, float(kosten)))
+        nachbarn[j].append((i, float(kosten)))
+
+    W = np.asarray(handel_W, dtype=np.float64)
+    traffic = {}
+    for start in range(anzahl):
+        dist = np.full(anzahl, np.inf)
+        vorgaenger = np.full(anzahl, -1, dtype=np.int64)
+        dist[start] = 0.0
+        halde = [(0.0, start)]
+        while halde:
+            d, k = heapq.heappop(halde)
+            if d > dist[k]:
+                continue
+            for nachbar, kosten in nachbarn[k]:
+                neu = d + kosten
+                if neu < dist[nachbar]:
+                    dist[nachbar] = neu
+                    vorgaenger[nachbar] = k
+                    heapq.heappush(halde, (neu, nachbar))
+        # Volumen jedes Ziels entlang seines Weges zurueckverfolgen. Nur
+        # start<ziel, damit jede Kante genau einmal je Paar zaehlt.
+        for ziel in range(anzahl):
+            if ziel <= start or not np.isfinite(dist[ziel]):
+                continue
+            volumen = float(W[start, ziel])
+            if volumen <= 0:
+                continue
+            k = ziel
+            while vorgaenger[k] >= 0:
+                v = int(vorgaenger[k])
+                schluessel = (min(k, v), max(k, v))
+                traffic[schluessel] = traffic.get(schluessel, 0.0) + volumen
+                k = v
+    return traffic
+
+
+def seehandel_anteil(kanten, handel_W, anzahl, seekanten):
+    """
+    Anteil des Handelsvolumens, das ueber SEEwege laeuft (0..1).
+
+    Die Groesse, gegen die die Hafen-Umsteigekosten geeicht werden
+    (Nutzer-Vorgabe 2026-08-13: "ich will nur nicht das alle nur noch per see
+    transportieren, deshalb muss die 'umsteigekosten' eingestellt werden, so
+    dass nur 35% seehandel besteht oder sowas").
+
+    Gezaehlt wird ueber `kanten_traffic()`, also ueber das tatsaechlich
+    durchlaufende Volumen - nicht ueber die blosse ANZAHL der Seewege. Zwei
+    kaum genutzte Faehren sollen nicht so viel zaehlen wie eine stark
+    befahrene Hauptroute.
+    """
+    traffic = kanten_traffic(kanten, handel_W, anzahl)
+    gesamt = sum(traffic.values())
+    if gesamt <= 0:
+        return 0.0
+    see = sum(v for k, v in traffic.items() if k in seekanten)
+    return see / gesamt
+
+
+def kanten_nach_bedarf(direkt_C, handel_W, bestehende, kandidaten,
+                       mindest_nutzen=NETZAUSBAU_MINDESTNUTZEN, hoechstens=None):
+    """
+    Waehlt zusaetzliche Verbindungen nach ihrem GESAMTNUTZEN fuer alle
+    Handelspaare (docs/OFFENE_PUNKTE.md 5.21).
+
+    DAS PROBLEM, DAS DAMIT GELOEST WIRD (Nutzerbeobachtung 2026-08-13): das
+    bisherige Verfahren entscheidet je PAAR - lohnt sich fuer A und B eine
+    direkte Strecke? Ein Pass ueber einen Bergruecken lohnt sich fuer kein
+    einzelnes Paar, er ist fuer jedes fuer sich zu teuer. Dass er fuer ZEHN
+    Paare zusammen der groesste Gewinn waere, sieht ein paarweises Verfahren
+    strukturell nicht: "aber nicht das 10 doerfer daran interessiert sind eine
+    verbindung oben zu haben".
+
+    Der Nutzen einer Kandidatenkante e ist die Summe ueber ALLE Ortspaare:
+
+        Nutzen(e) = SUMME_ij  handel_ij * (netzdistanz_ohne_e - netzdistanz_mit_e)
+
+    also: um wieviel verkuerzt diese eine Strecke die Wege aller Handelspaare
+    zusammen, gewichtet mit ihrem Handelsvolumen. Gebaut wird gierig die Kante
+    mit dem besten Verhaeltnis Nutzen zu Baukosten, danach werden die
+    Netzdistanzen neu bestimmt und die naechste gesucht.
+
+    ERSETZT DEN GABRIEL-GRAPHEN NICHT, sondern ergaenzt ihn (Nutzer-Vorgabe:
+    "bisher sieht das ziemlich gut aus, halte dich etwa daran, aber wir wollen
+    das nur etwas besser machen"). `bestehende` ist das bereits gebaute Netz.
+
+    Parameter:
+        direkt_C     (n,n) Wegkosten zwischen den Orten (erreichbarkeits_matrix)
+        handel_W     (n,n) Handelsinteresse je Paar (handelsgewicht)
+        bestehende   dict {(i,j): kosten}, i<j - das schon gebaute Netz
+        kandidaten   Liste von (i,j)-Paaren, die gebaut werden koennten
+        mindest_nutzen  Schwelle fuer Nutzen/Baukosten; darunter wird nichts gebaut
+        hoechstens   Obergrenze fuer die Zahl neuer Kanten (None = unbegrenzt)
+
+    Rueckgabe: Liste der gewaehlten (i, j)-Paare, in der Reihenfolge des Baus.
+    """
+    anzahl = len(direkt_C)
+    netz = dict(bestehende)
+    offen = [(min(i, j), max(i, j)) for i, j in kandidaten
+             if (min(i, j), max(i, j)) not in netz and i != j]
+    gewaehlt = []
+
+    W = np.asarray(handel_W, dtype=np.float64)
+    while offen:
+        D = netzdistanzen(netz, anzahl)
+        # Unverbundenes zaehlt mit einem hohen, aber endlichen Ersatzwert:
+        # sonst waere jede Differenz gegen inf entweder inf oder NaN, und der
+        # Vergleich zwischen zwei Kandidaten, die BEIDE etwas verbinden,
+        # unmoeglich.
+        endlich = D[np.isfinite(D)]
+        ersatz = (float(endlich.max()) * 4.0 + 1.0) if endlich.size else 1.0
+        D_e = np.where(np.isfinite(D), D, ersatz)
+
+        bester, bester_wert = None, 0.0
+        for (i, j) in offen:
+            kosten = float(direkt_C[i, j])
+            if not np.isfinite(kosten) or kosten <= 0:
+                continue
+            probe = dict(netz)
+            probe[(i, j)] = kosten
+            D_neu = netzdistanzen(probe, anzahl)
+            D_neu_e = np.where(np.isfinite(D_neu), D_neu, ersatz)
+            ersparnis = float(np.sum(W * np.maximum(D_e - D_neu_e, 0.0))) / 2.0
+            wert = ersparnis / kosten
+            if wert > bester_wert:
+                bester, bester_wert = (i, j), wert
+
+        if bester is None or bester_wert < mindest_nutzen:
+            break
+        netz[bester] = float(direkt_C[bester[0], bester[1]])
+        gewaehlt.append(bester)
+        offen.remove(bester)
+        if hoechstens is not None and len(gewaehlt) >= hoechstens:
+            break
+    return gewaehlt
 
 
 def _gabriel_kandidaten(punkte):
@@ -967,6 +1625,49 @@ def kreuzungen_finden(roads, sea_roads, settlements, shape, mindestabstand_siedl
     return kreuzungen
 
 
+def kreuzungsgrade(roads, sea_roads, kreuzungen, shape, radius=None):
+    """
+    WIEVIELE verschiedene Wege treffen sich an jeder Kreuzung.
+
+    `kreuzungen_finden()` liefert nur die ORTE - "hier beruehren sich
+    mindestens zwei Wege". Fuer die Nutzer-Vorgabe 2026-08-13 ("roadsites
+    haben auch bestimmte kriterien, zB taverne ... an einer kreuzung mit min.
+    drei wegen") reicht das nicht: eine Taverne gehoert an eine echte
+    Wegscheide, nicht an jede Stelle, an der sich zwei Strecken streifen.
+
+    Gezaehlt werden verschiedene Weg-IDs in einem kleinen Umkreis um den
+    Kreuzungspunkt. Der Umkreis ist noetig, weil `kreuzungen_finden()` die
+    Kreuzung als SCHWERPUNKT einer Pixelgruppe zurueckgibt - der genaue
+    Mittelpunkt muss selbst gar nicht auf jedem beteiligten Weg liegen.
+
+    Rueckgabe: Liste von int, gleiche Reihenfolge und Laenge wie `kreuzungen`.
+    """
+    height, width = shape
+    if radius is None:
+        radius = max(2, int(min(height, width) / 128))
+
+    alle_wege = list(roads) + list(sea_roads)
+    # Weg-IDs in ein Raster legen, dann je Kreuzung das Fenster auslesen -
+    # billiger als je Kreuzung alle Wege durchzugehen.
+    raster = [[set() for _ in range(width)] for _ in range(height)]
+    for weg_id, weg in enumerate(alle_wege):
+        for x, y in weg:
+            xi = int(np.clip(round(x), 0, width - 1))
+            yi = int(np.clip(round(y), 0, height - 1))
+            raster[yi][xi].add(weg_id)
+
+    grade = []
+    for x, y in kreuzungen:
+        xi = int(np.clip(round(x), 0, width - 1))
+        yi = int(np.clip(round(y), 0, height - 1))
+        ids = set()
+        for yy in range(max(0, yi - radius), min(height, yi + radius + 1)):
+            for xx in range(max(0, xi - radius), min(width, xi + radius + 1)):
+                ids |= raster[yy][xx]
+        grade.append(len(ids))
+    return grade
+
+
 class PathfindingSystem:
     """
     A*-Wegesuche auf einem VORBERECHNETEN Kostenfeld (siehe bau_kostenfeld()).
@@ -1046,8 +1747,25 @@ class PathfindingSystem:
 
         return cost
 
-    def _a_stern(self, start_x, start_y, end_x, end_y, max_nodes):
+    def _a_stern(self, start_x, start_y, end_x, end_y, max_nodes,
+                 schnell=True):
         """
+        A* - seit 2026-08-23 zuerst ueber den mit numba uebersetzten Kern
+        (core/wegsuche_schnell.py), mit der Python-Fassung darunter als
+        Rueckfall.
+
+        GEMESSEN: 14x schneller bei Punkt-fuer-Punkt identischem Pfad und
+        identischer Kostensumme (tests/smoke_test_wegsuche_schnell.py, alle
+        fuenf Gruppen gruen, darunter der harte Fall "Ebene" mit lauter
+        Kostengleichstaenden). Auf einer 1024-px-Karte fiel der Median je
+        Route von 0.85 s auf unter 0.06 s.
+
+        Der Rueckfall meldet sich LAUT (Logzeile in wegsuche_schnell), wenn
+        numba fehlt - ein stiller Rueckfall auf einen 14x langsameren Pfad
+        waere von Erfolg nicht zu unterscheiden, und genau dieser Fehler ist
+        in diesem Projekt schon zweimal wochenlang unbemerkt geblieben
+        (siehe CLAUDE.md).
+
         Der reine A*-Suchlauf mit festem Knotenbudget. Gibt den Pfad zurueck,
         wenn er das Ziel innerhalb von `max_nodes` erreicht, sonst None.
 
@@ -1084,6 +1802,50 @@ class PathfindingSystem:
         # Edge-Bias nur einbeziehen, wenn er ueberhaupt aktiv ist (bei den
         # Aufrufen aus calculate_road_network() immer aus) - sonst waere die
         # Inline-Fassung fuer den haeufigsten Fall unnoetig komplizierter.
+        edge_map = self.edge_distance_map if self.edge_bias > 0 else None
+
+        # DER SCHNELLE PFAD ZUERST.
+        #
+        # `schnell=False` erzwingt die Python-Fassung. Das ist KEIN
+        # Debug-Schalter, sondern die Voraussetzung dafuer, dass
+        # tests/smoke_test_wegsuche_schnell.py ueberhaupt etwas prueft:
+        # ohne ihn verglich der Test nach dem Einbau numba gegen numba und
+        # war gruen, ohne noch irgendetwas zuzusichern (2026-08-23, beim
+        # Einbau sofort bemerkt - dieselbe Falle wie beim adaptiven Mesh,
+        # siehe CLAUDE.md "Gruene Tests koennen eine tote Funktion
+        # verdecken").
+        if not schnell:
+            return self._a_stern_python(start_x, start_y, end_x, end_y,
+                                        max_nodes)
+        from core.wegsuche_schnell import wegsuche as _wegsuche_schnell
+        _schnell = _wegsuche_schnell(
+            cost_field, (start_x, start_y), (end_x, end_y), max_nodes,
+            schritt=path_resolution, kante=edge_map,
+            kante_bias=self.edge_bias if edge_map is not None else 0.0,
+            kante_skala=self.edge_bias_scale,
+            h_gewicht=WEGSUCHE_H_GEWICHT)
+        if _schnell is not None:
+            return _schnell
+        if _NUMBA_WEGSUCHE_DA:
+            # numba war da und hat NICHTS gefunden - dann findet die
+            # Python-Fassung auch nichts (identische Suche, siehe
+            # smoke_test_wegsuche_schnell). Den langsamen Lauf sparen.
+            return None
+        return self._a_stern_python(start_x, start_y, end_x, end_y, max_nodes)
+
+    def _a_stern_python(self, start_x, start_y, end_x, end_y, max_nodes):
+        """
+        Die urspruengliche Fassung in reinem Python.
+
+        Bleibt als Rueckfall UND als Pruefmassstab: sie ist die Definition
+        dessen, was ein richtiger Pfad ist, und der numba-Kern in
+        core/wegsuche_schnell.py wird in
+        tests/smoke_test_wegsuche_schnell.py Punkt fuer Punkt gegen sie
+        gemessen.
+        """
+        height, width = self.cost_field.shape[:2]
+        cost_field = self.cost_field
+        path_resolution = self.path_resolution
         edge_map = self.edge_distance_map if self.edge_bias > 0 else None
         edge_bias = self.edge_bias
         edge_scale = self.edge_bias_scale
@@ -1573,6 +2335,9 @@ class PlotPhysicsSystem:
     # Verschiebung ueber CONVERGENCE_STABLE_TICKS aufeinanderfolgende Ticks
     # unter CONVERGENCE_MAX_DISPLACEMENT bleibt. Platzhalter-Werte - Nutzer
     # will das Ergebnis erst live sehen, bevor final kalibriert wird.
+    # Stagnationsabbruch - siehe _run_physics_to_convergence().
+    STAGNATION_FENSTER = 10
+    STAGNATION_ANTEIL = 0.10          # 10 % Rueckgang je Fenster als Mindestmass
     CONVERGENCE_MAX_DISPLACEMENT = 0.05
     CONVERGENCE_STABLE_TICKS = 5
 
@@ -2384,6 +3149,7 @@ class PlotPhysicsSystem:
             return best_point
 
         distributed_count = 0
+        ohne_nachbarn = []
         for city_core in city_cores:
             settlement_id = city_core.settlement_id
             own_neighbors = [
@@ -2391,7 +3157,12 @@ class PlotPhysicsSystem:
                 if city_core.node_id in pn.neighbor_core_ids and pn.node_type == "standard_plot_node"
             ]
             if not own_neighbors:
-                logging.warning(f"PlotPhysicsSystem: Stadtkern settlement_id={settlement_id} hat keine eigenen Voronoi-Nachbarn.")
+                # EINE Sammelzeile statt einer je Stadt. Im Lauf vom
+                # 2026-08-22 standen hier sieben identische WARNINGs
+                # untereinander; das ist Laerm, nicht Diagnose. Der
+                # eigentliche Befund - WIEVIELE von WIEVIELEN - steht jetzt
+                # unten in einer Zeile.
+                ohne_nachbarn.append(settlement_id)
                 continue
 
             polygons = self._city_polygons.get(settlement_id) or []
@@ -2407,6 +3178,15 @@ class PlotPhysicsSystem:
                 self.boundary_owner[pn.node_id] = settlement_id
                 distributed_count += 1
 
+        if ohne_nachbarn:
+            logging.warning(
+                "PlotPhysicsSystem: %d von %d Stadtkernen ohne eigene "
+                "Voronoi-Nachbarn (settlement_id %s) - ihre Grenze bleibt "
+                "unbesetzt. Vermutlich derselbe Grund, aus dem die "
+                "Physikschleife nicht konvergiert; wird mit dem neuen "
+                "Plot-System geklaert (docs/PERFORMANCE_2026-08-23.md 3.2).",
+                len(ohne_nachbarn), len(city_cores),
+                ", ".join(str(i) for i in ohne_nachbarn))
         self._report_progress(
             "plot_physics", 25, f"Topologie: {distributed_count} plot_nodes zu Stadtgrenze verteilt")
 
@@ -3425,20 +4205,73 @@ class PlotPhysicsSystem:
         gesetztem progress_callback alle TRAFFIC_RECOMPUTE_INTERVAL
         Iterationen zurueck, damit die GUI den fortschreitenden Zustand
         live anzeigen kann (siehe [[project-settlement-plot-physics-rebuild]] Teil F)."""
+        import time as _t
+        # Teilzeiten der Physikschleife. Das Log sagte bisher nur, dass die
+        # 100 Iterationen ausgeschoepft wurden - nicht, wie sich die 20 s auf
+        # Schritt, Verkehr und Fortschrittsmeldung verteilen. Ohne diese
+        # Aufteilung ist nicht zu entscheiden, ob eine hoehere Schrittweite
+        # oder ein selteneres _simulate_traffic() der Hebel ist.
+        _zeit = {"physics_step": 0.0, "sync": 0.0, "traffic": 0.0,
+                 "fortschritt": 0.0}
+        _t_ges = _t.perf_counter()
         stable_ticks = 0
+        # ABBRUCH BEI STAGNATION (Punkt 3.4 der Leistungsliste,
+        # docs/PERFORMANCE_2026-08-23.md).
+        #
+        # Diese Schleife lief bisher IMMER die vollen 100 Iterationen, weil
+        # sie die Konvergenzschranke nie erreichte - im Log des Nutzers vom
+        # 2026-08-22 steht dazu "MAX_PHYSICS_ITERATIONS (100) erreicht,
+        # eingefroren ohne volle Konvergenz", und das kostete 20 s.
+        #
+        # Ein System, dessen groesste Verschiebung ueber
+        # STAGNATION_FENSTER Iterationen um weniger als STAGNATION_ANTEIL
+        # faellt, wird auch in den restlichen Iterationen nicht mehr
+        # konvergieren. Der Endzustand ist derselbe "eingefroren ohne
+        # Konvergenz", nur frueher erreicht.
+        #
+        # DIE PLOT-PHYSIK WIRD ERSETZT (Nutzer-Vorgabe 2026-08-23: "bei
+        # settlements machen wir fuer die plots ein neues system, also hier
+        # nur rudimentaer fehlerhafte systeme fixen oder ausschalten").
+        # Deshalb hier bewusst KEIN Umbau der Kraftrechnung, sondern nur
+        # der Abbruch und die Verlaufsaufzeichnung - die sagt dem neuen
+        # System, woran das alte gescheitert ist.
+        verlauf = []
         for iteration in range(1, self.MAX_PHYSICS_ITERATIONS + 1):
             self.iteration = iteration
+            _a = _t.perf_counter()
             max_displacement = self._physics_step()
+            _b = _t.perf_counter(); _zeit["physics_step"] += _b - _a
             self._sync_core_positions()
+            _c = _t.perf_counter(); _zeit["sync"] += _c - _b
 
             if iteration % self.TRAFFIC_RECOMPUTE_INTERVAL == 0:
                 self._simulate_traffic()
+                _d = _t.perf_counter(); _zeit["traffic"] += _d - _c
                 self._report_progress(
                     "plot_physics",
                     45 + int(50 * iteration / self.MAX_PHYSICS_ITERATIONS),
                     f"Physik-Iteration {iteration}/{self.MAX_PHYSICS_ITERATIONS} "
                     f"(max. Verschiebung {max_displacement:.3f}px)")
                 self._report_live_state()
+                _zeit["fortschritt"] += _t.perf_counter() - _d
+
+            verlauf.append(float(max_displacement))
+            if (len(verlauf) >= 2 * self.STAGNATION_FENSTER
+                    and iteration % self.STAGNATION_FENSTER == 0):
+                jetzt = min(verlauf[-self.STAGNATION_FENSTER:])
+                davor = min(verlauf[-2 * self.STAGNATION_FENSTER:
+                                    -self.STAGNATION_FENSTER])
+                if jetzt > davor * (1.0 - self.STAGNATION_ANTEIL):
+                    logging.info(
+                        "PlotPhysicsSystem: Stagnation nach %d Iterationen "
+                        "(groesste Verschiebung %.3f px, davor %.3f px - "
+                        "Rueckgang unter %.0f %%). Eingefroren; die "
+                        "restlichen %d Iterationen haetten daran nichts "
+                        "geaendert.",
+                        iteration, jetzt, davor,
+                        100.0 * self.STAGNATION_ANTEIL,
+                        self.MAX_PHYSICS_ITERATIONS - iteration)
+                    break
 
             if max_displacement < self.CONVERGENCE_MAX_DISPLACEMENT:
                 stable_ticks += 1
@@ -3454,8 +4287,29 @@ class PlotPhysicsSystem:
                 f"PlotPhysicsSystem: MAX_PHYSICS_ITERATIONS ({self.MAX_PHYSICS_ITERATIONS}) erreicht, "
                 f"eingefroren ohne volle Konvergenz.")
 
+        _t_schleife = _t.perf_counter() - _t_ges
+        _a = _t.perf_counter()
         self._simulate_traffic()  # finale Traffic-Zuweisung mit den konvergierten Positionen
         self._classify_road_tiers()
+        _zeit["abschluss"] = _t.perf_counter() - _a
+
+        _log = logging.getLogger("Pipeline")
+        _log.info("--- settlement.plot_nodes Physik: %d Iterationen, %.3fs ---",
+                  self.iteration, _t_schleife + _zeit["abschluss"])
+        if verlauf:
+            # Der VERLAUF der groessten Verschiebung, nicht nur ihr Endwert.
+            # Faellt sie und stagniert, ist CONVERGENCE_MAX_DISPLACEMENT zu
+            # streng; springt sie, ist die Schrittweite zu gross. Das ist
+            # die Frage, die das Nachfolgesystem beantworten muss.
+            stichprobe = verlauf[::max(len(verlauf) // 8, 1)][:8]
+            _log.info("      %-38s %s",
+                      "[max. Verschiebung px]",
+                      " ".join(f"{v:.3f}" for v in stichprobe)
+                      + f" ... {verlauf[-1]:.3f}")
+        for _n, _d2 in sorted(_zeit.items(), key=lambda x: -x[1]):
+            _log.info("      %-38s %8.3fs  %5.1f%%  (%.1f ms je Iteration)",
+                      _n, _d2, 100.0 * _d2 / max(_t_schleife + _zeit["abschluss"], 1e-9),
+                      1000.0 * _d2 / max(self.iteration, 1))
         self._report_progress("plot_physics", 100, f"Physik abgeschlossen nach {self.iteration} Iterationen")
 
     # ==================================================================
@@ -4168,8 +5022,45 @@ class SettlementGenerator:
         if suitability_map is None:
             raise ValueError(f"settlement.settlements: combined_suitability_map für LOD {lod_level} nicht verfügbar")
 
+        # Eignungskarten je Stadttyp (2026-08-13, docs/OFFENE_PUNKTE.md 5.16).
+        # Aus DENSELBEN Eingaben wie die allgemeine Standortguete - der
+        # Analyzer rechnet die vier Teilfaktoren dafuer ohnehin schon.
+        typ_eignungen = None
+        try:
+            # Derselbe Analyzer-Aufbau wie in calculate_terrain_suitability() -
+            # er haelt keinen Zustand ueber den Aufruf hinaus, ein zweites
+            # Exemplar ist deshalb unbedenklich und billiger als es
+            # durchzureichen.
+            analyzer = TerrainSuitabilityAnalyzer(
+                self.terrain_factor_villages, inputs["heightmap"].shape[0])
+            typ_eignungen = analyzer.stadttyp_eignungen(
+                inputs["heightmap"], inputs["slopemap"], inputs["water_map"],
+                self._update_progress)
+        except Exception as fehler:
+            # LAUT melden statt still auf "alles sonstige" zurueckzufallen -
+            # ohne diese Zeile waere ein Fehler hier von einer Karte ohne
+            # Sondertypen nicht zu unterscheiden (CLAUDE.md).
+            self.logger.warning(
+                "Stadttyp-Eignungen fehlgeschlagen (%s) - alle Orte bleiben "
+                "beim Auffangtyp 'sonstige'", fehler)
+
+        # Kostenfeld fuer die Erreichbarkeit der Marktstadt-Wahl (5.17).
+        # Dasselbe Feld, das auch das Wegenetz benutzt - eine zweite
+        # Kostendefinition waere eine zweite Wahrheit. Die Erreichbarkeit
+        # selbst rechnet darauf grob (siehe erreichbarkeits_matrix()).
+        kostenfeld = None
+        try:
+            kostenfeld = bau_kostenfeld(inputs["heightmap"], inputs["slopemap"],
+                                        self.road_slope_to_distance_ratio)
+        except Exception as fehler:
+            self.logger.warning(
+                "Kostenfeld fuer die Marktstadt-Erreichbarkeit nicht gebaut (%s) - "
+                "es zaehlt nur die Wasserlage", fehler)
+
         settlement_list = self.calculate_settlements(
-            suitability_map, inputs["heightmap"], lod_level, region_map=inputs.get("region_map"))
+            suitability_map, inputs["heightmap"], lod_level,
+            region_map=inputs.get("region_map"), typ_eignungen=typ_eignungen,
+            kostenfeld=kostenfeld)
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"settlement_list": settlement_list})
 
     def _calc_city_boundary(self, calculator_id: str, lod_level: int) -> None:
@@ -4521,7 +5412,105 @@ class SettlementGenerator:
             raenge[idx] = "siedlung" if i < siedlung_anzahl else "dorf"
         return raenge
 
-    def calculate_settlements(self, suitability_map, heightmap, lod, region_map=None):
+    def _typen_zuweisen(self, orte, typ_eignungen, raenge, kostenfeld=None):
+        """
+        Weist den Orten EINER Kultur ihre Stadttypen zu und liefert die
+        (moeglicherweise angepassten) Raenge zurueck.
+
+        Reihenfolge, und warum:
+        1. **Marktstadt zuerst.** Sie ist auf eine je Region beschraenkt
+           ("nur eine Marktstadt pro Region moeglich") - waere sie ein
+           gewoehnlicher Kandidat, koennten zwei Orte sie gleichzeitig
+           beanspruchen. Es gewinnt der Ort mit der hoechsten
+           Marktstadt-Eignung an seiner Position, und nur wenn diese ueber
+           TYP_GRUNDGUETE liegt: eine Region ohne brauchbare Hafenlage
+           bekommt lieber gar keine Marktstadt als eine schlechte.
+        2. **Alle uebrigen** nehmen den Typ mit der hoechsten Eignung an ihrem
+           Ort. "sonstige" ist dabei ein normaler Mitbewerber mit fester
+           Guete - gewinnt er, passte schlicht kein Sondertyp.
+        3. **Rang gegen den Typ pruefen.** `rang_erlaubt` je Typ setzt die
+           Vorgabe "Bergdorf klein bis mittel" / "Marktstadt mittel bis gross"
+           durch. Ein zu hoher Rang wird auf den hoechsten erlaubten gesenkt,
+           ein zu niedriger auf den niedrigsten erlaubten angehoben.
+           **Die Marktstadt ist davon ausgenommen, ihren Rang zu VERLIEREN** -
+           sie ist der Handelsknoten der Region und soll nicht als Dorf enden.
+        """
+        if not orte:
+            return raenge
+
+        raenge = list(raenge)
+        offen = list(range(len(orte)))
+
+        def eignung_bei(typ, ort):
+            karte = typ_eignungen.get(typ)
+            if karte is None:
+                return 0.0
+            yi = int(np.clip(round(ort.y), 0, karte.shape[0] - 1))
+            xi = int(np.clip(round(ort.x), 0, karte.shape[1] - 1))
+            return float(karte[yi, xi])
+
+        # 1. Marktstadt - hoechstens eine, und nur bei brauchbarer Lage.
+        #
+        # "liegt am Wasser ODER kann viele Staedte gut erreichen" - das ODER
+        # ist woertlich gemeint, deshalb das MAXIMUM aus beidem und kein
+        # Produkt: eine Binnenstadt am Knotenpunkt aller Wege ist ebenso eine
+        # Marktstadt wie ein Hafen abseits der Hauptrouten.
+        #
+        # Die Erreichbarkeit kommt aus der Wegkosten-Matrix zwischen den
+        # bereits gesetzten Orten (erreichbarkeits_matrix()/zentralitaet(),
+        # docs/OFFENE_PUNKTE.md 5.17) - nicht aus einer Gelaendenaeherung.
+        # Fehlt sie (kein Kostenfeld uebergeben), bleibt es bei der reinen
+        # Wasserlage; das ist dann eine schwaechere, aber nicht falsche
+        # Bewertung.
+        zentral = None
+        if kostenfeld is not None and len(orte) > 1:
+            try:
+                matrix = erreichbarkeits_matrix(
+                    kostenfeld, [(o.x, o.y) for o in orte])
+                zentral = zentralitaet(matrix)
+            except Exception as fehler:
+                self.logger.warning(
+                    "Erreichbarkeit fuer die Marktstadt-Wahl fehlgeschlagen (%s) - "
+                    "es zaehlt nur die Wasserlage", fehler)
+
+        beste_markt, bester_wert = None, TYP_GRUNDGUETE
+        for i in offen:
+            wasserlage = eignung_bei("marktstadt", orte[i])
+            wert = wasserlage
+            if zentral is not None:
+                wert = max(wasserlage, float(zentral[i]))
+            if wert > bester_wert:
+                beste_markt, bester_wert = i, wert
+        if beste_markt is not None:
+            orte[beste_markt].settlement_type = "marktstadt"
+            offen.remove(beste_markt)
+
+        # 2. Alle uebrigen: bester Typ an ihrem Ort (ohne Marktstadt)
+        for i in offen:
+            kandidaten = [(eignung_bei(typ, orte[i]), typ)
+                          for typ in ("bergdorf", "agrarstadt", "sonstige")]
+            kandidaten.sort(key=lambda p: -p[0])
+            orte[i].settlement_type = kandidaten[0][1]
+
+        # 3. Rang an den Typ anpassen
+        for i, ort in enumerate(orte):
+            erlaubt = STADTTYPEN[ort.settlement_type]["rang_erlaubt"]
+            if raenge[i] in erlaubt:
+                continue
+            if ort.settlement_type == "marktstadt":
+                # nur anheben, nie senken (siehe Docstring)
+                raenge[i] = erlaubt[-1] if RANG_ZAHL.get(raenge[i], 1) < RANG_ZAHL[erlaubt[0]] \
+                    else raenge[i]
+                if raenge[i] not in erlaubt:
+                    raenge[i] = erlaubt[0]
+            elif RANG_ZAHL.get(raenge[i], 1) > RANG_ZAHL[erlaubt[-1]]:
+                raenge[i] = erlaubt[-1]
+            else:
+                raenge[i] = erlaubt[0]
+        return raenge
+
+    def calculate_settlements(self, suitability_map, heightmap, lod, region_map=None,
+                               typ_eignungen=None, kostenfeld=None):
         """
         Platziert Settlements je Kultur (docs/SIEDLUNGEN_ENTWURF.md §2+3).
 
@@ -4685,6 +5674,16 @@ class SettlementGenerator:
             # Aussage ueber die Kultur als Ganzes ("bester Ort wird Stadt"),
             # nicht ueber einen einzelnen Platzierungsschritt.
             raenge = self._rang_zuweisen([s.properties['rang_wert'] for s in neue_dieser_kultur])
+
+            # STADTTYPEN (2026-08-13, docs/OFFENE_PUNKTE.md 5.16). Erst hier,
+            # wenn alle Orte dieser Kultur stehen - "nur eine Marktstadt pro
+            # Region" ist eine Aussage ueber die Gruppe, nicht ueber einen
+            # einzelnen Ort. Der Typ kann den Rang anschliessend noch
+            # verschieben (ein Bergdorf darf keine 'stadt' sein).
+            if typ_eignungen:
+                raenge = self._typen_zuweisen(neue_dieser_kultur, typ_eignungen,
+                                              raenge, kostenfeld=kostenfeld)
+
             for settlement, rang in zip(neue_dieser_kultur, raenge):
                 lo, hi = RANG_HAEUSER[rang]
                 haeuser = int(round(zufall_s.uniform(lo, hi)))
@@ -4753,11 +5752,28 @@ class SettlementGenerator:
         if voronoi_cell_map is not None:
             edge_distance_map = _voronoi_edge_distance_map(voronoi_cell_map)
 
-        basis_kostenfeld = bau_kostenfeld(heightmap, slopemap, self.road_slope_to_distance_ratio)
+        # Teilschritt-Messung (managers/teilschritte.py). 60.3 s auf einer
+        # Zeile im Pipeline-Log liessen offen, ob die A*-Laeufe, das
+        # Kostenfeld oder der Bedarfsausbau die Zeit fressen. Zusaetzlich
+        # zaehlt `_a_stern_zaehler` die einzelnen Routen mit - ohne die Zahl
+        # laesst sich nicht sagen, ob ein Lauf teuer ist oder es viele sind.
+        from managers.teilschritte import Teilschritte, schritt as _s
+        _ts = Teilschritte("settlement.pathfinding",
+                           fortschritt=self._update_progress, von=25, bis=90,
+                           plan=[("kostenfeld", 2.0), ("gabriel_kandidaten", 1.0),
+                                 ("routen_bewerten", 70.0), ("seekostenfeld", 2.0),
+                                 ("kulturzusammenhang", 15.0),
+                                 ("bedarfsausbau", 10.0)])
+        self._a_stern_zaehler = [0, 0.0]
+
+        with _s(_ts, "kostenfeld", "Kostenfeld"):
+            basis_kostenfeld = bau_kostenfeld(heightmap, slopemap, self.road_slope_to_distance_ratio)
         weg_maske = np.zeros(basis_kostenfeld.shape, dtype=bool)
 
         def route(a, b):
             """(Pfad, Pfadkosten) fuer ein Ortspaar - nutzt den aktuellen Wegerabatt."""
+            import time as _t
+            _t0 = _t.perf_counter()
             feld = (np.where(weg_maske, basis_kostenfeld * WEGERABATT, basis_kostenfeld)
                    if np.any(weg_maske) else basis_kostenfeld)
             pathfinder = PathfindingSystem(feld, slopemap.shape[0],
@@ -4769,6 +5785,8 @@ class SettlementGenerator:
             # find_least_resistance_path().
             kosten = (sum(pathfinder.calculate_movement_cost(x, y) for x, y in pfad[1:])
                      if erreicht else float('inf'))
+            self._a_stern_zaehler[0] += 1
+            self._a_stern_zaehler[1] += _t.perf_counter() - _t0
             return pathfinder, pfad, kosten
 
         def merke(pf, pfad):
@@ -4789,9 +5807,18 @@ class SettlementGenerator:
         roads = []
         gebaut = set()  # {frozenset({id_a, id_b})}
 
+        # Tragen die Orte ueberhaupt Stadttypen? Nur dann greifen die
+        # Handelsgewichte (siehe bereitschaft_von()). Im alten
+        # Nicht-Weltkarten-Pfad bleibt es bei der Rang-Formel.
+        typen_vorhanden = any(
+            getattr(s, "settlement_type", "sonstige") != "sonstige" for s in settlements)
+
         # ---------------------------------------------------- 2: Gabriel-Graph
-        kandidaten_indizes = _gabriel_kandidaten(
-            np.array([[s.x, s.y] for s in settlements], dtype=np.float64))
+        with _s(_ts, "gabriel_kandidaten", "Kandidatenpaare"):
+            kandidaten_indizes = _gabriel_kandidaten(
+                np.array([[s.x, s.y] for s in settlements], dtype=np.float64))
+        _rb = _s(_ts, "routen_bewerten", "Kandidaten routen und bewerten")
+        _rb.__enter__()
 
         # BEREITSCHAFT HAENGT NICHT AN DEN WEGKOSTEN - sie kann also VORAB
         # sortiert werden, waehrend die Wegkosten erst BEIM Abarbeiten
@@ -4804,7 +5831,27 @@ class SettlementGenerator:
         # dort nie in die Entscheidung, nur noch in die spaeter neu
         # geroutete Geometrie.
         def bereitschaft_von(i, j):
+            """
+            Wie sehr zwei Orte diese Verbindung wollen.
+
+            Seit 2026-08-13 (docs/OFFENE_PUNKTE.md 5.16) das HANDELSGEWICHT
+            aus den Stadttypen (`handelsgewicht()`, Summe beider einseitiger
+            Interessen) statt des frueheren `rang_a * rang_b * kulturfaktor`.
+            Der Mechanismus dahinter ist unveraendert: der Wert wird gegen die
+            laengenbezogenen Wegkosten gehalten, und der Wegerabatt auf bereits
+            gebauten Trassen wirkt weiterhin auf die ENTSCHEIDUNG mit.
+
+            Die Kultur steckt jetzt IM Handelsgewicht (eigene Fraktion zaehlt
+            je nach Typ 1.5-fach oder mit eigenen Zahlen), ein zusaetzlicher
+            `BEREITSCHAFT_FREMDKULTUR`-Faktor waere doppelt gezaehlt.
+
+            Rueckfall auf die alte Formel, wenn KEIN Ort einen Typ traegt
+            (alter Nicht-Weltkarten-Pfad) - dort gibt es weder Kulturen noch
+            Typen, und alle Handelsgewichte waeren gleich.
+            """
             a, b = settlements[i], settlements[j]
+            if typen_vorhanden:
+                return handelsgewicht(a, b)
             rang_a = RANG_ZAHL.get(a.rank, 1)
             rang_b = RANG_ZAHL.get(b.rank, 1)
             kulturfaktor = 1.0 if a.culture == b.culture else BEREITSCHAFT_FREMDKULTUR
@@ -4829,9 +5876,11 @@ class SettlementGenerator:
                                       f"Bewertet {road_count}/{total_roads} Kandidaten")
 
         # ---------------------------------------------------- 4: Kulturzusammenhang
+        _rb.__exit__(None, None, None)
         sea_roads = []
-        seekostenfeld = bau_seekostenfeld(heightmap, seegrad=seegrad)
-        seepfadfinder = PathfindingSystem(seekostenfeld, slopemap.shape[0])
+        with _s(_ts, "seekostenfeld", "Seekostenfeld"):
+            seekostenfeld = bau_seekostenfeld(heightmap, seegrad=seegrad)
+            seepfadfinder = PathfindingSystem(seekostenfeld, slopemap.shape[0])
 
         def see_route(a, b):
             """
@@ -4856,6 +5905,8 @@ class SettlementGenerator:
         for idx, s in enumerate(settlements):
             kulturen.setdefault(s.culture, []).append(idx)
 
+        _kz = _s(_ts, "kulturzusammenhang", "Kulturzusammenhang")
+        _kz.__enter__()
         for kultur, indizes in kulturen.items():
             if len(indizes) < 2:
                 continue
@@ -4934,7 +5985,162 @@ class SettlementGenerator:
                     # bleibt; die Kultur bleibt fuer diese zwei Orte getrennt.
                     eltern[find(idx_a)] = find(idx_b)
 
+        # ------------------------------------ 4: Ausbau nach GESAMTBEDARF
+        #
+        # Bis hierher ist jede Entscheidung PAARWEISE gefallen: lohnt sich
+        # fuer A und B diese Strecke? Ein Pass ueber einen Bergruecken lohnt
+        # sich fuer kein einzelnes Paar - fuer zehn Paare zusammen waere er
+        # der groesste Gewinn. Genau das sah das Verfahren strukturell nicht
+        # (Nutzerbeobachtung 2026-08-13 am Kartenbild, docs/OFFENE_PUNKTE.md
+        # 5.21: "aber nicht das 10 doerfer daran interessiert sind eine
+        # verbindung oben zu haben").
+        #
+        # ERGAENZT das bisherige Netz, ersetzt es nicht (Nutzer-Vorgabe:
+        # "bisher sieht das ziemlich gut aus, halte dich etwa daran, aber wir
+        # wollen das nur etwas besser machen"). Laeuft auf dem Ortsgraphen mit
+        # wenigen Dutzend Knoten und kostet daher fast nichts; teuer ist nur
+        # das anschliessende Routen der wenigen tatsaechlich gewaehlten Kanten.
+        _kz.__exit__(None, None, None)
+        _ba = _s(_ts, "bedarfsausbau", "Netzausbau nach Bedarf")
+        _ba.__enter__()
+        try:
+            roads = self._netz_nach_bedarf_ausbauen(
+                settlements, roads, gebaut, kulturen, route, merke)
+        except Exception as fehler:                       # pragma: no cover
+            self.logger.warning(
+                "Bedarfsgetriebener Netzausbau uebersprungen (%s) - das Netz "
+                "bleibt beim paarweisen Ergebnis", fehler)
+        _ba.__exit__(None, None, None)
+
+        anzahl, dauer = self._a_stern_zaehler
+        _ts.bericht()
+        logging.getLogger("Pipeline").info(
+            "      %-38s %8.3fs  %d Laeufe, %.1f ms je Lauf",
+            "[davon A*-Routen]", dauer, anzahl,
+            1000.0 * dauer / max(anzahl, 1))
+
         return roads, sea_roads
+
+    def _seehandel_messen(self, settlements, kulturen, route, see_route,
+                          heightmap, seegrad):
+        """
+        Welcher Anteil des Handels laeuft ueber See - die Groesse, gegen die
+        `HAFEN_UMSTEIGEKOSTEN` geeicht ist (docs/OFFENE_PUNKTE.md 5.22).
+
+        Reines Messen, kein Bauen: die Funktion veraendert das Netz nicht. Sie
+        existiert, damit die Eichung ueberpruefbar ist statt behauptet - ohne
+        sie waere "35 % Seehandel" eine Zahl, die niemand nachrechnen kann.
+
+        Rueckgabe: (anteil, anzahl_seekanten, anzahl_landkanten).
+        """
+        gesamt_traffic = {}
+        see_gesamt = land_gesamt = 0
+        for kultur, indizes in kulturen.items():
+            if len(indizes) < 2:
+                continue
+            n = len(indizes)
+            C = np.full((n, n), np.inf)
+            W = np.zeros((n, n))
+            seekanten = set()
+            for a in range(n):
+                for b in range(a + 1, n):
+                    ort_a, ort_b = settlements[indizes[a]], settlements[indizes[b]]
+                    W[a, b] = W[b, a] = handelsgewicht(ort_a, ort_b)
+                    _pf, _pfad, land_kosten = route(ort_a, ort_b)
+                    see_pfad, see_kosten = see_route(ort_a, ort_b)
+                    see_gesamt_kosten = (see_kosten + 2.0 * hafenkosten(self.meters_per_pixel)
+                                         if np.isfinite(see_kosten) else np.inf)
+                    if see_gesamt_kosten < land_kosten:
+                        C[a, b] = C[b, a] = see_gesamt_kosten
+                        seekanten.add((a, b))
+                        see_gesamt += 1
+                    else:
+                        C[a, b] = C[b, a] = land_kosten
+                        if np.isfinite(land_kosten):
+                            land_gesamt += 1
+            np.fill_diagonal(C, 0.0)
+            kanten = {(a, b): float(C[a, b]) for a in range(n) for b in range(a + 1, n)
+                      if np.isfinite(C[a, b])}
+            if not kanten:
+                continue
+            anteil = seehandel_anteil(kanten, W, n, seekanten)
+            traffic = kanten_traffic(kanten, W, n)
+            gesamt_traffic[kultur] = (anteil, sum(traffic.values()))
+
+        if not gesamt_traffic:
+            return 0.0, see_gesamt, land_gesamt
+        # Ueber die Kulturen nach ihrem Handelsvolumen gewichtet mitteln -
+        # eine Kultur mit zwei Orten soll den Gesamtanteil nicht so stark
+        # bestimmen wie eine mit acht.
+        summe = sum(v for _a, v in gesamt_traffic.values())
+        if summe <= 0:
+            return 0.0, see_gesamt, land_gesamt
+        anteil = sum(a * v for a, v in gesamt_traffic.values()) / summe
+        return anteil, see_gesamt, land_gesamt
+
+    def _netz_nach_bedarf_ausbauen(self, settlements, roads, gebaut, kulturen,
+                                   route, merke):
+        """
+        Schritt 4 des Wegenetzes: zusaetzliche Strecken nach ihrem Nutzen fuer
+        ALLE Handelspaare (siehe `kanten_nach_bedarf()`, docs/OFFENE_PUNKTE.md
+        5.21).
+
+        Je Kultur getrennt, wie die uebrigen Schritte auch. Die Kostenmatrix
+        entsteht aus den tatsaechlichen A*-Pfadkosten zwischen den Orten
+        dieser Kultur - dieselbe Quelle wie beim paarweisen Bau, damit beide
+        Schritte dieselbe Wirklichkeit sehen.
+        """
+        for kultur, indizes in kulturen.items():
+            if len(indizes) < 3:
+                # Unter drei Orten gibt es keinen "Umweg ueber Dritte", den
+                # eine zusaetzliche Kante abkuerzen koennte.
+                continue
+
+            n = len(indizes)
+            C = np.full((n, n), np.inf, dtype=np.float64)
+            W = np.zeros((n, n), dtype=np.float64)
+            pfade = {}
+            for a in range(n):
+                for b in range(a + 1, n):
+                    ort_a = settlements[indizes[a]]
+                    ort_b = settlements[indizes[b]]
+                    _pf, pfad, kosten = route(ort_a, ort_b)
+                    C[a, b] = C[b, a] = kosten
+                    W[a, b] = W[b, a] = handelsgewicht(ort_a, ort_b)
+                    pfade[(a, b)] = (_pf, pfad)
+            np.fill_diagonal(C, 0.0)
+
+            bestehend = {}
+            for a in range(n):
+                for b in range(a + 1, n):
+                    paar = frozenset((settlements[indizes[a]].location_id,
+                                      settlements[indizes[b]].location_id))
+                    if paar in gebaut and np.isfinite(C[a, b]):
+                        bestehend[(a, b)] = float(C[a, b])
+
+            kandidaten = [(a, b) for a in range(n) for b in range(a + 1, n)
+                          if (a, b) not in bestehend and np.isfinite(C[a, b])]
+            if not kandidaten:
+                continue
+
+            gewaehlt = kanten_nach_bedarf(
+                C, W, bestehend, kandidaten,
+                mindest_nutzen=NETZAUSBAU_MINDESTNUTZEN,
+                hoechstens=NETZAUSBAU_MAX_KANTEN)
+
+            for a, b in gewaehlt:
+                paar = frozenset((settlements[indizes[a]].location_id,
+                                  settlements[indizes[b]].location_id))
+                if paar in gebaut:
+                    continue
+                _pf, pfad = pfade[(a, b)]
+                merke(_pf, pfad)
+                gebaut.add(paar)
+                self.logger.debug(
+                    "Bedarfsausbau %s: Strecke %s-%s ergaenzt",
+                    kultur, settlements[indizes[a]].location_id,
+                    settlements[indizes[b]].location_id)
+        return roads
 
     def _knoten_zufall(self, name: str):
         """
@@ -4993,6 +6199,9 @@ class SettlementGenerator:
 
         # ---- Kandidatentypen sammeln, in der Prioritaet aus §4.6 ----
         kreuzungen = list(kreuzungen_finden(roads, sea_roads, settlements, (height, width)))
+        # Grad JETZT bestimmen, solange die Reihenfolge noch der von
+        # kreuzungen_finden() entspricht - _fern_zuerst() sortiert gleich um.
+        kreuzung_grade = kreuzungsgrade(roads, sea_roads, kreuzungen, (height, width))
 
         furt_punkte, pass_punkte, strecke_punkte = [], [], []
         for weg in roads:  # Furt/Pass nur auf Landwegen sinnvoll
@@ -5026,13 +6235,31 @@ class SettlementGenerator:
         # Prioritaet selbst (Kreuzung > Furt > Pass > Strecke) bleibt die
         # PRIMAERE Ordnung unten in `kandidaten`.
         if region_map is not None:
-            kreuzungen = self._fern_zuerst(kreuzungen, size)
+            # Kreuzungen mitsamt ihrem Grad umsortieren, sonst zeigt der Grad
+            # anschliessend auf die falsche Kreuzung.
+            paare = self._fern_zuerst(
+                [(x, y, g) for (x, y), g in zip(kreuzungen, kreuzung_grade)],
+                size, xy=lambda p: (p[0], p[1]))
+            kreuzungen = [(x, y) for x, y, _g in paare]
+            kreuzung_grade = [g for _x, _y, g in paare]
             furt_punkte = self._fern_zuerst(furt_punkte, size)
             pass_punkte = self._fern_zuerst(pass_punkte, size)
             strecke_punkte = self._fern_zuerst(strecke_punkte, size)
 
         kandidaten = (
-            [("kreuzung", x, y) for x, y in kreuzungen]
+            # ECHTE WEGSCHEIDEN ZUERST (2026-08-13, docs/OFFENE_PUNKTE.md
+            # 5.20). Nutzer-Vorgabe: "roadsites haben auch bestimmte kriterien
+            # (zB taverne ... an einer kreuzung mit min. drei wegen etc)".
+            # `kreuzungen_finden()` meldet jede Stelle, an der sich MINDESTENS
+            # ZWEI Wege beruehren - darunter viele, an denen zwei Strecken
+            # sich nur streifen. Eine Taverne gehoert aber an eine richtige
+            # Wegscheide. `kreuzungsgrade()` zaehlt deshalb nach, wie viele
+            # verschiedene Wege je Kreuzung zusammenkommen, und Kreuzungen ab
+            # KREUZUNG_MIN_WEGE stehen VOR den uebrigen.
+            [("kreuzung", x, y) for (x, y), grad in zip(kreuzungen, kreuzung_grade)
+             if grad >= KREUZUNG_MIN_WEGE]
+            + [("kreuzung", x, y) for (x, y), grad in zip(kreuzungen, kreuzung_grade)
+               if grad < KREUZUNG_MIN_WEGE]
             + [("furt", x, y) for x, y in furt_punkte]
             + [("pass", x, y) for x, y in pass_punkte]
             + [("strecke", x, y) for x, y in strecke_punkte]
@@ -5216,42 +6443,88 @@ class SettlementGenerator:
             "abgelegen": basis & land & (norm_height < 0.7),
         }
 
-        # Pool je Kategorie MUSS mit der Anzahl der Gebiete mitwachsen - sonst
-        # verschwinden Kategorien wie "gipfel"/"kueste"/"quelle", die auf
-        # wenige Regionen konzentriert sind, aus einem einzigen globalen
-        # Zufallsschnitt schon vor der Regionszuordnung (gemessen: mit dem
-        # alten Schnitt max(gesamt_ziel*3, 20) blieben bei neun Regionen
-        # sieben davon komplett ohne Landmark). Ein Schnitt je Region statt
-        # global waere sauberer, aber die Masken sind ohnehin durch die
-        # Wildnis-/Hoehen-/Kuestenbedingungen begrenzt - ungekuerzt reichen
-        # sie bei Kartengroessen bis in den vierstelligen Pixelbereich.
-        pool_je_kategorie = max(gesamt_ziel * 3, 20) * max(len(gebiete), 1)
-        kandidaten = []
-        for kategorie, maske in kategorie_masken.items():
-            ys, xs = np.nonzero(maske)
-            punkte = list(zip(xs.tolist(), ys.tolist()))
-            zufall.shuffle(punkte)
-            kandidaten.extend((kategorie, x, y) for x, y in punkte[:pool_je_kategorie])
-        zufall.shuffle(kandidaten)
-        if region_map is not None:
-            kandidaten = self._fern_zuerst(kandidaten, size, xy=lambda p: (p[1], p[2]))
+        # AUSWAHL NACH EIGNUNG STATT PER ZUFALLSZIEHUNG (2026-08-13,
+        # docs/OFFENE_PUNKTE.md 5.18).
+        #
+        # Die alte Fassung zog aus jeder binaeren Kategoriemaske einen
+        # ZUFAELLIGEN Pool und mischte ihn. Ein "Gipfel" landete damit auf
+        # irgendeinem Pixel oberhalb 60 % der Hoehenspanne statt auf dem
+        # Gipfel. Jetzt liefert `landmark_eignungen()` je Kategorie eine
+        # kontinuierliche Guete, und je Region wird schlicht das Beste
+        # genommen - mit Mindestabstand, damit nicht alle auf demselben Grat
+        # sitzen.
+        #
+        # Das Rauschen bleibt als leichter Stoerterm erhalten (wie bei der
+        # Rangvergabe der Siedlungen, SIEDLUNGEN_ENTWURF §2): sonst saehe
+        # jede Karte mit gleichem Seed nicht nur gleich aus, sondern jede
+        # Region auch immer nach demselben Muster.
+        eignungen = self.landmark_eignungen(civ_map, heightmap, slopemap, water_map)
 
         min_abstand = max(3.0, min(height, width) / 20.0)
         gewaehlt = []
         for regionsmaske, anzahl_ziel in gebiete:
             if anzahl_ziel <= 0:
                 continue
+            # Beste Kategorie je Pixel dieser Region, plus etwas Rauschen
+            beste_kat = None
+            bester_wert = None
+            for kategorie, karte in eignungen.items():
+                wert = np.where(regionsmaske & kategorie_masken[kategorie], karte, 0.0)
+                if bester_wert is None:
+                    bester_wert = wert.copy()
+                    beste_kat = np.where(wert > 0, kategorie, "")
+                else:
+                    besser = wert > bester_wert
+                    bester_wert = np.where(besser, wert, bester_wert)
+                    beste_kat = np.where(besser, kategorie, beste_kat)
+            if bester_wert is None or not np.any(bester_wert > 0):
+                continue
+
+            # `zufall` ist ein `random.Random` (siehe _knoten_zufall()), KEIN
+            # numpy-RandomState - es kennt kein `size=`. Das Rauschfeld
+            # deshalb ueber einen aus demselben Generator geseedeten
+            # numpy-Generator, damit es weiterhin nur am Seed und am
+            # Knotennamen haengt und nicht an der Ausfuehrungsgeschichte.
+            rausch_quelle = np.random.RandomState(zufall.randrange(2 ** 31))
+            rausch = rausch_quelle.uniform(0.92, 1.08, size=bester_wert.shape)
+            punkte_wert = bester_wert * rausch
+
             hinzugefuegt = 0
-            for kategorie, x, y in kandidaten:
+            arbeits_wert = punkte_wert.copy()
+            # KATEGORIE-VIELFALT JE REGION. Ohne sie gewinnt auf einer Insel
+            # fast immer dieselbe Kategorie: gemessen 14 von 20 Landmarks
+            # "kueste", weil eine 21-km-Insel eben viel Kueste hat und die
+            # Kuesteneignung dort flaechendeckend hoch ist. Nach jeder Wahl
+            # wird die gewaehlte Kategorie in DIESER Region gedaempft - bei
+            # 1-4 Landmarks je Region genuegt das fuer eine Mischung, ohne
+            # eine Kategorie hart zu verbieten (eine Region ganz ohne Berge
+            # soll auch weiterhin kein Gipfel-Landmark erzwingen muessen).
+            kategorie_daempfung = {k: 1.0 for k in eignungen}
+            for _ in range(anzahl_ziel * 4):
                 if hinzugefuegt >= anzahl_ziel:
                     break
-                if not regionsmaske[y, x]:
-                    continue
+                if not np.any(arbeits_wert > 0):
+                    break
+                yi, xi = np.unravel_index(np.argmax(arbeits_wert), arbeits_wert.shape)
+                if arbeits_wert[yi, xi] <= 0:
+                    break
+                x, y = int(xi), int(yi)
                 if any((x - gx) ** 2 + (y - gy) ** 2 < min_abstand ** 2
-                      for _k, gx, gy in gewaehlt):
+                       for _k, gx, gy in gewaehlt):
+                    arbeits_wert[yi, xi] = 0.0
                     continue
+                kategorie = str(beste_kat[yi, xi])
                 gewaehlt.append((kategorie, x, y))
                 hinzugefuegt += 1
+                # Umgebung sperren, damit die naechste Wahl woanders landet
+                y0, y1 = max(0, y - int(min_abstand)), min(height, y + int(min_abstand) + 1)
+                x0, x1 = max(0, x - int(min_abstand)), min(width, x + int(min_abstand) + 1)
+                arbeits_wert[y0:y1, x0:x1] = 0.0
+                # ... und diese Kategorie regionsweit abwerten
+                if kategorie in kategorie_daempfung:
+                    kategorie_daempfung[kategorie] *= KATEGORIE_WIEDERHOLUNG
+                    betroffen = (beste_kat == kategorie)
+                    arbeits_wert[betroffen] *= KATEGORIE_WIEDERHOLUNG
 
         for kategorie, x, y in gewaehlt:
             kultur = _naechste_kultur(x, y, settlements)
@@ -5272,6 +6545,111 @@ class SettlementGenerator:
             self._update_progress("Landmark Placement", 70, f"Placed {len(landmarks)} landmarks")
 
         return landmarks
+
+    def landmark_eignungen(self, civ_map, heightmap, slopemap, water_map):
+        """
+        Eine EIGNUNGSKARTE (0..1) je Landmark-Kategorie statt einer binaeren
+        Maske (2026-08-13, docs/OFFENE_PUNKTE.md 5.18).
+
+        WARUM DAS DIE EIGENTLICHE VERBESSERUNG IST: die bisherigen
+        `kategorie_masken` waren ja/nein-Felder, aus denen anschliessend
+        ZUFAELLIG gezogen wurde. Ein "Gipfel"-Landmark landete damit auf
+        irgendeinem Pixel oberhalb 60 % der Hoehenspanne - nicht auf dem
+        Gipfel. Eine "Kueste"-Landmark auf irgendeinem kuestennahen Pixel -
+        nicht am markanten Kliff. Genau das meinte der Nutzer mit
+        "Landmarks sind schlecht". Mit einer kontinuierlichen Eignung laesst
+        sich stattdessen die BESTE Stelle waehlen.
+
+        Die vier Kategorien entsprechen denen des Katalogs (LANDMARK_KATALOG):
+
+          gipfel     echtes lokales Hoehenmaximum, nicht nur "hoch gelegen"
+          kueste     nah am Wasser UND markant (Steilkueste schlaegt Flachufer)
+          quelle     nah am Wasser, aber hoch gelegen - ein Ursprung, nicht
+                     die Muendung
+          abgelegen  weit weg von jeder Zivilisation
+
+        `civ_map` daempft alle vier: "in der naehe von staedten ist oft
+        weniger hoch" (Nutzer). Fuer "abgelegen" ist sie zugleich das
+        Hauptkriterium.
+        """
+        from scipy.ndimage import maximum_filter, gaussian_filter
+
+        hoehe = np.asarray(heightmap, dtype=np.float32)
+        land = hoehe > 0.0
+        if not np.any(land):
+            leer = np.zeros(hoehe.shape, dtype=np.float32)
+            return {k: leer.copy() for k in ("gipfel", "kueste", "quelle", "abgelegen")}
+
+        size = min(hoehe.shape)
+        # Hoehenrang NUR ueber Land - ueber die ganze Karte gerechnet wuerde
+        # die Meerestiefe die Spanne dominieren und fast jedes Landpixel als
+        # "hoch" erscheinen lassen (derselbe Fehler wie bei den Stadttypen).
+        land_hoehen = hoehe[land]
+        unten = float(np.percentile(land_hoehen, 40))
+        oben = float(np.percentile(land_hoehen, 98))
+        hoehenrang = np.clip((hoehe - unten) / max(oben - unten, 1e-6), 0.0, 1.0)
+
+        # GIPFEL: ein echtes lokales Maximum. `maximum_filter` liefert je
+        # Pixel den hoechsten Wert der Umgebung; wo er dem eigenen Wert
+        # entspricht, steht ein Gipfel. Weich gemacht ueber die Differenz,
+        # damit auch "fast Gipfel" noch Werte bekommen und nicht nur ein
+        # einzelnes Pixel je Bergkuppe.
+        radius = max(3, int(size / 40))
+        umgebungsmax = maximum_filter(hoehe, size=2 * radius + 1)
+        vorsprung = np.clip(1.0 - (umgebungsmax - hoehe) / max(1.0, 0.15 * (oben - unten)),
+                            0.0, 1.0)
+        gipfel = hoehenrang * vorsprung
+
+        # KUESTE: nah am Meer und markant. Die Markanz kommt aus der
+        # Hangneigung - ein Kliff ist interessanter als ein Sandstrand.
+        hang = np.sqrt(slopemap[..., 0] ** 2 + slopemap[..., 1] ** 2)
+        hang_norm = np.clip(hang / max(float(np.percentile(hang[land], 90)), 1e-6), 0.0, 1.0)
+        kuestennaehe_px = max(2.0, size / 40.0)
+        dist_meer = distance_transform_edt(land) if np.any(~land) else np.full(hoehe.shape, np.inf)
+        nah_am_meer = np.clip(1.0 - dist_meer / kuestennaehe_px, 0.0, 1.0)
+        kueste = nah_am_meer * (0.35 + 0.65 * hang_norm)
+
+        # QUELLE: nah an Suesswasser, aber hoch gelegen. Ohne den
+        # Hoehenanteil waere jede Flussmuendung eine "Quelle".
+        wasser = np.asarray(water_map) > 0
+        if np.any(wasser):
+            dist_wasser = distance_transform_edt(~wasser)
+            nah_am_wasser = np.clip(1.0 - dist_wasser / kuestennaehe_px, 0.0, 1.0)
+        else:
+            nah_am_wasser = np.zeros(hoehe.shape, dtype=np.float32)
+        quelle = nah_am_wasser * (0.3 + 0.7 * hoehenrang)
+
+        # ABGELEGEN: fern jeder Zivilisation - und BEWUSST GEDECKELT.
+        #
+        # Ohne den Deckel gewinnt diese Kategorie fast ueberall: `civ_map` ist
+        # auf weiten Teilen der Karte schlicht 0 (dort wohnt niemand), die
+        # Einsamkeit also 1.0. Gemessen mit leerem Zivilisationsfeld lag
+        # "abgelegen" auf 100 % der Landflaeche bei 1.0, waehrend ein echter
+        # Gipfel nur 0.32 % der Flaeche ueber 0.5 bringt - ohne Deckel waere
+        # JEDES Landmark "abgelegen" geworden und die drei ortsgebundenen
+        # Kategorien haetten nie gezogen.
+        #
+        # Mit ABGELEGEN_DECKEL ist sie der Auffangtyp, genau wie
+        # TYP_GRUNDGUETE bei den Stadttypen: ein markanter Gipfel (bis 1.0)
+        # oder ein Kliff (bis ~0.9) sticht sie, eine unauffaellige Wildnis
+        # nicht.
+        civ = np.clip(np.asarray(civ_map, dtype=np.float32), 0.0, 1.0)
+        einsamkeit = 1.0 - gaussian_filter(civ, sigma=max(1.0, size / 128.0))
+        abgelegen = np.clip(einsamkeit, 0.0, 1.0) ** 2 * ABGELEGEN_DECKEL
+
+        # Zivilisationsdaempfung fuer die drei ORTSGEBUNDENEN Kategorien -
+        # ein Gipfel mitten in der Stadt ist kein Landmark. "abgelegen" hat
+        # sie bereits als Hauptkriterium und wird nicht doppelt gedaempft.
+        naehe_daempfung = np.clip(1.0 - 0.7 * civ, 0.0, 1.0)
+
+        eignungen = {
+            "gipfel": gipfel * naehe_daempfung,
+            "kueste": kueste * naehe_daempfung,
+            "quelle": quelle * naehe_daempfung,
+            "abgelegen": abgelegen,
+        }
+        return {k: np.where(land, np.clip(v, 0.0, 1.0), 0.0).astype(np.float32)
+                for k, v in eignungen.items()}
 
     def calculate_landmark_roads(self, landmarks, roads, heightmap, slopemap, lod):
         """

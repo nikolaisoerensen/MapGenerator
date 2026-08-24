@@ -170,46 +170,87 @@ def poisson_points(extent_m: float, min_distance_m: float, seed: int,
     bekommt - dieselbe Ueberlegung wie bei FEATURE_SIZE_M und GULLY_SIZE_M in
     §10.
     """
+    # DIE ZUFALLSREIHENFOLGE IST UNANTASTBAR (2026-08-23).
+    #
+    # Jeder rng-Aufruf steht in derselben Reihenfolge wie vorher: einmal
+    # `random(2)` fuer den Startpunkt, dann je Runde ein `integers` und je
+    # Versuch zwei `random`. Wuerde man auch nur einen Aufruf zusammenfassen
+    # oder vorziehen, kaeme ein anderer Punktsatz heraus - und damit ein
+    # anderes Flussnetz, andere Taeler, ein anderes Gelaende. Beschleunigt
+    # ist ausschliesslich, was ZWISCHEN den Zufallsaufrufen passiert.
+    #
+    # GEMESSEN (1024 px, Mikrostufe mit 150 m Abstand): 12 708 Punkte,
+    # 465 662 Versuche, 20.4 s - also 43.8 Mikrosekunden je Versuch fuer im
+    # Mittel 11 Zellpruefungen. Das ist fast reiner Aufrufaufwand.
+    #
+    # DIE URSACHE WAR numpy AN DER FALSCHEN STELLE. `grid[yy, xx]` auf einem
+    # numpy-Array kostet rund 1.5 Mikrosekunden - es baut je Zugriff ein
+    # numpy-Skalarobjekt. Bei 5.2 Millionen Zellpruefungen sind das etwa
+    # 8 Sekunden fuer Indexzugriffe, die als Python-Listenzugriff je 0.05
+    # Mikrosekunden kosten. numpy ist schnell auf GANZEN Feldern und langsam
+    # auf EINZELWERTEN; hier wird ausschliesslich einzeln zugegriffen.
+    #
+    # Geaendert: `grid` als verschachtelte Python-Liste, `points` als Liste
+    # von Tupeln aus Python-Floats, und Skalararithmetik statt eines
+    # 2-Element-Arrays je Versuch. Die Rechnung selbst ist unveraendert -
+    # IEEE-double bleibt IEEE-double, ob in numpy oder in Python.
+    # tests/smoke_test_poisson_punkte.py prueft die Bitgleichheit.
+    #
+    # NICHT vektorisiert, obwohl das naheliegt: ein erster Anlauf holte den
+    # 5x5-Block in einem Slice und verglich alle Nachbarn auf einmal. Das war
+    # GEMESSEN 1.7- bis 3-mal LANGSAMER - es sind typisch nur ein bis fuenf
+    # belegte Nachbarn, und die Schleife bricht beim ersten Treffer ab,
+    # waehrend die Vektorfassung immer alle prueft und dafuer mehrere
+    # Zwischenarrays anlegt.
     rng = np.random.default_rng(seed)
     cell = min_distance_m / np.sqrt(2.0)
     n = int(np.ceil(extent_m / cell)) + 1
-    grid = -np.ones((n, n), dtype=np.int64)
+    grid = [[-1] * n for _ in range(n)]
 
     points = []
     active = []
+    grenze2 = min_distance_m * min_distance_m
 
-    def insert(p):
-        points.append(p)
-        grid[int(p[0] / cell), int(p[1] / cell)] = len(points) - 1
+    def insert(p0, p1):
+        points.append((p0, p1))
+        grid[int(p0 / cell)][int(p1 / cell)] = len(points) - 1
         active.append(len(points) - 1)
 
-    insert(rng.random(2) * extent_m)
+    start = rng.random(2) * extent_m
+    insert(float(start[0]), float(start[1]))
 
     while active:
         k = int(rng.integers(0, len(active)))
-        centre = points[active[k]]
+        c0, c1 = points[active[k]]
         found = False
         for _ in range(attempts):
             angle = rng.random() * 2.0 * np.pi
             radius = min_distance_m * (1.0 + rng.random())
-            p = centre + radius * np.array([np.cos(angle), np.sin(angle)])
-            if not (0.0 <= p[0] < extent_m and 0.0 <= p[1] < extent_m):
+            p0 = c0 + radius * np.cos(angle)
+            p1 = c1 + radius * np.sin(angle)
+            if not (0.0 <= p0 < extent_m and 0.0 <= p1 < extent_m):
                 continue
-            gy, gx = int(p[0] / cell), int(p[1] / cell)
+            gy, gx = int(p0 / cell), int(p1 / cell)
             free = True
             for dy in range(-2, 3):
+                yy = gy + dy
+                if yy < 0 or yy >= n:
+                    continue
+                zeile = grid[yy]
                 for dx in range(-2, 3):
-                    yy, xx = gy + dy, gx + dx
-                    if 0 <= yy < n and 0 <= xx < n and grid[yy, xx] >= 0:
-                        q = points[grid[yy, xx]]
-                        if ((q[0] - p[0]) ** 2 + (q[1] - p[1]) ** 2
-                                < min_distance_m ** 2):
-                            free = False
-                            break
+                    xx = gx + dx
+                    if 0 <= xx < n:
+                        j = zeile[xx]
+                        if j >= 0:
+                            q0, q1 = points[j]
+                            if ((q0 - p0) * (q0 - p0)
+                                    + (q1 - p1) * (q1 - p1) < grenze2):
+                                free = False
+                                break
                 if not free:
                     break
             if free:
-                insert(p)
+                insert(p0, p1)
                 found = True
                 break
         if not found:

@@ -929,8 +929,33 @@ class FlowNetworkBuilder:
             sim_result["discharge_map"], lake_map)
         return sim_result
 
-    # Vielfache der Creek-Schwelle, ab denen ein Wasserlauf als River bzw.
-    # Grand River gilt (Klassifikationsstufen 2 und 3).
+    # Um wieviel SELTENER ein River bzw. Grand River ist als ein Creek.
+    #
+    # BIS 2026-08-24 WAREN DAS VIELFACHE DER CREEK-SCHWELLE - und damit war
+    # ein Grand River auf dieser Karte rechnerisch unmoeglich. Gemessen:
+    #
+    #     creek-Schwelle           1716.77   (Perzentil der nassen Zellen)
+    #     river braucht  4x        6867.08
+    #     grand  braucht 20x      34335.41
+    #     groesster Abfluss der ganzen Karte    6408.09
+    #
+    # Der groesste Fluss verfehlte die River-Schwelle um 7 %, die
+    # Grand-River-Schwelle um Faktor 5.4. In `water_biomes_map` gab es
+    # deshalb ausschliesslich Creeks und Seen - die Stufen 2 und 3 kamen
+    # NIE vor, auf keiner Karte.
+    #
+    # URSACHE: die Creek-Schwelle ist ein PERZENTIL (sie passt sich der
+    # Verteilung an, siehe _river_flow_percentile_threshold), die Faktoren
+    # waren dagegen ABSOLUT. In einer Abflussverteilung liegt zwischen
+    # einem hohen Perzentil und dem Maximum aber systematisch weniger als
+    # eine Groessenordnung - hier Faktor 3.73. Ein absoluter Faktor 20
+    # darauf ist nicht streng, er ist unerfuellbar.
+    #
+    # JETZT wirken die Faktoren auf die HAEUFIGKEIT: ein River ist der
+    # Lauf, der zu den obersten (abundance / 4) gehoert, ein Grand River zu
+    # den obersten (abundance / 20). Das ist die Bedeutung, die die Namen
+    # immer schon nahelegten - "vier mal so selten", nicht "vier mal so
+    # viel Wasser" - und sie ist auf jeder Karte erreichbar.
     RIVER_THRESHOLD_FACTOR = 4.0
     GRAND_RIVER_THRESHOLD_FACTOR = 20.0
 
@@ -947,13 +972,28 @@ class FlowNetworkBuilder:
         # Werts - dadurch bleibt der ANTEIL der wasserführenden Pixel, der als
         # Fluss gilt, unabhängig von Kartengröße/Seed/Niederschlagsmenge.
         creek_threshold = _river_flow_percentile_threshold(flow_accumulation, self.river_abundance)
+        # Dieselbe Funktion, nur mit einem kleineren Anteil - siehe
+        # RIVER_THRESHOLD_FACTOR. Ein River ist der Lauf, der zu den
+        # obersten (abundance / 4) der wasserfuehrenden Zellen gehoert.
+        river_threshold = _river_flow_percentile_threshold(
+            flow_accumulation, self.river_abundance / self.RIVER_THRESHOLD_FACTOR)
+        grand_threshold = _river_flow_percentile_threshold(
+            flow_accumulation,
+            self.river_abundance / self.GRAND_RIVER_THRESHOLD_FACTOR)
+        # MONOTONIE ERZWINGEN. Die Perzentilfunktion klemmt auf 0.5..99.5;
+        # bei sehr kleinem `river_abundance` laufen alle drei in dieselbe
+        # Klemme und koennten gleich werden. `np.select` nimmt dann die
+        # erste zutreffende Bedingung, und ein Creek wuerde als Grand River
+        # gelten. Ein strikt aufsteigender Satz Schwellen schliesst das aus.
+        river_threshold = max(river_threshold, creek_threshold)
+        grand_threshold = max(grand_threshold, river_threshold)
 
         is_lake = lake_map >= 0
         water_biomes_map = np.select(
             [
                 is_lake,
-                flow_accumulation >= creek_threshold * self.GRAND_RIVER_THRESHOLD_FACTOR,
-                flow_accumulation >= creek_threshold * self.RIVER_THRESHOLD_FACTOR,
+                flow_accumulation >= grand_threshold,
+                flow_accumulation >= river_threshold,
                 flow_accumulation >= creek_threshold,
             ],
             [4, 3, 2, 1],

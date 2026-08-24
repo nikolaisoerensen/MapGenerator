@@ -1045,11 +1045,25 @@ class WeatherSystemGenerator:
         Fallback auslösen (etabliertes 3-stufiges Fallback-Muster dieser Datei).
         """
         self._update_progress("Temperature", 20, "Calculating coupled 3-layer atmosphere...")
-        heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
+        # Teilschritt-Messung, gleiche Bauart wie terrain.redistribution
+        # (managers/teilschritte.py). 13.5 s auf einer Zeile im Pipeline-Log
+        # sagten nicht, ob der Schattenwurf, die Atmosphaerenschleife oder
+        # das Vorbereiten der Eingaben die Zeit frisst.
+        from managers.teilschritte import Teilschritte, schritt as _s
+        _ts = Teilschritte("weather.temperature",
+                           fortschritt=self._update_progress, von=20, bis=95,
+                           plan=[("terrain_inputs", 3.0), ("rauheit_solar", 5.0),
+                                 ("schattenwurf", 30.0), ("monatsparameter", 2.0),
+                                 ("atmosphaere_schleife", 55.0),
+                                 ("nachbereitung", 5.0)])
+        with _s(_ts, "terrain_inputs", "Gelaende-Eingaben"):
+            heightmap, shadowmap, target_size = self._get_prepared_terrain_inputs(lod_level)
         atmosphere_steps = self._get_atmosphere_loop_steps(lod_level)
         # Statisch über alle 6 Monate dieser Runde - einmal holen statt in
         # _run_coupled_atmosphere_simulation sechsmal neu abzufragen (siehe
         # [[project-wind-roughness]]).
+        _rs = _s(_ts, "rauheit_solar", "Rauheit und Einstrahlung")
+        _rs.__enter__()
         roughness_damping = self._get_roughness_damping(heightmap.shape, lod_level)
         # Statisch über alle 6 Monate dieser Runde, gleiches Muster wie
         # roughness_damping direkt darüber (siehe _get_solar_absorption_factor()).
@@ -1076,6 +1090,7 @@ class WeatherSystemGenerator:
         # Das spart Faktor 6 auf dem teuersten Posten der Wetterrechnung. Die
         # Monatsparameter bleiben sechsfach - sie sind billig und Wind und
         # Feuchte lesen sie noch.
+        _rs.__exit__(None, None, None)
         FRUEHLING = 1
         sun_angles = generate_seasonal_sun_angles(FRUEHLING, latitude, longitude)
         # Pixelgroesse setzen - ohne sie haelt der Schattenwurf jeden Hang fuer
@@ -1084,14 +1099,17 @@ class WeatherSystemGenerator:
         self.shadow_calculator.set_meters_per_pixel(
             float(self.data_lod_manager.get_map_distance_km()) * 1000.0
             / heightmap.shape[0])
-        gemeinsame_shadowmap = self.shadow_calculator.calculate_shadows(
-            heightmap, lod_level, sun_angles_override=sun_angles)
+        with _s(_ts, "schattenwurf", "Schattenwurf"):
+            gemeinsame_shadowmap = self.shadow_calculator.calculate_shadows(
+                heightmap, lod_level, sun_angles_override=sun_angles)
         # Dieselbe LOD-gefilterte Kanal-Teilmenge, die auch die Shadowmap
         # erzeugt hat (siehe _weighted_solar_exposure()-Docstring - die
         # Kanalzahl muss exakt übereinstimmen, sonst Shape-Mismatch-Fallback).
         gemeinsame_winkel, _ = self.shadow_calculator.get_sun_angles_for_lod(
             lod_level, sun_angles_override=sun_angles)
 
+        _mp = _s(_ts, "monatsparameter", "Monatsparameter")
+        _mp.__enter__()
         monthly_shadowmaps = []
         monthly_sun_angles = []
         month_params_list = []
@@ -1156,6 +1174,9 @@ class WeatherSystemGenerator:
             monthly_humid_maps, monthly_precip_maps = [], []
             monthly_temp_layers, monthly_wind_layers, monthly_humid_layers = [], [], []
 
+            _mp.__exit__(None, None, None)
+            _as = _s(_ts, "atmosphaere_schleife", "Atmosphaere, 6 Monate")
+            _as.__enter__()
             for month_index in range(TICKS_JE_JAHR):
                 initial_state = None
                 if has_lod_inheritance:
@@ -1238,6 +1259,9 @@ class WeatherSystemGenerator:
                         prev_m = self._interpolate_2d_bicubic(prev_m, monthly_humid_maps[m].shape[0])
                     monthly_humid_maps[m] = 0.4 * prev_m + 0.6 * monthly_humid_maps[m]
 
+            _as.__exit__(None, None, None)
+            _nb = _s(_ts, "nachbereitung", "Mittelung und Wind-Nachlauf")
+            _nb.__enter__()
             temp_map = np.mean(np.stack(monthly_temp_maps, axis=0), axis=0).astype(np.float32)
             wind_map = np.mean(np.stack(monthly_wind_maps, axis=0), axis=0).astype(np.float32)
             humid_map = np.mean(np.stack(monthly_humid_maps, axis=0), axis=0).astype(np.float32)
@@ -1302,6 +1326,8 @@ class WeatherSystemGenerator:
             self._speichern(
                 "weather.precipitation", lod_level,
                 {"precip_map": precip_map, "precip_map_monthly": monthly_precip_maps})
+            _nb.__exit__(None, None, None)
+            _ts.bericht()
 
         except Exception as e:
             self.logger.warning(

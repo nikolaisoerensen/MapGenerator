@@ -92,6 +92,12 @@ class TerrainData:
         # nachschlagbar; kuesten_staerke die Blendstaerke (0..1) je Pixel.
         self.kuesten_archetyp: Optional[np.ndarray] = None
         self.kuesten_staerke: Optional[np.ndarray] = None
+        # Spielkarten-Zerlegung (2026-08-13, docs/OFFENE_PUNKTE.md 5.15):
+        # int16 0..8, welche der neun Spielkarten dieses Pixel traegt. Konvexe
+        # Vielecke mit etwa gleicher Landmasse - siehe core/spielkarten.py.
+        # NICHT dasselbe wie region_map: die Regionen bestimmen Gelaende und
+        # Kultur, die Spielkarten sind der Zuschnitt fuer Anzeige und Export.
+        self.spielkarte: Optional[np.ndarray] = None
 
         # LOD metadata
         self.lod_level: int = 1
@@ -845,7 +851,8 @@ class ShadowCalculator:
         shadows = np.zeros((shadow_resolution, shadow_resolution), dtype=np.float32)
         total_weight = sum(sun_weights)
 
-        # Dieselben Konstanten wie der CPU-Hauptpfad (_is_in_shadow_cpu:
+        # Dieselben Konstanten wie der fruehere CPU-Hauptpfad (der inzwischen
+        # geloeschte _is_in_shadow_cpu, siehe docs/OFFENE_PUNKTE.md 10.5:
         # step_size=0.5, max_distance=max(width,height)*2 - bei der hier immer
         # 64x64 großen shadow_heightmap also 128.0) statt der vorherigen
         # ShaderManager-eigenen Defaults (max_distance=100.0, step_size=1.0) -
@@ -1006,10 +1013,10 @@ class ShadowCalculator:
         sun_x, sun_y, sun_z = self._sonnenrichtung(sun_elevation, sun_azimuth)
 
         # SEIT 2026-08-07 vektorisiert und in Metern gerechnet, siehe den
-        # Block bei _einfallswinkel(). Die alte Doppelschleife ueber alle
-        # Pixel steht darunter noch als _is_in_shadow_cpu /
-        # _calculate_slope_shading_cpu; sie wird nicht mehr aufgerufen und
-        # bleibt vorerst als Vergleichsmoeglichkeit stehen.
+        # Block bei _einfallswinkel(). Die alte Pixel-fuer-Pixel-Doppelschleife
+        # (_is_in_shadow_cpu / _calculate_slope_shading_cpu) rief niemand mehr
+        # auf und ist am 2026-08-16 geloescht (docs/OFFENE_PUNKTE.md 10.5) -
+        # die Fehlergeschichte dazu steht weiter unten (SONNENEXPOSITION).
         mpp = float(getattr(self, "_meters_per_pixel", 0.0)) or 1.0
         shadow_map = (self._verschattung_cpu(heightmap, mpp, sun_x, sun_y, sun_z)
                       * self._einfallswinkel(heightmap, mpp, sun_x, sun_y, sun_z))
@@ -1150,59 +1157,6 @@ class ShadowCalculator:
             d += schritt
 
         return (~im_schatten).astype(np.float32)
-
-    def _is_in_shadow_cpu(self, heightmap: np.ndarray, x: int, y: int,
-                         sun_x: float, sun_y: float, sun_z: float) -> bool:
-        """CPU-optimierte Shadow-Raycast-Test"""
-        height, width = heightmap.shape
-        current_height = heightmap[y, x]
-
-        step_size = 0.5
-        max_distance = max(width, height) * 2
-
-        for distance in np.arange(step_size, max_distance, step_size):
-            ray_x = x + sun_x * distance
-            ray_y = y + sun_y * distance
-            ray_z = current_height + sun_z * distance
-
-            if ray_x < 0 or ray_x >= width or ray_y < 0 or ray_y >= height:
-                break
-
-            terrain_height = self._interpolate_height_cpu(heightmap, ray_x, ray_y)
-
-            if ray_z <= terrain_height:
-                return True
-
-        return False
-
-    def _calculate_slope_shading_cpu(self, heightmap: np.ndarray, x: int, y: int,
-                                   sun_x: float, sun_y: float, sun_z: float) -> float:
-        """CPU-optimierte Slope-basierte Beleuchtung"""
-        height, width = heightmap.shape
-
-        # Berechne Oberflächennormale
-        if x > 0 and x < width - 1 and y > 0 and y < height - 1:
-            dz_dx = (heightmap[y, x + 1] - heightmap[y, x - 1]) * 0.5
-            dz_dy = (heightmap[y + 1, x] - heightmap[y - 1, x]) * 0.5
-        else:
-            dz_dx = 0
-            dz_dy = 0
-
-        # Normale berechnen
-        normal = np.array([-dz_dx, -dz_dy, 1.0])
-        normal_length = np.linalg.norm(normal)
-        if normal_length > 0:
-            normal = normal / normal_length
-
-        # Sonnenrichtung
-        sun_dir = np.array([sun_x, sun_y, sun_z])
-        sun_dir_length = np.linalg.norm(sun_dir)
-        if sun_dir_length > 0:
-            sun_dir = sun_dir / sun_dir_length
-
-        # Dot-Product für Beleuchtungsstärke
-        dot_product = np.dot(normal, sun_dir)
-        return max(0.0, dot_product)
 
     def _interpolate_height_cpu(self, heightmap: np.ndarray, x: float, y: float) -> float:
         """CPU-optimierte Höhen-Interpolation"""
@@ -1461,6 +1415,14 @@ class BaseTerrainGenerator:
         self.shader_manager = shader_manager
         self.data_lod_manager = data_lod_manager
 
+        # LADEBALKEN - bis 2026-08-23 hatte AUSGERECHNET dieser Generator
+        # keinen. Der Orchestrator setzt das Attribut per hasattr()-Test
+        # (generation_orchestrator._run_calculator), fand es hier nie, und
+        # damit stand der Balken waehrend terrain.redistribution still -
+        # also waehrend der laengsten Einzelphase der ganzen Pipeline (61 s
+        # von 203 s gemessen). Es sah aus, als haenge das Programm.
+        self.progress_callback = None
+
         # Parameter der aktuell laufenden Generierungs-Anfrage - vom
         # GenerationOrchestrator einmal pro frischer Anfrage über
         # set_active_parameters() gesetzt, bleibt über alle LOD-Runden dieser
@@ -1593,7 +1555,7 @@ class BaseTerrainGenerator:
         for schluessel in ("river_mask", "river_order", "river_generation",
                            "region_map", "klima_map", "seegrad",
                            "ufer_region_a", "ufer_region_b", "see_eis",
-                           "kuesten_archetyp", "kuesten_staerke"):
+                           "kuesten_archetyp", "kuesten_staerke", "spielkarte"):
             setattr(terrain_data, schluessel,
                     self.data_lod_manager.get_calculator_output(
                         "terrain.redistribution", schluessel, lod_level))
@@ -1748,6 +1710,20 @@ class BaseTerrainGenerator:
         self.data_lod_manager.set_calculator_output(calculator_id, lod_level, outputs)
         self.logger.debug("Heightmap generation + redistribution completed")
 
+    def _update_progress(self, phase: str, progress: int, message: str):
+        """
+        Ladebalken, gleiche Signatur wie in allen anderen core/*_generator.py.
+        Fehler hier duerfen die Berechnung nicht abbrechen - eine Anzeige ist
+        kein Rechenergebnis.
+        """
+        cb = getattr(self, "progress_callback", None)
+        if cb is None:
+            return
+        try:
+            cb(phase, int(progress), message)
+        except Exception:                                        # noqa: BLE001
+            self.logger.debug("progress_callback fehlgeschlagen", exc_info=True)
+
     def _weltkarte_heightmap(self, lod_level: int):
         """
         Die Heightmap der Regionenwelt, oder None wenn der Schalter aus ist.
@@ -1782,7 +1758,23 @@ class BaseTerrainGenerator:
             self.logger.info(
                 "Weltkarte aktiv: map_distance_km auf %.1f km gesetzt", WELT_KM)
 
-        heightmap, felder = weltfeld(size, seed, shader_manager=self.shader_manager)
+        # TEILSCHRITT-MESSUNG (2026-08-23). Ohne sie sagte das Pipeline-Log
+        # nur "terrain.redistribution | 61.117s" - bei einem Aufrufbaum aus
+        # rund einem Dutzend Funktionen ist das keine Diagnose, sondern eine
+        # Zahl. Die drei Stufen hier (Weltfeld, Erosionsfilter, Fluesse) und
+        # die elf Teilschritte in weltfeld() selbst stehen jetzt einzeln im
+        # Log und treiben den Ladebalken.
+        from core.terrain_weltkarte import WELTFELD_PLAN
+        from managers.teilschritte import Teilschritte, schritt as _s
+        schritte = Teilschritte(
+            "terrain.redistribution", fortschritt=self._update_progress,
+            von=5, bis=95,
+            plan=list(WELTFELD_PLAN) + [("erosionsfilter", 8.0),
+                                        ("weltfluesse", 25.0),
+                                        ("ridge_und_klima", 2.0)])
+
+        heightmap, felder = weltfeld(
+            size, seed, shader_manager=self.shader_manager, schritte=schritte)
         mpp = WELT_KM * 1000.0 / float(size)
 
         # DER EROSIONSFILTER - nach dem Weltfeld, VOR dem Flussnetz.
@@ -1792,7 +1784,8 @@ class BaseTerrainGenerator:
         # genau diese Form geschnitten werden. Umgekehrt wuerde der Filter die
         # frisch eingegrabenen Taeler wieder zuschuetten.
         ridge_ersatz = None
-        gefiltert = self._weltkarte_erosionsfilter(heightmap, felder)
+        with _s(schritte, "erosionsfilter", "Erosionsfilter"):
+            gefiltert = self._weltkarte_erosionsfilter(heightmap, felder)
         if gefiltert is not None:
             heightmap = gefiltert["heightmap"]
             ridge_ersatz = gefiltert["ridge_map"]
@@ -1802,8 +1795,9 @@ class BaseTerrainGenerator:
         fluss_generation = np.zeros((size, size), dtype=np.float32)
 
         if getattr(vd, "WELTFLUESSE_AKTIV", False):
-            heightmap, fluss_maske, fluss_ordnung, fluss_generation = \
-                self._weltfluesse(heightmap, felder, size, seed)
+            with _s(schritte, "weltfluesse", "Flussnetz und Taeler"):
+                heightmap, fluss_maske, fluss_ordnung, fluss_generation = \
+                    self._weltfluesse(heightmap, felder, size, seed)
 
         # ridge_map ist ein Anzeige-Output des Erosionsfilters. Solange der bei
         # aktiver Weltkarte nicht laeuft, liefert die Hangneigung ein
@@ -1833,9 +1827,14 @@ class BaseTerrainGenerator:
         # Vorgabe des Nutzers vom 2026-08-07 ("wir muessen immer
         # Regionengrenzen sanft uebergehen lassen"). Wuerde das Wetter sie
         # ueber `region_map` (argmax) nachschlagen, gaebe es harte Kanten.
+        _r_ctx = _s(schritte, "ridge_und_klima", "Grate und Klima")
+        _r_ctx.__enter__()
         klima = np.stack([felder["temp_mittel_m0"],
                           felder["temp_spanne"],
                           felder["niederschlag_mm"]], axis=0).astype(np.float32)
+
+        _r_ctx.__exit__(None, None, None)
+        schritte.bericht()
 
         return {
             "heightmap": heightmap.astype(np.float32),
@@ -1860,12 +1859,57 @@ class BaseTerrainGenerator:
             # (0..1) - die vom Nutzer angefragte "Strahlungstiefe".
             "kuesten_archetyp": felder.get("kuesten_archetyp"),
             "kuesten_staerke": felder.get("kuesten_staerke"),
+            # Spielkarten-Zerlegung (docs/OFFENE_PUNKTE.md 5.15): neun konvexe
+            # Vielecke mit etwa gleicher Landmasse, als Zuschnitt fuer die
+            # Regionalansicht und spaeter den Godot-Export. Laeuft HIER, weil
+            # sie genau die beiden Felder braucht, die an dieser Stelle
+            # frisch vorliegen (fertige Heightmap und seegrad) - ein eigener
+            # Calculator-Knoten muesste beide erneut anfordern.
+            # Kostet rund 1 s bei 1024 px (gemessen), gegenueber den ~33 s
+            # dieses Knotens vernachlaessigbar.
+            "spielkarte": self._weltkarte_spielkarten(heightmap, felder, seed),
             # Regionsziel fuer die Windgeschwindigkeit (SPEZIFIKATION.md §3.5),
             # weich ueber die Regionsgrenzen gemischt wie klima_map - siehe
             # weather_generator.py._run_coupled_atmosphere_simulation fuer die
             # Verwendung als raeumlicher wind_speed_factor.
             "wind_ziel_map": felder["wind_mittel_ms"].astype(np.float32),
         }
+
+    def _weltkarte_spielkarten(self, heightmap, felder, seed):
+        """
+        Die Zerlegung der Welt in neun Spielkarten (core/spielkarten.py,
+        docs/OFFENE_PUNKTE.md 5.15) - konvexe Vielecke mit etwa gleicher
+        Landmasse, wobei kuestennahe See zur Haelfte zaehlt.
+
+        Rueckgabe: (H,W) int16 mit 0..8, oder None wenn die Zerlegung nicht
+        moeglich ist (z.B. gar kein Land). **Ein Fehlschlag wird als WARNING
+        geloggt und nicht still verschluckt** - ohne diese Zeile waere ein
+        fehlendes Feld von einem absichtlich leeren nicht zu unterscheiden
+        (CLAUDE.md, dieselbe Lehre wie beim adaptiven Mesh).
+
+        Die Siedlungen sind hier bewusst NICHT dabei, obwohl `spielkarten.
+        saatpunkte()` sie verarbeiten kann: sie entstehen erst weit spaeter in
+        der Kette (settlement.settlements haengt ueber mehrere Stufen an
+        diesem Knoten hier). Die Vorgabe "Schnittlinien zwischen den Staedten"
+        braucht deshalb einen eigenen Umbau der Reihenfolge und ist bewusst
+        aufgeschoben (Nutzer 2026-08-13: "die schnittlinie zwischen den
+        staedten ist mit dem settlement-update verwandt und da gehen wir
+        spaeter drauf ein").
+        """
+        try:
+            from core import spielkarten
+            ergebnis = spielkarten.zerlegen(
+                heightmap, felder.get("seegrad"), siedlungen=None,
+                anzahl=9, seed=int(seed))
+            self.logger.debug(
+                "Spielkarten: %d Runden, Massenspanne %.2f",
+                ergebnis["runden"], ergebnis["spanne"])
+            return ergebnis["karte"].astype(np.int16)
+        except Exception as fehler:
+            self.logger.warning(
+                "Spielkarten-Zerlegung fehlgeschlagen (%s) - die Regionalansicht "
+                "faellt auf das starre 3x3-Raster zurueck", fehler)
+            return None
 
     def _weltfluesse(self, heightmap, felder, size, seed):
         """
@@ -1906,7 +1950,15 @@ class BaseTerrainGenerator:
             abstand_makro_m=regler("river_spacing_m", 1200.0),
             muendungstiefe_m=-abs(regler("river_mouth_depth_m",
                                          -MUENDUNGSTIEFE_M)),
-            erbe_kosten=regler("river_inherit_cost", ERBE_KOSTEN))
+            erbe_kosten=regler("river_inherit_cost", ERBE_KOSTEN),
+            # WASSERMENGE STATT KNOTENZAHL (Block 1.1,
+            # docs/FLUESSE_UND_WASSER.md). `felder` liegt hier seit jeher
+            # vollstaendig vor - der Niederschlag wurde nur nie
+            # weitergereicht, und das Flussnetz zaehlte deshalb Knoten
+            # statt Wasser.
+            niederschlag_mm=felder.get("niederschlag_mm"),
+            # Fuer die Hauptstrom-Quote (Block 2, docs/FLUESSE_UND_WASSER.md).
+            region_map=felder.get("regionen"))
         if netz is None:
             leer = np.zeros((size, size), dtype=np.float32)
             return heightmap, leer, leer.copy(), leer.copy()

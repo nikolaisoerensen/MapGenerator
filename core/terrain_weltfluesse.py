@@ -47,6 +47,11 @@ STUFEN_FARBE = ("#e03030", "#25a03a", "#e8c020")
 MUENDUNGSTIEFE_M = -50.0   # bis hierhin laufen die Laeufe weiter
 ERBE_KOSTEN = 0.12         # geerbte Kette kostet so viel wie sonst
 
+# Untergrenze fuer das Wassergewicht eines Knotens (Block 1.1). Verhindert,
+# dass eine sehr trockene Region Knoten mit Gewicht ~0 bekommt und ihre
+# Laeufe dadurch voellig verschwinden - auch in der Steppe fliesst etwas.
+WASSER_MINDEST = 0.15
+
 # Die drei Stufenabstaende haengen fest aneinander: Meso ist rund ein Drittel
 # des Makroabstands, Mikro ein Achtel. Aus 1200 werden so 420 und 150 - genau
 # die Werte, mit denen das Netz eingemessen wurde.
@@ -207,7 +212,8 @@ def _kanten_und_kosten(punkte, H, mpp, felder_hang, kosten_staerke,
 
 
 def baue_stufe(punkte, H, mpp, kosten_staerke, erbe=None, stufe_index=0,
-               erbe_kosten=ERBE_KOSTEN, muendungstiefe_m=MUENDUNGSTIEFE_M):
+               erbe_kosten=ERBE_KOSTEN, muendungstiefe_m=MUENDUNGSTIEFE_M,
+               wasser_feld=None):
     """
     Ein Spannbaum ueber `punkte`. `erbe` = (eltern, stufe) der vorigen Stufe,
     auf DIESELBEN Indizes bezogen (die Punkte sind geschachtelt).
@@ -285,6 +291,45 @@ def baue_stufe(punkte, H, mpp, kosten_staerke, erbe=None, stufe_index=0,
     eltern = erg[1][:n].astype(np.int64)
     eltern[eltern == n] = -1
 
+    # VOM MEER ABGESCHNITTENE KOMPONENTEN AN DEN NAECHSTEN ERREICHTEN KNOTEN
+    # BRUECKEN (2026-08-13, Nutzerbefund "so schwer ist das flusssystem ja
+    # nicht - wo sind verbesserungen moeglich"). scipy markiert einen von der
+    # Ueberquelle aus NIE erreichten Knoten mit dem Sentinel -9999 in `eltern`
+    # UND mit `entfernung == inf` - beides wird bisher nirgends abgefragt.
+    # `eltern[eltern==n]=-1` faengt nur den echten Meeresausgang ab, -9999
+    # rutschte durch und wurde ueberall, wo nur `eltern<0` geprueft wird
+    # (Kettenerzwingung, `netz["auslaesse"]`, `taeler_eingraben`), als
+    # gueltiger Ausgang gezaehlt - ein Knoten mitten im Land erschien als
+    # Fluss-Muendung. Ursache der Trennung: `_kanten_und_kosten()`s
+    # Bruecken-Reparatur haelt fuer einen isolierten Punkt nur EINE, die
+    # kuerzeste Kante - garantiert nicht, dass die am ANDEREN Ende auch zurueck
+    # zum Festland fuehrt. Zwei einander nur GEGENSEITIG haltende Punkte bilden
+    # so eine eigene, vom Meer getrennte Mini-Komponente. Nachgemessen
+    # (384px, Seed 20260804): exakt 5 Knoten betroffen, Hoehen 63-306 m - deckt
+    # sich exakt mit den von `smoke_test_river_reaches_sea.py` gemeldeten 5
+    # Sackgassen.
+    #
+    # Selbes Bruecken-Prinzip wie dort, nur auf GANZE abgeschnittene
+    # Komponenten angewendet statt auf einzelne Punkte: jeder unerreichte
+    # Knoten wird an den naechstgelegenen ERREICHTEN Knoten gehaengt (echte
+    # Position, nicht ueber den Tiefwasser-gefilterten Kantensatz - dieselbe
+    # pragmatische Abkuerzung, die die Punkt-Bruecken-Reparatur oben schon
+    # nutzt). `taeler_eingraben()` schneidet ohnehin nur oberhalb von 0 m
+    # (`np.where(H > 0.0, neu, H)`), eine ueber Wasser fuehrende Bruecke bleibt
+    # also unsichtbar, stellt aber die Kette bis zum Meer her.
+    unerreicht = np.flatnonzero(~np.isfinite(entfernung))
+    if len(unerreicht) > 0:
+        erreicht = np.flatnonzero(np.isfinite(entfernung))
+        if len(erreicht) > 0:
+            baum_erreicht = cKDTree(punkte[erreicht])
+            _, naechste = baum_erreicht.query(punkte[unerreicht])
+            eltern[unerreicht] = erreicht[naechste]
+        else:
+            # Kein einziger Knoten erreicht das Meer (praktisch nie, da
+            # `unter_wasser` immer mindestens einen Auslass stellt) - dann
+            # bleibt nur die ehrliche Kennzeichnung als eigener Ausgang.
+            eltern[unerreicht] = -1
+
     # ---------------------------------------------------- Ketten erzwingen
     #
     # HIER ENTSTANDEN DIE RINGE (Nutzermeldung 2026-08-10: "die fliessen oft
@@ -335,7 +380,39 @@ def baue_stufe(punkte, H, mpp, kosten_staerke, erbe=None, stufe_index=0,
         tiefe[i] = d
     reihenfolge = np.argsort(tiefe, kind="stable")
 
-    flaeche = np.ones(n)
+    # WASSERMENGE STATT KNOTENZAHL (Block 1.1, docs/FLUESSE_UND_WASSER.md).
+    #
+    # Hier stand `flaeche = np.ones(n)`: jeder Knoten trug 1 bei, egal ob
+    # dort 471 mm oder 1967 mm im Jahr fallen. Was das Modell
+    # "Einzugsgebiet" nennt, war damit die FLAECHE in Knoten - nicht die
+    # Wassermenge. Der Niederschlag lag als volles Feld bereit
+    # (`felder["niederschlag_mm"]`) und wurde nie gelesen.
+    #
+    # GEMESSEN, was das anrichtete (512 px, Seed 20260804): das Fjordland
+    # hat mit 1967 mm den hoechsten Niederschlag aller Regionen und die
+    # meiste Wassermenge (Niederschlag mal Landflaeche, 13.0 Mio) - und
+    # mit 123 Knoten den KLEINSTEN Hauptfluss. Die Steppe hat mit 4.3 Mio
+    # die wenigste Wassermenge und einen dreimal groesseren Fluss. Die
+    # Korrelation war negativ.
+    #
+    # `wasser_feld` ist der Niederschlag, auf den Kartenmittelwert
+    # bezogen: 1.0 heisst durchschnittlich, das Fjordland liegt bei rund
+    # 2.2, die Steppe bei 0.5. Ein Knoten traegt damit sein Wasser bei,
+    # nicht seine Existenz.
+    #
+    # OHNE FELD bleibt es bei `ones` - Werkzeuge und Tests, die
+    # `flussnetz()` ohne Regionsdaten aufrufen, sollen unveraendert
+    # weiterlaufen. Das ist KEIN stiller Rueckfall: die Wirkung ist
+    # dieselbe wie vor dem Umbau, und wer Regionsdaten hat, gibt sie mit.
+    if wasser_feld is not None:
+        yq = np.clip(np.round(punkte[:, 0]).astype(np.int64),
+                     0, wasser_feld.shape[0] - 1)
+        xq = np.clip(np.round(punkte[:, 1]).astype(np.int64),
+                     0, wasser_feld.shape[1] - 1)
+        flaeche = np.maximum(wasser_feld[yq, xq].astype(np.float64),
+                             WASSER_MINDEST)
+    else:
+        flaeche = np.ones(n)
     for i in reihenfolge[::-1]:
         if eltern[i] >= 0:
             flaeche[eltern[i]] += flaeche[i]
@@ -361,7 +438,8 @@ def baue_stufe(punkte, H, mpp, kosten_staerke, erbe=None, stufe_index=0,
 
 
 def flussnetz(H, seed, kosten_staerke=6.0, abstand_makro_m=None,
-              muendungstiefe_m=MUENDUNGSTIEFE_M, erbe_kosten=ERBE_KOSTEN):
+              muendungstiefe_m=MUENDUNGSTIEFE_M, erbe_kosten=ERBE_KOSTEN,
+              niederschlag_mm=None, region_map=None):
     """
     Die drei Rechenstufen nacheinander. Rueckgabe: das Netz der letzten.
 
@@ -376,6 +454,20 @@ def flussnetz(H, seed, kosten_staerke=6.0, abstand_makro_m=None,
     size = H.shape[0]
     mpp = rw.WELT_KM * 1000.0 / size
     abstaende = stufenabstaende(abstand_makro_m)
+    # WASSERGEWICHT JE PIXEL (Block 1.1, docs/FLUESSE_UND_WASSER.md).
+    #
+    # Der Niederschlag, bezogen auf den Mittelwert ueber LAND - nicht ueber
+    # die ganze Karte. Ueber See faellt zwar auch Regen, aber er speist
+    # keinen Fluss; naehme man ihn in den Mittelwert, haenge das Gewicht
+    # am Wasseranteil der Karte statt an der Region.
+    wasser_feld = None
+    if niederschlag_mm is not None:
+        n_feld = np.asarray(niederschlag_mm, dtype=np.float64)
+        land = H > 0.0
+        mittel = float(np.mean(n_feld[land])) if land.any() else 0.0
+        if mittel > 1e-9:
+            wasser_feld = n_feld / mittel
+
     punkte, stufe = geschachtelte_punkte(H, seed, abstand_makro_m,
                                          muendungstiefe_m)
 
@@ -403,13 +495,123 @@ def flussnetz(H, seed, kosten_staerke=6.0, abstand_makro_m=None,
         neu = baue_stufe(punkte[auswahl], H, mpp, kosten_staerke,
                          erbe=teil_erbe, stufe_index=index,
                          erbe_kosten=erbe_kosten,
-                         muendungstiefe_m=muendungstiefe_m)
+                         muendungstiefe_m=muendungstiefe_m,
+                         wasser_feld=wasser_feld)
         if neu is None:
             break
         neu["auswahl"] = auswahl
         neu["stufe"] = stufe[auswahl]
         netz, erbe = neu, teil_erbe
+
+    if netz is not None and region_map is not None:
+        _hauptstrom_erzwingen(netz, region_map, H, seed)
     return netz
+
+
+# Wie wahrscheinlich eine Region einen erzwungenen Hauptstrom bekommt, und
+# wie gross er mindestens werden soll (Nutzervorgabe 2026-08-24):
+#
+#   *"dann werden grosse fluesse zumindest in Fjordland (100% chance),
+#   Taiga (66%) und Atlantik (66% chance) generiert. der rest generiert
+#   weiterhin wie jetzt. nur ein kleiner nudge erstmal."*
+#   *"Fjordland soll es groesser sein als jetzt der groesste fluss."*
+#
+# WARUM ES DIESE REGEL UEBERHAUPT BRAUCHT. Block 1.1 hat den Niederschlag
+# ins Netz gebracht, und die Richtung stimmt seither: nasse Regionen
+# wachsen, trockene schrumpfen (Fjordland 123 -> 215, Steppe 374 -> 226).
+# Das Fjordland fuehrt trotzdem nicht - 215 gegen 737 an der
+# Atlantikkueste - und die Ursache ist ungeklaert. Drei Hypothesen wurden
+# gemessen und widerlegt (docs/FLUESSE_UND_WASSER.md 1.1).
+#
+# Diese Regel ist deshalb eine bewusste SETZUNG, kein Modell: sie behebt
+# nicht die unbekannte Ursache, sie ueberstimmt sie an genau den drei
+# Stellen, an denen der Nutzer grosse Fluesse sehen will.
+#
+# Der Zielwert 700 liegt ueber den 654, die vor Block 1.1 der groesste
+# Fluss der ganzen Karte waren.
+HAUPTSTROM_QUOTE = {
+    "Fjordland": (1.00, 700.0),
+    "Taiga": (0.66, 500.0),
+    "Atlantikkueste": (0.66, 500.0),
+}
+
+
+def _hauptstrom_erzwingen(netz, region_map, H, seed):
+    """
+    Je Region mit Quote: den groessten Lauf auf sein Sollmass anheben.
+
+    NICHT DEN BAUM UMHAENGEN. Der naheliegende Weg waere, Nachbarlaeufe in
+    den groessten umzuleiten - das kann aber Zyklen erzeugen und die
+    muehsam gesicherte Kettenlogik zerstoeren (siehe Modulkopf: "HOECHSTENS
+    EIN KETTENELTERNKNOTEN je Punkt"). Stattdessen wird nur das GEWICHT
+    entlang der bestehenden Hauptkette angehoben, so als flosse dort mehr
+    Wasser zu. Die Geometrie bleibt unberuehrt, nur die Talbreite und
+    -tiefe folgen (`gebiet` in taeler_eingraben).
+    """
+    eltern, fl, pk = netz["eltern"], netz["flaeche"], netz["punkte"]
+    n = len(pk)
+    if n == 0:
+        return
+    ys = np.clip(np.round(pk[:, 0]).astype(np.int64), 0, region_map.shape[0] - 1)
+    xs = np.clip(np.round(pk[:, 1]).astype(np.int64), 0, region_map.shape[1] - 1)
+    rk = region_map[ys, xs]
+    hk = H[ys, xs]
+
+    namen = [r["name"] for _z, _s, r in rw.alle_regionen()]
+    for i, name in enumerate(namen):
+        eintrag = HAUPTSTROM_QUOTE.get(name)
+        if eintrag is None:
+            continue
+        wahrscheinlich, ziel = eintrag
+
+        # AUS DEM SEED, nicht aus `random`: dieselbe Karte muss dasselbe
+        # Ergebnis geben, und zwar unabhaengig davon, wie viele
+        # Zufallszahlen vorher gezogen wurden.
+        wuerfel = np.random.default_rng(
+            (int(seed) << 8) ^ (hash(name) & 0xFFFF)).random()
+        if wuerfel >= wahrscheinlich:
+            continue
+
+        eigene = (rk == i) & (hk > 0.0)
+        if eigene.sum() < 5:
+            continue
+        groesster = int(np.flatnonzero(eigene)[np.argmax(fl[eigene])])
+        if fl[groesster] >= ziel:
+            continue
+
+        # NUR DER HAUPTLAUF, vom groessten Knoten ABWAERTS bis zur
+        # Muendung. Zwei Fehler, beide beim ersten Anlauf gemessen:
+        #
+        #   * Die Zufluesse OBERHALB mitzuskalieren ist falsch - dort
+        #     fliesst ja nicht mehr Wasser. Ein grosser Strom hat normale
+        #     Nebenfluesse, keine ebenfalls vergroesserten.
+        #   * Kette und Zufluesse als getrennte Masken multiplizierten den
+        #     Hauptknoten ZWEIMAL: 215 * 3.26 * 3.26 = 2275 statt der
+        #     angepeilten 700.
+        #
+        # Der Strom schwillt damit am Zusammenfluss an, nicht allmaehlich -
+        # das ist an einem grossen Fluss auch real so, wenn ein
+        # Haupteinzugsgebiet dazukommt.
+        #
+        # ADDITIV, NICHT MULTIPLIKATIV - dritter gemessener Fehler dieser
+        # Regel. Ein Faktor haette jeden Knoten flussabwaerts im selben
+        # VERHAELTNIS vergroessert, auch die, die ohnehin schon gross sind:
+        # der Fjordland-Strom muendet in der Atlantikkueste, und deren
+        # Maximum sprang dadurch von 737 auf 2396, das Alpenland von 676
+        # auf 2197 - obwohl beide gar keine Quote haben.
+        #
+        # Mehr Wasser im Oberlauf heisst flussabwaerts eine KONSTANTE
+        # Zugabe, kein konstantes Verhaeltnis. Der Zielknoten trifft damit
+        # genau sein Sollmass, und die Abschnitte darunter wachsen um
+        # denselben absoluten Betrag - so, als waere oben ein weiteres
+        # Einzugsgebiet dazugekommen.
+        zugabe = ziel - float(fl[groesster])
+        kette = np.zeros(n, dtype=bool)
+        k, schutz = groesster, 0
+        while k >= 0 and schutz <= n:
+            kette[k] = True
+            k, schutz = int(eltern[k]), schutz + 1
+        fl[kette] = fl[kette] + zugabe
 
 
 # =============================================================================
@@ -503,21 +705,39 @@ def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
         strecke = float(np.linalg.norm(pk[i] - pk[e]))
         schritte = max(int(strecke * 3.0), 3)
         anteil = untergrenze + (1.0 - untergrenze) * gebiet[i] ** 0.40
-        for t in np.linspace(0.0, 1.0, schritte):
-            p = pk[e] * (1.0 - t) + pk[i] * t
-            y = int(np.clip(round(p[0]), 0, size - 1))
-            x = int(np.clip(round(p[1]), 0, size - 1))
-            w = max(anteil * breite_feld[y, x], 2.5)
-            sohle_roh = z[e] * (1.0 - t) + z[i] * t
-            # EROSIONSBASIS: ein Fluss kann nicht unter den Meeresspiegel
-            # schneiden. Ohne diese Schranke grub sich ein Lauf auf 20 m Hoehe
-            # 60 m tief ein und legte die halbe Kueste unter Wasser - gemessen
-            # fiel der Landanteil von 65 auf 54 Prozent. Die Eintiefung ist
-            # deshalb hoechstens ein Teil der Hoehe ueber Null.
-            tief = min(tiefe_feld[y, x] * gebiet[i] ** 0.30,
-                       0.55 * max(sohle_roh, 0.0))
-            sohle[y, x] = sohle_roh - tief
-            breite[y, x] = max(breite[y, x], w)
+        # DIE STUETZSTELLEN AUF EINMAL, nicht einzeln (2026-08-23).
+        #
+        # Hier stand eine Schleife ueber `schritte` Stuetzstellen je Kante,
+        # und in ihr zwei `np.clip`-Aufrufe auf SKALAREN. Gemessen per
+        # cProfile auf einer 1024-px-Karte: 215 761 clip-Aufrufe, 6.5 s von
+        # 12.6 s allein dafuer - `np.clip` auf einem einzelnen Wert ist
+        # praktisch nur Aufrufaufwand, die eigentliche Rechnung ist ein
+        # Vergleich. Dazu 215 759 `round()`-Aufrufe mit weiteren 1.1 s.
+        #
+        # DIE SCHREIBREIHENFOLGE BLEIBT DIESELBE, und darauf kommt es an:
+        #   * `sohle` wird ZUGEWIESEN. Treffen mehrere Stuetzstellen
+        #     dasselbe Pixel, gewann in der Schleife die letzte; bei
+        #     `sohle[ys, xs] = werte` gewinnt ebenfalls der letzte Eintrag.
+        #   * `breite` wird MAXIMIERT. `np.maximum.at` ist dafuer da und
+        #     von der Reihenfolge ohnehin unabhaengig.
+        # `np.round` rundet wie Pythons `round` zur geraden Zahl, die
+        # Pixelwahl ist also unveraendert. Geprueft in
+        # tests/smoke_test_weltfluesse_vektor.py.
+        t = np.linspace(0.0, 1.0, schritte)
+        ps = pk[e][None, :] * (1.0 - t)[:, None] + pk[i][None, :] * t[:, None]
+        ys = np.clip(np.round(ps[:, 0]), 0, size - 1).astype(np.int64)
+        xs = np.clip(np.round(ps[:, 1]), 0, size - 1).astype(np.int64)
+        w = np.maximum(anteil * breite_feld[ys, xs], 2.5)
+        sohle_roh = z[e] * (1.0 - t) + z[i] * t
+        # EROSIONSBASIS: ein Fluss kann nicht unter den Meeresspiegel
+        # schneiden. Ohne diese Schranke grub sich ein Lauf auf 20 m Hoehe
+        # 60 m tief ein und legte die halbe Kueste unter Wasser - gemessen
+        # fiel der Landanteil von 65 auf 54 Prozent. Die Eintiefung ist
+        # deshalb hoechstens ein Teil der Hoehe ueber Null.
+        tief = np.minimum(tiefe_feld[ys, xs] * gebiet[i] ** 0.30,
+                          0.55 * np.maximum(sohle_roh, 0.0))
+        sohle[ys, xs] = sohle_roh - tief
+        np.maximum.at(breite, (ys, xs), w)
 
     ist_fluss = np.isfinite(sohle)
     if not ist_fluss.any():
@@ -555,6 +775,23 @@ def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
 
     t = abstand / np.maximum(0.5 * (b_nah + b_glatt), 1e-6)
     d = 1.0 - np.exp(-np.maximum(t, 0.0))
+
+    # DIE TALFORM JE REGION (Nutzervorgabe 2026-08-24: *"ja flusstypen
+    # sollte es geben, nach region. zB alpen eher V. Fjordland U und im
+    # Atlantik irgendwas dazwischen"*).
+    #
+    # `form` war bis hierher ein Festwert (1.3) fuer die ganze Karte. Der
+    # Exponent bestimmt den Querschnitt: klein heisst, das Profil steigt
+    # sofort - schmale Sohle, steile Flanken, also ein fluvial
+    # eingeschnittenes V-Tal. Gross heisst, es steigt traege - breite
+    # flache Sohle, also ein glazial ausgeschuerftes U-Tal.
+    #
+    # `felder["talform"]` ist wie alle Regionsparameter ueber die
+    # Voronoi-Gewichte weich ueberblendet; an einer Regionsgrenze geht die
+    # Talform also allmaehlich ueber, statt zu springen.
+    form_feld = felder.get("talform")
+    if form_feld is not None:
+        form = np.clip(np.asarray(form_feld, dtype=np.float64), 0.3, 6.0)
     profil = np.power(d, form)
     z_eff = (1.0 - profil) * z_nah + profil * z_glatt
     neu = H - (H - z_eff) * (1.0 - profil)
