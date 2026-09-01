@@ -9,7 +9,7 @@ ohne Dependencies liefert er heightmap, slopemap und shadowmap für alle nachgel
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
-    QButtonGroup, QLabel
+    QButtonGroup, QLabel, QCheckBox
 )
 from PyQt6.QtCore import pyqtSlot
 from PyQt6.QtGui import QFont
@@ -40,6 +40,10 @@ class TerrainTab(BaseMapTab):
         # Terrain-spezifische Attribute (vor super(), da create_parameter_controls
         # während BaseMapTab.setup_ui() darauf zugreift und sie befüllt)
         self.parameter_sliders = {}
+        # Abschalthaekchen je Erzeugungsstufe (2026-08-25) - Schluessel
+        # ist der Parametername, Wert die QCheckBox. Siehe
+        # _build_parameter_group(schalter=...).
+        self.stufen_schalter = {}
         self.generation_button = None
         self.progress_bar = None
         self.system_status = None
@@ -144,26 +148,31 @@ class TerrainTab(BaseMapTab):
         # Flussnetz-Skelett (SPEZIFIKATION §12). Laeuft NACH dem
         # Erosionsfilter - dessen Ergebnis ist die Flaeche, in die die Taeler
         # geschnitten werden.
+        # DIE FUENF WICHTIGSTEN STEHEN SEIT 2026-08-26 IM FLUSSREITER.
+        #
+        # Nutzervorgabe: *"kannst du die 5 wichtigsten parameter fuer die
+        # fluesse herausfinden und mir diese auf die Flussnetzwerktab seite
+        # packen?"* Sie stehen dort und NICHT zusaetzlich hier - zwei
+        # Widgets fuer denselben Schluessel waeren zwei Wahrheiten
+        # (tests/smoke_test_parameter_eindeutig.py wacht darueber). Die
+        # Auswahl samt Messreihe steht bei `FLUSS_REGLER` in
+        # gui/tabs/river_tab.py.
+        #
+        # Hier bleiben die zwei, die den LAUF verschieben statt die
+        # Landschaft zu formen - einmal einzustellen, nicht zum Gestalten.
         river_configs = [
             # Seit dem 2026-08-06 wirken die ersten fuenf wieder - sie sind an
             # core/terrain_weltfluesse.py angeschlossen. "Valley Spacing" ist
             # jetzt der MAKRO-Knotenabstand; Meso und Mikro folgen daraus.
-            ("river_spacing_m", "Valley Spacing (m)", RIVER_NETWORK.SPACING_M),
             ("river_mouth_depth_m", "Mouth Depth (m)",
              RIVER_NETWORK.MOUTH_DEPTH_M),
             ("river_inherit_cost", "Trunk Continuity",
              RIVER_NETWORK.INHERIT_COST),
-            ("river_incision_share", "Valley Depth (share)",
-             RIVER_NETWORK.INCISION_SHARE),
             ("river_plateau_flatten", "Plateau Flattening",
              RIVER_NETWORK.PLATEAU_FLATTEN),
-            ("river_valley_width", "Valley Width", RIVER_NETWORK.VALLEY_WIDTH),
-            ("river_valley_form", "Valley Shape", RIVER_NETWORK.VALLEY_FORM),
             ("river_meander", "Meander", RIVER_NETWORK.MEANDER),
             ("river_divide_blend", "Divide Softness",
              RIVER_NETWORK.DIVIDE_BLEND),
-            ("river_cost_strength", "Rivers Follow Lowland",
-             RIVER_NETWORK.COST_STRENGTH),
             ("river_border_outflow", "Border Outflow Cost",
              RIVER_NETWORK.BORDER_OUTFLOW),
         ]
@@ -174,18 +183,59 @@ class TerrainTab(BaseMapTab):
         noise_detail_group = self._build_parameter_group("Noise Detail", noise_detail_configs)
         self.control_panel.layout().addWidget(noise_detail_group)
 
-        river_group = self._build_parameter_group("River Network", river_configs)
+        river_group = self._build_parameter_group(
+            "River Network", river_configs,
+            schalter=("river_network_aktiv", "Flussnetz und Täler berechnen"))
         self.control_panel.layout().addWidget(river_group)
 
         erosion_filter_group = self._build_parameter_group(
-            "Erosion Filter", erosion_filter_configs)
+            "Erosion Filter", erosion_filter_configs,
+            schalter=("erosion_filter_aktiv", "Erosionsfilter anwenden"))
         self.control_panel.layout().addWidget(erosion_filter_group)
 
-    def _build_parameter_group(self, title: str, parameter_configs) -> QGroupBox:
-        """Baut eine QGroupBox mit Slidern für die übergebenen (key, label, config)-Tupel."""
+        # KUESTENTYPEN. Eigene Gruppe ohne Slider - die 27 Archetypen sind
+        # ein gemessener Katalog (core/vektor_kueste.py), kein Regler. Was
+        # der Nutzer davon einstellen koennen wollte, ist genau das eine:
+        # ganz aus, um zu sehen, was sie beitragen.
+        kueste_group = self._build_parameter_group(
+            "Coastline", [],
+            schalter=("kuesten_archetypen_aktiv",
+                      "Küstentypen formen (27 Archetypen)"))
+        self.control_panel.layout().addWidget(kueste_group)
+
+    def _build_parameter_group(self, title: str, parameter_configs,
+                               schalter=None) -> QGroupBox:
+        """
+        Baut eine QGroupBox mit Slidern für die (key, label, config)-Tupel.
+
+        `schalter` ist ein optionales (key, label)-Paar und erzeugt ganz oben
+        in der Gruppe ein Häkchen, mit dem sich die ganze Stufe abschalten
+        lässt. Nutzerwunsch 2026-08-25: *"kannst du mir einmal für
+        flussnetzwerk und erosionfilter und küstentypen jeweils checkboxen
+        einfügen, mit denen ich die effekte immer auch ausschalten kann?"*
+
+        Das Häkchen ist ein ganz normaler Parameter (1.0 an, 0.0 aus) und
+        läuft über denselben Weg wie jeder Slider. Es greift damit in die
+        ERZEUGUNG ein, nicht in die Anzeige - 2D und 3D zeigen also
+        zwangsläufig dasselbe, ohne dass es dafür zwei Wege bräuchte
+        (stehende Regel in CLAUDE.md).
+        """
         group = QGroupBox(title)
         group.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         layout = QVBoxLayout()
+
+        if schalter is not None:
+            schalter_key, schalter_label = schalter
+            box = QCheckBox(schalter_label)
+            box.setChecked(True)
+            box.setToolTip("Aus: diese Stufe wird bei der Erzeugung ganz "
+                           "übersprungen. Zum Vergleichen, wieviel sie zum "
+                           "Bild beiträgt.")
+            box.toggled.connect(
+                lambda an, key=schalter_key: self._on_parameter_changed(
+                    key, 1.0 if an else 0.0))
+            self.stufen_schalter[schalter_key] = box
+            layout.addWidget(box)
 
         for param_key, label, config in parameter_configs:
             if param_key == "map_seed":
@@ -353,6 +403,38 @@ class TerrainTab(BaseMapTab):
             lambda checked: self._on_display_mode_changed("spielkarten", checked))
         self.display_mode_group.addButton(spielkarten_radio, 5)
 
+        # HOEHENFAKTOR UND VORONOI (2026-08-26, Nutzerwunsch: *"kannst du mir
+        # die voronoiansicht als erstes bauen? ich will den hoehenfaktor sehen
+        # koennen (3d und 2D)"*).
+        #
+        # "Hoehenfaktor" zeigt je Pixel die gemessene Hoehe des Hinterlands
+        # seines Kuestengebiets in METERN - die Groesse, aus der
+        # `kuestengebiete()` sein Hoehendelta bildet. Sie stammt aus der
+        # Zweipunktmethode des Nutzers (Mittel des gemessenen Kuestenprofils
+        # im Band 400-700 m), NICHT aus dem Katalogfaktor `hoehe_faktor`:
+        # der beschreibt das Ufer, und in vier von neun Regionen dreht sich
+        # die Reihenfolge dadurch um.
+        #
+        # "Voronoi" zeigt die Zellen, aus denen die Gebiete gewachsen sind -
+        # dieselben, die auch die Regionen bilden.
+        hoehenfaktor_radio = QRadioButton("Hoehenfaktor")
+        hoehenfaktor_radio.setToolTip(
+            "Gemessene Hinterlandhoehe je Kuestengebiet, in Metern "
+            "(Profilmittel 400-700 m landeinwaerts). Grau = alpiner "
+            "Sonderfall ohne Kuestensaat.")
+        hoehenfaktor_radio.toggled.connect(
+            lambda an: self._on_display_mode_changed("hinterland_height", an))
+        self.display_mode_group.addButton(hoehenfaktor_radio, 6)
+
+        voronoi_radio = QRadioButton("Voronoi")
+        voronoi_radio.setToolTip(
+            "Die Zellen, aus denen Regionen und Kuestengebiete wachsen. "
+            "Die Farbe ist nur zur Unterscheidung, der Zahlenwert bedeutet "
+            "nichts.")
+        voronoi_radio.toggled.connect(
+            lambda an: self._on_display_mode_changed("voronoi_map", an))
+        self.display_mode_group.addButton(voronoi_radio, 7)
+
         layout.addWidget(height_radio)
         layout.addWidget(combined_radio)
         layout.addWidget(slope_radio)
@@ -401,6 +483,28 @@ class TerrainTab(BaseMapTab):
         parameters = {}
         for param_name, slider in self.parameter_sliders.items():
             parameters[param_name] = slider.getValue()
+
+        # DIE EINSTELLUNGEN DES REGIONSREITERS MITNEHMEN (2026-08-26).
+        #
+        # Die Generierung holt sich `get_tab_parameters(self.generator_type)`,
+        # also NUR den eigenen Satz. Ohne diese Zeilen kaeme aus dem
+        # Regionsreiter nichts an: man stellt eine Region ein, drueckt
+        # "Generieren" - und bekommt dieselbe Karte. Genau das war bis heute
+        # der Fall, ohne Fehlermeldung.
+        if self.parameter_manager is not None:
+            for beitragend in ("region", "kontinent"):
+                try:
+                    teil = self.parameter_manager.get_tab_parameters(beitragend)
+                    if teil:
+                        parameters.update(teil)
+                except Exception as fehler:              # pragma: no cover
+                    self.logger.debug("Parameter von %s nicht verfuegbar: %s",
+                                      beitragend, fehler)
+
+        # Die Abschalthaekchen als 1.0/0.0 - derselbe Weg wie jeder Slider,
+        # damit der ParameterManager nichts Neues lernen muss.
+        for param_name, box in self.stufen_schalter.items():
+            parameters[param_name] = 1.0 if box.isChecked() else 0.0
         return parameters
 
     def _validate_parameter_constraints(self):
@@ -515,6 +619,14 @@ class TerrainTab(BaseMapTab):
                 data_type = "region_map"
                 display_data = ({"regionen": data, "heightmap": hoehe}
                                 if data is not None and hoehe is not None else None)
+            elif self.current_display_mode in ("hinterland_height", "voronoi_map"):
+                # Gewoehnliche Skalarkarten - derselbe Weg wie "slope", also
+                # in 2D UND 3D ohne Sonderbehandlung (die Registereintraege
+                # dafuer stehen in base_tab._LAYER_NAME_MAP_3D).
+                data = self.data_lod_manager.get_terrain_data(
+                    self.current_display_mode)
+                data_type = self.current_display_mode
+                display_data = data
             elif self.current_display_mode == "spielkarten":
                 # Rohdaten-Payload wie bei "Regionen"/"Kuestentypen" - der
                 # Renderer braucht die Hoehen, um Land von Meer zu trennen.
@@ -603,7 +715,7 @@ class TerrainTab(BaseMapTab):
 
             elif data_type == "region_map" and hasattr(data, 'shape'):
                 # LANDflaeche je Region, nicht Gesamtflaeche. Die Zuordnung gilt
-                # auch auf offener See - Huegelland kaeme sonst auf 66 km2, von
+                # auch auf offener See - Clonagh kaeme sonst auf 66 km2, von
                 # denen 51 Ozean sind. Nur die Landzahl sagt etwas darueber aus,
                 # wieviele Siedlungen eine Kultur tragen kann.
                 from core.terrain_weltkarte import alle_regionen

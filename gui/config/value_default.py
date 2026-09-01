@@ -94,7 +94,12 @@ class TERRAIN:
     # direkt unter Map Size, da Map Size (Pixel-Auflösung) und Map Distance
     # (reale km-Ausdehnung) zwei unabhängige, aber eng verwandte Größen sind.
     MAP_DISTANCE_KM = {
-        "min": 1.0, "max": 100.0, "default": WORLD_SIZE_KM, "step": 1.0, "suffix": "km",
+        # SCHRITT 1.0 -> 0.1 (2026-08-26). WORLD_SIZE_KM ist 21.3 und lag
+        # damit NICHT auf dem Raster: der Regler rastete beim Aufbau des
+        # Reiters auf 21 km. Das ist die WELTBREITE, gegen die jede
+        # Meterrechnung des Programms geeicht ist - allein das Oeffnen des
+        # Terrain-Reiters haette sie um 1.4 % verstellt, ohne Meldung.
+        "min": 1.0, "max": 100.0, "default": WORLD_SIZE_KM, "step": 0.1, "suffix": "km",
         "description": "Reale Ausdehnung der Karte in Kilometern (Breite = "
                         "Höhe), unabhängig von der Pixel-Auflösung (Map "
                         "Size). Bestimmt, wie viele reale Meter ein Pixel "
@@ -743,15 +748,22 @@ class RIVER_NETWORK:
     # Größe, wo eine relative hingehört.
     # 2026-08-06 auf 0.30: der Wert, mit dem taeler_eingraben() bisher fest
     # rechnete. Der alte Vorgabewert 0.55 gehoerte zum abgeloesten Netz.
+    # 2026-08-25 von 0.30 auf 0.18 - die zweite Haelfte von "groesser, aber
+    # weniger tief". Gemessen sinkt die mediane Abtragung auf Land von 44 auf
+    # rund 34 m (384 px), der Anteil ueber 20 m von 68.8 auf 62.1 %.
     INCISION_SHARE = {
-        "min": 0.0, "max": 0.6, "default": 0.30, "step": 0.05,
+        # SCHRITT 0.05 -> 0.01 (2026-08-26). Die Vorgabe 0.18 lag NICHT
+        # auf dem Raster: der Regler rastete beim Oeffnen des Reiters
+        # auf 0.20, das blosse Anzeigen verstellte also den geeichten
+        # Wert. Aufgefallen beim Umzug in den Flussreiter.
+        "min": 0.0, "max": 0.6, "default": 0.18, "step": 0.01,
         "description": "Wie tief das größte Tal einschneidet, als Anteil der "
                         "Höhenspanne. Passt sich damit von selbst an die "
                         "Height Amplitude an. 0 lässt das Gelände unberührt; "
                         "kleinere Nebentäler schneiden entsprechend flacher."
     }
     # 0.0  Fläche zwischen den Tälern behält ihr volles Relief (Bergland)
-    # 0.9  Fläche zwischen den Tälern ist eingeebnet (Hochebene, Fjordland)
+    # 0.9  Fläche zwischen den Tälern ist eingeebnet (Hochebene, Skerrheim)
     #
     # Vorgabe 0.0: Hochebenen sind zurückgestellt, und für die Beurteilung des
     # Übergangs Tal -> Noise-Gelände muss das Noise-Gelände da sein.
@@ -760,7 +772,7 @@ class RIVER_NETWORK:
         "description": "Wie stark die Fläche ZWISCHEN den Tälern eingeebnet "
                         "wird. 0 lässt ihr das volle Relief (Bergland wie in "
                         "den Alpen), hohe Werte machen daraus eine Hochebene "
-                        "mit tief eingeschnittenen Trögen (Fjordland). Nach "
+                        "mit tief eingeschnittenen Trögen (Skerrheim). Nach "
                         "oben bei 0.9 begrenzt - eine exakt ebene Fläche hätte "
                         "kein Gefälle mehr, dem ein Fluss folgen kann."
     }
@@ -778,6 +790,21 @@ class RIVER_NETWORK:
     # `taeler_eingraben` bezieht jetzt auf SPACING_M; bei 0.35 bleibt der
     # mittlere Hang bis auf 0.6 Grad stehen. Die Beschreibung gilt damit
     # woertlich - 0.5 heisst wirklich "bis zur Mitte zwischen zwei Laeufen".
+    # 2026-08-25 KURZ AUF 0.60 GESETZT UND WIEDER ZURUECK - der Versuch war
+    # falsch, und die Beschreibung dieses Reglers sagte es bereits: "0.5
+    # heisst wirklich bis zur Mitte zwischen zwei Laeufen". 0.60 liegt
+    # DARUEBER, es bleibt also gar keine Hochflaeche mehr stehen.
+    #
+    # Gemessen brachte die Verbreiterung ohnehin fast nichts: der Anteil der
+    # Landflaeche mit ueber 20 m Abtragung aendert sich zwischen
+    # breite_faktor 0.12 und 0.60 nur von 52.4 auf 54.8 %. Der Grund steht
+    # bei TALTIEFE_MINDESTWASSER in core/terrain_weltfluesse.py - die Laeufe
+    # liegen im Median 1 Pixel auseinander, da spielt die Talbreite keine
+    # Rolle mehr.
+    #
+    # Breitere Taeler fuer die GROSSEN Fluesse kommen stattdessen aus dem
+    # Kontrast (TALBREITE_UNTERGRENZE/TALBREITE_EXPONENT): der Hauptstrom
+    # bekommt 688 statt 402 m, die feinsten Baeche 104 statt 116 m.
     VALLEY_WIDTH = {
         "min": 0.10, "max": 3.0, "default": 0.35, "step": 0.05,
         "description": "Talbreite als Anteil des Talabstands. Bei 0.5 reicht "
@@ -893,7 +920,7 @@ WELTKARTE_AKTIV = True
 # unbenutzt. Der Vektorweg ist aufloesungsunabhaengig (Stationen in Metern
 # statt per Pixelindex gezogen) und bezieht Profilform, Zielhoehe und
 # Reichweite aus Messungen an 19 realen Vorbildkuesten statt aus geschaetzten
-# Katalogwerten - der Katalog lag stellenweise um Faktor 16 daneben (Taiga
+# Katalogwerten - der Katalog lag stellenweise um Faktor 16 daneben (Morobora
 # 495 m gegen gemessene 30 m).
 #
 # UMSCHALTBAR, weil es die Gelaendeform aendert und die Regionseichung daran
@@ -1037,7 +1064,28 @@ class EROSION_FILTER:
 # JEDE GPU-Operation still auf den CPU-Pfad zurueckfiel (siehe
 # tests/smoke_test_shader_paths.py). Nur der Erosion-Tab selbst ist von diesem
 # Schalter betroffen, und das ist beabsichtigt.
-EROSION_AKTIV = False
+# WIEDER AN seit 2026-08-27, nach Messung. Die Begruendung von 2026-07-30
+# ("sie ERZEUGT die Becken, die sie aufloesen soll") war richtig - fuer das
+# Gelaende von damals. Sie traegt nicht mehr, seit das Flussnetz ein
+# entwaessertes Gelaende vorlegt. Gemessen bei 256 px, Seed 20260804, mit den
+# fuenf Kennzahlen aus tests/smoke_test_erosion_quality.py:
+#
+#     Gelaende                       Top5    Netz  Krater  Ebenen  Schritte
+#     synthetisch (so misst der Test) 0.397   105     12     4.0%    875
+#     echt, ohne Flussnetz            0.899   546      1    23.3%    125
+#     echt, MIT Flussnetz             0.909   273      3    23.7%    100
+#
+# Auf dem echten Gelaende bleiben 3 Krater von 65536 Pixeln - die Erosion
+# erzeugt dort keine Becken mehr. Die drei roten Befunde von
+# smoke_test_erosion_quality sind Eigenschaften seines SYNTHETISCHEN
+# Testgelaendes, nicht der Erosion.
+#
+# Vorher behoben werden musste ein zweiter Punkt: der GPU-Pfad prueft die
+# Konvergenz jetzt im selben Takt wie die CPU (CONVERGENCE_CHECK_INTERVAL
+# statt PROGRESS_REPORT_INTERVAL, siehe core/erosion_generator.py). Ohne das
+# haette die Produktionskarte auf der GPU zwanzigmal laenger erodiert als
+# noetig - 500 statt 25 Schritte.
+EROSION_AKTIV = True
 
 
 class EROSION:
@@ -1432,11 +1480,43 @@ class BIOME:
         "description": "Höhe, ab der dauerhaft schneebedeckte Biome "
                         "beginnen (muss über dem Alpine Level liegen)."
     }
+    # 2026-08-25 von 60 auf 45 gesenkt (Nutzervorgabe nach der Messung).
+    #
+    # BEI 60 GRAD GAB ES AUF DER GANZEN KARTE EINE EINZIGE KLIPPE - genau ein
+    # Pixel in `biome_map_super`. Kein Fehler in der Rechnung, sondern eine
+    # Schwelle, die das fertige Gelaende nicht erreicht: eine Heightmap kann
+    # nur so steil sein, wie ihre Aufloesung zulaesst (dieselbe Grenze wie in
+    # docs/OFFENE_PUNKTE.md 6.19).
+    #
+    # Gemessen auf der Heightmap, mit der die Biom-Stufe wirklich rechnet
+    # (128 px, 117.2 m/px, 5332 Landpixel) - NICHT auf dem Rohgelaende, das
+    # deutlich steiler ist:
+    #
+    #     Schwelle   Anteil des Landes   noetig je Pixel
+    #        30 Grad        18.68 %             67.7 m
+    #        40 Grad         8.16 %             98.3 m
+    #        45 Grad         4.58 %            117.2 m   <- neu
+    #        50 Grad         1.89 %            139.7 m
+    #        60 Grad         0.15 %            203.0 m   <- alt
+    #
+    # 45 Grad liegt damit in derselben Groessenordnung wie die uebrigen
+    # Wahrscheinlichkeits-Biome (`beach` 0.47 %, `alpine_level` 1.84 % der
+    # Karte), statt praktisch leer zu sein.
+    #
+    # EHRLICHE EINSCHRAENKUNG: der Anteil haengt an der Aufloesung. Steilere
+    # Haenge werden erst bei feinerem Raster ueberhaupt darstellbar - bei
+    # 1024 px ueberschreiten im Rohgelaende 9.4 % der Landflaeche 45 Grad
+    # gegen 4.4 % bei 256 px. Dieselbe Schwelle gibt auf einer feineren Karte
+    # also mehr Klippe. Wer das nicht will, muss die Schwelle an die
+    # Kartengroesse koppeln - das ist bewusst NICHT gemacht, weil es dann drei
+    # Groessen zu eichen gaebe statt einer.
     CLIFF_SLOPE = {
-        "min": 30, "max": 80, "default": 60, "step": 1, "suffix": "°",
+        "min": 30, "max": 80, "default": 45, "step": 1, "suffix": "°",
         "description": "Mindest-Hangneigung, ab der ein Bereich als "
                         "Klippe/Fels statt als normales Gelände "
-                        "klassifiziert wird."
+                        "klassifiziert wird. Bei 60° kam auf der ganzen "
+                        "Karte praktisch keine Klippe vor - so steil wird "
+                        "das gerasterte Gelände nicht (gemessen 2026-08-25)."
     }
 
 

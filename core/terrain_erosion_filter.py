@@ -572,12 +572,24 @@ def filter_heightmap(heightmap: np.ndarray, meters_per_pixel: float,
     Returns: dict mit height_delta (Meter), ridge_map, magnitude.
     """
     heightmap = np.asarray(heightmap, dtype=np.float64)
-    if heightmap.ndim != 2 or heightmap.shape[0] != heightmap.shape[1]:
+    if heightmap.ndim != 2:
         raise ValueError(
-            "filter_heightmap erwartet eine quadratische 2D-Karte, bekam %s"
+            "filter_heightmap erwartet eine 2D-Karte, bekam %s"
             % (heightmap.shape,))
 
-    size = heightmap.shape[0]
+    # RECHTECKIG ERLAUBT (2026-08-26). Die frueher geforderte Quadratform war
+    # keine Bedingung des Filters, sondern eine Annahme der Umsetzung: es
+    # wurde EINE Achse gebaut und zweimal benutzt.
+    #
+    # Beide Achsen werden mit DERSELBEN Laenge normiert (der Breite). Damit
+    # bleibt ein Pixel im Einheitsraum quadratisch und das Rauschen
+    # richtungsunabhaengig; der Bildbereich ist dann [0,1] x [0, H/B] statt
+    # [0,1]^2. Normierte man jede Achse mit ihrer eigenen Laenge, waeren die
+    # Rinnen in der laengeren Richtung gestreckt - ein Fehler, den man erst
+    # im Bild sieht.
+    #
+    # Gebraucht von der Regionsansicht (docs/AUFRAEUMPLAN.md 4.10).
+    hoehe_px, size = heightmap.shape
     p = dict(ATEF_DEFAULTS)
     # Der konstante Hoehenversatz des Demonstrationsteils entfaellt: er
     # verschiebt die Karte als Ganzes, und unsere Pipeline legt die
@@ -618,8 +630,9 @@ def filter_heightmap(heightmap: np.ndarray, meters_per_pixel: float,
 
     normiert = (heightmap - tief) / spanne
 
-    achse = (np.arange(size, dtype=np.float64) + 0.5) / float(size)
-    px, py = np.meshgrid(achse, achse, indexing="xy")
+    achse_x = (np.arange(size, dtype=np.float64) + 0.5) / float(size)
+    achse_y = (np.arange(hoehe_px, dtype=np.float64) + 0.5) / float(size)
+    px, py = np.meshgrid(achse_x, achse_y, indexing="xy")
 
     # Ableitung im Einheitsquadrat: d(normierte Hoehe) / d(normierter Ort).
     # np.gradient liefert (d/dZeile, d/dSpalte); Spalte ist x.

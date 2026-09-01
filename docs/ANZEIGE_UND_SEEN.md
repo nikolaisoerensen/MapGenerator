@@ -66,10 +66,54 @@ Nutzerwunsch: *"dass man im 3D modus bei dem Flussnetzwerk keine fluesse
 sehn kann. ich will in den jeweiligen reitern die fluesse auf dem boden
 sehen. die grossen fluesse koennen als overlay bei biome drin sein."*
 
-### [ ] B.1 Flussnetz als Overlay im Fluss-Reiter
-`river_mask` und `river_order` liegen als Terrain-Ausgaben vor
-(`terrain.redistribution`). Sie muessen nur als Overlay-Layer registriert
-und eingefaerbt werden — das System dafuer steht.
+### [x] B.1 Flussnetz als Overlay - ERLEDIGT 2026-08-25
+
+Der Fluss-Reiter hatte das Overlay bereits (`overlay_river_generations`,
+seit dem 24.08. auf beiden Anzeigen). Offen waren zwei andere Dinge, und
+beide waren unsichtbar:
+
+**1. `river_order` hatte keine Farbskala.** Kein Eintrag in
+`CanvasSettings.CANVAS_2D["layer_ranges"]`, also Auto-Skalierung - und weil
+0 (kein Fluss) den weitaus groessten Teil der Karte ausmacht, sass die ganze
+Skala im Nichts. Jetzt fest `("Blues", 0.0, 4.0)`. Gemessen am 2026-08-25
+(256 px, Seed 20260804, 1318 Netzknoten): Strahler-Ordnung 1 = 75.6 %,
+2 = 12.4 %, 3 = 7.1 %, 4 = 4.9 %, Maximum 4. Fest statt automatisch, damit
+ein Seed mit nur drei Ordnungen nicht andere Farben fuer dieselbe Ordnung
+zeigt.
+
+**2. Der Biome-Reiter zeigte ein ANDERES Flusssystem - und nur in 2D.**
+Seine Checkbox rief `overlay_river_network(flow_map)`:
+
+* **Zweite Quelle.** `flow_map` kommt aus dem Wassergenerator; das Overlay
+  schnitt sich daraus per 90.-Perzentil selbst eine Flussmaske. Der
+  Fluss-Reiter zeigt dagegen `river_generation` aus dem Weltflussnetz. Zwei
+  Quellen fuer dieselbe Aussage - dieselbe Falle wie bei `lake`
+  (SPEZIFIKATION §4.5). In zwei Reitern standen zwei verschiedene Fluesse.
+* **Nur 2D.** `overlay_river_network` gibt es ausschliesslich auf
+  `MapDisplay2D`. In der 3D-Ansicht traf die `hasattr`-Weiche nie zu und
+  fiel lautlos aus - **genau der Ausfall, der am 24.08. schon einmal fuer
+  `overlay_river_generations` behoben wurde.**
+
+Der Biome-Reiter benutzt jetzt dieselbe Quelle und dasselbe Overlay wie der
+Fluss-Reiter, inklusive `clear_river_overlay()` beim Abschalten. Die
+Checkbox heisst "Flussnetz" statt "Rivers".
+
+**Dauerhaft abgesichert:** `smoke_test_display_methoden_existieren.py` hat
+eine dritte Gruppe `einseitige_sind_begruendet`. Die alte Pruefung verlangte
+nur, dass ein Methodenname auf MINDESTENS EINER Anzeigeklasse existiert -
+der haeufigere und teurere Fall ist der halbe. Jetzt muss jede einseitige
+Methode in `NUR_EINE_ANZEIGE` mit Begruendung stehen (17 Stueck, alle
+benannt); alles Neue faellt auf. Gegenprobe gemacht: Eintrag entfernt ->
+Test schlaegt fehl, wieder eingesetzt -> gruen.
+
+**NICHT bestaetigt:** wie es aussieht. Der Nutzer muss den Biome-Reiter im
+3D mit eingeschaltetem Flussnetz ansehen.
+
+**Bewusst NICHT mit umgestellt:** `gui/tabs/overview_tab.py:517` ruft
+`overlay_river_network` weiterhin direkt (nicht ueber `hasattr`). Der
+Uebersichtsreiter ist rein 2D, dort fehlt also nichts - aber es ist die
+zweite Quelle, und wenn sie irgendwann stoert, gehoert sie dort genauso
+ersetzt.
 
 ### [x] B.2 Grosse Fluesse im Biome-Reiter - ERZEUGUNG BEHOBEN 2026-08-24
 Die Biome `grand_river` und `river` gibt es bereits. **Zuerst pruefen, ob
@@ -100,8 +144,8 @@ Lake oder Sea erkannt werden (je nachdem ob es kontakt zum meer gibt)."*
 
 ### [ ] C.1 Seeboden glaetten
 Gemessen (512 px, Seed 20260804): 11 Binnenseen ueber 4 Pixel, groesster
-252 Pixel, verteilt auf Mittelmeer, Atlantikkueste, Griechische Inseln,
-Huegelland. **Keiner im Fjordland oder in der Taiga.**
+252 Pixel, verteilt auf Macchia, Estrande, Thalassia,
+Clonagh. **Keiner im Skerrheim oder in der Morobora.**
 
 Zwei Wege, wie der Nutzer sagt:
   * Mit `_seetiefe_aus_archetyp()` senken — der Code existiert, arbeitet
@@ -126,7 +170,7 @@ diesem Projekt schon mehrfach schiefgegangen** (SPEZIFIKATION §4.5).
 
 1. **B.2 und B.3 PRUEFEN** — moeglicherweise ist nichts zu bauen. Billig,
    und es verhindert, dass Vorhandenes ein zweites Mal entsteht.
-2. **B.1** — Flussnetz als Overlay, das System steht.
+2. ~~**B.1**~~ — erledigt 2026-08-25.
 3. **A.1** — Layerwert in 2D, schnell und sofort nuetzlich.
 4. **A.2/A.3** — Maus-Raycast im 3D, der eigentliche Aufwand.
 5. **C.1/C.2** — Binnenseen, mit der Quellenfrage aus C.2 vorab geklaert.

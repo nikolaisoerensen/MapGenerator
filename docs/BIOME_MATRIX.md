@@ -16,7 +16,7 @@ Stand 2026-08-07, **umgesetzt und gemessen** (Vermerk 2026-08-12).
 >
 > **Eine Falle, die hier schon einmal zugeschnappt ist:** die Werte dieser
 > Tabelle sind **Julitemperaturen**. Die Biom-Klassifikation las monatelang
-> das Jahresmittel und lag damit systematisch 8–9 K zu kalt — das Mittelmeer
+> das Jahresmittel und lag damit systematisch 8–9 K zu kalt — das Macchia
 > wurde zu 47 % Bruchwald statt Steineichenwald (OFFENE_PUNKTE 9.1). Wer hier
 > Werte vergleicht, muss sicherstellen, dass er `temp_map_juli` gegenüberstellt
 > und nicht `temp_map`.
@@ -30,15 +30,15 @@ Hoehenabnahme rechnet mit **0.6 K je 100 m**. Die Bezugsorte sind deshalb auf
 
 | Region | Bezugsort | Hoehe | Jan gemessen | Jul gemessen | **Jan auf 0 m** | **Jul auf 0 m** | Niederschlag |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Huegelland | Cork | 10 m | 6.0 | 15.5 | **6.1** | **15.6** | 1200 mm |
-| Fjordland | Bergen | 20 m | 2.0 | 15.0 | **2.1** | **15.1** | 2250 mm |
-| Taiga | Wologda | 130 m | −11.5 | 17.5 | **−10.7** | **18.3** | 600 mm |
-| Atlantikkueste | La Rochelle | 15 m | 6.5 | 20.5 | **6.6** | **20.6** | 780 mm |
-| Alpenland | Chur | 590 m | 0.0 | 18.5 | **3.5** | **22.0** | 850 mm |
-| Mittelgebirge | Bamberg | 240 m | 0.5 | 19.0 | **1.9** | **20.4** | 640 mm |
-| Steppe | Madrid | 660 m | 6.5 | 25.5 | **10.5** | **29.5** | 430 mm |
-| Mittelmeer | Rom | 20 m | 8.0 | 25.5 | **8.1** | **25.6** | 800 mm |
-| Griechische Inseln | Iraklio | 40 m | 12.5 | 26.5 | **12.7** | **26.7** | 480 mm |
+| Clonagh | Cork | 10 m | 6.0 | 15.5 | **6.1** | **15.6** | 1200 mm |
+| Skerrheim | Bergen | 20 m | 2.0 | 15.0 | **2.1** | **15.1** | 2250 mm |
+| Morobora | Wologda | 130 m | −11.5 | 17.5 | **−10.7** | **18.3** | 600 mm |
+| Estrande | La Rochelle | 15 m | 6.5 | 20.5 | **6.6** | **20.6** | 780 mm |
+| Nevadin | Chur | 590 m | 0.0 | 18.5 | **3.5** | **22.0** | 850 mm |
+| Nebelrode | Bamberg | 240 m | 0.5 | 19.0 | **1.9** | **20.4** | 640 mm |
+| Samarcia | Madrid | 660 m | 6.5 | 25.5 | **10.5** | **29.5** | 430 mm |
+| Macchia | Rom | 20 m | 8.0 | 25.5 | **8.1** | **25.6** | 800 mm |
+| Thalassia | Iraklio | 40 m | 12.5 | 26.5 | **12.7** | **26.7** | 480 mm |
 
 ### Was daraus auf der TATSAECHLICHEN Regionshoehe wird
 
@@ -46,23 +46,23 @@ Das ist der Punkt, den man sehen muss, bevor man die Tabelle festschreibt:
 
 | Region | Mittelhoehe | Jul auf 0 m | **Jul in der Region** | Bezugsort zum Vergleich |
 |---|---:|---:|---:|---:|
-| Huegelland | 147 m | 15.6 | **14.7** | Cork 15.5 |
-| Fjordland | 113 m | 15.1 | **14.4** | Bergen 15.0 |
-| Taiga | 294 m | 18.3 | **16.5** | Wologda 17.5 |
-| Alpenland | 800 m | 22.0 | **17.2** | Chur 18.5 |
-| Mittelgebirge | 350 m | 20.4 | **18.3** | Bamberg 19.0 |
-| Steppe | 230 m | 29.5 | **28.1** | Madrid 25.5 |
-| Mittelmeer | 1 m | 25.6 | **25.6** | Rom 25.5 |
-| Griechische Inseln | Kueste | 26.7 | **26.7** | Iraklio 26.5 |
+| Clonagh | 147 m | 15.6 | **14.7** | Cork 15.5 |
+| Skerrheim | 113 m | 15.1 | **14.4** | Bergen 15.0 |
+| Morobora | 294 m | 18.3 | **16.5** | Wologda 17.5 |
+| Nevadin | 800 m | 22.0 | **17.2** | Chur 18.5 |
+| Nebelrode | 350 m | 20.4 | **18.3** | Bamberg 19.0 |
+| Samarcia | 230 m | 29.5 | **28.1** | Madrid 25.5 |
+| Macchia | 1 m | 25.6 | **25.6** | Rom 25.5 |
+| Thalassia | Kueste | 26.7 | **26.7** | Iraklio 26.5 |
 
-**Die Steppe faellt auf.** Madrid liegt auf 660 m, unsere Steppe auf 230 m —
+**Die Samarcia faellt auf.** Madrid liegt auf 660 m, unsere Samarcia auf 230 m —
 zurueckgerechnet und wieder abgezogen bleiben 28.1 °C statt 25.5. Das ist
 rechnerisch richtig (tiefer heisst waermer), aber sie waere damit die heisseste
 Region der Karte, heisser als Kreta.
 
 > **Zwei Wege, ich empfehle den zweiten:**
 >
-> 1. So lassen — die Steppe ist eben eine Tiefebene, kein Hochplateau.
+> 1. So lassen — die Samarcia ist eben eine Tiefebene, kein Hochplateau.
 > 2. **Den Meereshoehenwert auf 27.0 °C senken** statt 29.5. Madrid ist als
 >    Vorbild wegen seiner Hochlage gewaehlt worden; die Meseta-Hitze soll aus
 >    der Trockenheit kommen, nicht aus einer Rueckrechnung.
@@ -124,8 +124,8 @@ Nutzer beschrieben hat.
 **Zur Strandtiefe:** der Nutzer fragte, ob sie sich aus der Steigung ergeben
 soll. *Vorschlag: ja, aber indirekt.* Wenn die Regel `Hoehe < 5 m UND Hang < 3°`
 lautet, folgt die Breite des Strands von selbst aus dem Gelaende — eine flache
-Kueste (Taiga, Mittelgebirge, `kuestenform` 0.45) bekommt breite Straende, eine
-Klippenkueste (Huegelland, Fjordland) gar keine. Das braucht keine eigene
+Kueste (Morobora, Nebelrode, `kuestenform` 0.45) bekommt breite Straende, eine
+Klippenkueste (Clonagh, Skerrheim) gar keine. Das braucht keine eigene
 Rechnung; die Kuestenform erledigt es bereits.
 
 
@@ -137,20 +137,20 @@ und ist damit die Pruefliste.
 
 | Region | Klima | erwartete Grundbiome | typische Superbiome |
 |---|---|---|---|
-| **Huegelland** (Cork) | 15.6 °C / 1200 mm | Hochmoor · Grasland · Feuchtwiese · Heide · Bruchwald | Klippe, Fels |
-| **Fjordland** (Bergen) | 15.1 °C / 2250 mm | Hochmoor · Nadelwald · Bergwald · Fjell | Alpin, Firn, Klippe, Fels |
-| **Taiga** (Wologda) | 18.3 °C / 600 mm | Nadelwald · Mischwald · Hochmoor · Grasland | Strand, Aue |
-| **Atlantikkueste** (La Rochelle) | 20.6 °C / 780 mm | Feuchtwiese · Eichen-Hainbuchenwald · Grasland · Bruchwald | Strand, Duenen, Aue |
-| **Alpenland** (Chur) | 22.0 °C / 850 mm | Bergwald · Fjell · Buchenwald (Taeler) · Grasland (Almen) | **Alpin, Firn, Fels** |
-| **Mittelgebirge** (Bamberg) | 20.4 °C / 640 mm | Buchenwald · Mischwald · Grasland · Bergwald (Kaemme) | Strand, Aue |
-| **Steppe** (Madrid) | 29.5 °C / 430 mm | Trockensteppe · Halbwueste · Macchia · Steineichenwald | Fels |
-| **Mittelmeer** (Rom) | 25.6 °C / 800 mm | Steineichenwald · Macchia · Grasland · Bruchwald | Strand, Klippe |
-| **Griechische Inseln** (Iraklio) | 26.7 °C / 480 mm | Macchia · Trockensteppe · Steineichenwald | Strand, Klippe, Fels |
+| **Clonagh** (Cork) | 15.6 °C / 1200 mm | Hochmoor · Grasland · Feuchtwiese · Heide · Bruchwald | Klippe, Fels |
+| **Skerrheim** (Bergen) | 15.1 °C / 2250 mm | Hochmoor · Nadelwald · Bergwald · Fjell | Alpin, Firn, Klippe, Fels |
+| **Morobora** (Wologda) | 18.3 °C / 600 mm | Nadelwald · Mischwald · Hochmoor · Grasland | Strand, Aue |
+| **Estrande** (La Rochelle) | 20.6 °C / 780 mm | Feuchtwiese · Eichen-Hainbuchenwald · Grasland · Bruchwald | Strand, Duenen, Aue |
+| **Nevadin** (Chur) | 22.0 °C / 850 mm | Bergwald · Fjell · Buchenwald (Taeler) · Grasland (Almen) | **Alpin, Firn, Fels** |
+| **Nebelrode** (Bamberg) | 20.4 °C / 640 mm | Buchenwald · Mischwald · Grasland · Bergwald (Kaemme) | Strand, Aue |
+| **Samarcia** (Madrid) | 29.5 °C / 430 mm | Trockensteppe · Halbwueste · Macchia · Steineichenwald | Fels |
+| **Macchia** (Rom) | 25.6 °C / 800 mm | Steineichenwald · Macchia · Grasland · Bruchwald | Strand, Klippe |
+| **Thalassia** (Iraklio) | 26.7 °C / 480 mm | Macchia · Trockensteppe · Steineichenwald | Strand, Klippe, Fels |
 
 Jede Region bekommt damit 4 bis 5 charakteristische Arten, und **keine zwei
 Regionen haben dieselbe Kombination**. Genau das war die Vorgabe.
 
-**Ein Prueffall faellt dabei auf:** das Alpenland liegt mit 22.0 °C auf
+**Ein Prueffall faellt dabei auf:** das Nevadin liegt mit 22.0 °C auf
 Meereshoehe zu warm fuer Bergwald — der entsteht erst durch die Hoehenabnahme
 auf 800 m und darueber. Das ist die Probe darauf, dass die Hoehenabnahme
 wirklich wirkt.
@@ -208,7 +208,7 @@ ihn saehen alle neun Regionen gleich aus. Das ist Geld, das ankommt.
 
 ## 5. Entschieden am 2026-08-07
 
-1. **Steppe bleibt bei 29.5 Grad.** Nutzer: "lassen, kann gerne etwas heisser
+1. **Samarcia bleibt bei 29.5 Grad.** Nutzer: "lassen, kann gerne etwas heisser
    sein." Sie ist damit die heisseste Region der Karte, und das ist gewollt.
 
 2. **Duenen werden SUPERBIOM**, nicht Grundbiom. Damit bleiben **15
@@ -224,6 +224,6 @@ ihn saehen alle neun Regionen gleich aus. Das ist Geld, das ankommt.
    `docs/KLIMA_UND_SEE.md`, Abschnitt 4.
 
    **Schneegrenze und Firn bleiben damit moeglich.** Im Januar liegt das
-   Alpenland auf 800 m bei 3.5 - 4.8 = **-1.3 Grad**, die Gipfel deutlich
+   Nevadin auf 800 m bei 3.5 - 4.8 = **-1.3 Grad**, die Gipfel deutlich
    darunter. Mit "nur Fruehling" waere selbst der hoechste Punkt schneefrei
    geblieben.

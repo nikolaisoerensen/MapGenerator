@@ -123,6 +123,64 @@ MIN_BOGEN_TRENNUNG_M = 400.0
 # Stationen - vier Sektoren, deren Naehte man als Tortenstuecke sieht. Bei
 # kurzen Konturen wird der Abstand deshalb so weit verkleinert, bis diese
 # Zahl erreicht ist.
+
+
+# BUDGETKORREKTUR JE ARCHETYP - gemessen ueber 64 Karten (2026-08-25)
+#
+# Nutzervorgabe: *"es sollte gleichmaessig sein ueber viele maps hinweg.
+# eine map kann sich von einer anderen unterscheiden. also neu gewichten."*
+#
+# Bis hierher war jede Aussage ueber die Archetypverteilung an EINEM Seed
+# gemessen. Das ist bei dieser Groesse wertlos: die Streuung des
+# Kuestenanteils eines Archetyps von Karte zu Karte betraegt 8 bis 21
+# Prozentpunkte. Was auf einer Karte wie ein grober Fehler aussieht, ist im
+# Mittel oft genau richtig -
+#
+#     Kola-Steilkueste: Einzelkarte 5.53x ueber Soll, Mittel ueber 64
+#     Karten 29.7 % gegen 30.0 % Soll.
+#
+# GEMESSEN ueber 64 Seeds a 384 px (Anteil an der Kuestenlaenge INNERHALB
+# der eigenen Region, Mittel +- Standardfehler des Mittels):
+#
+#     mittlere Abweichung vom max_anteil:  2.9 Prozentpunkte
+#     22 von 24 auswertbaren Archetypen:   innerhalb von 2 Standardfehlern
+#
+# Nur zwei sind belegbar daneben - alle anderen Abweichungen sind Rauschen
+# und werden ABSICHTLICH NICHT korrigiert (eine Korrektur auf einen Wert
+# innerhalb des Standardfehlers kalibriert Rauschen ein und macht die
+# Verteilung schlechter, nicht besser):
+#
+#     Archetyp            soll     ist     Abw    +-SE   Faktor
+#     Vendee-Straende      45%    39.9%   -5.1    1.7     3.0     (keiner)
+#     Fjordwand            30%    34.9%   +4.9    2.2     2.2      0.86
+#
+# Das Nevadin fehlt in dieser Rechnung: es hat auf 62 von 64 Karten
+# ueberhaupt keine Kueste und ist damit nicht kalibrierbar.
+#
+# Die Faktoren werden INNERHALB der Region wieder auf die Summe der
+# `max_anteil` normiert - ein groesseres Budget fuer den einen darf dem
+# anderen nichts wegnehmen, das Gesamtbudget bleibt die Kueste der Region.
+#
+# WARUM VENDEE-STRAENDE KEINEN FAKTOR BEKOMMT, obwohl es der groesste
+# belegbare Ausreisser ist: der Faktor wurde gebaut, mit 1.13 ueber
+# dieselben 64 Karten nachgemessen - und bewegte den Anteil von 39.9 % auf
+# 39.8 %. Wirkungslos, und fuer die Nachbarn sogar leicht schaedlich
+# (Ile-de-Re-Watt +2.5 -> +3.5 Punkte).
+#
+# Der Grund steht unten in der Zuordnungsschleife: die uebrig gebliebenen
+# Stationen gehen an `rest = max(archetypen, key=max_anteil)`, und das IST
+# in der Estrande Vendee-Straende (45 % gegen 30 % und 25 %). Ein
+# Archetyp, der ohnehin alle Reste einsammelt, ist nicht budgetbegrenzt -
+# sein Budget zu erhoehen kann per Konstruktion nichts aendern. Dasselbe
+# gilt fuer jeden anderen groessten Typ seiner Region.
+#
+# Seine fehlenden 5 Punkte kommen aus dem Einschmelzen kurzer Segmente in
+# `_segmente_schliessen()` (siehe docs/OFFENE_PUNKTE.md). Dort muesste die
+# Korrektur ansetzen, nicht hier.
+SAAT_BUDGET_KORREKTUR = {
+    "Fjordwand": 0.86,
+}
+
 MIN_STATIONEN_JE_KONTUR = 16
 
 # Ueber wieviele Nachbarstationen die gemessene Hinterlandhoehe geglaettet
@@ -162,9 +220,10 @@ MIN_SEGMENT_M = 3.0 * UEBERGANG_M
 # ABHILFE: der Jitter wird entlang der Bogenlaenge geglaettet. Benachbarte
 # Stationen bekommen dadurch aehnliche Scores und damit denselben Typ, und
 # die Laeufe werden lang genug, um das Einschmelzen zu ueberstehen. Die
-# ZIELANTEILE bleiben davon unberuehrt - `ziel_anzahl` und die
-# Auswahlschleife sind unveraendert, es aendert sich nur, WELCHE Stationen
-# ein Typ bekommt, nicht WIEVIELE.
+# ZIELANTEILE bleiben davon unberuehrt - das Meterbudget (`ziel_meter`,
+# bis 2026-08-25 `ziel_anzahl`) und die Auswahlschleife sind unveraendert,
+# es aendert sich nur, WELCHE Stationen ein Typ bekommt, nicht wieviel
+# Kueste.
 # GEMESSEN 2026-08-24 (512 px, Seed 20260804), Ausfaelle ab 8 Stationen:
 #   sigma 2.5 -> 2 fehlen (Fjordbucht, Moher-Klippen), Median 505 m
 #   sigma 3.5 -> 1 fehlt  (Algarve-Klippen), Median 502 m   <-- gewaehlt
@@ -249,7 +308,7 @@ BAND_EXPONENTEN = (2.5, 1.6, 0.9, 0.45)
 # Der erste Anlauf koppelte an `katalog_m`, die Klippenhoehe des
 # Archetyps. GEMESSEN WAR DAS FALSCH: der Katalogwert ist je REGION
 # tabelliert, nicht je Archetyp, und trennt Strand und Klippe deshalb
-# nicht. Die Kola-STEILKUESTE steht bei 30 m (die Taiga hat insgesamt
+# nicht. Die Kola-STEILKUESTE steht bei 30 m (die Morobora hat insgesamt
 # niedrige Kuesten), der Kykladen-STRAND bei 69 m. Eine Schwelle auf
 # diesen Wert daempfte ausgerechnet die niedrigen Klippen mit: die
 # schlechteste Klippenform stieg von RMS 0.138 auf 0.214 (Schwelle 80 m)
@@ -260,7 +319,7 @@ BAND_EXPONENTEN = (2.5, 1.6, 0.9, 0.45)
 # - also exakt die Groesse, um die es hier geht.
 #
 #   Straende   1.06 - 1.11  (Weissmeer 1.06, Vendee 1.07, Toskana 1.10,
-#                            Dingle 1.10, Kykladen 1.11)
+#                            Luce Bay 1.10, Kykladen 1.11)
 #   Klippen    1.23 - 1.45  (Bretagne 1.23, Kola 1.27, Santorini 1.29,
 #                            Algarve 1.32, Moher 1.35, Amalfi 1.40,
 #                            Fjordwand 1.45)
@@ -339,29 +398,29 @@ PLATEAU_FLACH = 0.6
 # (p90 = 170 m). Diese Zahlen stammen aus tools/kuestenlaengsschnitt.py,
 # Schnitte auf den Kuestennormalen alle 100 m, ueber die volle Vorbildkueste:
 #
-#   Huegelland          Doolin-Moher, 19.4 km
-#   Fjordland           Lofoten bei Reine, 61.5 km
-#   Taiga               Stockholmer Schaeren, 57.2 km
-#   Atlantikkueste      Cabo da Roca, 13.6 km
-#   Alpenland           Lofoten (Nutzer-Vorgabe: "alpen kann lofoten
+#   Clonagh          Doolin-Moher, 19.4 km
+#   Skerrheim           Lofoten bei Reine, 61.5 km
+#   Morobora               Stockholmer Schaeren, 57.2 km
+#   Estrande      Cabo da Roca, 13.6 km
+#   Nevadin           Lofoten (Nutzer-Vorgabe: "alpen kann lofoten
 #                       entsprechen, das ist gut genug")
-#   Mittelgebirge       Ruegen/Koenigsstuhl, 15.2 km
-#   Steppe              Kap Kaliakra, 20.9 km
-#   Mittelmeer          Calanques Marseille, 33.3 km
-#   Griechische Inseln  Santorini, 42.9 km
+#   Nebelrode       Ruegen/Koenigsstuhl, 15.2 km
+#   Samarcia              Kap Kaliakra, 20.9 km
+#   Macchia          Calanques Marseille, 33.3 km
+#   Thalassia  Santorini, 42.9 km
 #
 # p10/p90 statt Min/Max: die Extremwerte sind einzelne Stationen und setzen
 # sonst die ganze Skala.
 MESSWERTE_JE_REGION = {
-    "Huegelland": (17.0, 170.0),
-    "Fjordland": (42.0, 448.0),
-    "Taiga": (15.0, 30.0),
-    "Atlantikkueste": (50.0, 191.0),
-    "Alpenland": (42.0, 448.0),
-    "Mittelgebirge": (80.0, 142.0),
-    "Steppe": (47.0, 83.0),
-    "Mittelmeer": (53.0, 297.0),
-    "Griechische Inseln": (69.0, 280.0),
+    "Clonagh": (17.0, 170.0),
+    "Skerrheim": (42.0, 448.0),
+    "Morobora": (15.0, 30.0),
+    "Estrande": (50.0, 191.0),
+    "Nevadin": (42.0, 448.0),
+    "Nebelrode": (80.0, 142.0),
+    "Samarcia": (47.0, 83.0),
+    "Macchia": (53.0, 297.0),
+    "Thalassia": (69.0, 280.0),
 }
 
 
@@ -381,19 +440,19 @@ MESSWERTE_JE_REGION = {
 # weitersteigt. Ein Saettigungskriterium ist an realen Daten unbrauchbar.
 #
 # Die Schwelle 10 % ist geprueft stabil: zwischen 5 % und 20 % aendern sich
-# die Werte moderat (Huegelland 185/141/105 m), bei 30 % bricht das
-# Verfahren zusammen (Atlantikkueste springt auf 3 m - ein Fehltreffer im
+# die Werte moderat (Clonagh 185/141/105 m), bei 30 % bricht das
+# Verfahren zusammen (Estrande springt auf 3 m - ein Fehltreffer im
 # verrauschten Anfang).
 MESS_REICHWEITE_M = {
-    "Huegelland": 141.0,
-    "Fjordland": 296.0,
-    "Taiga": 132.0,
-    "Atlantikkueste": 185.0,
-    "Alpenland": 296.0,          # Lofoten, wie bei den Hoehen
-    "Mittelgebirge": 172.0,
-    "Steppe": 110.0,
-    "Mittelmeer": 203.0,
-    "Griechische Inseln": 349.0,
+    "Clonagh": 141.0,
+    "Skerrheim": 296.0,
+    "Morobora": 132.0,
+    "Estrande": 185.0,
+    "Nevadin": 296.0,          # Lofoten, wie bei den Hoehen
+    "Nebelrode": 172.0,
+    "Samarcia": 110.0,
+    "Macchia": 203.0,
+    "Thalassia": 349.0,
 }
 
 
@@ -411,8 +470,8 @@ MESS_REICHWEITE_M = {
 # Messrauschen keine Rueckfaelle erzeugt - eine Kueste, die landeinwaerts
 # wieder abfaellt, waere ein Tal und gehoert nicht ins Kuestenprofil.
 #
-# Die Formen unterscheiden sich deutlich: Griechische Inseln steigen am
-# steilsten (0.42 bei u=0.25), Fjordland am flachsten (0.20) - Lofoten ist
+# Die Formen unterscheiden sich deutlich: Thalassia steigen am
+# steilsten (0.42 bei u=0.25), Skerrheim am flachsten (0.20) - Lofoten ist
 # eine Rampe, keine Wand. Genau diese Unterschiede gingen mit der einen
 # Formel verloren.
 # GEMESSENE MASSE JE ARCHETYP: (Distanz in m, Hoehe in m).
@@ -430,7 +489,7 @@ MESS_REICHWEITE_M = {
 #
 # Bis hierher gab es nur `MESS_REICHWEITE_M` und `MESSWERTE_JE_REGION`,
 # beide je REGION. Das ist die Wurzel der vier bekannten Hoehenausreisser:
-# die Taiga-Hoehen stammen von den Stockholmer Schaeren (15-30 m) und
+# die Morobora-Hoehen stammen von den Stockholmer Schaeren (15-30 m) und
 # galten damit auch fuer die Kola-Steilkueste. Jetzt misst die
 # Weissmeer-Flachkueste 17 m und die Kola-Steilkueste 19 m - beide
 # innerhalb ihres Bandes, aber mit dem Verhaeltnis 0.114 gegen 0.170
@@ -463,14 +522,14 @@ MESS_REICHWEITE_M = {
 # 27 DEM-Kacheln in tools/_dem_cache/), und die Unterschiede sind gemessen
 # statt konstruiert. Steilheit h(150 m)/150 m je Region, flach -> steil:
 #
-#   Huegelland         Dingle 0.016    West-Cork 0.068   Moher 0.948
-#   Fjordland          Schaeren 0.094  Fjordbucht 0.215  Fjordwand 0.799
-#   Taiga              Weissmeer 0.036 Labrador 0.102    Kola 0.146
-#   Atlantikkueste     Ile-de-Re 0.037 Vendee 0.070      Bretagne 0.331
-#   Alpenland          Flussmdg 0.052  Dalmatien 0.118   Kotor 0.257
-#   Mittelgebirge      Foerde 0.012    Ostsee 0.062      Ruegen 0.488
-#   Steppe             Donana 0.106    Algarve 0.298     Costa Brava 0.346
-#   Mittelmeer         Toskana 0.026   Amalfi 0.535      Cinque Terre 0.662
+#   Clonagh         Luce Bay 0.039  West-Cork 0.070   Moher 0.973
+#   Skerrheim          Schaeren 0.094  Fjordbucht 0.215  Fjordwand 0.799
+#   Morobora              Weissmeer 0.036 Labrador 0.102    Kola 0.146
+#   Estrande     Ile-de-Re 0.037 Vendee 0.070      Bretagne 0.331
+#   Nevadin          Flussmdg 0.052  Dalmatien 0.118   Kotor 0.257
+#   Nebelrode      Foerde 0.012    Ostsee 0.062      Ruegen 0.488
+#   Samarcia             Donana 0.106    Algarve 0.298     Costa Brava 0.346
+#   Macchia         Toskana 0.026   Amalfi 0.535      Cinque Terre 0.662
 #   Griech. Inseln     Kykladen 0.008  Kreta 0.438       Santorini 0.542
 #
 # Algarve und Costa Brava liegen im Anfangsanstieg nah beieinander,
@@ -525,10 +584,6 @@ MESS_PROFIL_M_JE_ARCHETYP = {
         0.0, 9.6, 15.8, 17.6, 20.8, 24.9, 27.7,
         31.1, 36.0, 42.0, 46.0, 50.8, 55.4, 59.5,
         65.1, 68.7, 72.4, 74.5, 82.3),
-    "Dingle-Straende": (
-        0.0, 1.7, 2.0, 2.5, 3.4, 3.9, 4.9,
-        6.4, 9.1, 10.2, 11.5, 12.0, 13.9, 17.5,
-        25.7, 30.0, 40.0, 47.6, 51.9),
     "Fjordbucht": (
         0.0, 12.3, 23.5, 34.9, 52.4, 74.4, 95.0,
         121.0, 144.1, 163.5, 193.1, 202.7, 212.7, 224.3,
@@ -565,6 +620,17 @@ MESS_PROFIL_M_JE_ARCHETYP = {
         0.0, 4.1, 9.5, 16.8, 27.1, 37.8, 50.3,
         60.4, 70.9, 80.5, 87.4, 94.3, 96.6, 97.5,
         102.7, 106.4, 106.4, 106.4, 106.4),
+    # NEU GEMESSEN 2026-08-25 an Sandhead / Luce Bay, Galloway (vorher
+    # Inch Beach / Dingle - siehe die Begruendung in
+    # tools/archetyp_vorbilder.py). Die alte Vorlage stieg hinter dem
+    # Strand auf 51.9 m, die neue auf 22.8 m, und sie ist ueber die ersten
+    # 350 m deutlich flacher (6.2 statt 3.4 m bei 200 m, aber 10.1 statt
+    # 6.4 m bei 350 m). Das ist die vom Nutzer verlangte Form: flach an
+    # der Wasserlinie, Huegel im Hinterland statt Bergfuss.
+    "Luce-Bay-Straende": (
+        0.0, 3.9, 4.8, 5.8, 6.2, 6.2, 6.6,
+        10.1, 15.7, 16.5, 18.6, 18.6, 19.3, 19.3,
+        19.7, 21.2, 21.5, 22.1, 22.8),
     "Moher-Klippen": (
         0.0, 57.3, 129.1, 146.0, 148.2, 148.2, 148.2,
         148.2, 148.2, 148.2, 148.2, 148.2, 148.2, 148.2,
@@ -608,6 +674,47 @@ MESS_PROFIL_M_JE_ARCHETYP = {
 }
 
 
+# HINTERLANDHOEHE JE ARCHETYP - die Zweipunktmethode des Nutzers.
+#
+# Nutzervorgabe 2026-08-26: *"höhenwert vom küstenprofil sei die mittlere
+# höhe von 400 bis 700 m tiefe im hinterland (zweipunktmethode)"*.
+#
+# WOFUER: das Gebietssystem (`kuestengebiete()` in
+# core/terrain_weltkarte.py) leitet daraus ab, wie hoch das Hinterland
+# hinter einem Kuestenabschnitt liegt.
+#
+# WARUM NICHT `hoehe_faktor` AUS DEM KATALOG - der beschreibt das UFER,
+# nicht das Hinterland, und in VIER von neun Regionen dreht sich die
+# Reihenfolge dadurch um (gemessen 2026-08-26):
+#
+#     Region              Archetyp             hoehe_faktor   h(400-700)
+#     Skerrheim           Fjordbucht               0.30          195 m
+#     Skerrheim           Schaerenkueste           0.50           15 m
+#     Thalassia  Kreta-Buchten            0.80          202 m
+#     Thalassia  Santorini-Kliff          1.15          120 m
+#     Macchia          Cinque-Terre-Buchten     1.00          252 m
+#     Macchia          Amalfi-Steilkueste       1.60          204 m
+#     Morobora               Labrador-Buchten         0.70           90 m
+#     Morobora               Kola-Steilkueste         1.10           58 m
+#
+# Eine Fjordbucht hat ein niedriges Ufer und steile Waende direkt dahinter.
+# Der Katalogfaktor sagt "niedrig", das Hinterland ist das Zweithoechste
+# seiner Region. Fuer das Gebietssystem zaehlt das Hinterland.
+#
+# ABGELEITET, NICHT GETIPPT: der Wert wird aus MESS_PROFIL_M_JE_ARCHETYP
+# gerechnet. Eine zweite von Hand gepflegte Tabelle waere eine zweite
+# Wahrheit ueber dieselbe Messung (SPEZIFIKATION 4.5).
+HINTERLAND_BAND_M = (400.0, 700.0)
+
+
+def _gemessene_hinterlandhoehen():
+    """Archetypname -> mittlere Profilhoehe im Band HINTERLAND_BAND_M."""
+    stellen = np.asarray(PROFIL_STELLEN_M, dtype=np.float64)
+    band = (stellen >= HINTERLAND_BAND_M[0]) & (stellen <= HINTERLAND_BAND_M[1])
+    return {name: float(np.asarray(werte, dtype=np.float64)[band].mean())
+            for name, werte in MESS_PROFIL_M_JE_ARCHETYP.items()}
+
+
 MESS_ARCHETYP_MASSE = {
     "Algarve-Klippen": (96.0, 59.0),
     "Alpine-Flussmuendung": (376.0, 19.0),
@@ -616,7 +723,6 @@ MESS_ARCHETYP_MASSE = {
     "Cinque-Terre-Buchten": (287.0, 109.0),
     "Costa-Brava-Buchten": (119.0, 55.0),
     "Dalmatien-Klippen": (392.0, 22.0),
-    "Dingle-Straende": (176.0, 17.0),
     "Fjordbucht": (349.0, 46.0),
     "Fjordwand": (529.0, 553.0),
     "Foerdenkueste": (216.0, 81.0),
@@ -626,6 +732,11 @@ MESS_ARCHETYP_MASSE = {
     "Kreta-Buchten": (258.0, 135.0),
     "Kykladen-Strand": (225.0, 58.0),
     "Labrador-Buchten": (256.0, 14.0),
+    # Wert unveraendert beim Wechsel der Vorbildkueste 2026-08-25: diese
+    # Tabelle kommt NICHT aus der Kachel des Archetyps, sondern aus dem
+    # Streckensplit seiner REGION (Schnitte nach Steilheit sortiert, in
+    # Drittel geteilt) - siehe tools/archetyp_masse_messen.py.
+    "Luce-Bay-Straende": (176.0, 17.0),
     "Moher-Klippen": (127.0, 144.0),
     "Ostsee-Flachkueste": (167.0, 78.0),
     "Ruegen-Kreidekueste": (145.0, 83.0),
@@ -668,10 +779,6 @@ MESS_FORM_JE_ARCHETYP = {
         0.000, 0.031, 0.081, 0.127, 0.181, 0.253,
         0.316, 0.381, 0.449, 0.518, 0.587, 0.656,
         0.727, 0.804, 0.880, 0.949, 1.000),
-    "Dingle-Straende": (
-        0.000, 0.020, 0.057, 0.093, 0.143, 0.218,
-        0.292, 0.366, 0.460, 0.549, 0.636, 0.717,
-        0.792, 0.866, 0.921, 0.970, 1.000),
     "Fjordbucht": (
         0.000, 0.021, 0.051, 0.074, 0.117, 0.165,
         0.199, 0.247, 0.305, 0.363, 0.422, 0.501,
@@ -708,6 +815,14 @@ MESS_FORM_JE_ARCHETYP = {
         0.000, 0.041, 0.113, 0.195, 0.298, 0.417,
         0.522, 0.627, 0.715, 0.774, 0.832, 0.869,
         0.909, 0.939, 0.970, 0.987, 1.000),
+    # Wert unveraendert beim Wechsel der Vorbildkueste 2026-08-25: diese
+    # Tabelle kommt NICHT aus der Kachel des Archetyps, sondern aus dem
+    # Streckensplit seiner REGION (Schnitte nach Steilheit sortiert, in
+    # Drittel geteilt) - siehe tools/archetyp_masse_messen.py.
+    "Luce-Bay-Straende": (
+        0.000, 0.020, 0.057, 0.093, 0.143, 0.218,
+        0.292, 0.366, 0.460, 0.549, 0.636, 0.717,
+        0.792, 0.866, 0.921, 0.970, 1.000),
     "Moher-Klippen": (
         0.000, 0.064, 0.188, 0.326, 0.449, 0.552,
         0.660, 0.773, 0.853, 0.883, 0.915, 0.938,
@@ -795,10 +910,25 @@ MINDEST_LANDHOEHE_M = 0.01
 # 350 m und wechselt dann auf 150 m.
 #
 # Gemischt wird ueber die Steilheit h(150 m)/150 m des Archetyps:
-#   Kykladen-Strand 0.009, Foerdenkueste 0.013, Dingle 0.017 (flach)
-#   Santorini 0.542, Fjordwand 0.799, Moher 0.948 (steil)
-PROFIL_VOLL_FLACH_M = 300.0     # p1 der flachsten Kueste
-PROFIL_VOLL_STEIL_M = 350.0     # p1 der steilsten
+#   Kykladen-Strand 0.010, Foerdenkueste 0.014, Toskana 0.024 (flach)
+#   Cinque Terre 0.693, Fjordwand 0.851, Moher 0.973 (steil)
+# (Stand 2026-08-25, nach dem Wechsel der Clonagh-Strandvorlage von
+# Dingle auf Luce Bay: 0.017 -> 0.039. Die Zonen p1/p2 aendern sich
+# dadurch NICHT - beide Werte liegen im flachen Sattel der Mischung.)
+# 2026-08-25 um 30 % naeher an die Kueste gezogen (Nutzervorgabe nach der
+# Sichtpruefung: *"die kuestenprofile sind teilweise etwas zu agressiv, ich
+# wuerde p1 noch naeher an die kueste ziehen (30% naeher ran)"*).
+# Vorher 300 / 350 m.
+#
+# p2 bleibt, wo es war. Die Uebergangszone wird dadurch LAENGER (flach:
+# 210 statt 300 bis 550 m, also 340 statt 250 m Ueberblendung) - das ist
+# genau die gewuenschte Wirkung: das gemessene Profil setzt sich kuerzer
+# durch und geht sanfter ins Rauschgelaende ueber.
+# 2026-08-25, ZWEITER ZUG: nochmal 15 % naeher (Nutzervorgabe *"p1 noch
+# frueher ist, also nochmal 15% naeher an der kueste"*). Von 210/245 auf
+# 178/208. Der erste Zug am selben Tag hatte 300/350 auf 210/245 gebracht.
+PROFIL_VOLL_FLACH_M = 178.0     # p1 der flachsten Kueste
+PROFIL_VOLL_STEIL_M = 208.0     # p1 der steilsten
 PROFIL_ENDE_FLACH_M = 550.0     # p2 der flachsten
 PROFIL_ENDE_STEIL_M = 500.0     # p2 der steilsten
 STEIL_FLACH = 0.05              # Steilheit, ab der gemischt wird
@@ -833,6 +963,99 @@ ZONEN_WELLEN_M = (1700.0, 2900.0, 4600.0)
 # negativ und der Smoothstep spraenge.
 MIN_UEBERGANG_M = 60.0
 
+# WIE WEIT p2 REICHT - AUS DER AEHNLICHKEIT ZUM NACHBARABSCHNITT
+#
+# Nutzervorgabe 2026-08-25: *"p2 abhaengig von der kuestenaehnlichkeit. also
+# wenn die hoehenfaktoren sich stark aendern, dann bricht p2 frueher ab.
+# damit es sich einfuegt. also kann 1500 m weit reichen, oder aber 400 m
+# weit (natuerlich ist das mindeste immer 2x p1 oder so)."*
+#
+# DER GEDANKE DAHINTER: die Uebergangszone ist die Strecke, auf der das
+# gemessene Kuestenprofil ins Rauschgelaende ausblendet. Steht neben einer
+# Klippe ein Strand, muessen beide auf kurzer Strecke zueinanderfinden -
+# eine lange Ausblendung wuerde sie ueber hunderte Meter ineinanderziehen
+# und beide Formen verwischen. Gleicht der Nachbar dagegen dem eigenen
+# Abschnitt, darf die Kueste ihre Form weit ins Land tragen.
+#
+# GEMESSEN wird ueber `hoehe_faktor` aus dem Archetypkatalog, weil das die
+# Groesse ist, die der Nutzer nennt. Spannen je Region:
+#
+#     Skerrheim   1.8 / 0.5 / 0.3   Spanne 1.50   (Wand neben Bucht)
+#     Nevadin   1.7 / 1.2 / 0.4   Spanne 1.30
+#     Nebelrode 0.85/0.3/0.35   Spanne 0.55   (alle drei aehnlich)
+#
+# Der Vergleich laeuft gegen die GLOBALE Spanne (0.25 bis 1.8), nicht die
+# der Region - sonst haette das Nebelrode, dessen drei Typen ohnehin
+# dicht beieinanderliegen, dieselben kurzen Uebergaenge wie das Skerrheim
+# mit seinem Wand-neben-Bucht-Sprung, und genau der Unterschied ist gemeint.
+# WIE WEIT p2 HOECHSTENS REICHT - GEBAUT, GEMESSEN, VORERST AUS.
+#
+# Nutzerwunsch 2026-08-25: *"p2 abhaengig von der kuestenaehnlichkeit ...
+# also kann 1500 m weit reichen, oder aber 400 m weit"*. Die Mechanik dafuer
+# steht unten in `_uebergaenge_aus_aehnlichkeit()` und ist ueber
+# P2_AUS_AEHNLICHKEIT einzuschalten. **Vorgabe ist AUS**, und zwar aus
+# gemessenem Grund - nicht aus Vergesslichkeit.
+#
+# smoke_test_regionen_welt (5 Seeds, 384 px):
+#
+#     p2-Regel                      Befunde   Naht   Atlantik-Hang (soll 10)
+#     fest je Archetyp (Vorgabe)       4      1.546        ok
+#     Aehnlichkeit, max  620           5      1.521        ok
+#     Aehnlichkeit, max  700           5      1.457        ok
+#     Aehnlichkeit, max 1000, exp 1.6  7      1.314       7.7
+#     Aehnlichkeit, max 1500, exp 2.2  7      1.301       6.0
+#     Aehnlichkeit, max 1500, exp 1.0  6      1.300       5.0
+#
+# smoke_test_kuestenprofiltreue, selbst bei der zahmsten Fassung (max 700):
+#
+#     fest je Archetyp:  3/3 gruen, Median 1.8 m, 13 von 13 flachen getroffen
+#     Aehnlichkeit 700:  2/3,       Median 5.6 m, Kykladen-Strand 12 m daneben
+#
+# DER ZIELKONFLIKT, offen benannt: die variable Reichweite verbessert die
+# Naht (1.546 -> 1.457), kostet aber die Zusicherung *"flache kueste bleibt
+# flach"* - und die ist eine aeltere, ausdrueckliche Nutzervorgabe. Ein
+# flaches Profil, das weiter ins Land traegt, wird unterwegs von steilen
+# Nachbarn hochgezogen; genau das beschreibt schon der Kommentar bei
+# MISCH_EXPONENT, hier nur mit umgekehrtem Vorzeichen.
+#
+# GEGENGEPRUEFT, WOHER DIE KOSTEN KOMMEN: p1 auf 178/208 zu ziehen (der
+# andere Teil derselben Nutzervorgabe) kostet auf BEIDEN Tests nichts -
+# 4 Befunde und 3/3, jeweils unveraendert. Die Kosten stecken
+# ausschliesslich in der Reichweite.
+#
+# WOHIN DAS GEHOERT: die tiefe Kopplung Kueste -> Hinterland ist der Zweck
+# des Gebietssystems (docs/AUFRAEUMPLAN.md) - es leitet die mittlere Hoehe
+# des Hinterlands aus dem Kuestenarchetyp ab UND erhaelt dabei das
+# Regionsmittel, weshalb es die Eichung nicht umwirft. p2 zu strecken
+# erreicht dasselbe Ziel auf die grobe Tour und kaempft gegen die Eichung.
+# Wenn das Gebietssystem steht, ist die Reichweitenfrage neu zu stellen.
+P2_MAX_M = 700.0                # bei voellig gleichem Nachbarn
+# Wie scharf die Aehnlichkeit auf die Reichweite durchschlaegt. 1 = linear.
+#
+# GEMESSEN 2026-08-25 (384 px, Seed 20260804). Linear reicht p2 zu weit:
+# benachbarte Abschnitte laufen ueber hunderte Meter ineinander, flache
+# Archetypen werden von steilen Nachbarn hochgezogen, und ganze Regionen
+# verflachen, weil ein Strandprofil weit ins Land traegt.
+#
+#     Exp   p2 Median   Profilfehler   flache daneben   Atlantik-Hang
+#     1.0     1206 m        9.2 m            1               7.4
+#     1.6     1067 m        8.1 m            1               9.2
+#     2.2      951 m        7.4 m            0              10.8
+#     3.0      825 m        7.1 m            0              12.0
+#
+# Der Estrande-Hang soll 10.0 sein - 2.2 trifft ihn am besten und
+# raeumt zugleich die flachen Ausreisser weg. p2 liegt damit im Median noch
+# immer bei 951 m, also fast doppelt so weit wie die festen 500-550 m
+# davor. 3.0 waere schaerfer, uebersteuert den Hang aber nach oben.
+# Bei P2_MAX_M = 700 ist der Exponent nur noch eine Feinheit (die Spanne
+# ist klein). 1.6 aus der Messreihe oben uebernommen.
+P2_AEHNLICHKEIT_EXPONENT = 1.6
+
+# False stellt p2 auf den festen Archetypwert zurueck - siehe P2_MAX_M.
+P2_AUS_AEHNLICHKEIT = False
+P2_MIN_FAKTOR = 2.0             # Untergrenze als Vielfaches von p1
+HOEHENFAKTOR_SPANNE = 1.8 - 0.25
+
 # WIE SCHARF DER NAECHSTE KUESTENABSCHNITT DOMINIERT.
 #
 # Das Mischgewicht faellt mit `(1 - d/zone) ** MISCH_EXPONENT`. Der Wert
@@ -842,7 +1065,7 @@ MIN_UEBERGANG_M = 60.0
 #   2  quadratisch - erster Anlauf, GEMESSEN ZU SCHWACH
 #   4  scharf      - der naechste Abschnitt setzt sich durch
 #
-# GEMESSEN 2026-08-24, warum 2 nicht reicht: das Fjordland hat 2106
+# GEMESSEN 2026-08-24, warum 2 nicht reicht: das Skerrheim hat 2106
 # Schaerenkuesten-Pixel (h(150 m) = 14 m) gegen 1299 Fjordwand-Pixel
 # (Soll 120 m). Die Fjordwand wurde von ihren flachen Nachbarn
 # heruntergezogen - an ihren eigenen Pixeln stand 41 m, wo das Profil
@@ -869,7 +1092,7 @@ MISCH_EXPONENT = 4.0
 # Kueste tiefer, haelt das Profil laenger gegen dieses absinkende
 # Hinterland an.
 KUESTEN_TIEFE_JE_REGION = {
-    "Fjordland": 1.5,
+    "Skerrheim": 1.5,
 }
 
 
@@ -920,10 +1143,107 @@ def _zone_p2(name):
         PROFIL_ENDE_FLACH_M + m * (PROFIL_ENDE_STEIL_M - PROFIL_ENDE_FLACH_M))
 
 
+# PROFILMASSSTAB: die Kuestenprofile auf die Groesse der Welt bringen.
+#
+# Nutzerbefund 2026-08-26: *"wenn ich sehe dass Skerrheim nur 200m hoehe hat
+# (im Profil) und wir aber einen faktor zu den hoehen haben ... dementsprechend
+# sollten die kuestenprofile von der hoehe etwas gestaucht sein."*
+#
+# DER BEFUND. Die Regionsparameter sind als Zielbild gesetzt (Nevadin 1050 m
+# Relief auf 3800 m Formgroesse). Die Kuestenprofile sind an echten DEMs in
+# ECHTEN Metern gemessen. Beide Skalen wurden nie aufeinander bezogen.
+# Verhaeltnis "hoechstes Profil im Band 400-700 m" zu "halbem Regionsrelief":
+#
+#     Clonagh 3.73   Skerrheim 2.31   Samarcia 1.70   Macchia 1.61
+#     Morobora 1.52   Nebelrode 1.41   Griech. Inseln 1.00
+#     Estrande 0.82   Nevadin 0.36
+#
+# In sieben von neun Regionen ragt die Kueste hoeher auf als das Land dahinter.
+#
+# IN BEIDEN ACHSEN, NICHT NUR IN DER HOEHE. Am 2026-08-24 hat derselbe Nutzer
+# verlangt: *"die kuestenprofile sind dadurch nicht gestreckt oder gestaucht
+# sondern haben das gleiche hoehen zu tiefen verhaeltnis wie in echt"*. Eine
+# reine Hoehenstauchung wuerde das verletzen - die Profile waeren flacher als
+# die Wirklichkeit. Ein Faktor auf BEIDE Achsen laesst Form und Neigung
+# unveraendert und macht nur ein Modell im Massstab daraus:
+#
+#     h'(x) = f * h(x / f)
+#
+# DIE FLACHEN TYPEN BLEIBEN UNVERAENDERT. Nutzervorgabe 2026-08-26:
+# *"lass uns erstmal verkleinern, ausser bei den flachen typen pro region ...
+# dann haben wir zB auch kuerzere straende und das mag ich nicht so."*
+# Kriterium ist die BEREITS VORHANDENE Definition aus
+# tests/smoke_test_kuestenprofiltreue.py (h(150 m) <= 25 m) - eine zweite
+# Definition daneben waere eine zweite Wahrheit. Sie passt auch sachlich: zu
+# hoch ragen die STEILEN Profile, die flachen waren nie das Problem.
+#
+# NUR VERKLEINERN, NIE STRECKEN. Das Nevadin braeuchte rechnerisch Faktor
+# 2.81, also eine Streckung des 900-m-Profils auf 2529 m - weit ueber p2
+# (hoechstens 700 m). Der Faktor ist deshalb bei 1.0 gedeckelt. Praktisch
+# gegenstandslos: das Nevadin hat auf 62 von 64 Karten keine Kueste.
+PROFILMASSSTAB_MIN = 0.35
+FLACH_GRENZE_H150_M = 25.0
+
+
+def _profil_flach(name):
+    """Ist der Archetyp flach im Sinne von smoke_test_kuestenprofiltreue?"""
+    werte = MESS_PROFIL_M_JE_ARCHETYP.get(name)
+    if werte is None:
+        return True
+    h150 = float(np.interp(150.0, PROFIL_STELLEN_M,
+                           np.asarray(werte, dtype=np.float64)))
+    return h150 <= FLACH_GRENZE_H150_M
+
+
+def _profilmasstab():
+    """Archetypname -> Faktor fuer BEIDE Achsen. 1.0 heisst unveraendert."""
+    stellen = np.asarray(PROFIL_STELLEN_M, dtype=np.float64)
+    band = ((stellen >= HINTERLAND_BAND_M[0])
+            & (stellen <= HINTERLAND_BAND_M[1]))
+    faktoren = {}
+    for _z, _s, r in alle_regionen():
+        typen = KUESTEN_ARCHETYPEN.get(r["name"]) or []
+        steile = [t["name"] for t in typen
+                  if t["name"] in MESS_PROFIL_M_JE_ARCHETYP
+                  and not _profil_flach(t["name"])]
+        for t in typen:
+            faktoren[t["name"]] = 1.0
+        if not steile:
+            continue                      # Region ganz aus flachen Typen
+        hoechstes = max(
+            float(np.asarray(MESS_PROFIL_M_JE_ARCHETYP[n],
+                             dtype=np.float64)[band].mean())
+            for n in steile)
+        ziel = 0.5 * float(r["relief_m"])
+        f = float(np.clip(ziel / max(hoechstes, 1e-9), PROFILMASSSTAB_MIN, 1.0))
+        for n in steile:
+            faktoren[n] = f
+    return faktoren
+
+
+PROFILMASSSTAB = _profilmasstab()
+
+
 def _gemessene_profile_m():
-    """Archetypname -> gemessenes Hoehenprofil in METERN."""
-    return {name: np.asarray(werte, dtype=np.float64)
-            for name, werte in MESS_PROFIL_M_JE_ARCHETYP.items()}
+    """
+    Archetypname -> Hoehenprofil in METERN, auf den Weltmassstab gebracht.
+
+    h'(x) = f * h(x / f) - siehe PROFILMASSSTAB oben. Bei f = 1 kommt die
+    Messtabelle unveraendert heraus.
+    """
+    stellen = np.asarray(PROFIL_STELLEN_M, dtype=np.float64)
+    tabelle = {}
+    for name, werte in MESS_PROFIL_M_JE_ARCHETYP.items():
+        roh = np.asarray(werte, dtype=np.float64)
+        f = PROFILMASSSTAB.get(name, 1.0)
+        if abs(f - 1.0) < 1e-9:
+            tabelle[name] = roh
+            continue
+        # Ausserhalb der Messung (x/f > 900 m) haelt np.interp den letzten
+        # Wert - genau richtig: das Hinterland steigt dort nicht weiter,
+        # weil wir es nicht gemessen haben.
+        tabelle[name] = f * np.interp(stellen / f, stellen, roh)
+    return tabelle
 
 
 def _gemessene_formen():
@@ -987,6 +1307,7 @@ GEMESSENE_HOEHE = _gemessene_hoehen()
 GEMESSENE_REICHWEITE = _gemessene_reichweiten()
 GEMESSENE_FORM = _gemessene_formen()
 GEMESSENES_PROFIL_M = _gemessene_profile_m()
+GEMESSENE_HINTERLANDHOEHE = _gemessene_hinterlandhoehen()
 
 
 def _bogen_glaetten(werte, kontur, bogen, sigma_stationen):
@@ -1249,6 +1570,63 @@ class VektorKueste:
                 })
 
         self._segmente_schliessen()
+        self._uebergaenge_aus_aehnlichkeit()
+
+    def _uebergaenge_aus_aehnlichkeit(self):
+        """
+        p2 je Segment aus der Aehnlichkeit zu seinen NACHBARN - siehe
+        P2_MAX_M weiter oben.
+
+        Laeuft NACH `_segmente_schliessen()`, weil erst dort feststeht,
+        welche Segmente es am Ende wirklich gibt: die Funktion schmilzt
+        Segmente unter MIN_SEGMENT_M in ihre Nachbarn ein. Vorher gerechnet
+        haetten wir die Aehnlichkeit gegen Nachbarn bestimmt, die es
+        anschliessend nicht mehr gibt.
+        """
+        hoehe_faktor = {}
+        for _z, _s, r in alle_regionen():
+            for t in KUESTEN_ARCHETYPEN.get(r["name"], []):
+                hoehe_faktor[t["name"]] = float(t["hoehe_faktor"])
+
+        je_kontur = {}
+        for seg in self.segmente:
+            je_kontur.setdefault(int(seg["kontur"]), []).append(seg)
+
+        for nummer, segmente in je_kontur.items():
+            segmente.sort(key=lambda s: s["a"])
+            n = len(segmente)
+            # Geschlossene Konturen haben einen zyklischen Nachbarn, offene
+            # nicht - bei denen ist der Rand sein eigener Nachbar (also
+            # maximal aehnlich, langer Uebergang).
+            zyklisch = self.kontur_laenge.get(nummer) is not None
+            for k, seg in enumerate(segmente):
+                eigen = hoehe_faktor.get(seg["name"])
+                if eigen is None:
+                    continue
+                nachbarn = []
+                for versatz in (-1, 1):
+                    j = k + versatz
+                    if 0 <= j < n:
+                        nachbarn.append(segmente[j])
+                    elif zyklisch and n > 1:
+                        nachbarn.append(segmente[j % n])
+                sprung = max(
+                    (abs(eigen - hoehe_faktor.get(nb["name"], eigen))
+                     for nb in nachbarn), default=0.0)
+                aehnlich = 1.0 - min(sprung / HOEHENFAKTOR_SPANNE, 1.0)
+                aehnlich = aehnlich ** P2_AEHNLICHKEIT_EXPONENT
+
+                p1 = float(seg["voll_m"])
+                unten = P2_MIN_FAKTOR * p1
+                p2 = unten + aehnlich * max(P2_MAX_M - unten, 0.0)
+                if not P2_AUS_AEHNLICHKEIT:
+                    # Der Zustand VOR dem 2026-08-25, absichtlich erreichbar
+                    # geblieben: p2 fest je Archetyp. Die Messreihe oben
+                    # vergleicht gegen genau diesen Zustand, und ohne den
+                    # Schalter muesste sie jemand von Hand nachbauen.
+                    p2 = _zone_p2(seg["name"])
+                seg["uebergang_m"] = max(p2 - p1, MIN_UEBERGANG_M)
+                seg["aehnlichkeit"] = float(aehnlich)
 
     def _segmente_schliessen(self):
         """
@@ -1762,7 +2140,7 @@ class VektorKueste:
         # `clip(1 - d / reichweite_m)^2`. `reichweite_m` ist die Groesse
         # aus dem FRUEHEREN Modell (110-349 m je Region); seit dem
         # Zonenumbau rechnet `_hoehe_block()` aber mit `voll_m`/
-        # `uebergang_m` (350/500 m, im Fjordland 525/750 m). Bei einem
+        # `uebergang_m` (350/500 m, im Skerrheim 525/750 m). Bei einem
         # Pixel 392 m vor der Kueste wurde damit `1 - 392/296` negativ und
         # auf 0 geklemmt - die Fjordwand-Pixel bekamen `staerke` 0.07, die
         # Schaerenkueste 0.00, obwohl die Kueste dort voll wirkt.
@@ -1975,7 +2353,7 @@ class VektorKueste:
         # Lange Konturen bleiben beim Sollabstand, es wird also nichts teurer,
         # wo nichts zu gewinnen ist.
         linien_abstand_echt_px = max(1.0, LINIEN_ABSTAND_M / self.mpp)
-        teile_p, teile_k, teile_b = [], [], []
+        teile_p, teile_k, teile_b, teile_g = [], [], [], []
         for nummer in np.unique(self.linien_kontur):
             maske = self.linien_kontur == nummer
             punkte_k = self.linienpunkte[maske]
@@ -1991,12 +2369,25 @@ class VektorKueste:
             teile_p.append(punkte_k[::schritt])
             teile_k.append(np.full(len(punkte_k[::schritt]), nummer, dtype=np.int32))
             teile_b.append(bogen_k[::schritt])
+            # WIEVIEL KUESTE DIESE STATION VERTRITT, in Metern.
+            #
+            # Nicht jede Station steht fuer gleich viel Kueste: die Zeile
+            # `soll_px = min(soll_px, laenge_px / MIN_STATIONEN_JE_KONTUR)`
+            # oben verdichtet kurze Konturen absichtlich, damit eine kleine
+            # Insel nicht in vier Tortenstuecke zerfaellt. Eine 1.7-km-Insel
+            # bekommt dadurch eine Station je ~105 m, das Festland eine je
+            # 420 m. Fuer die Zonenform ist das richtig - fuer die Quote
+            # weiter unten waere es ein Zaehlfehler, siehe dort.
+            teile_g.append(np.full(len(punkte_k[::schritt]),
+                                   schritt * linien_abstand_echt_px * self.mpp,
+                                   dtype=np.float64))
 
         if not teile_p:
             return
         kandidaten = np.concatenate(teile_p)
         kandidaten_kontur = np.concatenate(teile_k)
         kandidaten_bogen = np.concatenate(teile_b)
+        kandidaten_gewicht = np.concatenate(teile_g)
         if len(kandidaten) == 0:
             return
 
@@ -2040,8 +2431,83 @@ class VektorKueste:
             hoehe_norm = _bogen_glaetten(
                 hoehe_norm, kontur_je, bogen_je, SAAT_KOHAERENZ_STATIONEN)
             n = len(treffer)
-            ziel_anzahl = {a["name"]: max(1, int(round(a["max_anteil"] * n)))
-                           for a in archetypen}
+
+            # QUOTE NACH KUESTENLAENGE, NICHT NACH STATIONSZAHL (2026-08-25)
+            #
+            # `max_anteil` ist im Katalog als "Obergrenze am gesamten
+            # Kuestenumfang der Region" beschrieben. Gerechnet wurde sie bis
+            # hierher gegen die ZAHL der Saatstationen, und das ist NICHT
+            # dasselbe, weil MIN_STATIONEN_JE_KONTUR kurze Konturen
+            # absichtlich verdichtet:
+            #
+            #     55.5 % aller Saatstationen liegen auf 14.5 % der Kueste
+            #     (384 px, Seed 20260804, 62 Konturen, 155 km).
+            #
+            # Faktor 3.8 - kleine Inseln kauften einen ueberproportionalen
+            # Teil jeder Quote auf. Jede Station bringt jetzt ihr Stueck
+            # Kueste als GEWICHT mit, und ein Archetyp bekommt Stationen,
+            # bis sein Meterbudget voll ist. Eine Inselstation mit 105 m
+            # zaehlt damit ein Viertel einer Festlandstation mit 420 m.
+            #
+            # WAS DAS BRINGT UND WAS ES KOSTET - beides gemessen:
+            #
+            #   + smoke_test_kuestenprofiltreue: Luce-Bay-Straende faellt
+            #     von 32 m Abweichung auf 1 m. Der Archetyp stand vorher bei
+            #     44 m Hoehe nach 150 m, wo die Vorlage 6 m sagt - ein
+            #     Huegel, wo ein Strand stehen soll. Er war seit Beginn der
+            #     Messreihe rot (als Dingle-Straende 57 m). Alle 11 flachen
+            #     Archetypen sind damit gruen, schlechtester 4 m.
+            #   + schlechteste Quotenabweichung 65.0 -> 40.1 Prozentpunkte.
+            #   - smoke_test_regionen_welt bekommt EINEN Befund dazu (7 -> 8):
+            #     Morobora-Hang 10.4 statt 7.5. Die Morobora hat nur ~33 Stationen
+            #     in der ganzen Region, da schlaegt jede Umverteilung durch.
+            #   o mittlere Quotenabweichung praktisch unveraendert
+            #     (12.5 -> 12.8 Prozentpunkte).
+            #
+            # DIE NAHELIEGENDE VERSCHAERFUNG IST GEMESSEN SCHLECHTER.
+            # Eine Variante, die das Budget NICHT ueberzieht (Station
+            # ueberspringen statt anhaengen), sieht sauberer aus und ist in
+            # jedem Punkt schwaecher:
+            #
+            #                              ueberziehend   nicht ueberziehend
+            #   kuestenprofiltreue            3/3 gruen   2/3 (Luce-Bay 32 m)
+            #   archetyp_verteilung           1 Befund    2 Befunde, darunter
+            #                                             Fjordwand faellt bei
+            #                                             17 Stationen ganz aus
+            #   Quotentreue Mittel            12.8 P      14.0 P
+            #   Quotentreue schlechteste      40.1 P      65.0 P
+            #   regionen_welt Morobora-Hang      10.4        9.5 (beide rot)
+            #
+            # Grund: wer eine Station ueberspringt, weil sie nicht mehr ins
+            # Budget passt, gibt sie an den NAECHSTEN Archetyp weiter - und
+            # die Schleife laeuft vom steilsten zum flachsten. Die flachen
+            # Typen erben dadurch genau die Stationen, die keiner wollte.
+            # Deshalb die ueberziehende Fassung.
+            #
+            # DER EIGENTLICHE ENGPASS SITZT DANACH und ist NICHT behoben:
+            # `_segmente_schliessen()` schmilzt Segmente unter MIN_SEGMENT_M
+            # (750 m) in den laengeren Nachbarn ein. Ein Archetyp mit vielen
+            # einzeln verstreuten Stationen verliert seine ganze Laenge an
+            # den Nachbarn, egal wie die Quote gerechnet wurde -
+            # Schaerenkueste und Algarve-Klippen kommen in BEIDEN
+            # Zaehlweisen auf 0.0 % Laenge bei 16 bzw. 8 zugeteilten
+            # Stationen. Dort muesste eine weitere Korrektur ansetzen.
+            #
+            # (Die urspruengliche ANNAHME, die flachen Archetypen laegen auf
+            # Inseln und koennten ihr Profil dort nicht halten, war falsch.
+            # Gemessen liegen sie auf dem Festland; siehe den Kommentar zur
+            # Messstrecke in tests/smoke_test_kuestenprofiltreue.py.)
+            gewicht_je = kandidaten_gewicht[treffer]
+            gesamt_m = float(gewicht_je.sum())
+            # Gemessene Korrektur, innerhalb der Region normiert - siehe
+            # SAAT_BUDGET_KORREKTUR.
+            roh = {a["name"]: a["max_anteil"]
+                              * SAAT_BUDGET_KORREKTUR.get(a["name"], 1.0)
+                   for a in archetypen}
+            skala = (sum(a["max_anteil"] for a in archetypen)
+                     / max(sum(roh.values()), 1e-9))
+            ziel_meter = {name: wert * skala * gesamt_m
+                          for name, wert in roh.items()}
 
             frei = set(range(n))
             zuordnung = {}
@@ -2054,8 +2520,19 @@ class VektorKueste:
                     SAAT_KOHAERENZ_STATIONEN)
                 score = -np.abs(hoehe_norm - archetyp["hoehe_faktor"]) + jitter
                 kandidaten_idx = sorted(frei, key=lambda k: -score[k])
-                gewaehlt = kandidaten_idx[:min(ziel_anzahl[archetyp["name"]],
-                                               len(kandidaten_idx))]
+                # Auffuellen bis das Meterbudget erreicht ist. Mindestens
+                # eine Station, damit ein Archetyp nie voellig verschwindet
+                # (das war die Rolle des alten `max(1, ...)`).
+                # Auffuellen, bis das Meterbudget erreicht ist. Mindestens
+                # eine Station, damit ein Archetyp nie voellig verschwindet
+                # (das war die Rolle des alten `max(1, ...)`).
+                budget = ziel_meter[archetyp["name"]]
+                gewaehlt, summe_m = [], 0.0
+                for k in kandidaten_idx:
+                    if gewaehlt and summe_m >= budget:
+                        break
+                    gewaehlt.append(k)
+                    summe_m += float(gewicht_je[k])
                 zuordnung.update({k: archetyp for k in gewaehlt})
                 frei -= set(gewaehlt)
             if frei:
@@ -2359,7 +2836,7 @@ class VektorKueste:
         Die alte Fassung nahm `seg["reichweite_m"]`, also die Groesse aus
         dem frueheren Modell. Solange die Zonen bei 500 m lagen und die
         Reichweiten bei 110-349 m, schnitt die Maske die Zone AB - der
-        aeussere Teil des Uebergangs fiel weg. Mit dem Fjordland-Faktor
+        aeussere Teil des Uebergangs fiel weg. Mit dem Skerrheim-Faktor
         (p2 = 823 m) waere die Abweichung noch groesser geworden.
 
         Der Zuschlag LINIEN_ABSTAND_M deckt den Unterschied zwischen dem
@@ -2671,7 +3148,7 @@ class VektorKueste:
             # genau das vom Nutzer beschriebene Aufteilen: der naechste
             # Abschnitt bekommt den groessten Anteil, entferntere weniger.
             # DER EXPONENT entscheidet, wie stark der naechste Abschnitt
-            # dominiert. Quadratisch war zu schwach: das Fjordland hat
+            # dominiert. Quadratisch war zu schwach: das Skerrheim hat
             # 2106 Schaerenkuesten-Pixel (h(150 m) = 14 m) gegen 1299
             # Fjordwand-Pixel (Soll 120 m), und die Fjordwand wurde von
             # ihren flachen Nachbarn heruntergezogen - gemessen 41 m, wo

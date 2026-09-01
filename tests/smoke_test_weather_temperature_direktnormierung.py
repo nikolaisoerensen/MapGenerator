@@ -6,9 +6,9 @@ ANLASS. `t_mittel`/`t_spanne` kommen aus `klima_map`, also aus der weich ueber
 die Regionsgrenzen GEBLENDETEN Fassung von core.terrain_weltkarte.REGIONEN.
 temp_mittel_m0/temp_spanne - die Regionsmischung zieht jede Region zu ihren
 Nachbarn hin. VORHER wurde das durch HANDKALIBRIERTE Eingabewerte kompensiert
-("Taiga 1.8, damit am Ende 3.8 ankommen"), ueber drei Seeds von Hand geeicht -
+("Morobora 1.8, damit am Ende 3.8 ankommen"), ueber drei Seeds von Hand geeicht -
 1.11 hielt fest, dass das auf einem VIERTEN Seed schon wieder daneben lag
-(Taiga-Jahresspanne 30.9 K statt 29.0 K).
+(Morobora-Jahresspanne 30.9 K statt 29.0 K).
 
 FIX: `_je_region_auf_mittel()` (dasselbe Prinzip wie beim Niederschlag, 1.3)
 normiert das fertige, geblendete Feld direkt auf `KLIMA_ZIEL` - das trifft die
@@ -47,7 +47,7 @@ def main():
     # Grosszuegiger als beim Mittel: die Spanne haengt zusaetzlich am
     # Jahresgang-Sample (jahresgang() an sechs diskreten Monatspunkten) und
     # damit staerker an der zufaelligen Kartenform. Gemessen ueber vier
-    # Seeds: schlechtester Fall 1.69 K (Taiga, Seed 4242) - deutlich besser
+    # Seeds: schlechtester Fall 1.69 K (Morobora, Seed 4242) - deutlich besser
     # als die alte Handeichung (1.11: bis zu 1.9 K auf einem ungeeichten
     # Seed), aber nicht ganz so knapp wie das Mittel.
     TOLERANZ_SPANNE_K = 2.0

@@ -3,7 +3,7 @@ Path: tools/archetyp_profile_messen.py
 
 Kuestenprofile je ARCHETYP, in METERN, jeder aus SEINER EIGENEN Vorbildkueste.
 
-WARUM DIESE FASSUNG (Nutzerbefund 2026-08-24 am Bild "Mittelgebirge", dann
+WARUM DIESE FASSUNG (Nutzerbefund 2026-08-24 am Bild "Nebelrode", dann
 Auftrag "ich moechte sofort alle profile bekommen"):
 
 Die Vorfassung hatte nur 11 Vorbildstrecken fuer 27 Archetypen. Sie teilte
@@ -12,7 +12,7 @@ Archetyp eines davon. Das ergab drei Kurven mit praktisch identischer Form,
 die sich nur in der Hoehe unterschieden - normiert 0.28/0.26/0.30 nach 50 m
 und 0.58/0.57/0.57 nach 100 m. Zwei Fehler auf einmal:
 
-  1. Alle drei kamen aus DERSELBEN Kachel. Fuers Mittelgebirge war das
+  1. Alle drei kamen aus DERSELBEN Kachel. Fuers Nebelrode war das
      Ruegen - eine Kreidekueste, wo alles steil ist. Eine
      "Ostsee-Flachkueste", die nach 150 m auf 73 m steigt, ist keine.
   2. Sortieren nach h(150 m) und dann h(150 m) messen ist ein

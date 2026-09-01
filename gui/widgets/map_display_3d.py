@@ -108,6 +108,16 @@ _LAYER_RANGE_KEY_MAP = {
     "terrain_hub_delta": "terrain_hub_delta", "tilt_delta": "tilt_delta",
     "fold_delta": "fold_delta", "fault_delta": "fault_delta",
     "intrusion_delta": "intrusion_delta",
+    # Die vier neuen Terrain-Karten (2026-08-26/27). OHNE Eintrag hier
+    # findet `_colorize_layer()` keinen `range_key`, faellt still auf
+    # Auto-Skalierung ohne Farbtafel zurueck - und 3D zeigt ANDERE Farben
+    # als 2D, ohne Fehlermeldung. Genau der Rueckfall, den
+    # smoke_test_layer_2d_3d_parity.py bewacht; er hat es gefunden,
+    # nachdem die Eintraege in layer_ranges (gui_default.py) schon standen
+    # und die Sache dadurch erledigt aussah.
+    "river_water": "river_water", "river_order": "river_order",
+    "hinterland_height": "hinterland_height",
+    "voronoi_map": "voronoi_map",
 }
 
 
@@ -558,7 +568,11 @@ class MapDisplay3D(QOpenGLWidget):
                         # "Ordnung" wechselt (Nutzerbefund 2026-08-24:
                         # *"wenn man auf Ordnung geht dann aendert sich
                         # nichts"* - das Netz lag ueber allem).
-                        "river_overlay": False},
+                        "river_overlay": False,
+                        # Skalarkarten des Flussreiters (2026-08-26).
+                        "river_water": False, "river_order": False,
+                        # Hoehenfaktor-Ansicht (2026-08-26).
+                        "hinterland_height": False, "voronoi_map": False},
             "geology": {"rock_map": True, "hardness_map": False,
                         "terrain_hub_delta": False, "tilt_delta": False, "fold_delta": False,
                         "fault_delta": False, "intrusion_delta": False},
@@ -567,7 +581,11 @@ class MapDisplay3D(QOpenGLWidget):
                        "thermal_deposition": False},
             "weather": {"precipitation": True, "temperature": False, "wind": False, "humidity": False},
             "water": {"water_map": True, "soil_moisture": False, "erosion": False, "sedimentation": False,
-                      "flow_map": False},
+                      "flow_map": False,
+                      # 2026-08-26 nachgetragen: stand in beiden
+                      # Registern des Reiters, fehlte aber hier - die
+                      # Verdunstungskarte blieb im 3D unsichtbar.
+                      "evaporation": False},
             "biome": {"biome_map": True, "super_biome_mask": False},
             "settlement": {"plots": True, "settlements": True, "landmarks": True, "roads": True, "civ_map": False,
                            # "uebersicht": globale Siedlungsuebersicht als RGBA-Skin
@@ -588,7 +606,11 @@ class MapDisplay3D(QOpenGLWidget):
             # `generator_type = "terrain"` und meldet sich im 3D genau so
             # an. Ein eigener Tab-Typ waere nie erreicht worden.
             "terrain": {"slope": None, "region_overlay": None,
-                        "kuesten_overlay": None, "river_overlay": None},
+                        "kuesten_overlay": None, "river_overlay": None,
+                        # Skalarkarten des Flussreiters (2026-08-26) - er
+                        # meldet sich als "terrain" an, siehe base_tab.
+                        "river_water": None, "river_order": None,
+                        "hinterland_height": None, "voronoi_map": None},
             "geology": {"rock_map": None, "hardness_map": None,
                         "terrain_hub_delta": None, "tilt_delta": None, "fold_delta": None,
                         "fault_delta": None, "intrusion_delta": None},
@@ -597,7 +619,9 @@ class MapDisplay3D(QOpenGLWidget):
                        "thermal_deposition": None},
             "weather": {"precipitation": None, "temperature": None, "wind": None, "humidity": None},
             "water": {"water_map": None, "soil_moisture": None, "erosion": None, "sedimentation": None,
-                      "flow_map": None},
+                      "flow_map": None,
+                      # 2026-08-26 nachgetragen, siehe layer_visibility oben.
+                      "evaporation": None},
             "biome": {"biome_map": None, "super_biome_mask": None},
             "settlement": {"plots": None, "settlements": [], "landmarks": [], "roads": [], "civ_map": None,
                            "uebersicht": None, "wegbaender": None}
@@ -1792,6 +1816,23 @@ class MapDisplay3D(QOpenGLWidget):
         if self.layer_visibility["terrain"].get("kuesten_overlay"):
             self._render_dict_rgba_overlay("terrain", "kuesten_overlay")
 
+        # DIE SKALARKARTEN DES FLUSSREITERS (2026-08-26). Gewoehnliche
+        # Overlays wie "slope" - `_colorize_layer()` holt ihre Farbskala aus
+        # derselben `layer_ranges`-Tabelle wie die 2D-Ansicht, es braucht
+        # also keinen eigenen Farbcode.
+        if self.layer_visibility["terrain"].get("river_water"):
+            self._render_overlay("terrain", "river_water")
+        if self.layer_visibility["terrain"].get("river_order"):
+            self._render_overlay("terrain", "river_order")
+
+        # HOEHENFAKTOR UND VORONOI (2026-08-26). Nutzerwunsch ausdruecklich
+        # "3d und 2D" - beide Wege in derselben Aenderung, siehe die stehende
+        # Regel in CLAUDE.md.
+        if self.layer_visibility["terrain"].get("hinterland_height"):
+            self._render_overlay("terrain", "hinterland_height")
+        if self.layer_visibility["terrain"].get("voronoi_map"):
+            self._render_overlay("terrain", "voronoi_map")
+
         # DAS FLUSSNETZ (2026-08-24, Nutzerbefund *"dass man im 3D modus bei
         # dem Flussnetzwerk keine fluesse sehn kann"*).
         #
@@ -1845,7 +1886,12 @@ class MapDisplay3D(QOpenGLWidget):
         """
         self._render_terrain_base()
 
-        water_layers = ["water_map", "soil_moisture", "erosion", "sedimentation", "flow_map"]
+        # "evaporation" 2026-08-26 nachgetragen - sie stand in beiden
+        # Registern des Wasserreiters, fehlte aber sowohl in den
+        # Vorgabe-Dicts als auch in dieser Liste. Gefunden vom neuen
+        # tests/smoke_test_anzeige_register_3d.py bei seinem ERSTEN Lauf.
+        water_layers = ["water_map", "soil_moisture", "erosion",
+                        "sedimentation", "flow_map", "evaporation"]
         for layer in water_layers:
             if self.layer_visibility["water"][layer]:
                 self._render_overlay("water", layer)

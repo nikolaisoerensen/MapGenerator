@@ -13,7 +13,7 @@ NUTZERAUFTRAG 2026-08-24:
   vergleichbarer wert gefunden werden. also bewohnbare flaeche geht zB
   100% ein, unbewohnbar geht mit 25% ein und dann wirkt sich viel
   kuestenlinie nochmal positiv aus (zB 130% bei viel Kuestenlinie).
-  Alpenland kann einen etwas kleineren zielwert haben (80% im vergleich zu
+  Nevadin kann einen etwas kleineren zielwert haben (80% im vergleich zu
   den anderen regionen, weil es einfach normal ist, dass es in den bergen
   weniger platz gibt)."*
 
@@ -78,7 +78,7 @@ SEED = 20260804
 UNBEWOHNBAR_HANG_GRAD = 25.0
 
 # Hoehe, ab der es ungemuetlich wird. Bezogen auf DIESE Welt, nicht auf die
-# Realitaet: das Alpenland reicht bis rund 1030 m, der Rest deutlich
+# Realitaet: das Nevadin reicht bis rund 1030 m, der Rest deutlich
 # tiefer. 800 m trennt das Hochgebirge vom besiedelbaren Teil.
 UNBEWOHNBAR_HOEHE_M = 800.0
 
@@ -89,28 +89,28 @@ WASSER_GEWICHT = 0.25               # Wasser ist kein verlorener Raum
 KUESTENBONUS_MAX = 1.30             # Nutzervorgabe: "zB 130% bei viel Kueste"
 
 # Ab welcher Kuestendichte (Kuestenpixel je Landpixel) der Bonus voll gilt.
-# Gemessen liegt die dichteste Region (Griechische Inseln) bei rund 15 %.
+# Gemessen liegt die dichteste Region (Thalassia) bei rund 15 %.
 KUESTENDICHTE_VOLL = 0.15
 
 # ------------------------------------------------------------- Zielwerte
 #
 # 1.0 heisst "so viel Wert wie der Median aller Regionen". Nur das
-# Alpenland weicht ab - Nutzervorgabe: *"Alpenland kann einen etwas
+# Nevadin weicht ab - Nutzervorgabe: *"Nevadin kann einen etwas
 # kleineren zielwert haben (80%), weil es einfach normal ist, dass es in
 # den bergen weniger platz gibt"*.
 ZIELWERT = {
-    "Alpenland": 0.80,
+    "Nevadin": 0.80,
     # Nutzerentscheidung 2026-08-24, nachdem der Verteilungsfix echte
     # Fjordwaende auf die Karte gebracht hatte: *"lass uns zielwert 0.8
     # fuer fjordland festlegen, aber dann muessen wir noch etwas mehr
     # flaeche bekommen."*
     #
-    # Fjordland verliert DOPPELT - erst rund ein Drittel ans Wasser, dann
+    # Skerrheim verliert DOPPELT - erst rund ein Drittel ans Wasser, dann
     # die Haelfte des Rests an Haenge ueber der Bewohnbarkeitsgrenze. Es
-    # ist damit strukturell dem Alpenland aehnlich und bekommt denselben
+    # ist damit strukturell dem Nevadin aehnlich und bekommt denselben
     # Zielwert. Der Ausgleich laeuft ueber `flaeche_soll` in
     # core/terrain_weltkarte.py - siehe tools/flaeche_eichen.py.
-    "Fjordland": 0.80,
+    "Skerrheim": 0.80,
 }
 ZIELWERT_STANDARD = 1.00
 

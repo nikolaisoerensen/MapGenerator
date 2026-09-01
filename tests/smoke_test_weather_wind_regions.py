@@ -9,7 +9,7 @@ treffen (Teil von 1.6/3.5).
 
 VORHER: `wind_speed_factor` war ein einziger globaler Regler - alle neun
 Regionen lagen faktisch gleich (gemessen 5.1-5.8 m/s ueberall), obwohl die
-Zielspanne von 2.2 (Alpenland) bis 4.5 m/s (mehrere Kuestenregionen) reicht.
+Zielspanne von 2.2 (Nevadin) bis 4.5 m/s (mehrere Kuestenregionen) reicht.
 
 WIE DAS TRIFFT: `_wind_regional_faktor()` normiert das REGIONALE MITTEL der
 Windgeschwindigkeit direkt auf `wind_ziel_map` (core/terrain_weltkarte.py
@@ -23,7 +23,7 @@ Normierung des ERGEBNISSES wirkt dagegen garantiert.
 
 LUV/LEE (SPEZIFIKATION.md §3.5, 1.5-2x Kontrast): ein multiplikativer Term
 (`_wind_luv_lee_faktor`) ist eingebaut, aber NICHT verifizierbar als
-verlaesslicher Gruppenkontrast - gemessen im Alpenland: die vorhandene
+verlaesslicher Gruppenkontrast - gemessen im Nevadin: die vorhandene
 Simulation hat selbst schon eine terraingetriebene Windstruktur, die mit
 diesem einfachen Hangneigungs-Ansatz ANTIKORRELIERT (-0.53 gemessen), nicht
 neutral. Deshalb hier NICHT geprueft; nur die REGIONSMITTEL-Zusicherung.
@@ -104,17 +104,17 @@ def main():
                           % (name, ist, TOLERANZ_MS, ziel))
 
     print("")
-    print("2. Reihenfolge stimmt (Alpenland am ruhigsten, Kuesten am windigsten)")
+    print("2. Reihenfolge stimmt (Nevadin am ruhigsten, Kuesten am windigsten)")
     mittel_je_region = {}
     for i, name in enumerate(namen):
         maske = (region_map == i) & land
         if maske.sum() >= 10:
             mittel_je_region[name] = float(speed[maske].mean())
-    if "Alpenland" in mittel_je_region:
+    if "Nevadin" in mittel_je_region:
         ruhigste = min(mittel_je_region, key=mittel_je_region.get)
         print("   Ruhigste Region: %s (%.2f m/s)" % (ruhigste, mittel_je_region[ruhigste]))
-        if ruhigste != "Alpenland":
-            fehler.append("Alpenland ist nicht die windaermste Region (das ist %s)" % ruhigste)
+        if ruhigste != "Nevadin":
+            fehler.append("Nevadin ist nicht die windaermste Region (das ist %s)" % ruhigste)
 
     print("")
     print("3. Alter Nicht-Weltkarten-Pfad bleibt unveraendert (kein Absturz ohne wind_ziel_map)")

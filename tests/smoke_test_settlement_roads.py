@@ -9,7 +9,22 @@ kein Bereitschaftstest.
 Geprueft wird hier das NEUE Verhalten:
 
   1. Kostenfeld (§4.1): die drei Wasserstufen und der Wegerabatt wirken
-     tatsaechlich, Hangkosten wachsen quadratisch.
+     tatsaechlich, Hangkosten wachsen EXPONENTIELL und werden ab
+     MAX_WEG_STEIGUNG_GRAD gesperrt.
+
+     ACHTUNG, HIER STAND BIS ZUM 2026-08-25 "quadratisch". Das war der alte
+     Vertrag; der Code rechnet seit der Nutzervorgabe *"hoehenkosten sollten
+     mit der steigung etwas exponentiell wachsen ... irgendwann wird es
+     einfach unpassierbar"* mit
+     `1 + ratio * expm1(winkel / STEIGUNG_SKALA_GRAD)` und setzt oberhalb von
+     MAX_WEG_STEIGUNG_GRAD den endlichen Sperrwert WEGEBAU_UNMOEGLICH.
+     Der Test prueft seither eine Formel, die es nicht mehr gab, und schlug
+     entsprechend fehl (500.000 gegen erwartete 2.5).
+
+     **Gefunden hat das nur der volle Lauf.** Eine statische Pruefung sieht
+     so etwas nicht: die Datei importiert sauber, verweist auf keine
+     geloeschte Datei und sieht in jeder Hinsicht gesund aus. Veraltete
+     ZUSICHERUNGEN findet man ausschliesslich, indem man sie ausfuehrt.
   2. Gabriel-Graph (§4.2): sparse (nicht Vollverknuepfung) UND zusammenhaengend
      (Eigenschaft von Gabriel-Graphen fuer Punkte in allgemeiner Lage).
   3. Bereitschaftstest (§4.3): zwei Staedte derselben Kultur verbinden sich
@@ -39,6 +54,7 @@ def main():
         Location, bau_kostenfeld, _gabriel_kandidaten, WASSERKOSTEN_FLACH,
         WASSERKOSTEN_TIEF, WEGERABATT, RANG_ZAHL, BEREITSCHAFT_FREMDKULTUR,
         SettlementGenerator, CityBoundaryAnalyzer,
+        STEIGUNG_SKALA_GRAD, MAX_WEG_STEIGUNG_GRAD, WEGEBAU_UNMOEGLICH,
     )
 
     # ---------- 1: Kostenfeld ----------
@@ -49,14 +65,19 @@ def main():
     heightmap[20, :] = -7.0    # tiefes-aber-noch-Bruecke-Streifen
     heightmap[30, :] = -20.0   # gesperrt
     slopemap = np.zeros((n, n, 2), dtype=np.float32)
-    slopemap[5, 5] = [1.0, 0.0]   # steile Stelle, |hang|=1.0
+    slopemap[5, 5] = [1.0, 0.0]   # 45 Grad - ueber der Sperrgrenze
+    slopemap[6, 6] = [0.20, 0.0]  # rund 11 Grad - mitten in der Kurve
 
     feld = bau_kostenfeld(heightmap, slopemap, slope_distance_ratio=1.5)
     print("   eben              %.3f (soll 1.0)" % feld[0, 0])
     print("   Flachwasser       %.3f (soll %.1f)" % (feld[10, 0], WASSERKOSTEN_FLACH))
     print("   tieferes Wasser   %.3f (soll %.1f)" % (feld[20, 0], WASSERKOSTEN_TIEF))
     print("   gesperrt          %s (soll inf)" % feld[30, 0])
-    print("   Hang |1.0|        %.3f (soll 1+1.5*1.0^2=2.5, quadratisch)" % feld[5, 5])
+    # |hang| = 1.0 entspricht 45 Grad und liegt damit UEBER
+    # MAX_WEG_STEIGUNG_GRAD (30) - dort steht der Sperrwert, nicht die Kurve.
+    print("   Hang |1.0| = 45 Grad  %.3f (ueber %.0f Grad gesperrt, soll %.1f)"
+          % (feld[5, 5], MAX_WEG_STEIGUNG_GRAD, WEGEBAU_UNMOEGLICH))
+    print("   Hang |0.20| = 11 Grad %.3f (in der Kurve)" % feld[6, 6])
 
     if abs(feld[0, 0] - 1.0) > 1e-6:
         fehler.append("ebener Grund kostet nicht 1.0: %.3f" % feld[0, 0])
@@ -66,8 +87,21 @@ def main():
         fehler.append("Tiefwasser-Kosten falsch: %.3f" % feld[20, 0])
     if np.isfinite(feld[30, 0]):
         fehler.append("gesperrtes Wasser ist nicht unendlich: %.3f" % feld[30, 0])
-    if abs(feld[5, 5] - 2.5) > 1e-6:
-        fehler.append("Hangkosten nicht quadratisch: %.3f (erwartet 2.5)" % feld[5, 5])
+    # ZWEI ZUSICHERUNGEN STATT EINER, weil die Formel zwei Bereiche hat.
+    if abs(feld[5, 5] - WEGEBAU_UNMOEGLICH) > 1e-6:
+        fehler.append("zu steiler Hang wird nicht gesperrt: %.3f (erwartet %.1f)"
+                      % (feld[5, 5], WEGEBAU_UNMOEGLICH))
+    # Innerhalb der erlaubten Steigung muss die Kurve exponentiell sein:
+    #     1 + ratio * (exp(winkel / STEIGUNG_SKALA_GRAD) - 1)
+    winkel = float(np.degrees(np.arctan(0.20)))
+    soll = 1.0 + 1.5 * np.expm1(winkel / STEIGUNG_SKALA_GRAD)
+    if abs(feld[6, 6] - soll) > 1e-4:
+        fehler.append("Hangkosten nicht exponentiell: %.3f (erwartet %.3f "
+                      "bei %.1f Grad)" % (feld[6, 6], soll, winkel))
+    # Und sie muss STAERKER als linear wachsen - sonst waere "exponentiell"
+    # eine Behauptung ueber eine Formel, nicht ueber ihr Verhalten.
+    if not (feld[6, 6] - 1.0) > 1.5 * (winkel / STEIGUNG_SKALA_GRAD) * 0.999:
+        fehler.append("Hangkosten wachsen nicht schneller als linear")
 
     weg_maske = np.zeros((n, n), dtype=bool)
     weg_maske[0, 0] = True

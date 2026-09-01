@@ -639,7 +639,7 @@ def lauf_regionen(size=192):
 def lauf_vergleich(size=192):
     """
     Die eigentliche Gegenprobe: Skelett gegen den heutigen Noise-Pfad, auf
-    denselben zwei Zielgelaenden wie in §7 (Alpental und Mittelgebirge) und mit
+    denselben zwei Zielgelaenden wie in §7 (Alpental und Nebelrode) und mit
     demselben Messgeraet.
 
     Erwartung, vor dem Lauf notiert: Abfluss deutlich ueber den 10-20% des

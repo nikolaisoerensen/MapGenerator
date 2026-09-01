@@ -3339,7 +3339,8 @@ class DataLODManager(QObject):
         # Sie sind OPTIONAL - im alten Pfad (WELTKARTE_AKTIV = False) liefert
         # terrain.redistribution sie nicht, und dann bleibt es beim bisherigen
         # Verhalten.
-        for schluessel in ("river_mask", "river_order", "river_generation",
+        for schluessel in ("river_mask", "river_order", "river_generation", "river_water",
+                          "hinterland_height", "voronoi_map",
                            "region_map", "klima_map", "seegrad",
                            "ufer_region_a", "ufer_region_b", "see_eis",
                            "kuesten_archetyp", "kuesten_staerke", "spielkarte"):

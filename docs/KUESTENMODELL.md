@@ -122,7 +122,7 @@ Enden der Übergangszone einen Knick in der Ableitung, sichtbar als Kante längs
 der Küste.
 
 **Wieviele Typen je Region?** Nicht fest. Die Küstenlänge je Region schwankt
-gemessen um Faktor 50 (Alpenland 1.0 km, Griechische Inseln 54.6 km). Die
+gemessen um Faktor 50 (Nevadin 1.0 km, Thalassia 54.6 km). Die
 Typenzahl folgt daher der Küstenlänge: `max(1, Küstenlänge ÷ Ziellänge je Typ)`.
 
 **Fehlt:** die Segmentbildung ganz. Heute wird zwischen Stationen durchgehend

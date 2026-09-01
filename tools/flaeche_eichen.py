@@ -15,7 +15,7 @@ NUTZERAUFTRAG 2026-08-24:
 ## Warum ein Werkzeug und keine Handarbeit
 
 Die Groesse einer Region und ihr NUTZWERT haengen nicht linear zusammen.
-Fjordland verliert doppelt - erst ein Drittel ans Wasser, dann die Haelfte
+Skerrheim verliert doppelt - erst ein Drittel ans Wasser, dann die Haelfte
 des Rests an zu steile Haenge. Mehr Grundflaeche bringt dort weniger als
 anderswo, und wieviel weniger, haengt an der Form des Kontinents.
 

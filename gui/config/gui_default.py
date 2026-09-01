@@ -119,7 +119,7 @@ class CanvasSettings:
             # auf NIEDERSCHLAG_ZIEL/KLIMA_ZIEL statt auf eine Perioden-
             # Akkumulation). Gemessen (256px, Seed 20260804, Standardregler):
             # precip_map liegt zwischen 10 und 978, Regionsmittel 77
-            # (Steppe) bis 354 (Fjordland) - komplett ausserhalb der alten
+            # (Samarcia) bis 354 (Skerrheim) - komplett ausserhalb der alten
             # 0-70-Skala. Die GESAMTE Karte saettigte dadurch auf die
             # oberste Farbe und sah ueberall gleich aus, an Land UND auf See
             # - kein Datenproblem, ein reines Farbskalen-Problem. Neue Skala
@@ -131,7 +131,73 @@ class CanvasSettings:
             "humid_map": ("Blues", 0.0, 100.0),
             "wind_map": ("plasma", 0.0, 40.0),           # Windstärke m/s - EINE Farbskala für Heatmap-Hintergrund, Stromlinien UND Pfeile in _render_wind_map (siehe dortiger Docstring: vorher hatte die Colorbar keinen Bezug zu den tatsächlichen Pfeil-/Stromlinien-Farben)
             "water_map": ("Blues", 0.0, 10.0),
-            "flow_map": ("Blues", 0.0, 50.0),
+            # LOGARITHMISCH UND ZWEI GROESSENORDNUNGEN HOEHER (2026-08-25,
+            # Nutzerfrage "schau mal ob flow-map von der skala her passt").
+            #
+            # Sie passte nicht. Gemessen an der vollen Pipeline (128 px,
+            # `flow_accumulation` aus water.flow_network - `flow_map` ist nur
+            # der Name auf dem zusammengesetzten WaterData-Objekt):
+            #
+            #     p1     35.8      p50    581.2      p99   3500.5
+            #     p10   155.4      p90   1783.9      max   6408.1
+            #
+            # Mit der alten Skala 0..50 sassen **98.26 % aller Wasserpixel
+            # ueber dem Maximum** und bekamen dieselbe oberste Farbe. Nur
+            # 1.7 % lagen ueberhaupt im Farbverlauf - die Karte zeigte
+            # praktisch eine einfarbige Flaeche.
+            #
+            # LOG statt linear, weil die Verteilung 2.5 Groessenordnungen
+            # umspannt. Linear 0..3500 draengte p10 auf 4 %, p25 auf 9 % und
+            # p50 auf 17 % der Skala - alle kleinen Laeufe saehen gleich aus,
+            # Unterschiede gaebe es nur zwischen den groessten Fluessen.
+            # Logarithmisch 20..8000 verteilt sich das gleichmaessig:
+            # p1 bei 10 %, p10 bei 34 %, p50 bei 56 %, p90 bei 75 %,
+            # max bei 96 %.
+            #
+            # Die Obergrenze ist an EINER Aufloesung gemessen. Falls
+            # `flow_accumulation` doch mit der Kartengroesse skaliert (der
+            # Kommentar in water_generator.py nennt m3/s, also eine
+            # physikalische Groesse - dann nicht), waere eine log-Skala
+            # ohnehin die vertraeglichere Wahl: ein Faktor 2 daneben
+            # verschiebt sie nur um 8 % der Rampe.
+            "flow_map": ("Blues", 20.0, 8000.0, "log"),
+            # Strahler-Ordnung des Weltflussnetzes (docs/ANZEIGE_UND_SEEN.md
+            # B.1). Ohne Eintrag fiel der Reiter auf Auto-Skalierung zurueck -
+            # und weil 0 (kein Fluss) den weitaus groessten Teil der Karte
+            # ausmacht, sass die ganze Farbskala im Nichts.
+            #
+            # Feste Obergrenze 4, gemessen am 2026-08-25 (256 px, Seed
+            # 20260804, 1318 Netzknoten): Ordnung 1 = 75.6 %, 2 = 12.4 %,
+            # 3 = 7.1 %, 4 = 4.9 %, Maximum 4. Fest statt automatisch, damit
+            # ein Seed mit nur drei Ordnungen nicht ploetzlich andere Farben
+            # fuer dieselbe Ordnung zeigt.
+            "river_order": ("Blues", 0.0, 4.0),
+            # DIE EINE FLUSSKARTE (Nutzervorgabe 2026-08-26): "koennen wir nur
+            # eine karte haben die darstellt wie viel wasser fuer die fluesse
+            # berechnet wurde?" Wert ist Niederschlag mal Flaeche, akkumuliert
+            # flussabwaerts. LOGSKALA aus demselben Grund wie bei flow_map: der
+            # Hauptstrom traegt zwei bis drei Groessenordnungen mehr als ein
+            # Zufluss, linear waere alles ausser der Muendung eine Farbe.
+            # GEMESSEN 2026-08-26 (384 px, Seed 20260804), Wassermenge je
+            # Netzknoten MIT Niederschlag: 0.38 bis 725, Median 1.33,
+            # p90 17.5, p99 378. Der Hauptstrom traegt also rund das
+            # 500-fache des Medians - eine lineare Skala waere ausserhalb der
+            # Muendung durchgehend eine Farbe.
+            #
+            # Ein erster Anlauf setzte 0.02 bis 60 - geraten, nicht gemessen,
+            # und um mehr als eine Groessenordnung daneben. Aufgefallen nur,
+            # weil die Messung nachgereicht wurde.
+            "river_water": ("Blues", 0.4, 725.0, "log"),
+            # HOEHENFAKTOR-ANSICHT (2026-08-26). Gemessene Hinterlandhoehe je
+            # Kuestengebiet, in Metern. Bereich aus der Tabelle:
+            # 4 m (Foerdenkueste) bis 559 m (Fjordwand). Linear, weil die
+            # Werte nur ueber zwei Dekaden gehen und der Nutzer sie
+            # VERGLEICHEN will - eine Logskala wuerde die Unterschiede im
+            # oberen Bereich zusammendruecken.
+            "hinterland_height": ("YlOrBr", 0.0, 560.0),
+            # Die Voronoi-Zellnummern. Zyklische Farbtafel, damit benachbarte
+            # Zellen sich unterscheiden - der ZAHLENWERT bedeutet nichts.
+            "voronoi_map": ("twilight", 0.0, 200.0),
             # Logarithmisch statt linear: Werteverteilung ist stark
             # rechtsschief (die meisten Pixel exakt 0, wenige Ausreißer
             # deutlich höher) - eine lineare Skala ließ den typischen/

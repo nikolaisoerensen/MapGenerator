@@ -54,7 +54,7 @@ SEED = 20260730
 #
 # Die Faustregel, die sich beim Ansehen der Bilder ergibt: feature_size ist der
 # Abstand der grossen Taeler, gully_size der der Seitenrinnen. Ihr VERHAELTNIS
-# macht den Charakter - Hochgebirge ~4:1, dicht zergliedertes Mittelgebirge
+# macht den Charakter - Hochgebirge ~4:1, dicht zergliedertes Nebelrode
 # ~8:1, Flachland spielt keine Rolle, weil die Staerke gegen null geht.
 
 REGIONEN = {

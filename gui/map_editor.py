@@ -102,6 +102,10 @@ OVERVIEW_AVAILABLE, OverviewTab, overview_error = _import_tab_safely("gui.tabs.o
 # Seit 2026-08-05: eigener Reiter fuer das Flussnetz (steht hinter Terrain,
 # weil es dessen Heightmap formt) und ein zweiter Siedlungsreiter, der auf
 # eine der neun Regionen zoomt.
+REGION_AVAILABLE, RegionTab, region_error = _import_tab_safely(
+    "gui.tabs.region_tab", "RegionTab")
+KONTINENT_AVAILABLE, KontinentTab, kontinent_error = _import_tab_safely(
+    "gui.tabs.kontinent_tab", "KontinentTab")
 RIVER_AVAILABLE, RiverTab, river_error = _import_tab_safely("gui.tabs.river_tab", "RiverTab")
 SETTLEMENT_REGIONAL_AVAILABLE, SettlementRegionalTab, settlement_regional_error = _import_tab_safely(
     "gui.tabs.settlement_regional_tab", "SettlementRegionalTab")
@@ -648,6 +652,16 @@ class MapEditorWindow(QMainWindow):
         # dem Terrain, weil es dessen Heightmap formt, und die Siedlungen
         # zerfallen in eine globale und eine regionale Ansicht.
         tab_configs = [
+            # DER REGIONSREITER STEHT VORN (2026-08-26). Nutzerentwurf:
+            # *"als ziel wuerde ich vorschlagen, dass wir am anfang eine
+            # regionen-ansicht haben ... dort stellt man die optik jeder
+            # region ein. dann gehts in kontinent sicht."* Die Reihenfolge
+            # der Reiter IST der Arbeitsablauf, und sie ordnet ihn zugleich
+            # nach den Kosten: der Regionsreiter rechnet in 0.1-1.2 s, die
+            # Vollkarte in 40 s.
+            ("region", "Regionen", RegionTab, REGION_AVAILABLE, region_error),
+            ("kontinent", "Kontinent", KontinentTab,
+             KONTINENT_AVAILABLE, kontinent_error),
             ("terrain", "Terrain", TerrainTab, TERRAIN_AVAILABLE, terrain_error),
             ("rivers", "Flussnetzwerk", RiverTab, RIVER_AVAILABLE, river_error),
             ("geology", "Geologie", GeologyTab, GEOLOGY_AVAILABLE, geology_error),

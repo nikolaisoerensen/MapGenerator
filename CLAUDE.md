@@ -11,10 +11,60 @@
 | `docs/UEBERGABE.md` | Umgebung und Gesamtstand (Stand 2026-08-12). |
 | `docs/SPEZIFIKATION.md` | Ziele und Invarianten — vor der Arbeit lesen (siehe unten) |
 | `docs/FLUESSE_UND_WASSER.md` | **Fluesse und Wasserverteilung — die Ordnung dieses Themas.** Befund, geklaerte Fakten, Bloecke 1-5 mit Reihenfolge. Was dort nicht steht, ist nicht beschlossen. |
+| `docs/AUFRAEUMPLAN.md` | **Aufbau des Programms und die naechsten Ziele.** Wo die GUI-Regler und die neun Regionsparameter auseinanderlaufen, der gemessene Nevadin-Spitzenbefund, acht Ziele mit empfohlener Reihenfolge. |
 | `docs/OFFENE_PUNKTE.md` | **Die einzige Aufgabenliste.** `docs/TODO.md` gibt es nicht mehr, sie ist dort in Abschnitt 12 aufgegangen. |
 | `docs/TESTBERICHT.md` | Was gerade gruen ist und was nicht, mit Erklaerung je Fehlschlag |
 | `docs/PRUEFLISTE_LIVE.md` | Was am laufenden Programm zu pruefen ist — alles, was headless nicht geht |
 | `docs/archiv/` | Historisch, gilt nicht mehr — nicht als Beschreibung des Ist-Zustands lesen |
+
+
+## STEHENDE REGEL: was in 2D sichtbar ist, gehoert auch in 3D
+
+**Nutzervorgabe 2026-08-25, woertlich:** *"im uebrigen werden mal wieder alle
+features, die in 2D anzeigbar sind, auch in 3D dargestellt. kann man irgendwo
+festhalten dass wenn du etwas umsetzt es immer auch in 3D gleich umgesetzt
+wird? weil sonst muss ich das immer wieder sagen."*
+
+Also: **jede Anzeige, jeder Haken, jedes Overlay wird in DERSELBEN Aenderung
+fuer 2D und 3D gebaut.** Nicht "erst 2D, 3D spaeter" - spaeter kommt nicht,
+und der Nutzer muss es erneut anfordern.
+
+### Warum das ausdruecklich dasteht
+
+Weil derselbe Fehler dreimal passiert ist, immer nach demselben Muster: ein
+Reiter ruft eine Anzeigemethode ueber `hasattr(display, "...")` auf. Gibt es
+sie nur auf `MapDisplay2D`, **trifft die Weiche in der 3D-Ansicht nie zu und
+der Code tut lautlos gar nichts** - keine Fehlermeldung, keine Warnung, das
+Overlay fehlt einfach.
+
+| Datum | Betroffen | Symptom |
+|---|---|---|
+| 2026-08-24 | `overlay_river_generations` | im 3D keine Fluesse |
+| 2026-08-25 | `overlay_river_network` (Biome-Reiter) | im 3D keine Fluesse, und in 2D ein ANDERES Flusssystem |
+| 2026-08-25 | `overlay_settlements` (Biome-Reiter) | im 3D keine Siedlungen |
+
+### Wie man es in 3D baut
+
+Fast immer **ohne neuen GLSL-Code**: die Zeichnung wird mit den
+`rasterize_*_rgba()`-Funktionen aus `gui/widgets/map_display_2d.py` auf eine
+RGBA-Textur gebracht und per `update_overlay_data(bereich, name, rgba)` als
+Alpha-Skin auf das Gelaende gelegt, dazu `set_layer_visibility(...)` zum
+Ein- und Ausschalten. `SettlementTab.apply_3d_overlays()` ist das Vorbild.
+
+Echte Geometrie lohnt nur, wo die Textur an ihre Grenze stoesst - so bei den
+Wegen (`gui/widgets/wege_geometrie.py`, weil sie beim Zoomen scharf bleiben
+und anklickbar sein muessen).
+
+### Wer das bewacht
+
+`tests/smoke_test_display_methoden_existieren.py`, Gruppe
+`einseitige_sind_begruendet`. Jede Anzeigemethode, die es nur auf EINER der
+beiden Klassen gibt, muss dort namentlich eingetragen sein:
+
+* `NUR_EINE_ANZEIGE` - einseitig **und das ist richtig so** (es gibt keine
+  Sonne in einer 2D-Karte).
+* `FEHLT_IM_3D` - einseitig **und das ist eine Schuld**. Die Liste darf nur
+  schrumpfen; kommt etwas Neues dazu, schlaegt der Test fehl.
 
 
 ## ZUERST LESEN: docs/SPEZIFIKATION.md
@@ -251,8 +301,8 @@ Gemessen (384 px, Seed 20260804, Median-Hang, Pass ein/aus):
 
 | Region | mit | ohne | Ziel |
 |---|---:|---:|---:|
-| Steppe | 10.6 | 6.6 | 6.5 |
-| Taiga | 9.1 | 5.9 | 7.5 |
+| Samarcia | 10.6 | 6.6 | 6.5 |
+| Morobora | 9.1 | 5.9 | 7.5 |
 
 Bei diesen beiden stammt die **gesamte** Abweichung aus dem Kuestenpass.
 

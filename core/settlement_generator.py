@@ -560,7 +560,7 @@ class Plot:
 # Referenzhoehe der Hoehen-Daempfung (Meter). Ab hier ist der Standortwert auf
 # die Haelfte gefallen; oberhalb von rund 1800 m ist praktisch nichts mehr
 # uebrig. Frei gewaehlt, kein Regler (docs/SIEDLUNGEN_ENTWURF.md nennt keinen) -
-# passt zu den Regionshoehen der Weltkarte (Alpenland reicht nach der
+# passt zu den Regionshoehen der Weltkarte (Nevadin reicht nach der
 # Neueichung vom 2026-08-10 bis rund 1000 m ueber die Reliefspanne).
 ELEVATION_DAEMPFUNG_M = 600.0
 
@@ -792,7 +792,7 @@ class TerrainSuitabilityAnalyzer:
         #
         # Stattdessen der Rang der Hoehe zwischen Median und 95. Perzentil des
         # LANDES: relativ zur jeweiligen Karte, damit eine flache Steppenwelt
-        # ebenso ihre "Berge" hat wie das Alpenland, und unabhaengig von
+        # ebenso ihre "Berge" hat wie das Nevadin, und unabhaengig von
         # absoluten Metergrenzen, die je Region ohnehin verschieden gemeint
         # waeren.
         land_hoehen = heightmap[land_mask]
@@ -5579,7 +5579,7 @@ class SettlementGenerator:
             # Ein einziger, aus der GESAMTzahl aller Orte auf der Karte
             # abgeleiteter Mindestabstand liess kleine Regionen ihr Ziel
             # verfehlen: gemessen bei 96 px, Seed 12345, bekam Italiener/
-            # Mittelmeer (klein, kuestennah) nur 1 statt der vorgesehenen 2-5
+            # Macchia (klein, kuestennah) nur 1 statt der vorgesehenen 2-5
             # Orte - der Abstand war fuer die GANZE Karte bemessen, nicht fuer
             # diese eine, kleinere Flaeche. Jede Kultur bekommt stattdessen
             # ihren eigenen Abstand aus der WURZEL ihrer eigenen Landflaeche -

@@ -17,7 +17,7 @@ NUTZERAUFTRAG 2026-08-24:
 ## Was verglichen wird, und warum nicht die Hoehen selbst
 
 Ein direkter Hoehenvergleich waere sinnlos: Geiranger steigt auf ueber
-1400 m, das Fjordland dieser Welt auf rund 500. Das ist gewollt - die
+1400 m, das Skerrheim dieser Welt auf rund 500. Das ist gewollt - die
 Spielwelt ist gestaucht. Verglichen werden deshalb **Formkennzahlen**,
 die von der absoluten Groesse unabhaengig sind:
 
@@ -30,7 +30,7 @@ die von der absoluten Groesse unabhaengig sind:
                      das Gelaende aus Plateaus oder aus Graten besteht.
   Wasseranteil       Wieviel der Flaeche unter dem Meeresspiegel liegt.
   Formfaktor         Kuestenlaenge / Wurzel(Landflaeche). Dimensionslos -
-                     eine Kreisscheibe hat rund 3.5, ein Fjordland weit
+                     eine Kreisscheibe hat rund 3.5, ein Skerrheim weit
                      mehr.
 
 ## Die Skalierung
@@ -40,14 +40,14 @@ die von der absoluten Groesse unabhaengig sind:
 Faktor 1/3). Das betrifft NUR die Hangkennzahlen - Kuestendichte und
 Formfaktor sind ohnehin masstabsfrei.
 
-DER AUSSCHNITT WIRD MITSKALIERT: das Fjordland dieser Welt misst rund
+DER AUSSCHNITT WIRD MITSKALIERT: das Skerrheim dieser Welt misst rund
 9650 Pixel bei 41.6 m, also etwa 16.7 km2. Ein Vorbildausschnitt sollte
 in derselben Groessenordnung liegen, sonst vergleicht man eine ganze
 Fjordlandschaft mit einem einzelnen Fjord.
 
 Aufruf:
-    .venv/Scripts/python.exe tools/region_gegen_vorbild.py Fjordland geiranger
-    .venv/Scripts/python.exe tools/region_gegen_vorbild.py Fjordland geiranger --skala 0.33
+    .venv/Scripts/python.exe tools/region_gegen_vorbild.py Skerrheim geiranger
+    .venv/Scripts/python.exe tools/region_gegen_vorbild.py Skerrheim geiranger --skala 0.33
 """
 
 import argparse
@@ -163,7 +163,7 @@ def region(name):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("region", help="z.B. Fjordland")
+    p.add_argument("region", help="z.B. Skerrheim")
     p.add_argument("strecke", help="z.B. geiranger")
     p.add_argument("--skala", type=float, default=1.0 / 3.0,
                    help="vertikale Stauchung des Vorbilds (Vorgabe 1/3)")

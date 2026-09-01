@@ -12,7 +12,7 @@ echten Fehler gefunden:
                           Nutzers: alles aus Seed und Reglern herleitbar.
   2. FINGERABDRUCK        Hangneigung und Wasseranteil je Region im
                           Sollbereich. Fand: `potenz` verschob den Median, die
-                          Atlantikkueste stand bei 73 % Wasser statt 45.
+                          Estrande stand bei 73 % Wasser statt 45.
   3. NAHTPRUEFUNG         An einer Regionsgrenze darf der Hoehengradient
                           keinen Sprung zeigen, der groesser ist als der
                           staerkste Gradient INNERHALB der Nachbarregionen.
@@ -60,37 +60,37 @@ SEED = 20260804
 # voronoi_regionen(). Die alten Werte waren gegen einen Kontinent gefittet, der
 # auf dem Kopf stand: jede Region sass auf einem anderen Stueck Land und hatte
 # andere Nachbarn. Da der gemessene Hang zu einem grossen Teil aus der
-# NACHBARSCHAFT kommt und nicht aus dem eigenen Relief (ein als Taiga
+# NACHBARSCHAFT kommt und nicht aus dem eigenen Relief (ein als Morobora
 # gefuehrtes Pixel traegt im Mittel 33 % fremdes Gewicht und damit 372 m Relief
 # statt der eingetragenen 138), aendern sich die Zielwerte mit der Anordnung.
 #
-# Der Vorgang ist nicht neu - die Atlantikkueste stand aus genau diesem Grund
-# schon am 2026-08-05 auf 9 statt 6, das Alpenland auf 24 statt 30.
+# Der Vorgang ist nicht neu - die Estrande stand aus genau diesem Grund
+# schon am 2026-08-05 auf 9 statt 6, das Nevadin auf 24 statt 30.
 #
 # GEMITTELT UEBER DIE FUENF SEEDS AUS FINGERABDRUCK_SEEDS. Die Streuung EINER
 # Region ueber Seeds betraegt bis zu 11 Grad; ein Zielwert aus einem einzigen
 # Seed waere derselbe Fehler noch einmal.
 # NACHGEZOGEN AM 2026-08-07, zweiter Grund: die Kuestenform je Region
 # (kuestenform in core/terrain_weltkarte.py) und der um 4.9 % gewachsene
-# Kontinent (Atlantikkueste +40 % Flaechenanteil). Beides veraendert die
+# Kontinent (Estrande +40 % Flaechenanteil). Beides veraendert die
 # Landschaft absichtlich; die Zielwerte folgen ihr, die ORDNUNG bleibt der
 # eigentliche Waechter.
 ZIEL_HANG = {
-    "Huegelland": 9.5, "Fjordland": 16.0, "Taiga": 7.5,
-    "Atlantikkueste": 10.0, "Mittelgebirge": 12.5, "Alpenland": 27.0,
-    "Steppe": 6.5, "Mittelmeer": 14.5, "Griechische Inseln": 11.5,
+    "Clonagh": 9.5, "Skerrheim": 16.0, "Morobora": 7.5,
+    "Estrande": 10.0, "Nebelrode": 12.5, "Nevadin": 27.0,
+    "Samarcia": 6.5, "Macchia": 14.5, "Thalassia": 11.5,
 }
 
 # DIE EIGENTLICHE ZUSICHERUNG: die Reihenfolge, nicht die Zahlen.
 #
 # Zielwerte, die einfach die Messwerte sind, machen einen Test tautologisch -
 # er ginge nach jeder Aenderung wieder durch, wenn man ihn nur nachzieht. Die
-# ORDNUNG dagegen ist die Absicht selbst: die Taiga ist flaches Hochland, das
-# Alpenland ein Gebirge, und das muss so bleiben, egal welche Zahl dabei
+# ORDNUNG dagegen ist die Absicht selbst: die Morobora ist flaches Hochland, das
+# Nevadin ein Gebirge, und das muss so bleiben, egal welche Zahl dabei
 # herauskommt. Kippt sie, ist das ein Befund und kein Eichthema.
 ORDNUNG_FLACH_NACH_STEIL = [
-    "Steppe", "Taiga", "Huegelland", "Atlantikkueste", "Griechische Inseln",
-    "Mittelgebirge", "Mittelmeer", "Fjordland", "Alpenland",
+    "Samarcia", "Morobora", "Clonagh", "Estrande", "Thalassia",
+    "Nebelrode", "Macchia", "Skerrheim", "Nevadin",
 ]
 
 # Der Fingerabdruck laeuft auf EIGENER Groesse und ueber MEHRERE Seeds.
@@ -175,8 +175,9 @@ def lauf():
         feld = fertiges_gelaende(seed)
         maske, _sdf = rw.kontinentform(FINGERABDRUCK_SIZE, seed,
                                        manager if gpu else None)
-        gewichte = rw.voronoi_regionen(maske, seed, punktzahl=200,
-                                       shader_manager=manager if gpu else None)
+        gewichte, _zellen = rw.voronoi_regionen(
+            maske, seed, punktzahl=200,
+            shader_manager=manager if gpu else None)
         fuehrend = np.argmax(gewichte, axis=0)
         mpp = rw.WELT_KM * 1000.0 / FINGERABDRUCK_SIZE
         dy, dx = np.gradient(feld, mpp)
@@ -227,8 +228,8 @@ def lauf():
     # ---------- 2b: die Ordnung ----------
     #
     # Die Zahlen oben lassen sich nachziehen, die Reihenfolge nicht. Sie ist
-    # die Absicht selbst - eine Taiga, die steiler wird als das Mittelgebirge,
-    # ist keine Taiga mehr, egal welchen Zielwert man einträgt.
+    # die Absicht selbst - eine Morobora, die steiler wird als das Nebelrode,
+    # ist keine Morobora mehr, egal welchen Zielwert man einträgt.
     if len(gemessener_hang) == 9:
         ist = sorted(gemessener_hang, key=gemessener_hang.get)
         verrutscht = [n for n in ist
@@ -267,8 +268,9 @@ def lauf():
     # passt also nicht zu `H` (SIZE, SEED). Sie hier wiederzuverwenden hiesse,
     # Naehte an Stellen zu suchen, an denen in dieser Karte gar keine sind.
     maske, _sdf = rw.kontinentform(SIZE, SEED, manager if gpu else None)
-    gewichte = rw.voronoi_regionen(maske, SEED, punktzahl=200,
-                                   shader_manager=manager if gpu else None)
+    gewichte, _zellen = rw.voronoi_regionen(
+        maske, SEED, punktzahl=200,
+        shader_manager=manager if gpu else None)
     fuehrend = np.argmax(gewichte, axis=0)
 
     wechsel = np.zeros_like(maske)
@@ -287,13 +289,13 @@ def lauf():
         # ZEHN PROZENT TOLERANZ, und der Grund steht hier, damit niemand sie
         # spaeter fuer eine Bequemlichkeit haelt: ein Grenzstreifen ist viel
         # schmaler als ein Regionsinneres, sein p99.5 entspricht also einem
-        # selteneren Ereignis. Und eine Grenze wie Fjordland/Taiga IST eine
+        # selteneren Ereignis. Und eine Grenze wie Skerrheim/Morobora IST eine
         # Landform - der Rand des Fjordplateaus darf zum steilsten gehoeren,
         # was es dort gibt. Was NICHT toleriert wird, hat der Test schon
         # zweimal gefangen: Faktor 1.5 bis 2.4, beides echte Waende.
         # 2026-08-07 von 1.10 auf 1.25.
         #
-        # Das Alpenland ist seit dem Hoehenprofil ein echtes Gebirge (Gipfel
+        # Das Nevadin ist seit dem Hoehenprofil ein echtes Gebirge (Gipfel
         # 865 m, Relief 1000) und grenzt an Tiefebenen. Sein Rand IST die
         # Gebirgsfront - der steilste Hang der Region liegt zwangslaeufig dort,
         # und das ist eine Landform, kein Nahtfehler.

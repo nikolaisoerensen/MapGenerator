@@ -44,7 +44,7 @@ sitzt und eine Stadt an mittelmaessiger. Ohne das wirkt die Karte gerechnet.
 **Nicht fest drei.** Zwischen **2 und 5**, abgeleitet aus dem, was die Region
 hergibt: die Summe der Eignung ueber der Region, verglichen mit allen neun.
 
-Eine Welt, deren Fjordland zufaellig weite bewohnbare Hochflaechen bekam, traegt
+Eine Welt, deren Skerrheim zufaellig weite bewohnbare Hochflaechen bekam, traegt
 dort fuenf Orte; eine, in der es fast nur Steilwand ist, zwei. Das macht den
 Seed spuerbar, statt ihn zu uebermalen.
 

@@ -49,7 +49,7 @@ ERBE_KOSTEN = 0.12         # geerbte Kette kostet so viel wie sonst
 
 # Untergrenze fuer das Wassergewicht eines Knotens (Block 1.1). Verhindert,
 # dass eine sehr trockene Region Knoten mit Gewicht ~0 bekommt und ihre
-# Laeufe dadurch voellig verschwinden - auch in der Steppe fliesst etwas.
+# Laeufe dadurch voellig verschwinden - auch in der Samarcia fliesst etwas.
 WASSER_MINDEST = 0.15
 
 # Die drei Stufenabstaende haengen fest aneinander: Meso ist rund ein Drittel
@@ -63,7 +63,7 @@ STUFEN_VERHAELTNIS = (1.0, 1.0 / 2.857, 1.0 / 8.0)
 
 # Mittlere Formgroesse der Regionentabelle, rund 2260 m. Sie dient als BEZUG
 # fuer die Talbreite: `formgroesse_m / BEZUGSFORM_M` liegt damit zwischen 0.5
-# (Griechische Inseln) und 2.2 (Alpenland) und moduliert nur noch, statt die
+# (Thalassia) und 2.2 (Nevadin) und moduliert nur noch, statt die
 # Groessenordnung zu setzen. Siehe `taeler_eingraben`.
 BEZUGSFORM_M = float(np.mean([r["formgroesse_m"]
                               for _z, _s, r in rw.alle_regionen()]))
@@ -388,16 +388,16 @@ def baue_stufe(punkte, H, mpp, kosten_staerke, erbe=None, stufe_index=0,
     # Wassermenge. Der Niederschlag lag als volles Feld bereit
     # (`felder["niederschlag_mm"]`) und wurde nie gelesen.
     #
-    # GEMESSEN, was das anrichtete (512 px, Seed 20260804): das Fjordland
+    # GEMESSEN, was das anrichtete (512 px, Seed 20260804): das Skerrheim
     # hat mit 1967 mm den hoechsten Niederschlag aller Regionen und die
     # meiste Wassermenge (Niederschlag mal Landflaeche, 13.0 Mio) - und
-    # mit 123 Knoten den KLEINSTEN Hauptfluss. Die Steppe hat mit 4.3 Mio
+    # mit 123 Knoten den KLEINSTEN Hauptfluss. Die Samarcia hat mit 4.3 Mio
     # die wenigste Wassermenge und einen dreimal groesseren Fluss. Die
     # Korrelation war negativ.
     #
     # `wasser_feld` ist der Niederschlag, auf den Kartenmittelwert
-    # bezogen: 1.0 heisst durchschnittlich, das Fjordland liegt bei rund
-    # 2.2, die Steppe bei 0.5. Ein Knoten traegt damit sein Wasser bei,
+    # bezogen: 1.0 heisst durchschnittlich, das Skerrheim liegt bei rund
+    # 2.2, die Samarcia bei 0.5. Ein Knoten traegt damit sein Wasser bei,
     # nicht seine Existenz.
     #
     # OHNE FELD bleibt es bei `ones` - Werkzeuge und Tests, die
@@ -511,16 +511,16 @@ def flussnetz(H, seed, kosten_staerke=6.0, abstand_makro_m=None,
 # Wie wahrscheinlich eine Region einen erzwungenen Hauptstrom bekommt, und
 # wie gross er mindestens werden soll (Nutzervorgabe 2026-08-24):
 #
-#   *"dann werden grosse fluesse zumindest in Fjordland (100% chance),
-#   Taiga (66%) und Atlantik (66% chance) generiert. der rest generiert
+#   *"dann werden grosse fluesse zumindest in Skerrheim (100% chance),
+#   Morobora (66%) und Atlantik (66% chance) generiert. der rest generiert
 #   weiterhin wie jetzt. nur ein kleiner nudge erstmal."*
-#   *"Fjordland soll es groesser sein als jetzt der groesste fluss."*
+#   *"Skerrheim soll es groesser sein als jetzt der groesste fluss."*
 #
 # WARUM ES DIESE REGEL UEBERHAUPT BRAUCHT. Block 1.1 hat den Niederschlag
 # ins Netz gebracht, und die Richtung stimmt seither: nasse Regionen
-# wachsen, trockene schrumpfen (Fjordland 123 -> 215, Steppe 374 -> 226).
-# Das Fjordland fuehrt trotzdem nicht - 215 gegen 737 an der
-# Atlantikkueste - und die Ursache ist ungeklaert. Drei Hypothesen wurden
+# wachsen, trockene schrumpfen (Skerrheim 123 -> 215, Samarcia 374 -> 226).
+# Das Skerrheim fuehrt trotzdem nicht - 215 gegen 737 an der
+# Estrande - und die Ursache ist ungeklaert. Drei Hypothesen wurden
 # gemessen und widerlegt (docs/FLUESSE_UND_WASSER.md 1.1).
 #
 # Diese Regel ist deshalb eine bewusste SETZUNG, kein Modell: sie behebt
@@ -530,9 +530,9 @@ def flussnetz(H, seed, kosten_staerke=6.0, abstand_makro_m=None,
 # Der Zielwert 700 liegt ueber den 654, die vor Block 1.1 der groesste
 # Fluss der ganzen Karte waren.
 HAUPTSTROM_QUOTE = {
-    "Fjordland": (1.00, 700.0),
-    "Taiga": (0.66, 500.0),
-    "Atlantikkueste": (0.66, 500.0),
+    "Skerrheim": (1.00, 700.0),
+    "Morobora": (0.66, 500.0),
+    "Estrande": (0.66, 500.0),
 }
 
 
@@ -596,8 +596,8 @@ def _hauptstrom_erzwingen(netz, region_map, H, seed):
         # ADDITIV, NICHT MULTIPLIKATIV - dritter gemessener Fehler dieser
         # Regel. Ein Faktor haette jeden Knoten flussabwaerts im selben
         # VERHAELTNIS vergroessert, auch die, die ohnehin schon gross sind:
-        # der Fjordland-Strom muendet in der Atlantikkueste, und deren
-        # Maximum sprang dadurch von 737 auf 2396, das Alpenland von 676
+        # der Skerrheim-Strom muendet in der Estrande, und deren
+        # Maximum sprang dadurch von 737 auf 2396, das Nevadin von 676
         # auf 2197 - obwohl beide gar keine Quote haben.
         #
         # Mehr Wasser im Oberlauf heisst flussabwaerts eine KONSTANTE
@@ -618,6 +618,233 @@ def _hauptstrom_erzwingen(netz, region_map, H, seed):
 # STUFE C - TAELER EINGRABEN
 # =============================================================================
 
+# KONTRAST ZWISCHEN DICKEN UND DUENNEN LAEUFEN (2026-08-25)
+#
+# Die Talbreite ist `anteil * breite_feld` mit
+#
+#     anteil = TALBREITE_UNTERGRENZE
+#              + (1 - TALBREITE_UNTERGRENZE) * gebiet ** TALBREITE_EXPONENT
+#
+# `gebiet` ist das normierte Einzugsgebiet (0..1). Bei gebiet = 1 ist `anteil`
+# IMMER 1 - der groesste Fluss bekommt also unabhaengig von diesen beiden
+# Zahlen die volle Breite. Sie bestimmen ausschliesslich, wieviel die KLEINEN
+# davon abbekommen, also den Kontrast.
+#
+# Nutzerbefund 2026-08-25 am 3D-Bild: *"die dicken fluesse (rot) muessen
+# breitere taeler ziehen. die gruenen taeler sind mir etwas zu stark ...
+# insgesamt groessere aber weniger tiefe taeler."*
+#
+# Vorher standen hier 0.22 und 0.40 - Kontrast 2.6x zwischen dem kleinsten
+# und dem groessten Lauf. Genau deshalb sahen die kleinen fast so kraeftig
+# aus wie die grossen. Gerechnet (breite_feld 890 m):
+#
+#     unter  exp     gebiet 0.02   0.10   0.50   1.00     Kontrast
+#      0.22  0.40          341 m  472 m  722 m  890 m        2.6x   (alt)
+#      0.12  0.55          198 m  328 m  642 m  890 m        4.5x   (neu)
+#      0.08  0.70          124 m  235 m  575 m  890 m        7.2x
+#
+# 0.12/0.55 gewaehlt: die duennen Laeufe verlieren rund 40 % Breite, die
+# dicken behalten ihre volle. 0.08/0.70 waere staerker, laesst die feinsten
+# Baeche aber unter die Untergrenze von 2.5 px fallen - dann verschwinden
+# sie ganz statt nur duenner zu werden.
+# NUR HAUPTTAELER - WIE SCHNELL EIN ABZWEIG ABSCHWAECHT (2026-08-25)
+#
+# Nutzervorgabe: *"wir generieren ueberall fluesse wo wir unsere
+# flussvoronois haben und das ist etwas krass. ich wollte damals nur die
+# haupttaeler damit erzeugen. die abzweige sollten weit unten noch taeler
+# generieren aber dann schwaecht das schnell ab (je nach regenmenge die
+# angeschlossen ist)."*
+#
+# DAS PROBLEM WAR DAS TIEFENGESETZ, nicht die Zahl der Knoten. Gemessen
+# (384 px, Seed 20260804, 2957 Knoten):
+#
+#     Ordnung 1: 2220 Knoten = 75.1 % aller Knoten, gebiet-Median 0.0022
+#
+# und mit dem alten Exponenten 0.30 bekamen diese 2220 Knoten
+# 0.0022**0.30 = **15.9 % der vollen Taltiefe**. Ein Sechstel Eintiefung,
+# gleichmaessig ueber die ganze Karte verteilt - gemessen lagen dadurch
+# 63 bis 67 % der Landflaeche tiefer als 20 m ausgehoben. Das ist kein
+# Talsystem mehr, das ist ein Tiefpass.
+#
+# `gebiet` IST die angeschlossene Regenmenge: `netz["flaeche"]` akkumuliert
+# seit 2026-08-24 Niederschlag mal Flaeche flussabwaerts (siehe
+# `baue_stufe`), nicht mehr blosse Knotenzahl. Die Nutzervorgabe "je nach
+# regenmenge die angeschlossen ist" ist damit genau diese Groesse.
+#
+# TIEFENFAKTOR gebiet**TALTIEFE_EXPONENT, je Strahler-Ordnung:
+#
+#     Exponent   Ord 1   Ord 2   Ord 3   Ord 4   Ord 5
+#       0.30     15.9%   35.3%   51.7%   64.6%   99.8%   (alt)
+#       0.70      1.4%    8.8%   21.5%   36.1%   99.6%   (neu)
+#       1.00      0.2%    3.1%   11.1%   23.3%   99.5%
+#
+# 0.70 gewaehlt: die feinsten Baeche verschwinden praktisch (1.4 %), die
+# mittleren Zufluesse (Ordnung 3/4) ziehen mit 21 bzw. 36 % weiterhin
+# sichtbare Taeler, der Hauptstrom bleibt unveraendert. Bei 1.00 waeren auch
+# die mittleren zu schwach - der Nutzer will Abzweige, nur schwaechere.
+TALTIEFE_EXPONENT = 0.70
+
+# Unterhalb dieser angeschlossenen Wassermenge zieht ein Knoten GAR KEIN Tal.
+#
+# DER EIGENTLICHE HEBEL, und er sitzt woanders als zuerst vermutet.
+#
+# Gemessen wurde nacheinander, was das Gelaende so flaechig eintieft:
+#
+#   * Tiefenexponent 0.30 -> 0.70:  Anteil >20 m von 63.4 auf 55.0 %  (wirkt)
+#   * Schwelle 0.005:               63.4 -> 63.1 %                    (nichts)
+#   * breite_faktor 0.60 -> 0.12:   54.8 -> 52.4 %                    (fast nichts)
+#
+# Beide letzten Hypothesen waren falsch. Die Ursache zeigte erst diese
+# Messung: **23.5 % der LANDFLAECHE sind Flusspixel, der Median-Abstand zum
+# naechsten Lauf ist 1 Pixel (55 m).** Jedes Landpixel liegt praktisch AUF
+# einem Fluss. Im Talprofil weiter unten ist
+#
+#     t = abstand / talbreite,   d = 1 - exp(-t),   profil = d ** form
+#
+# und bei abstand ~ 1 px gegen talbreite ~ 8-16 px wird t ~ 0.1, damit
+# profil ~ 0.03 - es wirken also ueber 95 % des Talsogs, ueberall. Die
+# Talbreite ist dabei fast gleichgueltig, weil der Abstand so klein ist.
+#
+# Nutzervorgabe 2026-08-25: *"wir generieren ueberall fluesse wo wir unsere
+# flussvoronois haben und das ist etwas krass. ich wollte damals nur die
+# haupttaeler damit erzeugen. die abzweige sollten weit unten noch taeler
+# generieren aber dann schwaecht das schnell ab (je nach regenmenge die
+# angeschlossen ist)."*
+#
+# Gemessen (384 px, Exponent 0.70, breite_faktor 0.35):
+#
+#     Schwelle   Median    >5 m    >20 m   unberuehrtes Land   Laeufe
+#      0.005     23.2 m   73.0 %  53.2 %        17.3 %          1737
+#      0.020     20.9 m   69.6 %  50.9 %        22.3 %
+#      0.050     13.2 m   61.4 %  42.9 %        30.2 %           694
+#      0.060     10.4 m   58.0 %  40.3 %        33.7 %
+#      0.070      7.7 m   54.8 %  37.2 %        35.4 %
+#      0.100      4.8 m   49.6 %  32.9 %        38.9 %
+#      0.200      0.1 m   28.7 %  19.2 %        61.4 %
+#
+# 0.07 gewaehlt. Zuerst stand hier 0.10; der Nutzer nach der Sichtpruefung:
+# *"etwas zu viel jetzt, dazwischen waere gut"* - also die Mitte zwischen
+# 0.05 (noch zu flaechig, nur 30 % unberuehrt) und 0.10 (schon sehr
+# ausgeduennt). Bei 0.07 bleibt gut ein Drittel der Landflaeche unberuehrt,
+# die mediane Abtragung liegt bei 7.7 m statt der urspruenglichen 41.8 m,
+# und ueber ein Drittel der Flaeche traegt weiterhin echte Taeler.
+#
+# DIE LAEUFE SELBST BLEIBEN IM NETZ. Sie werden weiterhin gezeichnet
+# (river_mask/river_order) und tragen Wasser - sie formen nur kein Tal mehr.
+# Ein Bach ohne eigenes Tal ist genau das, was man in der Landschaft sieht.
+TALTIEFE_MINDESTWASSER = 0.07
+
+TALBREITE_UNTERGRENZE = 0.12
+TALBREITE_EXPONENT = 0.55
+
+
+# ---------------------------------------------------------------------------
+# FLUSSLAEUFE ALS SPLINE STATT ALS STRECKENZUG
+#
+# Nutzerbefund 2026-08-25 am 2D-Bild: *"die fluesse sind hier sehr zackig
+# gezeichnet ... kann man das mit splines aufweichen? also so dass fluesse
+# (vor dem einschneiden ins terrain) abgerundeter sind?"*
+#
+# URSACHE: sowohl `taeler_eingraben()` als auch der Maskenaufbau in
+# `core/terrain_generator.py` liefen die Kanten des Knotengraphen als GERADE
+# SEHNEN ab (`pk[e]*(1-t) + pk[i]*t`). An jedem Knoten knickt der Lauf dann
+# abrupt - bei Knotenabstaenden von 150 bis 1200 m sind das sichtbare Zacken.
+# Der Graph selbst ist in Ordnung; nur seine Darstellung war eckig.
+#
+# ZENTRIPETALES CATMULL-ROM (alpha = 0.5), nicht uniformes:
+#
+#   * Es geht EXAKT durch die Knoten. Das ist keine Kosmetik, sondern
+#     Pflicht - an den Knoten haengen die Sohlenhoehen `z`, aus denen das
+#     Laengsprofil gebaut wird. Eine Kurve, die nur in der NAEHE der Knoten
+#     verliefe, wuerde Hoehen an Stellen setzen, fuer die sie nicht gelten.
+#   * Zentripetal statt uniform, weil die Knotenabstaende im Netz sehr
+#     ungleich sind (die Stufen STUFEN reichen von 150 bis 1200 m). Uniformes
+#     Catmull-Rom bildet bei ungleichen Abstaenden Schleifen und Spitzen;
+#     die zentripetale Parametrisierung ist beweisbar frei davon
+#     (Yuksel/Schaefer/Keyser 2011).
+#
+# Die beiden zusaetzlichen Stuetzpunkte kommen aus dem Netz selbst: flussab
+# der Elternknoten des Elternknotens, flussauf das GROESSTE Kind (der
+# Hauptstrang). An Muendung und Quelle fehlt einer - dort wird gespiegelt,
+# die Kurve laeuft dann gerade aus.
+
+
+def hauptkinder(eltern, fluss):
+    """
+    Je Knoten sein groesstes Kind (der Hauptstrang flussaufwaerts), sonst -1.
+
+    Gebraucht als vierter Stuetzpunkt der Spline. Das GROESSTE Kind und nicht
+    irgendeines: an einer Muendung soll die Kurve dem Hauptstrom folgen, nicht
+    einem Seitenbach - sonst bekaeme der Hauptlauf an jeder Einmuendung einen
+    Schlenker zur Seite.
+    """
+    import numpy as np
+
+    beste = np.full(len(eltern), -1, dtype=np.int64)
+    bester_fluss = np.zeros(len(eltern))
+    for kind in range(len(eltern)):
+        e = eltern[kind]
+        if e < 0:
+            continue
+        if fluss[kind] > bester_fluss[e]:
+            bester_fluss[e] = fluss[kind]
+            beste[e] = kind
+    return beste
+
+
+def kantenpunkte(pk, eltern, kinder, e, i, schritte):
+    """
+    Die Punkte einer Kante e->i als zentripetale Catmull-Rom-Kurve.
+
+    `e` ist der flussabwaertige (Eltern-)Knoten, `i` der flussaufwaertige.
+    Rueckgabe (schritte, 2) - beginnt exakt auf pk[e], endet exakt auf pk[i],
+    damit die Sohlenhoehen weiter passen.
+    """
+    import numpy as np
+
+    p1 = np.asarray(pk[e], dtype=np.float64)
+    p2 = np.asarray(pk[i], dtype=np.float64)
+
+    # Flussab weiter: der Elternknoten von e. Fehlt er (Muendung), spiegeln.
+    e2 = eltern[e] if e < len(eltern) else -1
+    p0 = np.asarray(pk[e2], dtype=np.float64) if e2 >= 0 else 2.0 * p1 - p2
+    # Flussauf weiter: das groesste Kind von i. Fehlt es (Quelle), spiegeln.
+    i2 = kinder[i] if i < len(kinder) else -1
+    p3 = np.asarray(pk[i2], dtype=np.float64) if i2 >= 0 else 2.0 * p2 - p1
+
+    def knoten(a, b, vorher):
+        d = float(np.linalg.norm(b - a))
+        # Fallen zwei Stuetzpunkte zusammen, waere der Nenner 0 - ein winziger
+        # Mindestabstand haelt die Rechnung endlich und die Kurve dort gerade.
+        return vorher + max(d, 1e-6) ** 0.5
+
+    t0 = 0.0
+    t1 = knoten(p0, p1, t0)
+    t2 = knoten(p1, p2, t1)
+    t3 = knoten(p2, p3, t2)
+
+    t = np.linspace(t1, t2, schritte)[:, None]
+
+    a1 = (t1 - t) / (t1 - t0) * p0 + (t - t0) / (t1 - t0) * p1
+    a2 = (t2 - t) / (t2 - t1) * p1 + (t - t1) / (t2 - t1) * p2
+    a3 = (t3 - t) / (t3 - t2) * p2 + (t - t2) / (t3 - t2) * p3
+    b1 = (t2 - t) / (t2 - t0) * a1 + (t - t0) / (t2 - t0) * a2
+    b2 = (t3 - t) / (t3 - t1) * a2 + (t - t1) / (t3 - t1) * a3
+    kurve = (t2 - t) / (t2 - t1) * b1 + (t - t1) / (t2 - t1) * b2
+
+    # Enden hart auf die Knoten setzen. Die Rechnung trifft sie ohnehin, aber
+    # Gleitkommareste wuerden sonst Sohlenhoehen um Bruchteile verschieben.
+    kurve[0] = p1
+    kurve[-1] = p2
+    return kurve
+
+
+# Bei welchem Reglerwert "Valley Shape" das Regionsfeld unveraendert laesst.
+# Muss der Vorgabe von RIVER_NETWORK.VALLEY_FORM entsprechen - sonst
+# veraendert schon das blosse Oeffnen des Reiters die Taeler.
+TALFORM_REGLER_NEUTRAL = 1.3
+
+
 def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
                      form=1.3, max_hang=1.0, abstand_makro_m=None):
     """
@@ -628,7 +855,7 @@ def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
     An der Sohle steht z_fluss, weit weg bleibt P unveraendert.
 
     JE REGION VERSCHIEDEN: Tiefe kommt aus `relief_m`, die Breite wird mit
-    `formgroesse_m` moduliert. Im Alpenland tiefe Troege, im Huegelland flache
+    `formgroesse_m` moduliert. Im Nevadin tiefe Troege, im Clonagh flache
     Sohlen - dieselbe Rechnung, ortsabhaengige Zahlen.
 
     DIE BREITE HAENGT AM NETZ, NICHT AM RAUSCHEN (2026-08-10).
@@ -695,16 +922,25 @@ def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
                    * (felder["formgroesse_m"] / BEZUGSFORM_M) / mpp)
     tiefe_feld = tiefe_anteil * felder["relief_m"]
 
+    # Einmal je Netz, nicht je Kante - siehe hauptkinder().
+    kinder = hauptkinder(el, fl)
+
     sohle = np.full((size, size), np.nan)
     breite = np.zeros((size, size))
-    untergrenze = 0.22
+    untergrenze = TALBREITE_UNTERGRENZE
+    uebersprungen = 0
     for i in np.argsort(-fl):
         e = el[i]
         if e < 0:
             continue
+        # ZU WENIG WASSER FUER EIN TAL - siehe TALTIEFE_MINDESTWASSER.
+        # Der Lauf bleibt im Netz und wird gezeichnet, er formt nur nichts.
+        if gebiet[i] < TALTIEFE_MINDESTWASSER:
+            uebersprungen += 1
+            continue
         strecke = float(np.linalg.norm(pk[i] - pk[e]))
         schritte = max(int(strecke * 3.0), 3)
-        anteil = untergrenze + (1.0 - untergrenze) * gebiet[i] ** 0.40
+        anteil = untergrenze + (1.0 - untergrenze) * gebiet[i] ** TALBREITE_EXPONENT
         # DIE STUETZSTELLEN AUF EINMAL, nicht einzeln (2026-08-23).
         #
         # Hier stand eine Schleife ueber `schritte` Stuetzstellen je Kante,
@@ -724,7 +960,10 @@ def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
         # Pixelwahl ist also unveraendert. Geprueft in
         # tests/smoke_test_weltfluesse_vektor.py.
         t = np.linspace(0.0, 1.0, schritte)
-        ps = pk[e][None, :] * (1.0 - t)[:, None] + pk[i][None, :] * t[:, None]
+        # SPLINE statt gerader Sehne (siehe kantenpunkte() oben). `t` bleibt
+        # fuer die Sohlenhoehe linear - die Hoehe interpoliert zwischen den
+        # beiden Knoten, nur der WEG dorthin ist jetzt gekruemmt.
+        ps = kantenpunkte(pk, el, kinder, e, i, schritte)
         ys = np.clip(np.round(ps[:, 0]), 0, size - 1).astype(np.int64)
         xs = np.clip(np.round(ps[:, 1]), 0, size - 1).astype(np.int64)
         w = np.maximum(anteil * breite_feld[ys, xs], 2.5)
@@ -734,10 +973,17 @@ def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
         # 60 m tief ein und legte die halbe Kueste unter Wasser - gemessen
         # fiel der Landanteil von 65 auf 54 Prozent. Die Eintiefung ist
         # deshalb hoechstens ein Teil der Hoehe ueber Null.
-        tief = np.minimum(tiefe_feld[ys, xs] * gebiet[i] ** 0.30,
+        tief = np.minimum(tiefe_feld[ys, xs] * gebiet[i] ** TALTIEFE_EXPONENT,
                           0.55 * np.maximum(sohle_roh, 0.0))
         sohle[ys, xs] = sohle_roh - tief
         np.maximum.at(breite, (ys, xs), w)
+
+    if uebersprungen:
+        import logging
+        logging.getLogger(__name__).info(
+            "%d von %d Netzknoten ziehen kein Tal (unter "
+            "TALTIEFE_MINDESTWASSER = %.3f)",
+            uebersprungen, len(el), TALTIEFE_MINDESTWASSER)
 
     ist_fluss = np.isfinite(sohle)
     if not ist_fluss.any():
@@ -777,7 +1023,7 @@ def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
     d = 1.0 - np.exp(-np.maximum(t, 0.0))
 
     # DIE TALFORM JE REGION (Nutzervorgabe 2026-08-24: *"ja flusstypen
-    # sollte es geben, nach region. zB alpen eher V. Fjordland U und im
+    # sollte es geben, nach region. zB alpen eher V. Skerrheim U und im
     # Atlantik irgendwas dazwischen"*).
     #
     # `form` war bis hierher ein Festwert (1.3) fuer die ganze Karte. Der
@@ -789,9 +1035,24 @@ def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
     # `felder["talform"]` ist wie alle Regionsparameter ueber die
     # Voronoi-Gewichte weich ueberblendet; an einer Regionsgrenze geht die
     # Talform also allmaehlich ueber, statt zu springen.
+    # DER GUI-REGLER WIRKT WIEDER, ALS FAKTOR (2026-08-26).
+    #
+    # Hier stand `form = np.clip(form_feld, ...)` - das Regionsfeld
+    # ueberschrieb den uebergebenen Wert BEDINGUNGSLOS. Die Regionsdifferenz
+    # war damit richtig, der Regler "Valley Shape" aber stumm: gemessen
+    # 0.00 m Hoehenaenderung und 0.0 % Netzwechsel ueber seinen ganzen
+    # Bereich (0.3 bis 3.0). Er stand in der Oberflaeche und tat nichts -
+    # kein Absturz, keine Warnung, nur ein Regler ohne Wirkung.
+    #
+    # Jetzt SKALIERT er das Regionsfeld, statt es zu ersetzen. Bei seinem
+    # Vorgabewert ist er neutral, die Regionsunterschiede bleiben also
+    # vollstaendig erhalten; darueber werden alle Taeler runder, darunter
+    # alle kerbiger - die Abstufung Alpen-V gegen Skerrheim-U bleibt.
     form_feld = felder.get("talform")
     if form_feld is not None:
-        form = np.clip(np.asarray(form_feld, dtype=np.float64), 0.3, 6.0)
+        faktor = float(form) / TALFORM_REGLER_NEUTRAL
+        form = np.clip(np.asarray(form_feld, dtype=np.float64) * faktor,
+                       0.3, 6.0)
     profil = np.power(d, form)
     z_eff = (1.0 - profil) * z_nah + profil * z_glatt
     neu = H - (H - z_eff) * (1.0 - profil)

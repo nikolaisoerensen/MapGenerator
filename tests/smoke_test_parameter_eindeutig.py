@@ -199,6 +199,61 @@ def run_unerreichbare_sind_benannt():
     return ok
 
 
+# Vorgaben, die absichtlich neben dem Raster liegen duerfen, mit Begruendung.
+RASTER_AUSNAHMEN = {
+    "EROSION.CONVERGENCE_THRESHOLD":
+        "1e-06 bei Schritt 1e-07 - reine Fliesskomma-Ungenauigkeit, und die "
+        "Droplet-Erosion ist ohnehin abgeschaltet.",
+}
+
+
+def run_vorgaben_liegen_auf_dem_raster():
+    """
+    Rastet ein Regler beim Aufbau des Reiters seine eigene Vorgabe weg?
+
+    ANLASS (gemessen 2026-08-26): `ParameterSlider` rastet auf `step`. Liegt
+    `default` nicht auf diesem Raster, zeigt der Regler beim ersten Aufbau
+    einen ANDEREN Wert als den eingetragenen - und schreibt ihn beim ersten
+    Anfassen auch zurueck. Gefunden wurden drei:
+
+        RIVER_NETWORK.INCISION_SHARE   0.18 bei Schritt 0.05  -> 0.20
+        TERRAIN.MAP_DISTANCE_KM        21.3 bei Schritt 1.0   -> 21.0
+        EROSION.CONVERGENCE_THRESHOLD  1e-06 bei Schritt 1e-07
+
+    Der zweite ist der ernste: `MAP_DISTANCE_KM` ist die WELTBREITE, gegen
+    die jede Meterrechnung geeicht ist. Das blosse Oeffnen des
+    Terrain-Reiters haette sie um 1.4 % verstellt, ohne Meldung und ohne
+    dass ein Test es gesehen haette.
+    """
+    import gui.config.value_default as vd
+
+    schlecht = []
+    for gname in dir(vd):
+        G = getattr(vd, gname)
+        if not isinstance(G, type):
+            continue
+        for a in dir(G):
+            if not a.isupper():
+                continue
+            c = getattr(G, a)
+            if not isinstance(c, dict) or "step" not in c or "default" not in c:
+                continue
+            try:
+                d, st, mn = float(c["default"]), float(c["step"]), float(c["min"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if st <= 0:
+                continue
+            n = (d - mn) / st
+            if abs(n - round(n)) > 1e-6 and f"{gname}.{a}" not in RASTER_AUSNAHMEN:
+                schlecht.append(f"{gname}.{a} (Vorgabe {d:g}, Schritt {st:g} "
+                                f"-> rastet auf {mn + round(n) * st:g})")
+    return check("jede Vorgabe liegt auf dem Raster ihres Reglers",
+                 not schlecht,
+                 ", ".join(schlecht) if schlecht else
+                 f"geprueft, {len(RASTER_AUSNAHMEN)} begruendete Ausnahme(n)")
+
+
 def main():
     print("=" * 70)
     print("Parameterschluessel eindeutig (12.3) und unerreichbare benannt (12.4)")
@@ -208,7 +263,9 @@ def main():
             ("kein Schluessel auf zwei Konfigurationen", run_kein_schluessel_zeigt_auf_zwei_konfigs),
             ("keine unangemeldeten Doppelschluessel", run_keine_unangemeldeten_doppel),
             ("Gegenprobe: Doppel werden gefunden", run_doppel_werden_wirklich_gefunden),
-            ("unerreichbare Regler sind benannt", run_unerreichbare_sind_benannt)]:
+            ("unerreichbare Regler sind benannt", run_unerreichbare_sind_benannt),
+            ("Vorgaben liegen auf dem Reglerraster",
+             run_vorgaben_liegen_auf_dem_raster)]:
         print(f"\n--- {name} ---")
         ergebnisse.append(funktion())
     print("\n" + "=" * 70)

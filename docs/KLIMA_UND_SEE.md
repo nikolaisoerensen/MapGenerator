@@ -6,7 +6,7 @@ Stand 2026-08-07, **abgestimmt und umgesetzt** (Vermerk 2026-08-12).
 > Das war überholt.** Umgesetzt sind: die Seegliederung über den Voronoi-
 > Zellgraphen (OFFENE_PUNKTE 3.1), die Tiefentabelle je Seegrad statt der
 > alten Schelfformel (3.2), Seewege ab Grad 1 (3.3), die Regionszuordnung der
-> Seezellen samt Fjordland-/Hügelland-Sondertabellen und Taiga-Seeeis (3.6).
+> Seezellen samt Skerrheim-/Hügelland-Sondertabellen und Morobora-Seeeis (3.6).
 > Dazu kamen später die Küsten-Archetypen (3.8), die es hier noch nicht gab.
 >
 > **Die Leitlinie in §0 gilt unverändert weiter und ist der wichtigste Teil
@@ -48,23 +48,23 @@ gegenpruefen**, sie sind auf ein bis zwei Grad genau, nicht besser.
 
 | Region | Bezugsort | Hoehe des Orts | Jan | Jul | Spanne | Niederschlag |
 |---|---|---:|---:|---:|---:|---:|
-| Huegelland (Kelten) | **Cork**, Irland | 10 m | 6.0 °C | 15.5 °C | 9.5 K | 1200 mm |
-| Fjordland (Wikinger) | **Bergen**, Norwegen | 20 m | 2.0 °C | 15.0 °C | 13.0 K | **2250 mm** |
-| Taiga (Slawen) | **Wologda**, Russland | 130 m | **−11.5 °C** | 17.5 °C | **29.0 K** | 600 mm |
-| Atlantikkueste (Franken) | **La Rochelle**, Frankreich | 15 m | 6.5 °C | 20.5 °C | 14.0 K | 780 mm |
-| Alpenland (Alemannen) | **Chur**, Schweiz | 590 m | 0.0 °C | 18.5 °C | 18.5 K | 850 mm |
-| Mittelgebirge (Sachsen) | **Bamberg**, Deutschland | 240 m | 0.5 °C | 19.0 °C | 18.5 K | 640 mm |
-| Steppe (Andalusier) | **Madrid**, Spanien | 660 m | 6.5 °C | **25.5 °C** | 19.0 K | **430 mm** |
-| Mittelmeer (Italiener) | **Rom**, Italien | 20 m | 8.0 °C | 25.5 °C | 17.5 K | 800 mm |
-| Griechische Inseln (Byzantiner) | **Iraklio**, Kreta | 40 m | **12.5 °C** | 26.5 °C | 14.0 K | 480 mm |
+| Clonagh (Kelten) | **Cork**, Irland | 10 m | 6.0 °C | 15.5 °C | 9.5 K | 1200 mm |
+| Skerrheim (Wikinger) | **Bergen**, Norwegen | 20 m | 2.0 °C | 15.0 °C | 13.0 K | **2250 mm** |
+| Morobora (Slawen) | **Wologda**, Russland | 130 m | **−11.5 °C** | 17.5 °C | **29.0 K** | 600 mm |
+| Estrande (Franken) | **La Rochelle**, Frankreich | 15 m | 6.5 °C | 20.5 °C | 14.0 K | 780 mm |
+| Nevadin (Alemannen) | **Chur**, Schweiz | 590 m | 0.0 °C | 18.5 °C | 18.5 K | 850 mm |
+| Nebelrode (Sachsen) | **Bamberg**, Deutschland | 240 m | 0.5 °C | 19.0 °C | 18.5 K | 640 mm |
+| Samarcia (Andalusier) | **Madrid**, Spanien | 660 m | 6.5 °C | **25.5 °C** | 19.0 K | **430 mm** |
+| Macchia (Italiener) | **Rom**, Italien | 20 m | 8.0 °C | 25.5 °C | 17.5 K | 800 mm |
+| Thalassia (Byzantiner) | **Iraklio**, Kreta | 40 m | **12.5 °C** | 26.5 °C | 14.0 K | 480 mm |
 
-Das ergibt eine schoene Spreizung: 24 K Unterschied im Januar zwischen Taiga
+Das ergibt eine schoene Spreizung: 24 K Unterschied im Januar zwischen Morobora
 und Kreta, und Faktor 5 im Niederschlag zwischen Bergen und Madrid.
 
 ### Die Bezugshoehe ist der Knackpunkt
 
-Chur liegt auf 590 m, unser Alpenland hat 800 m Mittelhoehe. Wologda liegt auf
-130 m, unsere Taiga auf 294 m. Die Tabellenwerte gelten also **nicht** ohne
+Chur liegt auf 590 m, unser Nevadin hat 800 m Mittelhoehe. Wologda liegt auf
+130 m, unsere Morobora auf 294 m. Die Tabellenwerte gelten also **nicht** ohne
 Weiteres fuer unsere Regionen.
 
 > **ENTSCHIEDEN 2026-08-07: die Werte gelten auf MEERESHOEHE**, und die
@@ -80,9 +80,9 @@ Weiteres fuer unsere Regionen.
 > ein geeichter Wert, kein fester), und dann waere die Klimavorgabe stillschweigend
 > mitgewandert. Meereshoehe ist der einzige Bezug, der nicht mitwandert.
 >
-> **Die Folge muss man sehen:** das Alpenland steht damit auf 22.0 Grad
+> **Die Folge muss man sehen:** das Nevadin steht damit auf 22.0 Grad
 > Meereshoehe im Juli und kommt auf seinen 800 m bei 17.2 Grad heraus. Die
-> Steppe kommt auf 28.1 Grad und ist die heisseste Region der Karte - der
+> Samarcia kommt auf 28.1 Grad und ist die heisseste Region der Karte - der
 > Nutzer dazu: "lassen, kann gerne etwas heisser sein."
 
 ### Das Meer
@@ -246,19 +246,19 @@ Jahresmittel und halbe Spanne, auf Meereshoehe, aus der Tabelle in
 
 | Region | Jan | Jul | **Mittel** | **halbe Spanne** |
 |---|---:|---:|---:|---:|
-| Huegelland | 6.1 | 15.6 | 10.9 | 4.8 |
-| Fjordland | 2.1 | 15.1 | 8.6 | 6.5 |
-| Taiga | -10.7 | 18.3 | 3.8 | **14.5** |
-| Atlantikkueste | 6.6 | 20.6 | 13.6 | 7.0 |
-| Alpenland | 3.5 | 22.0 | 12.8 | 9.3 |
-| Mittelgebirge | 1.9 | 20.4 | 11.2 | 9.3 |
-| Steppe | 10.5 | 29.5 | 20.0 | 9.5 |
-| Mittelmeer | 8.1 | 25.6 | 16.9 | 8.8 |
-| Griechische Inseln | 12.7 | 26.7 | 19.7 | 7.0 |
+| Clonagh | 6.1 | 15.6 | 10.9 | 4.8 |
+| Skerrheim | 2.1 | 15.1 | 8.6 | 6.5 |
+| Morobora | -10.7 | 18.3 | 3.8 | **14.5** |
+| Estrande | 6.6 | 20.6 | 13.6 | 7.0 |
+| Nevadin | 3.5 | 22.0 | 12.8 | 9.3 |
+| Nebelrode | 1.9 | 20.4 | 11.2 | 9.3 |
+| Samarcia | 10.5 | 29.5 | 20.0 | 9.5 |
+| Macchia | 8.1 | 25.6 | 16.9 | 8.8 |
+| Thalassia | 12.7 | 26.7 | 19.7 | 7.0 |
 | **See Sued** | 14.0 | 25.0 | 19.5 | 5.5 |
 | **See Nord** | 4.0 | 15.0 | 9.5 | 5.5 |
 
-Die Taiga hat mit 29 K die dreifache Jahresspanne des Huegellands - das ist der
+Die Morobora hat mit 29 K die dreifache Jahresspanne des Huegellands - das ist der
 Unterschied zwischen Kontinental- und Seeklima, und er faellt hier von selbst
 heraus, ohne dass ihn jemand modellieren muss.
 

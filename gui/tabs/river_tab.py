@@ -37,6 +37,36 @@ from PyQt6.QtWidgets import (
 from gui.tabs.base_tab import BaseMapTab
 
 
+# LIVE-VORSCHAU DES FLUSSNETZES (docs/AUFRAEUMPLAN.md 4.10)
+#
+# Nutzerentwurf 2026-08-26: *"dann kommt flussnetzwerke und auch hier sollte
+# eine live sicht moeglich sein."*
+#
+# GEMESSEN, warum 128 px und nicht mehr:
+#
+#     px    weltfeld (einmal)   Fluesse (je Reglerzug)
+#    128         1.30 s               0.65 s
+#    192         1.57 s               1.63 s
+#    256         2.25 s               2.10 s
+#
+# Aufgeschluesselt kostet bei 128 px `flussnetz()` allein 0.50 s, das
+# Taeler-Eingraben 0.02 s und die Rasterschleife 0.05 s. **Der Aufwand
+# steckt im Netz, nicht im Zeichnen** - eine Vermutung, die ausdruecklich
+# geprueft wurde, weil am selben Tag die Linienstaerke in genau diese
+# Schleife eingebaut worden war.
+#
+# DAS GRUNDGELAENDE WIRD EINMAL GERECHNET UND BEHALTEN. Die fuenf
+# Flussregler aendern es nicht - nur das Netz und die Taeler. Ohne diesen
+# Zwischenspeicher kostete jeder Reglerzug 1.95 statt 0.65 s.
+VORSCHAU_PX = 128
+
+# GEZEIGT WIRD DAS GELAENDE MIT DEN TAELERN, nicht eine eigene Flusskarte.
+# Alle fuenf Regler dieses Reiters formen Taeler (Abstand, Breite, Tiefe,
+# Form, Lauflage) - das eingeschnittene Gelaende IST also ihr Ergebnis. Es
+# geht ausserdem als "heightmap" durch den gewoehnlichen Anzeigeweg und
+# damit ohne Sonderbehandlung durch 2D UND 3D (stehende Regel in CLAUDE.md).
+
+
 class RiverTab(BaseMapTab):
     """Anzeige des Flussnetzes. Liest terrain.redistribution."""
 
@@ -49,6 +79,9 @@ class RiverTab(BaseMapTab):
         self.required_dependencies = ["heightmap"]
 
         self.parameter_sliders = {}
+        # Zwischenspeicher der Live-Vorschau, siehe VORSCHAU_PX.
+        self._vorschau_basis = None
+        self._vorschau_seed = None
         self.display_mode_group = None
         self.current_display_mode = "height"
         self._display_modes_by_id = {}
@@ -64,16 +97,70 @@ class RiverTab(BaseMapTab):
             shader_manager=shader_manager,
             generation_orchestrator=generation_orchestrator)
 
+        # DER TAKTGEBER ERST NACH super().__init__() - ein QTimer(self)
+        # braucht ein fertig gebautes QObject als Elternteil. Davor gibt es
+        # `RuntimeError: super-class __init__() of type RiverTab was never
+        # called`, und zwar erst beim Bauen des Reiters, nicht beim Import.
+        from PyQt6.QtCore import QTimer as _QTimer
+        self._vorschau_takt = _QTimer(self)
+        self._vorschau_takt.setSingleShot(True)
+        self._vorschau_takt.setInterval(250)
+        self._vorschau_takt.timeout.connect(self._vorschau_rechnen)
+
         self.logger.info("RiverTab initialized")
 
     # ------------------------------------------------------------------
+    # DIE FUENF WICHTIGSTEN FLUSSREGLER - GEMESSEN AUSGEWAEHLT (2026-08-26).
+    #
+    # Nutzervorgabe: *"was davon wird noch benoetigt, das ist a) schon viel
+    # zu viel. kannst du die 5 wichtigsten parameter fuer die fluesse
+    # herausfinden und mir diese auf die Flussnetzwerktab seite packen?"*
+    #
+    # Jeder der elf Regler wurde von seinem Minimum zu seinem Maximum
+    # gefahren, alles andere auf Vorgabe (384 px, Seed 20260804). Gemessen
+    # wurden ZWEI Groessen, weil ein Flussregler auf zwei Arten wirken kann:
+    # die Hoehenaenderung (die Taeler) und der Anteil der Flusspixel, die
+    # ihren Ort wechseln (der Lauf selbst).
+    #
+    #   Regler            Hoehe Mittel   groesste   Netz wechselt
+    #   SPACING_M              21.58 m    494 m        97.4 %
+    #   VALLEY_WIDTH           19.26 m    467 m         0.3 %
+    #   INHERIT_COST           10.72 m    690 m        52.6 %
+    #   MOUTH_DEPTH_M          10.26 m    451 m        52.2 %
+    #   COST_STRENGTH          10.21 m    557 m        72.2 %
+    #   INCISION_SHARE          3.22 m    189 m         0.0 %
+    #   VALLEY_FORM             0.00 m      0 m         0.0 %  <- war stumm
+    #   MEANDER, DIVIDE_BLEND, PLATEAU_FLATTEN, BORDER_OUTFLOW: alle 0.00 m
+    #   (die vier stehen ohnehin in stillgelegte_regler)
+    #
+    # AUSGEWAEHLT WURDE NICHT STRENG NACH DIESER LISTE, und das ist eine
+    # Entscheidung, keine Nachlaessigkeit: `INHERIT_COST` und
+    # `MOUTH_DEPTH_M` schneiden hoch ab, weil sie den LAUF verschieben - das
+    # Netz sieht danach anders aus, die Landschaft aber nicht. Sie sind
+    # einmal einzustellen, nicht zum Formen da, und bleiben im
+    # Terrain-Reiter.
+    #
+    # `INCISION_SHARE` steht dagegen HIER, obwohl sein Mittelwert klein ist:
+    # 3.22 m im Mittel bei 189 m Maximum heisst, die Wirkung ist auf die
+    # Taeler KONZENTRIERT statt ueber die Karte verteilt. Ein Mittelwert
+    # allein waere fuer diese Art Regler blind - genau darum steht die
+    # Maximalspalte mit in der Tabelle.
+    FLUSS_REGLER = (
+        ("river_spacing_m", "Talabstand (m)", "SPACING_M"),
+        ("river_valley_width", "Talbreite", "VALLEY_WIDTH"),
+        ("river_incision_share", "Taltiefe", "INCISION_SHARE"),
+        ("river_valley_form", "Talform (V bis U)", "VALLEY_FORM"),
+        ("river_cost_strength", "Fluesse folgen dem Tiefland", "COST_STRENGTH"),
+    )
+
     def create_parameter_controls(self):
         """
-        Keine eigenen Regler - bewusst.
+        Die fuenf wichtigsten Flussregler - siehe FLUSS_REGLER oben.
 
-        Das Flussnetz haengt an Seed und Weltparametern, die im Terrain-Reiter
-        stehen. Eine zweite Stelle mit denselben Reglern waere eine zweite
-        Wahrheit; §4.1 verlangt das Gegenteil.
+        Sie stehen NUR hier, nicht zusaetzlich im Terrain-Reiter: zwei
+        Widgets fuer denselben Parameterschluessel waeren zwei Wahrheiten
+        (SPEZIFIKATION 4.1, und tests/smoke_test_parameter_eindeutig.py
+        wacht darueber).
         """
         if not self.control_panel:
             return
@@ -98,6 +185,98 @@ class RiverTab(BaseMapTab):
         hinweis.setWordWrap(True)
         innen.addWidget(hinweis)
         self.control_panel_content_layout.addWidget(kasten)
+
+        from gui.config.value_default import RIVER_NETWORK
+        from gui.widgets.widgets import ParameterSlider
+        gruppe = QGroupBox("Taeler und Laeufe")
+        innen2 = QVBoxLayout(gruppe)
+        for schluessel, beschriftung, attr in self.FLUSS_REGLER:
+            c = getattr(RIVER_NETWORK, attr)
+            regler = ParameterSlider(
+                label=beschriftung, min_val=c["min"], max_val=c["max"],
+                default_val=c["default"], step=c["step"],
+                suffix=c.get("suffix", ""),
+                description=c.get("description", ""))
+            regler.valueChanged.connect(
+                lambda wert, k=schluessel: self._on_parameter_changed(k, wert))
+            self.parameter_sliders[schluessel] = regler
+            innen2.addWidget(regler)
+
+        from PyQt6.QtWidgets import QCheckBox as _QCheckBox
+        self.vorschau_an = _QCheckBox("Live-Vorschau (128 px)")
+        self.vorschau_an.setToolTip(
+            "Rechnet Flussnetz und Taeler bei 128 px neu, sobald ein Regler "
+            "steht - rund 0.65 s. Das Grundgelaende wird dabei behalten, "
+            "die Regler aendern es nicht. Aus: es wird gezeigt, was die "
+            "Pipeline zuletzt gerechnet hat.")
+        self.vorschau_an.toggled.connect(self._vorschau_umschalten)
+        innen2.addWidget(self.vorschau_an)
+        self.control_panel_content_layout.addWidget(gruppe)
+
+    def _on_parameter_changed(self, name, wert):
+        if getattr(self, "parameter_manager", None) is not None:
+            try:
+                self.parameter_manager.set_parameter(name, wert)
+            except Exception as fehler:                   # pragma: no cover
+                self.logger.debug("Parameter %s: %s", name, fehler)
+        if getattr(self, "vorschau_an", None) is not None                 and self.vorschau_an.isChecked():
+            self._vorschau_takt.start()
+
+    def _vorschau_umschalten(self, an):
+        if an:
+            self._vorschau_takt.start()
+        else:
+            # Zurueck auf das, was die Pipeline zuletzt gerechnet hat.
+            self._vorschau_basis = None
+            self.update_display_mode()
+
+    def _vorschau_rechnen(self):
+        """
+        Flussnetz und Taeler bei VORSCHAU_PX neu - siehe VORSCHAU_PX oben.
+
+        Das Grundgelaende (`weltfeld`) wird beim ersten Mal gerechnet und
+        behalten; die fuenf Regler dieses Reiters aendern es nicht.
+        """
+        import time
+        import numpy as _np
+        import core.terrain_weltkarte as _rw
+        from core.terrain_generator import BaseTerrainGenerator
+
+        t0 = time.time()
+        seed = 20260804
+        if self.parameter_manager is not None:
+            try:
+                seed = int(self.parameter_manager.get_tab_parameters(
+                    "terrain").get("map_seed", seed))
+            except Exception:                             # pragma: no cover
+                pass
+        if self._vorschau_basis is None or self._vorschau_seed != seed:
+            H, felder = _rw.weltfeld(VORSCHAU_PX, seed)
+            self._vorschau_basis = (_np.asarray(H, _np.float32), felder)
+            self._vorschau_seed = seed
+        basis, felder = self._vorschau_basis
+
+        gen = BaseTerrainGenerator.__new__(BaseTerrainGenerator)
+        gen.shader_manager = None
+        gen.data_lod_manager = None
+        gen.logger = self.logger
+        gen._current_parameters = dict(self.get_current_parameters())
+        try:
+            H, _m, _o, _g, _w = gen._weltfluesse(
+                basis.copy(), felder, VORSCHAU_PX, seed)
+        except Exception as fehler:                       # pragma: no cover
+            self.logger.error("Flussvorschau fehlgeschlagen: %s", fehler)
+            return
+        self.logger.info("Flussvorschau %d px in %.2f s",
+                         VORSCHAU_PX, time.time() - t0)
+        # Als "heightmap" durch den gewoehnlichen Weg - damit gilt sie in 2D
+        # UND 3D ohne Sonderbehandlung.
+        self._show_data(_np.asarray(H, _np.float32), "heightmap")
+
+    def get_current_parameters(self):
+        """Die fuenf Flussregler dieses Reiters."""
+        return {name: regler.getValue()
+                for name, regler in self.parameter_sliders.items()}
 
     # ------------------------------------------------------------------
     def create_visualization_controls(self):
@@ -136,9 +315,28 @@ class RiverTab(BaseMapTab):
         # Nutzer-Vorgabe): der erste Radioknopf eines Reiters soll die
         # Grundkarte zeigen, nicht schon eine Ueberlagerung - "Flussnetz" baut
         # als Vergleichsansicht darauf auf, nicht umgekehrt.
+        # 2026-08-26: "Wassermenge" ist die neue LEITANSICHT.
+        #
+        # Nutzervorgabe: *"ich verstehe noch immer nicht die mehrteilung mit
+        # roten und gruenen fluessen, jetzt wo wir quasi wassermengen und so
+        # haben. koennen wir nur eine karte haben die darstellt wie viel
+        # wasser fuer die fluesse berechnet wurde? und dann soll alles gut
+        # darstellbar auf der karte zu sehen sein."*
+        #
+        # `river_water` ist genau das: `netz["flaeche"]`, also Niederschlag
+        # mal Flaeche flussabwaerts akkumuliert, aufs Raster gelegt. Sie
+        # ersetzt die Rot/Gruen-Faerbung nach Generation als Leitbild.
+        #
+        # NEBENBEI EINE 3D-SCHULD GETILGT: "Flussnetz" laeuft ueber
+        # `overlay_river_generations()`, und die gibt es nur auf
+        # MapDisplay2D - in der 3D-Ansicht traf die hasattr-Weiche nie zu und
+        # es passierte lautlos nichts (CLAUDE.md, stehende Regel). Die
+        # Wassermenge ist eine gewoehnliche Skalarkarte und geht denselben
+        # Weg wie "Gelaende", also durch beide Ansichten.
         modi = [
             ("height", "Gelaende"),
-            ("rivers", "Flussnetz"),
+            ("river_water", "Wassermenge"),
+            ("rivers", "Flussnetz (Generationen)"),
             ("river_order", "Ordnung (Strahler)"),
         ]
         for nummer, (schluessel, beschriftung) in enumerate(modi):
@@ -210,6 +408,28 @@ class RiverTab(BaseMapTab):
                             np.asarray(generation),
                             zeige_mikro=bool(self.mikro_checkbox
                                              and self.mikro_checkbox.isChecked()))
+                    else:
+                        # LAUT MELDEN STATT LAUTLOS NICHTS TUN.
+                        #
+                        # Diese hasattr-Weiche ist die Fehlerklasse aus
+                        # CLAUDE.md: `overlay_river_generations` gibt es nur
+                        # auf MapDisplay2D, in der 3D-Ansicht trifft sie nie
+                        # zu - und dann fehlen die Fluesse einfach, ohne
+                        # Meldung. Der Nutzer meldete am 2026-08-26
+                        # *"Baeche (Mikro) gibt es ja auch gar nicht"*;
+                        # gemessen liegen 3760 Mikro-Pixel im Raster, mehr
+                        # als Makro (2411). Es fehlte die ANZEIGE, nicht die
+                        # Rechnung.
+                        #
+                        # Die neue Leitansicht "Wassermenge" geht den
+                        # gewoehnlichen Skalarweg und ist davon nicht
+                        # betroffen.
+                        self.logger.warning(
+                            "Flussnetz-Overlay nicht moeglich: %s kennt "
+                            "overlay_river_generations nicht - in dieser "
+                            "Ansicht bleiben die Laeufe unsichtbar. "
+                            "Ansicht 'Wassermenge' benutzen.",
+                            type(ziel).__name__ if ziel else "kein Ziel")
             else:
                 # DAS FLUSSNETZ ABSCHALTEN, sonst liegt es ueber jeder
                 # anderen Ansicht dieses Reiters (Nutzerbefund 2026-08-24:

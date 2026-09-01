@@ -116,6 +116,168 @@ def run():
     return True
 
 
+# EINSEITIGE ANZEIGEMETHODEN, absichtlich und begruendet.
+#
+# WARUM ES DIESES REGISTER GIBT (2026-08-25). Die Pruefung oben verlangt nur,
+# dass ein Methodenname auf MINDESTENS EINER der beiden Anzeigeklassen
+# existiert. Das ist zu wenig: gibt es ihn nur auf einer, faellt die
+# hasattr-Weiche in der ANDEREN Ansicht lautlos aus - kein Fehler, keine
+# Warnung, das Overlay fehlt einfach.
+#
+# Genau so verschwand `overlay_river_network` im Biome-Reiter aus der
+# 3D-Ansicht, und genau so war es am 2026-08-24 schon einmal bei
+# `overlay_river_generations` (siehe smoke_test_fluss_overlay.py). Zweimal
+# dieselbe Fehlerklasse an zwei Stellen.
+#
+# Jeder Eintrag hier ist eine ENTSCHEIDUNG mit Begruendung. Alles, was
+# einseitig ist und NICHT hier steht, laesst den Test fehlschlagen.
+# Beide frueheren Eintraege `overlay_river_network` und `objekt_gewaehlt`
+# sind seit dem 2026-08-25 nicht mehr noetig: kein Reiter fragt sie noch
+# per hasattr ab. Der Test meldet veraltete Eintraege von selbst.
+NUR_EINE_ANZEIGE = {
+    # --- nur 2D, und das ist richtig so -----------------------------------
+    "update_display": "2D-Gegenstueck zu update_heightmap (3D). Welche der "
+                      "beiden gerufen wird, entscheidet "
+                      "_push_data_to_current_display() in base_tab.py.",
+    "draw_plot_physics_snapshot": "Diagnosebild des Plot-Physik-Labors, "
+                                  "bewusst nur 2D.",
+    "overlay_settlements": "2D-ZWEIG EINES PAARES, kein Loch. Der Biome-Reiter "
+                           "ruft seit dem 2026-08-25 direkt daneben "
+                           "`update_overlay_data(\"settlement\", \"uebersicht\", "
+                           "rgba)` fuer die 3D-Ansicht (RGBA-Skin, wie "
+                           "SettlementTab.apply_3d_overlays). Die Methode "
+                           "selbst gibt es zu Recht nur in 2D - matplotlib "
+                           "zeichnet Punkte direkt, OpenGL braucht eine "
+                           "Textur.",
+    "overlay_roads": "Im 3D sind Wege echte Bandgeometrie "
+                     "(gui/widgets/wege_geometrie.py, docs 6.28), keine "
+                     "Overlay-Methode.",
+    # --- nur 3D, und das ist richtig so -----------------------------------
+    "update_heightmap": "3D-Gegenstueck zu update_display, siehe dort.",
+    "update_shademap": "Schattenkarte fuer die 3D-Beleuchtung.",
+    "update_overlay_data": "Der 3D-Weg fuer JEDES Overlay: RGBA-Textur auf "
+                           "das Gelaende. In 2D zeichnet matplotlib direkt.",
+    "set_layer_visibility": "Schaltet einzelne 3D-Texturschichten; in 2D "
+                            "wird ohnehin bei jeder Aenderung neu gezeichnet.",
+    "set_sun_direction": "Es gibt keine Sonne in einer 2D-Karte.",
+    "set_world_size_km": "Die 3D-Anzeige braucht den Massstab fuer die "
+                         "Hoehenskalierung; 2D zeichnet in Pixeln.",
+    "clear_river_overlay": "Im 3D bleibt eine gesetzte Textur liegen, bis sie "
+                           "abgeschaltet wird - 2D zeichnet neu und braucht "
+                           "das nicht.",
+    "setze_auswahlobjekte": "Anklickbare Objekte werden gegen die "
+                            "3D-Projektion getroffen (docs 6.29).",
+}
+
+
+# EINSEITIG UND EINE SCHULD - was in 2D geht und in 3D (noch) nicht.
+#
+# Getrennt von NUR_EINE_ANZEIGE, weil der Unterschied wichtig ist: dort steht,
+# was aus gutem Grund nur eine Ansicht hat; hier steht, was fehlt.
+#
+# STEHENDE REGEL (CLAUDE.md, Nutzervorgabe 2026-08-25): was in 2D sichtbar
+# ist, gehoert in derselben Aenderung auch in 3D. Diese Liste ist die
+# Restschuld aus der Zeit davor. **Sie darf nur schrumpfen.** Kommt eine neue
+# einseitige Anzeigemethode dazu, die weder hier noch in NUR_EINE_ANZEIGE
+# steht, schlaegt der Test fehl.
+FEHLT_IM_3D = {
+    "overlay_regions": "Regionsfarben als Flaeche. In 3D gaebe es sie ueber "
+                       "denselben RGBA-Skin wie im Terrain-Reiter.",
+    "overlay_region_grid": "Grenzen der neun Spielkarten.",
+    "overlay_city_boundary_contour": "Stadtgrenzkontur.",
+    "set_contour_reference_heightmap": "Hoehenlinien. Im 3D zeigt das Netz "
+                                       "die Form zwar selbst, aber "
+                                       "beschriftete Linien sind etwas "
+                                       "anderes als eine Silhouette.",
+    "overlay_plot_boundaries": "Grundstuecksgewebe des Regionalreiters. "
+                               "Streitbar - tausende Parzellen koennten in "
+                               "3D Pixelmatsch werden; steht hier, damit die "
+                               "Entscheidung bewusst faellt statt zu "
+                               "verschwinden.",
+}
+
+
+def run_einseitige_sind_begruendet():
+    """
+    Jede Anzeigemethode, die es nur auf EINER der beiden Klassen gibt, muss
+    in NUR_EINE_ANZEIGE begruendet sein.
+
+    Der Test oben findet nur Namen, die es NIRGENDS gibt. Der haeufigere und
+    teurere Fall ist der halbe: die Methode existiert, aber nur in einer
+    Ansicht - dann funktioniert das Overlay in 2D und fehlt im 3D, ohne dass
+    irgendetwas meldet.
+    """
+    import gui.widgets.map_display_3d as m3
+    from gui.widgets.map_display_2d import MapDisplay2D
+
+    klassen_3d = [getattr(m3, n) for n in dir(m3) if n.startswith("MapDisplay3D")]
+
+    def hat_3d(name):
+        return any(hasattr(k, name) for k in klassen_3d)
+
+    namen = {name for _d, _z, _o, name in sammle_hasattr_namen()
+             if name not in _KEIN_DISPLAY_NAME}
+    einseitig = {}
+    for name in sorted(namen):
+        in2, in3 = hasattr(MapDisplay2D, name), hat_3d(name)
+        if in2 != in3 and (in2 or in3):
+            einseitig[name] = "nur 2D" if in2 else "nur 3D"
+
+    print(f"{len(einseitig)} einseitige Anzeigemethoden gefunden")
+
+    # DIE BEIDEN REGISTER DUERFEN SICH NICHT UEBERSCHNEIDEN.
+    #
+    # Erst falsch gebaut: die fuenf Schuldeintraege standen zusaetzlich in
+    # NUR_EINE_ANZEIGE, und weil die Pruefung unten beide akzeptiert, war die
+    # Schuldliste reine Zierde - sie herauszunehmen aenderte nichts. Gefunden
+    # durch die Gegenprobe (Eintrag entfernen, Test muss fehlschlagen).
+    doppelt = sorted(set(NUR_EINE_ANZEIGE) & set(FEHLT_IM_3D))
+    if doppelt:
+        print("")
+        print("FEHLGESCHLAGEN - in BEIDEN Registern, damit wirkungslos:")
+        for n in doppelt:
+            print(f"  {n}")
+        return False
+
+    schuld = sorted(n for n in einseitig if n in FEHLT_IM_3D)
+    if schuld:
+        print(f"\n[--] OFFENE 3D-SCHULD ({len(schuld)}) - in 2D da, in 3D nicht:")
+        for n in schuld:
+            print(f"       {n:32s} {FEHLT_IM_3D[n][:60]}")
+        print("     Stehende Regel dazu: CLAUDE.md, Abschnitt "
+              "'was in 2D sichtbar ist, gehoert auch in 3D'.")
+
+    veraltete_schuld = [n for n in FEHLT_IM_3D if n not in einseitig]
+    if veraltete_schuld:
+        print(f"[OK] {len(veraltete_schuld)} Schulden getilgt, gehoeren aus "
+              f"FEHLT_IM_3D raus: {', '.join(sorted(veraltete_schuld))}")
+
+    fehlend = [n for n in einseitig
+               if n not in NUR_EINE_ANZEIGE and n not in FEHLT_IM_3D]
+    if fehlend:
+        print("")
+        print("FEHLGESCHLAGEN - einseitig und NICHT begruendet:")
+        print("(die hasattr-Weiche faellt in der anderen Ansicht still aus)")
+        print("")
+        for n in fehlend:
+            print(f"  {n}  ({einseitig[n]})")
+        print("")
+        print("Entweder auf beiden Anzeigen anbieten (Regel in CLAUDE.md), "
+              "oder in NUR_EINE_ANZEIGE begruenden, "
+              "oder als Schuld in FEHLT_IM_3D eintragen.")
+        return False
+
+    veraltet = [n for n in NUR_EINE_ANZEIGE if n not in einseitig]
+    if veraltet:
+        print(f"[--] {len(veraltet)} Eintraege im Register sind nicht mehr "
+              f"einseitig (koennen raus): {', '.join(sorted(veraltet))}")
+
+    print(f"OK - alle {len(einseitig)} sind namentlich begruendet.")
+    for n, seite in sorted(einseitig.items()):
+        print(f"     {n:32s} {seite}")
+    return True
+
+
 def run_regionaltab_zeichnet_basiskarte():
     """Gezielt: der Reiter, an dem der Fehler auftrat, darf die Basiskarte
     NICHT mehr ueber eine eigene hasattr-Weiche zeichnen, sondern muss den
@@ -142,6 +304,7 @@ def run_regionaltab_zeichnet_basiskarte():
 if __name__ == "__main__":
     ergebnisse = {
         "hasattr_namen_existieren": run(),
+        "einseitige_sind_begruendet": run_einseitige_sind_begruendet(),
         "regionaltab_zeichnet_basiskarte": run_regionaltab_zeichnet_basiskarte(),
     }
     print("\n=== SUMMARY ===")

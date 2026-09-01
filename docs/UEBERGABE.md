@@ -152,7 +152,7 @@ Rückfall auf einen Ersatzpfad braucht eine laute Logzeile.
 **Eine Geländeänderung verstimmt zuerst die Regionseichung.** Die
 Küsten-Archetypen (3.8) wurden gegen vier Terrain-Tests geprüft —
 `smoke_test_regionen_welt.py` war nicht darunter, und genau der schlägt jetzt
-fehl. Gemessen: Steppe 10.6° mit Küstenpass gegen 6.6° ohne, bei Ziel 6.5°.
+fehl. Gemessen: Samarcia 10.6° mit Küstenpass gegen 6.6° ohne, bei Ziel 6.5°.
 
 *Daraus folgt:* Dieser Test gehört in die Prüfliste **jeder** Änderung an
 `weltfeld()`.

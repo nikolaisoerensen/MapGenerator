@@ -413,7 +413,7 @@ class HydraulicFieldSimulator:
     #     Anteil 1.00      14.9%     338    196   10.9%   3401 m
     #     Anteil 0.25      12.0%     334    187   11.1%   3401 m
     #
-    #   Mittelgebirge     Abfluss  Senken  Netz  Becken
+    #   Nebelrode     Abfluss  Senken  Netz  Becken
     #     ohne Klemme      24.5%     107    173   15.5%
     #     Anteil 1.00      24.7%      93    173   15.4%
     #
@@ -740,7 +740,22 @@ class HydraulicFieldSimulator:
         }
 
         target_rate = cfg["convergence_threshold"] * state["relief"]
-        chunk = self.PROGRESS_REPORT_INTERVAL
+        # DER ABSCHNITT IST DAS KONVERGENZ-INTERVALL, NICHT DAS MELDE-INTERVALL.
+        #
+        # Bis zum 2026-08-27 stand hier PROGRESS_REPORT_INTERVAL (500). Die
+        # GPU konnte damit fruehestens nach 500 Schritten abbrechen, waehrend
+        # die CPU alle CONVERGENCE_CHECK_INTERVAL (25) prueft. Gemessen im
+        # Paritaetstest: CPU 25 Schritte / 0.1 m Export, GPU 500 Schritte /
+        # 38.5 m Export - und das sah wie ein Physikfehler um den Faktor 385
+        # aus. Er war keiner: EIN Schritt stimmt zwischen GPU und CPU EXAKT
+        # ueberein (Abweichung 0.00e+00). Die GPU hat schlicht zwanzigmal
+        # laenger weitererodiert, weil sie nicht nachsehen durfte.
+        #
+        # Der Preis sind mehr GPU-Uebergaben je Lauf. Der Fortschritt wird
+        # weiterhin nur alle PROGRESS_REPORT_INTERVAL Schritte gemeldet, damit
+        # das Log nicht flutet.
+        chunk = self.CONVERGENCE_CHECK_INTERVAL
+        letzte_meldung = 0
         reference = state["terrain"].copy()
         carried_state = None
         initial_rate = None
@@ -780,8 +795,10 @@ class HydraulicFieldSimulator:
                 self._report(progress_callback, steps_taken, cfg["max_steps"],
                              state, 1.0, rate)
                 break
-            self._report(progress_callback, steps_taken, cfg["max_steps"],
-                         state, progress, rate)
+            if steps_taken - letzte_meldung >= self.PROGRESS_REPORT_INTERVAL:
+                letzte_meldung = steps_taken
+                self._report(progress_callback, steps_taken, cfg["max_steps"],
+                             state, progress, rate)
 
         return {"steps_taken": steps_taken, "converged": converged}
 

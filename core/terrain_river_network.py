@@ -92,7 +92,7 @@ DEFAULTS: Dict[str, Any] = {
     # ebenen Boeden, die im Querschnitt als "aufgelegte Baender" auffielen.
     # Gemessene mittlere Neigung in der Sohle: 0.48 bei 1.6, 0.88 bei 1.0.
     # Das U-Tal bleibt einstellbar, es ist nur nicht mehr der Normalfall
-    # (glazial ueberformte Landschaften wie Wallis oder Fjordland).
+    # (glazial ueberformte Landschaften wie Wallis oder Skerrheim).
     "valley_form": 1.1,
     # Wie stark die Fluesse hohes Gelaende meiden - wirkt an ZWEI Stellen:
     # gerichtet auf die Kantenkosten des Baumes (spanning_tree) und auf die

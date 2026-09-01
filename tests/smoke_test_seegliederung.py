@@ -28,12 +28,12 @@ Sieben Zusicherungen:
 6. HUEGELLAND-Ufer bleibt bei Grad 1 FLACHER als die Standardtabelle ("das
    huegelland ab seegrad 2" - erst dort beginnt die eigentliche Vertiefung).
 7. SEEEIS liegt ausschliesslich auf See-Zellen, deren naechstes Ufer die
-   Taiga ist ("die taiga bekommt seeeis"), mit einer WAHRSCHEINLICHKEIT je
+   Morobora ist ("die taiga bekommt seeeis"), mit einer WAHRSCHEINLICHKEIT je
    Seegrad (100/75/50/25 % bei Grad 0-3, 0% ab Grad 4 - Nutzer-Nachbesserung
    2026-08-11: "grade 0 ist 100% eis grade 1 75% chance ... grade 3 ist
    25%"). Ueber mehrere Seeds gemittelt, weil einzelne Grade oft nur eine
    Handvoll Zellen stellen - bei so kleinem n schwankt ein einzelner Seed
-   erheblich (eine Karte mit 16 Grad-1-Taiga-Zellen bei p=0.75 kann rein
+   erheblich (eine Karte mit 16 Grad-1-Morobora-Zellen bei p=0.75 kann rein
    zufaellig 5 statt 12 treffen; erst ueber mehrere Karten gemittelt wird die
    Vorgabe selbst pruefbar).
 """
@@ -131,7 +131,7 @@ def main():
                       % verhaeltnis)
 
     print("")
-    print("5-6. Seetyp-Regeln: Fjordland steiler, Huegelland flacher bei Grad 1")
+    print("5-6. Seetyp-Regeln: Skerrheim steiler, Clonagh flacher bei Grad 1")
     regionsnamen = [r["name"] for _z, _s, r in rw.alle_regionen()]
 
     def _mittlere_tiefe(region_name, grad):
@@ -139,31 +139,31 @@ def main():
         m = see_maske & (ufer_a == idx) & (seegrad == grad)
         return float(seegrad_tiefe[m].mean()) if m.sum() > 20 else None
 
-    fjord_grad1 = _mittlere_tiefe("Fjordland", 1)
-    huegel_grad1 = _mittlere_tiefe("Huegelland", 1)
+    fjord_grad1 = _mittlere_tiefe("Skerrheim", 1)
+    huegel_grad1 = _mittlere_tiefe("Clonagh", 1)
     standard_grad1 = tiefe_soll[1]
-    print("   Fjordland Grad 1: %s m (Standard %.0f m)"
+    print("   Skerrheim Grad 1: %s m (Standard %.0f m)"
           % ("%.1f" % fjord_grad1 if fjord_grad1 is not None else "n/a", standard_grad1))
-    print("   Huegelland Grad 1: %s m (Standard %.0f m)"
+    print("   Clonagh Grad 1: %s m (Standard %.0f m)"
           % ("%.1f" % huegel_grad1 if huegel_grad1 is not None else "n/a", standard_grad1))
     if fjord_grad1 is not None and fjord_grad1 > standard_grad1 - 15.0:
-        fehler.append("Fjordland faellt bei Grad 1 nicht steiler ab als die "
+        fehler.append("Skerrheim faellt bei Grad 1 nicht steiler ab als die "
                       "Standardtabelle (%.1f m, Standard %.1f m)" % (fjord_grad1, standard_grad1))
     if huegel_grad1 is not None and huegel_grad1 < standard_grad1 + 15.0:
-        fehler.append("Huegelland bleibt bei Grad 1 nicht flacher als die "
+        fehler.append("Clonagh bleibt bei Grad 1 nicht flacher als die "
                       "Standardtabelle (%.1f m, Standard %.1f m)" % (huegel_grad1, standard_grad1))
 
     print("")
     print("7. Seeeis: harte Regeln auf dieser einen Karte, Wahrscheinlichkeit "
           "ueber mehrere Karten gemittelt")
     see_eis = felder["see_eis"]
-    taiga_idx = regionsnamen.index("Taiga")
+    taiga_idx = regionsnamen.index("Morobora")
     # Harte Regeln - muessen auf JEDER Karte gelten, kein Sample noetig.
     if bool(np.any(see_eis[maske])):
         fehler.append("Seeeis liegt auch auf Land")
     nicht_taiga_eis = int((see_eis & see_maske & (ufer_a != taiga_idx)).sum())
     if nicht_taiga_eis > 0:
-        fehler.append("%d Seeeis-Pixel liegen an einer Nicht-Taiga-Kueste" % nicht_taiga_eis)
+        fehler.append("%d Seeeis-Pixel liegen an einer Nicht-Morobora-Kueste" % nicht_taiga_eis)
     eis_ab_grad_4 = int((see_eis & (seegrad >= 4)).sum())
     if eis_ab_grad_4 > 0:
         fehler.append("%d Eis-Pixel ab Grad 4 (offene See) - Seeweg waere dort "

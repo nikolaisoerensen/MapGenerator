@@ -57,67 +57,67 @@ STRECKEN = {
     "doolin": {
         "titel": "Dough (Lahinch) bis Doolin, County Clare - "
                  "Liscannor Bay, Hag's Head, Cliffs of Moher",
-        "region": "Huegelland",
+        "region": "Clonagh",
         "sued": 52.9250, "nord": 53.0250, "west": -9.4700, "ost": -9.3300,
     },
     "moher": {
         "titel": "Cliffs of Moher, Kernstueck",
-        "region": "Huegelland",
+        "region": "Clonagh",
         "sued": 52.9600, "nord": 52.9820, "west": -9.4450, "ost": -9.4160,
     },
     "lofoten": {
         "titel": "Lofoten bei Reine - Gipfel direkt aus dem Meer",
-        "region": "Fjordland",
+        "region": "Skerrheim",
         "sued": 67.9200, "nord": 68.0400, "west": 13.0000, "ost": 13.2500,
     },
-    # FLAECHENGLEICHER AUSSCHNITT zum Fjordland dieser Welt (rund 16.7 km2,
+    # FLAECHENGLEICHER AUSSCHNITT zum Skerrheim dieser Welt (rund 16.7 km2,
     # davon 11.4 km2 Land). Der grosse `geiranger`-Ausschnitt misst 55.7 km2
     # und enthaelt ein ganzes Fjordsystem samt Hinterland - ein Vergleich der
     # Kuestendichte gegen die Spielregion waere damit sinnlos, weil beide
     # Groessen an der Ausschnittsgroesse haengen (Nutzerauftrag 2026-08-24).
     "geiranger_klein": {
-        "titel": "Geirangerfjord, Kernstueck (flaechengleich zum Fjordland)",
-        "region": "Fjordland",
+        "titel": "Geirangerfjord, Kernstueck (flaechengleich zum Skerrheim)",
+        "region": "Skerrheim",
         "sued": 62.0850, "nord": 62.1217, "west": 7.0450, "ost": 7.1235,
     },
     "geiranger": {
         "titel": "Geirangerfjord - Fjordwand im Landesinneren",
-        "region": "Fjordland",
+        "region": "Skerrheim",
         "sued": 62.0700, "nord": 62.1300, "west": 7.0000, "ost": 7.1600,
     },
     "stockholm": {
         "titel": "Stockholmer Schaeren - niedrige Felskueste, viele Inseln",
-        "region": "Taiga",
+        "region": "Morobora",
         "sued": 59.3000, "nord": 59.4000, "west": 18.7000, "ost": 18.9500,
     },
     "roca": {
         "titel": "Cabo da Roca, Portugal - hohe Atlantikklippe",
-        "region": "Atlantikkueste",
+        "region": "Estrande",
         "sued": 38.7500, "nord": 38.8300, "west": -9.5200, "ost": -9.4100,
     },
     "velebit": {
         "titel": "Velebit-Kueste, Kroatien - Gebirge direkt ins Meer",
-        "region": "Alpenland",
+        "region": "Nevadin",
         "sued": 44.2500, "nord": 44.3600, "west": 14.8800, "ost": 15.0600,
     },
     "ruegen": {
         "titel": "Ruegen, Koenigsstuhl - Kreidekueste",
-        "region": "Mittelgebirge",
+        "region": "Nebelrode",
         "sued": 54.5300, "nord": 54.6000, "west": 13.6000, "ost": 13.7200,
     },
     "schwarzmeer": {
         "titel": "Kap Kaliakra, Bulgarien - Steppenkueste mit Steilkante",
-        "region": "Steppe",
+        "region": "Samarcia",
         "sued": 43.3400, "nord": 43.4200, "west": 28.4000, "ost": 28.5200,
     },
     "calanques": {
         "titel": "Calanques bei Marseille - Kalkfelskueste",
-        "region": "Mittelmeer",
+        "region": "Macchia",
         "sued": 43.1800, "nord": 43.2400, "west": 5.4000, "ost": 5.5400,
     },
     "santorini": {
         "titel": "Santorini - Caldera-Steilwand gegen Aussenkueste",
-        "region": "Griechische Inseln",
+        "region": "Thalassia",
         "sued": 36.3400, "nord": 36.4800, "west": 25.3300, "ost": 25.4900,
     },
 
@@ -154,12 +154,12 @@ STRECKEN = {
     },
     "inselchen_taiga": {
         "titel": "Schaereninsel Oestliche Ostsee - flache Felsinsel",
-        "region": "Insel/Taiga",
+        "region": "Insel/Morobora",
         "sued": 59.4300, "nord": 59.4900, "west": 19.4000, "ost": 19.5200,
     },
     "aran": {
         "titel": "Inisheer (Aran), Irland - flache Kalkinsel",
-        "region": "Insel/Huegelland",
+        "region": "Insel/Clonagh",
         "sued": 53.0400, "nord": 53.0900, "west": -9.5600, "ost": -9.4800,
     },
 }

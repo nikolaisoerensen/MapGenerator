@@ -46,7 +46,7 @@ und ausgefüllte Zielwerte. **Noch offen — gemeinsam mit dem Nutzer zu füllen
 | 4 | Alpen Hochtal (Wallis) | 46° | 700 m | 3000 m | U (glazial) | Fels/Moräne |
 | 5 | Dolomiten Kalkgebirge | 46° | 1000 m | 2000 m | V steil | Kalk |
 | 6 | Karst Guilin/Vietnam | 23° | 100 m | 300 m | Türme | Kalk |
-| 7 | Norwegen Fjordland (Inland) | 62° | 200 m | 1500 m | U tief | Fels |
+| 7 | Norwegen Skerrheim (Inland) | 62° | 200 m | 1500 m | U tief | Fels |
 | 8 | Schottisches Hochland | 57° | 200 m | 1200 m | U breit | Torf/Fels |
 | 9 | Island Vulkanhochland | 65° | 600 m | 1000 m | V jung | Basalt/Asche |
 | 10 | Amazonas Tiefland | 3° S | 100 m | gering | flach | Lehm |
@@ -159,27 +159,27 @@ docs/KLIMA_UND_SEE.md §0).
 
 | Region | Referenzort | Ziel | Stand (256px, Seed 20260804) | Charakter |
 |---|---|---:|---:|---|
-| Huegelland (Kelten) | Cork | 4.5 m/s | 4.32 ✓ | exponiert atlantisch, windig |
-| Fjordland (Wikinger) | Bergen | 3.0 m/s | 3.01 ✓ | fjordgeschuetzt, aber Boeen vom Meer |
-| Taiga (Slawen) | Wologda | 3.2 m/s | 3.22 ✓ | kontinental, ruhiger |
-| Atlantikkueste (Franken) | La Rochelle | 4.5 m/s | 4.29 ✓ | atlantisch exponiert |
-| Alpenland (Alemannen) | Chur | 2.2 m/s | 2.67 ✓ | Tal geschuetzt, aber Foehn-Spitzen |
-| Mittelgebirge (Sachsen) | Bamberg | 3.0 m/s | 3.03 ✓ | gemaessigt kontinental |
-| Steppe (Andalusier) | Madrid | 3.0 m/s | 3.24 ✓ | Hochebene, maessig |
-| Mittelmeer (Italiener) | Rom | 3.5 m/s | 3.56 ✓ | kuestennah |
-| Griechische Inseln (Byzantiner) | Iraklio | 4.5 m/s | 4.37 ✓ | Aegaeis, Meltemi-Boeen im Sommer |
+| Clonagh (Kelten) | Cork | 4.5 m/s | 4.32 ✓ | exponiert atlantisch, windig |
+| Skerrheim (Wikinger) | Bergen | 3.0 m/s | 3.01 ✓ | fjordgeschuetzt, aber Boeen vom Meer |
+| Morobora (Slawen) | Wologda | 3.2 m/s | 3.22 ✓ | kontinental, ruhiger |
+| Estrande (Franken) | La Rochelle | 4.5 m/s | 4.29 ✓ | atlantisch exponiert |
+| Nevadin (Alemannen) | Chur | 2.2 m/s | 2.67 ✓ | Tal geschuetzt, aber Foehn-Spitzen |
+| Nebelrode (Sachsen) | Bamberg | 3.0 m/s | 3.03 ✓ | gemaessigt kontinental |
+| Samarcia (Andalusier) | Madrid | 3.0 m/s | 3.24 ✓ | Hochebene, maessig |
+| Macchia (Italiener) | Rom | 3.5 m/s | 3.56 ✓ | kuestennah |
+| Thalassia (Byzantiner) | Iraklio | 4.5 m/s | 4.37 ✓ | Aegaeis, Meltemi-Boeen im Sommer |
 
 Erreicht ueber `_wind_regional_faktor()` (core/weather_generator.py): das
 REGIONALE MITTEL der simulierten Windgeschwindigkeit wird direkt auf
 `wind_ziel_map` normiert, exakt das "direkt auf den Zielwert normieren"-
 Prinzip aus 1.3 (Niederschlag). Alle neun Regionen innerhalb 0.5 m/s ihres
-Ziels, Rangfolge stimmt (Alpenland ist die windaermste Region). Gesichert in
+Ziels, Rangfolge stimmt (Nevadin ist die windaermste Region). Gesichert in
 `tests/smoke_test_weather_wind_regions.py`.
 
 **Luv/Lee-Kontrast am Gebirge: Ziel 1.5–2×, NICHT verlaesslich erreicht.**
 Ein multiplikativer Term (`_wind_luv_lee_faktor`, Hangneigung in
 Windrichtung, analog zum Niederschlags-Luv-Term) ist eingebaut. Gemessen im
-Alpenland: die vorhandene 3-Schicht-Simulation hat selbst schon eine
+Nevadin: die vorhandene 3-Schicht-Simulation hat selbst schon eine
 terraingetriebene Windstruktur (eigene Ablenkungs-/Speedup-Terme), die mit
 diesem einfachen Ansatz ANTIKORRELIERT (-0.53 Korrelationskoeffizient
 Faktor↔Basisgeschwindigkeit) statt neutral zu sein - der Zusatzterm wird
@@ -382,7 +382,7 @@ Bei jeder Änderung diese vier Fragen beantworten:
 ## §7 Erosion: Entwaesserung — gemessener Stand 2026-07-30
 
 Werkzeug: `tools/drainage_lab.py`. Zielgelaende: Alpental (Region 04) und
-Mittelgebirge/Bamberg (Region 21). Neue Kennzahl **Entwaesserungsanteil** —
+Nebelrode/Bamberg (Region 21). Neue Kennzahl **Entwaesserungsanteil** —
 welcher Anteil der Karte findet per D8 einen Weg BIS ZUM RAND. Sie fehlte
 bisher; das Erosion-Labor misst nur die GROESSE des Netzes, nicht ob es
 irgendwo hinfuehrt.
@@ -392,13 +392,13 @@ irgendwo hinfuehrt.
 | | Wasser steht | noetig zum Ueberlaufen | Faktor |
 |---|---|---|---|
 | Alpental | 0.29 m | 13.0 m (max 311 m) | 45x zu wenig |
-| Mittelgebirge | 0.30 m | 2.36 m | 8x zu wenig |
+| Nebelrode | 0.30 m | 2.36 m | 8x zu wenig |
 
 Ohne Ueberlauf kein Durchfluss, ohne Durchfluss keine Rinne am Ueberlaufpunkt.
 Nur 10-20% der Karte entwaessert zum Rand, 1160 geschlossene Senken im
 Alpental (vorher 187) — die Erosion ERZEUGT Becken.
 
-Verdunstung auf 0 fuellt sie: im Mittelgebirge stehen dann 11 m gegen 2.4 m
+Verdunstung auf 0 fuellt sie: im Nebelrode stehen dann 11 m gegen 2.4 m
 Bedarf. Es entsteht trotzdem keine Rinne (Becken 18.9%, Abfluss 10.1%), und im
 Alpental kippt die fluviale Signatur (beta -0.78 -> -0.24). Wassermenge allein
 ist NICHT die Ursache.
@@ -420,7 +420,7 @@ Bei konstantem Produkt Ks x Schritte, beide Zielgelaende:
 | Ks 0.25 x 16000 | 15.8% | 1484 | 6329 | 564 |
 | Ks 0.125 x 20000 | 14.8% | 1559 | 6969 | 590 |
 
-Mittelgebirge deutlicher: Abfluss 22.5% -> 13.6%, Netz 315 -> 177.
+Nebelrode deutlicher: Abfluss 22.5% -> 13.6%, Netz 315 -> 177.
 
 ### Befund 4 — der Kapazitaetsfaktor ist bei 1.0 geklemmt
 
@@ -466,7 +466,7 @@ Gemessen auf der GPU, 192 px, Alpental:
 | Entwaesserungsanteil | 20.5% | 21.7% |
 
 Der Hauptgewinn ist das Relief: die Erosion hob aus 3700 m Rohrelief vorher
-5227 m aus, also ~1500 m zusaetzlich. Mittelgebirge bitidentisch - dort greift
+5227 m aus, also ~1500 m zusaetzlich. Nebelrode bitidentisch - dort greift
 die Klemme nicht, weil der Abtrag ohnehin unter dem Nachbarabstand liegt.
 
 Nadelzahl 5925 -> 8051. NICHT als Verschlechterung belegt: die Nadelschwelle
@@ -483,7 +483,7 @@ vorbestehend und von dieser Aenderung nicht beruehrt.
   unverstanden seit der relief-relativen Kapazitaet.
 * Die Becken laufen weiterhin nicht bis zum Ueberlauf voll (Befund 1). Die
   Klemme verhindert, dass neue entstehen, sie loest die vorhandenen nicht auf.
-* Routing-Variante bricht im Mittelgebirge nach 25 Schritten ab - Ursache
+* Routing-Variante bricht im Nebelrode nach 25 Schritten ab - Ursache
   ungeklaert, Variante ist aus.
 
 
@@ -628,14 +628,14 @@ Konfiguration - das ist §4.2 und wurde nachgeholt.
 | 1 Okt mit Filter | 12.9% | 79 | 430 | 2175 | -0.330 |
 
 Auf dem Untergrund, der tatsaechlich benutzt werden soll, ist der Filter also
-abflussNEUTRAL (12.5% -> 12.9%, Mittelgebirge 12.5% -> 12.2%) und senkt die
+abflussNEUTRAL (12.5% -> 12.9%, Nebelrode 12.5% -> 12.2%) und senkt die
 Nadelzahl um rund ein Fuenftel (2889 -> 2175). Auf dem 5-Oktaven-Untergrund
 haette er die Entwaesserung halbiert - der Unterschied zwischen den beiden
 Zeilenpaaren ist der ganze Befund 1.
 
-`beta` wandert von -0.718 auf -0.330, im Mittelgebirge von -0.946 auf -0.416.
+`beta` wandert von -0.718 auf -0.330, im Nebelrode von -0.946 auf -0.416.
 Das Zielband ist -0.4 .. -0.7: der Filter zieht beide von "zu steil" her in
-Richtung Band, das Mittelgebirge hinein, das Alpental darueber hinaus.
+Richtung Band, das Nebelrode hinein, das Alpental darueber hinaus.
 
 Nebenbefund, nicht erwartet: der 1-Oktaven-Untergrund hat SCHON OHNE Filter
 deutlich bessere Kennzahlen als der heutige (9 statt 187 Senken, Netz 1801
@@ -765,7 +765,7 @@ Aussage geliefert.
 ## §11 Fuenf Referenzlandschaften auf 25 x 25 km - erster Versuch
 
 Werkzeug: `tools/regionen_lab.py`. Fuenf Hoehenkarten des Nutzers (Alpen,
-Mittelgebirge, norddeutsches Flachland, Fjordland, Vietnam), jeweils rund
+Nebelrode, norddeutsches Flachland, Skerrheim, Vietnam), jeweils rund
 200 km Bildbreite. Ziel: Ausschnitte von 25 x 25 km im jeweiligen Stil.
 
 ### Ergebnis: unterscheidbar, aber nicht aehnlich
@@ -809,13 +809,13 @@ aus dem Augenschein, nicht aus Hoehenmodellen.
 | Region | Basis | Gipfel | Grundform | Rinne | Staerke |
 |---|---|---|---|---|---|
 | Alpen | 1000 m | 3500 m | 9000 m | 2200 m | 0.30 |
-| Mittelgebirge | 200 m | 550 m | 7000 m | 900 m | 0.26 |
+| Nebelrode | 200 m | 550 m | 7000 m | 900 m | 0.26 |
 | Flachland | 100 m | 165 m | 12000 m | 2500 m | 0.10 |
-| Fjordland | 150 m | 1500 m | 8000 m | 2600 m | 0.34 |
+| Skerrheim | 150 m | 1500 m | 8000 m | 2600 m | 0.34 |
 | Vietnam | 120 m | 1100 m | 5000 m | 700 m | 0.30 |
 
 Das Verhaeltnis Grundform zu Rinne traegt den Charakter: Hochgebirge ~4:1,
-dicht zergliedertes Mittelgebirge ~8:1, Kalkbergland ~7:1.
+dicht zergliedertes Nebelrode ~8:1, Kalkbergland ~7:1.
 
 BEKANNTE EINSCHRAENKUNG: jede Region beginnt bei 100 m, auch das Flachland.
 `TERRAIN.BASE_ELEVATION_M` liegt fest, `amplitude` ist die GIPFELHOEHE, und
@@ -848,9 +848,9 @@ abgelesen. Kein LOD.
 | | Abfluss | Senken | Relief |
 |---|---|---|---|
 | Alpen | 79.9% | 145 | 4742 m |
-| Mittelgebirge | 79.2% | 141 | 513 m |
+| Nebelrode | 79.2% | 141 | 513 m |
 | Flachland | 93.1% | 24 | 91 m |
-| Fjordland | **97.4%** | 16 | 1495 m |
+| Skerrheim | **97.4%** | 16 | 1495 m |
 | Vietnam | 60.9% | 582 | 1475 m |
 
 Zum Vergleich: Noise-Pfad 10.1%, Feld-Erosion 10-22% (§7), gewachsener Baum
@@ -900,7 +900,7 @@ mit runden Kappen an den Enden. Vier benennbare Ursachen:
 
 ### Was funktioniert
 
-Die Hochebene funktioniert, und man sieht sie am besten im Fjordland: zwischen
+Die Hochebene funktioniert, und man sieht sie am besten im Skerrheim: zwischen
 den Troegen liegt eine durchgehende, nahtlose Flaeche. Das war die Frage, die
 den Umbau ausgeloest hat, und die Antwort ist ja - `p_relief_anteil` von 28%
 (Norwegen) bis 100% (Alpen) schaltet zwischen Hochebene und Bergland um.
@@ -1009,7 +1009,7 @@ sie ausdruecklich geaendert werden.
 
 Schritt 3 wird NICHT angefasst, solange 1 und 2 nicht sitzen. `EROSION_AKTIV`
 bleibt False. Vor dem Wiedereinschalten soll ein **Auswahlfeld mit
-Regionsvorgaben** (Alpen, Fjordland, ...) da sein, das die Regler setzt, mit
+Regionsvorgaben** (Alpen, Skerrheim, ...) da sein, das die Regler setzt, mit
 einem Klick auf- und zuklappbar fuer das Feintuning.
 
 ### Festgelegt
@@ -1387,7 +1387,7 @@ aussen die Exponentialfunktion. Vorher formte ein Regler beides.
 
 1.6 ist ein ausgepraegtes U-Tal und hat per Definition eine flache Sohle. Das
 U-Tal bleibt einstellbar, es ist nur nicht mehr der Normalfall - es gehoert zu
-glazial ueberformten Landschaften (Wallis, Fjordland).
+glazial ueberformten Landschaften (Wallis, Skerrheim).
 
 ### Ergebnis
 

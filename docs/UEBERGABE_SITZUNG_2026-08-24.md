@@ -66,7 +66,7 @@ mussten deswegen neu gemessen werden.
 ### 4. Flüsse folgen jetzt dem Wasser
 
 Flussgröße hängt am Niederschlag statt an der Fläche; Hauptstrom-Quoten
-je Region (Fjordland 100 %, Taiga und Atlantik je 66 %); Talformen V/U
+je Region (Skerrheim 100 %, Morobora und Atlantik je 66 %); Talformen V/U
 je Region über `talform`. Die Ordnung dazu steht in
 `docs/FLUESSE_UND_WASSER.md` — **was dort nicht steht, ist nicht
 beschlossen.**
@@ -191,7 +191,7 @@ Quellen für dieselbe Aussage sind in diesem Projekt schon mehrfach
 schiefgegangen (SPEZIFIKATION §4.5).
 
 ### 5. Zurückgestellt, auf Wunsch des Nutzers
-* Taiga-Seenlandschaft („so wie in Lappland") — erster Schritt wäre
+* Morobora-Seenlandschaft („so wie in Lappland") — erster Schritt wäre
   `water.lake_detection`.
 * Block 1.3 (Verdunstung), 5.1/5.2 (Fjordarme, Fjord → Geiranger-Küstentyp).
 * Saisonale Flüsse.
@@ -202,7 +202,7 @@ schiefgegangen (SPEZIFIKATION §4.5).
 
 **Seit dem 12.08. hat niemand die Küstenformen im laufenden Programm
 gesehen.** Diese Sitzung hat danach noch erheblich am Gelände geändert:
-alle 27 Archetypen kommen jetzt vor (vorher 19), Fjordland ist größer und
+alle 27 Archetypen kommen jetzt vor (vorher 19), Skerrheim ist größer und
 steiler, die Wasserklassifikation hat drei statt einer Flussstufe.
 
 Headless ist alles grün. Gesehen hat es niemand.

@@ -27,3 +27,20 @@ logs/
 
 # Heruntergeladene Hoehenmodelle (tools/kuestenprofil_holen.py)
 tools/_dem_cache/
+/docs/inseltest/alle_regionen.png
+/docs/inseltest/arme_3km.png
+/docs/inseltest/arme_10km.png
+/docs/inseltest/fluesse_heute.png
+/docs/inseltest/kueste_zonen_schnitt.png
+/docs/inseltest/kuestenprofile_flach.png
+/docs/pipeline_kritischer_pfad.png
+/docs/inseltest/profile_27_eigene_vorbilder.png
+/docs/inseltest/profile_in_metern.png
+/docs/inseltest/region_alle_typen.png
+/docs/inseltest/rund_3km.png
+/docs/inseltest/rund_10km.png
+/docs/inseltest/rund_150m.png
+/docs/inseltest/rund_500m.png
+/docs/inseltest/schlaengel_10km.png
+/docs/inseltest/talformen.png
+/docs/inseltest/zonen_varianz.png

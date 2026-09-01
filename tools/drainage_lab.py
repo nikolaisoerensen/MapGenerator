@@ -21,9 +21,9 @@ WERKZEUG fuer zwei Nutzer-Hypothesen zur Erosion (2026-07-30):
     Gesamtarbeit gleich bleibt.
 
 Zwei Zielgelaende, entsprechend den beiden aktiven Regionen
-(docs/regionen/): Alpental mit hohem Relief und Mittelgebirge mit geringem.
+(docs/regionen/): Alpental mit hohem Relief und Nebelrode mit geringem.
 Ein Verfahren muss auf BEIDEN bestehen - eine Aenderung, die das Alpental
-verbessert und das Mittelgebirge zerlegt, ist keine Verbesserung.
+verbessert und das Nebelrode zerlegt, ist keine Verbesserung.
 
 Aufruf:
     .venv\\Scripts\\python.exe tools/drainage_lab.py ausgangslage

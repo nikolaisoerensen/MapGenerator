@@ -353,7 +353,7 @@ WETTER_GITTER = 256
 # dann haben wir vielleicht so um 1100 m die schneegrenze ... dann muss der
 # faktor in der hoehenformel eingepflegt sein."
 #
-# DIE RECHNUNG DAHINTER. Das Alpenland hat auf Meereshoehe 22.0 Grad im Juli.
+# DIE RECHNUNG DAHINTER. Das Nevadin hat auf Meereshoehe 22.0 Grad im Juli.
 # Damit die Firngrenze (Juli 0 Grad) bei 1100 m liegt:
 #
 #     22.0 K / 1100 m = 0.020 K/m
@@ -377,7 +377,7 @@ HOEHENABNAHME_K_PRO_M = 0.020
 # sind 30 K zwischen Nord- und Suedhang zu viel: jeder Suedhang wuerde zur
 # Halbwueste und jeder Nordhang zum Nadelwald, innerhalb einer Region.
 #
-# 0.25 der Jahresspanne heisst: Atlantikkueste 3.5 K, Taiga 7.3 K zwischen
+# 0.25 der Jahresspanne heisst: Estrande 3.5 K, Morobora 7.3 K zwischen
 # Schatten und voller Sonne. Das ist die Groessenordnung, die man in der
 # Vegetation wirklich sieht. Der Wert ist die erste Stellschraube, wenn die
 # Biome zu gleichfoermig oder zu fleckig ausfallen.
@@ -412,7 +412,7 @@ REGENSCHATTEN_HOEHE_M = 900.0
 
 # SEE_REGEN_ANTEIL  Wieviel es ueber See regnet, gemessen am Landwert derselben
 #               Region. Ohne Deckelung bekam die See 1.37-mal so viel wie das
-#               Land (Alpenland 3.38-mal), weil es dort keinen Regenschatten
+#               Land (Nevadin 3.38-mal), weil es dort keinen Regenschatten
 #               gibt, waehrend das Land durch die Normierung angehoben wird -
 #               der Nutzer sah "knallgruen ueber dem meer".
 #               0.8 ist auch physikalisch naeher dran: ueber offener See faellt
@@ -430,7 +430,7 @@ SEE_REGEN_ANTEIL = 0.8
 # Das Meer ist mit 11 K Spanne maritim und damit winterfeucht.
 #
 # Die Kontinentalitaet muss nicht eigens eingetragen werden - sie steckt schon
-# in `temp_spanne`: Taiga 34.5 K gegen Huegelland 9.0 K.
+# in `temp_spanne`: Morobora 34.5 K gegen Clonagh 9.0 K.
 SAISON_STAERKE = 0.35
 SAISON_BEZUGSSPANNE = 15.0   # ab hier kippt es von maritim nach kontinental
 SAISON_UEBERGANG = 8.0       # wie schnell
@@ -445,7 +445,7 @@ SAISON_UEBERGANG = 8.0       # wie schnell
 #
 # JA - ab jetzt. Der Niederschlag wird als MONATSRATE gefuehrt und erst beim
 # Ablegen mit der Ticklaenge multipliziert. Vorher stand in `precip_map` eine
-# Zweimonatssumme, ohne dass das irgendwo stand: das Fjordland zeigte 375
+# Zweimonatssumme, ohne dass das irgendwo stand: das Skerrheim zeigte 375
 # statt der 188 mm, die man bei 2250 mm Jahresniederschlag je Monat erwartet.
 #
 # MONATE_JE_TICK laesst sich auf 1 stellen, dann laeuft das Jahr in zwoelf
@@ -1212,7 +1212,7 @@ class WeatherSystemGenerator:
                 #
                 # Mit der Periodenmitte liegen alle sechs Stichproben ZWISCHEN
                 # den Extremen, und der Jahresgang erreicht nur +/-0.866 statt
-                # +/-1 - gemessen kam die Taiga auf 21.7 K Spanne statt der
+                # +/-1 - gemessen kam die Morobora auf 21.7 K Spanne statt der
                 # eingetragenen 29.0. Mit m/6 faellt Periode 0 auf den Januar
                 # und Periode 3 auf den Juli, also genau auf die beiden Werte,
                 # aus denen die Tabelle gebildet ist.
@@ -1236,7 +1236,7 @@ class WeatherSystemGenerator:
                 #
                 # Die sechs Perioden bekommen VORERST denselben Wert: die
                 # Klimatabelle fuehrt nur eine Jahressumme. Ein Jahresgang des
-                # Niederschlags (Mittelmeer trocken im Sommer) waere der
+                # Niederschlags (Macchia trocken im Sommer) waere der
                 # naechste Schritt und braucht eine zweite Spalte in der
                 # Tabelle.
                 fest_p = self.niederschlagsfeld_festgelegt(
@@ -2586,7 +2586,7 @@ class WeatherSystemGenerator:
 
         WARUM NICHT ALS INTERNER MULTIPLIKATOR AUF DEN DRUCKGRADIENTEN.
         Erster Versuch: `wind_speed_factor` raeumlich variieren, an der einen
-        Stelle, wo es die Druckgradient-Kraft treibt. Gemessen (Alpenland-
+        Stelle, wo es die Druckgradient-Kraft treibt. Gemessen (Nevadin-
         Zielfaktor 0.16 gegen Kuesten-Zielfaktor 0.71, identische Karte):
         1.871 m/s gegen 1.872 m/s - kein messbarer Unterschied. Der
         Druckgradient ist nur EINER von mehreren additiven Antrieben
@@ -2670,7 +2670,7 @@ class WeatherSystemGenerator:
         #
         Direkt auf das Ziel zu normieren macht die Eichung ueberfluessig, und
         die eingetragenen Werte bleiben lesbar ("Bergen 2250 mm") statt
-        vorkompensiert ("Taiga 79 mm, damit 600 ankommen").
+        vorkompensiert ("Morobora 79 mm, damit 600 ankommen").
 
         Damit trifft jede Region ihren Tabellenwert PER KONSTRUKTION, egal was
         das Feld sonst tut - eine Festlegung statt einer Hoffnung. Dieselbe
@@ -2725,7 +2725,7 @@ class WeatherSystemGenerator:
         # Getrennt geglaettet nimmt der Nenner am Regionsrand den Mittelwert
         # des NACHBARN an. Bei einem feuchten Nachbarn wird dort durch eine zu
         # grosse Zahl geteilt, und die ganze Region rutscht ab - gemessen lag
-        # das Huegelland dadurch 36 % unter seinem Zielwert, obwohl direkt auf
+        # das Clonagh dadurch 36 % unter seinem Zielwert, obwohl direkt auf
         # das Ziel normiert wurde.
         #
         # Als Verhaeltnis ist es ein reines Korrekturfeld: im Inneren einer
@@ -2870,7 +2870,7 @@ class WeatherSystemGenerator:
         #
         # Der Regenschatten kann nur VERRINGERN (exp(-x) <= 1), und die
         # Regionsmischung zieht feuchte Regionen zu ihren trockenen Nachbarn
-        # hinunter - Fjordland lag 36 % unter seinem Wert. Beides zusammen
+        # hinunter - Skerrheim lag 36 % unter seinem Wert. Beides zusammen
         # laesst sich nicht durch vorkompensierte Eingabewerte auffangen: die
         # Glaettung der Normierung verschiebt das Mittel erneut, und eine
         # Eichung darauf lief in die falsche Richtung (2026-08-07).
@@ -2945,9 +2945,9 @@ class WeatherSystemGenerator:
         # klima_map, also aus der weich ueber die Regionsgrenzen GEBLENDETEN
         # Fassung von core.terrain_weltkarte.REGIONEN.temp_mittel_m0/
         # temp_spanne - die Regionsmischung zieht jede Region zu ihren
-        # Nachbarn hin (Taiga bekam ohne Korrektur 1.8 statt der eigentlich
+        # Nachbarn hin (Morobora bekam ohne Korrektur 1.8 statt der eigentlich
         # gewollten 3.8, siehe KLIMA_ZIEL). Bisher wurde das durch
-        # HANDKALIBRIERTE Eingabewerte kompensiert - "Taiga 1.8, damit am
+        # HANDKALIBRIERTE Eingabewerte kompensiert - "Morobora 1.8, damit am
         # Ende 3.8 ankommen" -, ueber drei Seeds von Hand geeicht und auf
         # einem vierten schon wieder daneben (1.11: 30.9 K statt 29.0 K
         # Jahresspanne).

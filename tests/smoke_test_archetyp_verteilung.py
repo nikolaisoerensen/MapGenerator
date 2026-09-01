@@ -59,6 +59,81 @@ MINDEST_STATIONEN = 10
 VERZERRUNG_MIN = 0.30
 VERZERRUNG_MAX = 5.0
 
+# UEBER VIELE KARTEN URTEILEN, NICHT UEBER EINE (2026-08-25)
+#
+# Nutzervorgabe: *"es sollte gleichmaessig sein ueber viele maps hinweg.
+# eine map kann sich von einer anderen unterscheiden. also neu gewichten."*
+#
+# Dieser Test hat bis hierher an EINEM Seed geurteilt, und das ist bei
+# dieser Streuung nicht tragfaehig. Der Anteil eines Archetyps an der
+# Kueste seiner Region schwankt von Karte zu Karte um 8 bis 21
+# Prozentpunkte. Gemessen am eigenen Fehlalarm dieses Tests:
+#
+#     Kola-Steilkueste, Einzelkarte:      5.53x ueber Soll  -> FAIL
+#     Kola-Steilkueste, 64 Karten Mittel: 29.7 % gegen 30 % -> richtig
+#
+# Der Test schlug also auf Rauschen an. Umgekehrt kann eine einzelne gute
+# Karte einen echten systematischen Ausfall verdecken.
+#
+# GEMESSEN fuer die Grenzen unten - fuenf UNABHAENGIGE Gruppen zu je 16
+# Karten, jeweils die Abweichung des Mittelwerts vom `max_anteil`:
+#
+#     Gruppe   bewertet   Mittel   schlechteste   nie vorhanden
+#       0         24       4.8 P      12.2 P           -
+#       1         24       2.4 P       8.6 P           -
+#       2         24       5.0 P      10.8 P           -
+#       3         24       4.0 P      10.5 P           -
+#       4         24       3.4 P       8.8 P           -
+#
+# Die Grenzen liegen mit Reserve darueber. Sie sind trotzdem scharf genug
+# fuer den Fehler, den es diese Datei ueberhaupt gibt: ein Archetyp, der
+# systematisch ausfaellt, liegt 25 bis 50 Punkte daneben, nicht 12.
+KARTEN_ANZAHL = 16
+KARTEN_SIZE = 384          # kleiner als SIZE - 16 Karten statt einer
+MITTEL_ABWEICHUNG_MAX_P = 7.0
+EINZEL_ABWEICHUNG_MAX_P = 16.0
+
+# ZWEI ENDEN DER KETTE, mit ZWEI Grenzen - gemessen 2026-08-27.
+#
+# Anlass: der Test meldete "Vendee-Straende -16.7P" und sah damit aus wie
+# ein Verteilungsfehler. Er war keiner. Gemessen wurden beide Enden bei
+# zwei Aufloesungen, je 8 Karten:
+#
+#                        Saatanteil      Laengenanteil
+#     384 px (55 m/px)      -5.0             -20.1
+#     768 px (28 m/px)      -4.9              -0.2
+#
+# Das SAATENDE ist bei beiden Aufloesungen gleich - die Zuordnung stimmt.
+# Der Verlust entsteht danach und verschwindet bei feiner Karte ganz.
+# Die Gegenprobe liefert Bretagne-Klippen, Vendees Regionsnachbar:
+# +11.4 bei 384 px, -5.8 bei 768 px. Die beiden TAUSCHEN genau das, was
+# Vendee fehlt.
+#
+# Ursache: `MIN_SEGMENT_M` (750 m) ist eine ABSOLUTE Laenge. Vendee hat
+# mit 0.18 km die kuerzeste Reichweite der drei Atlantik-Typen; bei
+# 55 m/px fallen seine Zonen darunter und werden in `_segmente_schliessen()`
+# in den laengeren Nachbarn eingeschmolzen. Der Test hat also die
+# Aufloesung SEINER EIGENEN Testkarte gemessen, nicht die Verteilung.
+#
+# Daraus zwei Grenzen statt einer:
+#
+#   * Der SAATANTEIL ist aufloesungsunabhaengig und die Groesse, die die
+#     Quote ueberhaupt steuert. Er wird SCHARF geprueft - groesste
+#     gemessene Abweichung 5.3 P bei beiden Aufloesungen.
+#   * Der LAENGENANTEIL enthaelt das Einschmelzen und wird bei 384 px
+#     entsprechend weich geprueft. Groesste gemessene Abweichung 20.1 P.
+#
+# Der Fehler, den es diese Datei ueberhaupt gibt - ein Archetyp, der
+# systematisch ausfaellt - liegt 25 bis 50 Punkte daneben und faellt
+# durch BEIDE Grenzen. Die weiche Laengengrenze verliert also nichts.
+SAAT_ABWEICHUNG_MAX_P = 10.0
+LAENGE_ABWEICHUNG_MAX_P = 22.0
+# Unter so vielen Karten MIT Kueste wird ein Archetyp nicht bewertet.
+# Das Nevadin hat auf 62 von 64 Karten ueberhaupt keine Kueste; sein
+# "Mittelwert" aus zwei Stichproben lag scheinbar 60 Punkte daneben und
+# war reines Artefakt.
+MINDEST_KARTEN = 8
+
 # BEKANNTE AUSFAELLE - zur Zeit KEINE.
 #
 # Mit SAAT_KOHAERENZ_STATIONEN = 3.5 sind alle acht ehemals verschwundenen
@@ -116,7 +191,7 @@ def verteilung(lage):
                 marke = "  <-- FEHLT"
             elif not VERZERRUNG_MIN <= v <= VERZERRUNG_MAX:
                 verzerrt.append(f"{name} {v:.2f}x")
-                marke = "  <-- daneben"
+                marke = "  <-- auffaellig"
         print(f"       {name:22s}{anzahl:6d}{soll:8.1%}{ist:9.1%}"
               f"{v:11.2f}x{marke}")
 
@@ -125,10 +200,14 @@ def verteilung(lage):
         not ausgefallen,
         ", ".join(ausgefallen) if ausgefallen else
         f"{len(BEKANNTE_AUSFAELLE)} bekannte Ausfaelle uebergangen")
-    fehler += check(
-        f"Anteile im Rahmen ({VERZERRUNG_MIN:.2f}x bis {VERZERRUNG_MAX:.1f}x)",
-        not verzerrt, ", ".join(verzerrt) if verzerrt else
-        f"Median {np.median(verhaeltnisse):.2f}x")
+    # NUR NACHRICHT, KEINE PRUEFUNG - auf einer Karte ist die Verzerrung
+    # nicht bewertbar (Streuung 8-21 Prozentpunkte, siehe KARTEN_ANZAHL).
+    # Die Zusicherung dazu steht in `verteilung_ueber_karten`.
+    print(f"[--] Anteile auf DIESER Karte ({VERZERRUNG_MIN:.2f}x bis "
+          f"{VERZERRUNG_MAX:.1f}x) - "
+          + (", ".join(verzerrt) if verzerrt else
+             f"Median {np.median(verhaeltnisse):.2f}x")
+          + "   (nur Anschauung, geprueft wird ueber viele Karten)")
 
     # Ein einzelner Typ, der die halbe Kueste haelt, ist auch dann falsch,
     # wenn er die Verzerrungsgrenze knapp einhaelt.
@@ -196,6 +275,121 @@ def kohaerenz_wirkt():
     return fehler
 
 
+def verteilung_ueber_karten():
+    """
+    DIE EIGENTLICHE ZUSICHERUNG: stimmt die Verteilung IM MITTEL?
+
+    Nutzervorgabe 2026-08-25: *"es sollte gleichmaessig sein ueber viele
+    maps hinweg. eine map kann sich von einer anderen unterscheiden."*
+
+    Gemessen wird der Anteil, den ein Archetyp an der Kuestenlaenge
+    INNERHALB SEINER REGION haelt, gegen sein `max_anteil` aus dem
+    Katalog - gemittelt ueber KARTEN_ANZAHL Karten. Eine einzelne Karte
+    darf beliebig abweichen; der Erwartungswert nicht.
+
+    Zwei Dinge fallen hier auf, die eine Einzelkarte nicht zeigen kann:
+    ein Archetyp, der SYSTEMATISCH zu selten vorkommt (die urspruengliche
+    Ursache dieser Datei - acht von 27 fehlten ganz), und eine Quote, die
+    im Mittel danebenliegt statt nur zu streuen.
+    """
+    fehler = []
+    anteile = collections.defaultdict(list)
+    saatanteile = collections.defaultdict(list)
+    for k in range(KARTEN_ANZAHL):
+        seed = SEED + 1013 * k
+        _H, felder = rw.weltfeld(KARTEN_SIZE, seed)
+        vk = felder.get("vektor_kueste")
+        if vk is None or not getattr(vk, "segmente", None):
+            continue
+        laenge = collections.defaultdict(float)
+        for seg in vk.segmente:
+            laenge[seg["name"]] += max(0.0, seg["b"] - seg["a"])
+        saat = collections.Counter(a["name"] for a in vk.saat_archetyp)
+        for _z, _s, r in rw.alle_regionen():
+            typen = rw.KUESTEN_ARCHETYPEN.get(r["name"])
+            if not typen:
+                continue
+            ges = sum(laenge.get(t["name"], 0.0) for t in typen)
+            if ges <= 0:
+                continue                    # Region ohne Kueste auf dieser Karte
+            # Das zweite Ende: wieviele SAATSTATIONEN der Archetyp
+            # bekommen hat, bevor Zonenmischung und Einschmelzen daran
+            # waren. Siehe SAAT_ABWEICHUNG_MAX_P.
+            ges_s = sum(saat.get(t["name"], 0) for t in typen)
+            for t in typen:
+                anteile[t["name"]].append(laenge.get(t["name"], 0.0) / ges)
+                if ges_s > 0:
+                    saatanteile[t["name"]].append(
+                        saat.get(t["name"], 0) / ges_s)
+
+    soll = {t["name"]: t["max_anteil"]
+            for _z, _s, r in rw.alle_regionen()
+            for t in rw.KUESTEN_ARCHETYPEN.get(r["name"], [])}
+
+    print()
+    print(f"       {'Archetyp':24s}{'soll':>6}{'Mittel':>9}{'Abw':>8}"
+          f"{'Streuung':>10}{'Karten':>8}")
+    print("       " + "-" * 65)
+    abweichungen, verfehlt, verschwunden, zu_duenn = [], [], [], []
+    for name in sorted(anteile):
+        w = np.array(anteile[name])
+        if len(w) < MINDEST_KARTEN:
+            zu_duenn.append(f"{name} ({len(w)})")
+            continue
+        mittel = float(w.mean())
+        d = 100.0 * (mittel - soll[name])
+        abweichungen.append(abs(d))
+        marke = ""
+        if abs(d) > LAENGE_ABWEICHUNG_MAX_P:
+            verfehlt.append(f"{name} {d:+.1f}P")
+            marke = "  <-- daneben"
+        if float((w < 0.005).mean()) > 0.5:
+            verschwunden.append(f"{name} ({int((w < 0.005).sum())}/{len(w)} leer)")
+            marke = "  <-- meist leer"
+        print(f"       {name:24s}{soll[name]:>5.0%}{mittel:>9.1%}{d:>+7.1f}P"
+              f"{w.std():>10.1%}{len(w):>8}{marke}")
+
+    fehler += check(f"genug Archetypen bewertbar ({MINDEST_KARTEN}+ Karten)",
+                    len(abweichungen) >= 20,
+                    f"{len(abweichungen)} bewertet"
+                    + (f"; zu duenn belegt: {', '.join(zu_duenn)}"
+                       if zu_duenn else ""))
+    if not abweichungen:
+        return fehler
+    fehler += check("kein Archetyp verschwindet ueber die Karten hinweg",
+                    not verschwunden, ", ".join(verschwunden) if verschwunden
+                    else f"alle {len(abweichungen)} kommen auf der Mehrzahl vor")
+    fehler += check(f"Laengenanteil im Mittel innerhalb "
+                    f"{LAENGE_ABWEICHUNG_MAX_P:.0f} Punkten",
+                    not verfehlt, ", ".join(verfehlt) if verfehlt
+                    else f"schlechtester {max(abweichungen):.1f}P")
+
+    # DAS SCHARFE ENDE. Der Saatanteil haengt nicht von der Aufloesung ab
+    # und ist die Groesse, die die Quote steuert - siehe den Block bei
+    # SAAT_ABWEICHUNG_MAX_P.
+    saat_verfehlt, saat_abw = [], []
+    for name in sorted(saatanteile):
+        w = np.array(saatanteile[name])
+        if len(w) < MINDEST_KARTEN:
+            continue
+        d = 100.0 * (float(w.mean()) - soll[name])
+        saat_abw.append(abs(d))
+        if abs(d) > SAAT_ABWEICHUNG_MAX_P:
+            saat_verfehlt.append(f"{name} {d:+.1f}P")
+    fehler += check(f"SAATANTEIL jedes Archetyps innerhalb "
+                    f"{SAAT_ABWEICHUNG_MAX_P:.0f} Punkten",
+                    not saat_verfehlt,
+                    ", ".join(saat_verfehlt) if saat_verfehlt
+                    else f"schlechtester {max(saat_abw):.1f}P ueber "
+                         f"{len(saat_abw)} Archetypen")
+    fehler += check(f"mittlere Abweichung unter "
+                    f"{MITTEL_ABWEICHUNG_MAX_P:.0f} Punkten",
+                    float(np.mean(abweichungen)) <= MITTEL_ABWEICHUNG_MAX_P,
+                    f"{float(np.mean(abweichungen)):.1f}P ueber "
+                    f"{len(abweichungen)} Archetypen, {KARTEN_ANZAHL} Karten")
+    return fehler
+
+
 def lauf():
     lage = _lage()
     if lage is None:
@@ -206,6 +400,7 @@ def lauf():
         ("verteilung", lambda: verteilung(lage)),
         ("segmentlaengen", lambda: segmentlaengen(lage)),
         ("kohaerenz_wirkt", kohaerenz_wirkt),
+        ("verteilung_ueber_karten", verteilung_ueber_karten),
     ]
     ergebnis, alle = {}, []
     for name, fn in gruppen:

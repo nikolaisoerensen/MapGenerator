@@ -510,6 +510,25 @@ class BaseMapTab(QWidget):
         # Payload-Dict (wie fuer 2D), nicht ein fertiges Array. Siehe
         # MapDisplay3DWidget._render_dict_rgba_overlay().
         "region_map": "region_overlay", "kuesten_archetyp": "kuesten_overlay",
+        # FLUSSREITER (2026-08-26). Er meldet sich mit
+        # `generator_type = "terrain"` an, seine Layer standen aber in
+        # KEINER der beiden Listen. Folge: `mapped_layer` blieb None,
+        # es wurde nichts ans 3D gepusht - UND die Sichtbarkeits-
+        # schleife weiter unten schaltete danach alle Terrain-Layer
+        # unsichtbar. Im 3D blieb blankes Gelaende stehen, ohne jede
+        # Meldung (Nutzerbefund: *"bei Flussnetzwerk gehen die 3D
+        # karten nicht"*).
+        #
+        # DAS IST DIE STEHENDE REGEL AUS CLAUDE.md, nur an einer
+        # anderen Stelle als bisher: nicht eine fehlende Methode,
+        # sondern ein fehlender REGISTEREINTRAG. Beides ist von aussen
+        # nicht zu unterscheiden - es passiert lautlos nichts.
+        # tests/smoke_test_anzeige_register_3d.py wacht jetzt darueber.
+        "river_water": "river_water", "river_order": "river_order",
+        # Hoehenfaktor-Ansicht (2026-08-26) - ausdruecklich in 2D UND
+        # 3D verlangt, deshalb von Anfang an hier eingetragen.
+        "hinterland_height": "hinterland_height",
+        "voronoi_map": "voronoi_map",
     }
 
     # Für welche Tabs die radio buttons ÜBER dem Canvas die EINZIGE Quelle
@@ -524,7 +543,9 @@ class BaseMapTab(QWidget):
     # (mehrere gleichzeitig sichtbar), kein Radio-Button-artiges
     # "genau ein Layer"-Muster wie bei den übrigen Tabs.
     _LAYER_SELECTION_KEYS_3D = {
-        "terrain": {"slope", "region_overlay", "kuesten_overlay"},
+        "terrain": {"slope", "region_overlay", "kuesten_overlay",
+                    "river_water", "river_order",
+                    "hinterland_height", "voronoi_map"},
         "geology": {"rock_map", "hardness_map", "terrain_hub_delta", "tilt_delta",
                     "fold_delta", "fault_delta", "intrusion_delta"},
         "weather": {"precipitation", "temperature", "wind", "humidity"},

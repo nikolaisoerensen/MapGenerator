@@ -13,9 +13,9 @@ umgesetzt. Die uebrigen bleiben als Reserve stehen.
 
 | Region | bisher | Vorschlag | Grund |
 |---|---|---|---|
-| Griechische Inseln | Phoenizier | **Byzantiner** | Die phoenizischen Stadtstaaten enden rund 1500 Jahre vorher. Die Aegaeis ist 932 byzantinisch; Kreta ist zu diesem Zeitpunkt sogar arabisches Emirat und wird erst 961 zurueckerobert. |
-| Alpenland | "-" | **Alemannen** | Hatte gar keine Kultur, bekam damit auch keine Staedte. 932 stehen dort Alemannen, in den Hochtaelern Raetoromanen. |
-| Mittelgebirge | Franken | **Sachsen** | War doppelt mit der Atlantikkueste belegt. 932 regiert Heinrich I.; das Gebiet ist saechsisch und traegt dessen Burgenordnung. |
+| Thalassia | Phoenizier | **Byzantiner** | Die phoenizischen Stadtstaaten enden rund 1500 Jahre vorher. Die Aegaeis ist 932 byzantinisch; Kreta ist zu diesem Zeitpunkt sogar arabisches Emirat und wird erst 961 zurueckerobert. |
+| Nevadin | "-" | **Alemannen** | Hatte gar keine Kultur, bekam damit auch keine Staedte. 932 stehen dort Alemannen, in den Hochtaelern Raetoromanen. |
+| Nebelrode | Franken | **Sachsen** | War doppelt mit der Estrande belegt. 932 regiert Heinrich I.; das Gebiet ist saechsisch und traegt dessen Burgenordnung. |
 
 Damit sind alle neun Regionen kulturell unterschieden.
 
@@ -24,15 +24,15 @@ Damit sind alle neun Regionen kulturell unterschieden.
 
 | Lage | Region | Kultur | Charakter 932 |
 |---|---|---|---|
-| NW | Huegelland | Kelten | christlich-monastisch, Ringwallgehoefte, keine Staedte im roemischen Sinn |
-| N | Fjordland | Wikinger | vorchristlich, Hof und Thing, alles haengt am Wasserweg |
-| NO | Taiga | Slawen | heidnisch, Holzburgen (Gorod), Pelz- und Flusshandel |
-| W | Atlantikkueste | Franken | Westfranken nach dem Zerfall, Wikingerzuege, Motten und Abteien |
-| M | Alpenland | Alemannen | Passverkehr, Saumhandel, Bergkloester |
-| O | Mittelgebirge | Sachsen | jung christianisiert, Burgwarde Heinrichs I., Landwehren |
-| SW | Steppe | Andalusier | Kalifat von Cordoba (seit 929), Bewaesserung, Grenzwehr |
-| S | Mittelmeer | Italiener | Koenigreich Italien, Incastellamento gegen Sarazenenzuege |
-| SO | Griechische Inseln | Byzantiner | Themenverwaltung, Inselkastra, arabische Seeraeuberei |
+| NW | Clonagh | Kelten | christlich-monastisch, Ringwallgehoefte, keine Staedte im roemischen Sinn |
+| N | Skerrheim | Wikinger | vorchristlich, Hof und Thing, alles haengt am Wasserweg |
+| NO | Morobora | Slawen | heidnisch, Holzburgen (Gorod), Pelz- und Flusshandel |
+| W | Estrande | Franken | Westfranken nach dem Zerfall, Wikingerzuege, Motten und Abteien |
+| M | Nevadin | Alemannen | Passverkehr, Saumhandel, Bergkloester |
+| O | Nebelrode | Sachsen | jung christianisiert, Burgwarde Heinrichs I., Landwehren |
+| SW | Samarcia | Andalusier | Kalifat von Cordoba (seit 929), Bewaesserung, Grenzwehr |
+| S | Macchia | Italiener | Koenigreich Italien, Incastellamento gegen Sarazenenzuege |
+| SO | Thalassia | Byzantiner | Themenverwaltung, Inselkastra, arabische Seeraeuberei |
 
 
 ## AUSWAHL DES NUTZERS — 2026-08-06
@@ -61,7 +61,7 @@ Das ist der verbindliche Satz. Alles darunter ist Reserve.
 Landmarks stehen fuer sich; sie liegen nicht am Weg, sondern praegen die
 Gegend. Sie duerfen abgelegen sein.
 
-### Kelten — Huegelland
+### Kelten — Clonagh
 a) Steinkreis auf der Kuppe
 b) Hochkreuz aus Stein
 c) Heilige Quelle mit Opfergaben
@@ -73,7 +73,7 @@ h) Ganggrab, aelter als jede Erinnerung
 i) Feenhuegel — gemieden, nie gepfluegt
 j) Bienenkorbzellen am Kliff
 
-### Wikinger — Fjordland
+### Wikinger — Skerrheim
 a) Runenstein
 b) Grabhuegelfeld
 c) Schiffssetzung aus Steinen
@@ -85,7 +85,7 @@ h) Wachtfeuerkuppe (viti)
 i) Gestrandetes Langschiff
 j) Wasserfallheiligtum
 
-### Slawen — Taiga
+### Slawen — Morobora
 a) Gorod — Ringwallburg aus Holz und Erde
 b) Goetzenpfahl mit vier Gesichtern
 c) Heiliger Hain
@@ -97,7 +97,7 @@ h) Quellheiligtum mit Baendern
 i) Verlassene Brandrodung
 j) Baerenhoehle mit Opferstelle
 
-### Franken — Atlantikkueste
+### Franken — Estrande
 a) Steinerne Abtei
 b) Rest einer Koenigspfalz
 c) Motte — Turmhuegelburg
@@ -109,7 +109,7 @@ h) Reliquienschrein
 i) Aquaeduktstueck der Roemer
 j) Marschendeich mit Warft
 
-### Alemannen — Alpenland
+### Alemannen — Nevadin
 a) Bergkloster auf dem Sattel
 b) Trutzburg auf dem Felskopf
 c) Gletscherzunge
@@ -121,7 +121,7 @@ h) Roemischer Passaltar
 i) Klause — Einsiedelei in der Wand
 j) Steinbogenbruecke ueber die Klamm
 
-### Sachsen — Mittelgebirge
+### Sachsen — Nebelrode
 a) Burgward Heinrichs I. — Ringburg
 b) Stumpf der gefaellten Irminsul
 c) Felsenkamm mit ausgehauenen Nischen
@@ -133,7 +133,7 @@ h) Alte Landwehr aus Wall und Graben
 i) Opferstein im Buchenwald
 j) Wallburgruine der Alten
 
-### Andalusier — Steppe
+### Andalusier — Samarcia
 a) Hisn — Felsenburg ueber der Ebene
 b) Ribat — Grenzwehrkloster
 c) Alcazaba-Ruine
@@ -145,7 +145,7 @@ h) Roemisches Theater als Steinbruch
 i) Nekropole am Wadi
 j) Salzpfanne
 
-### Italiener — Mittelmeer
+### Italiener — Macchia
 a) Roemische Bruecke, noch benutzt
 b) Bergdorfkastell (incastellamento)
 c) Basilika mit Campanile
@@ -157,7 +157,7 @@ h) Katakombe
 i) Aquaedukt-Bogenreihe
 j) Schwefelquelle
 
-### Byzantiner — Griechische Inseln
+### Byzantiner — Thalassia
 a) Kastro — Inselfestung auf dem Felsen
 b) Kuppelkirche mit Fresken
 c) Klippenkloster
@@ -175,7 +175,7 @@ j) Schiffswrackriff
 Roadsites gehoeren an den Weg. Sie entstehen NACH dem Wegenetz und werden an
 Kreuzungen, Furten und langen Zwischenstuecken gesetzt.
 
-### Kelten — Huegelland
+### Kelten — Clonagh
 a) Furtstein an der Flussquerung
 b) Rastkreuz an der Wegscheide
 c) Bardenlager
@@ -187,7 +187,7 @@ h) Meilenstein aus Rohstein
 i) Pilgerherberge
 j) Zollringwall
 
-### Wikinger — Fjordland
+### Wikinger — Skerrheim
 a) Naust als Raststelle
 b) Faehrstelle ueber den Fjord
 c) Schiffszug — Umtragestelle
@@ -199,7 +199,7 @@ h) Kohlenmeiler
 i) Salzsiederei
 j) Passhuette unter dem Grat
 
-### Slawen — Taiga
+### Slawen — Morobora
 a) Bohlenweg durchs Sumpfland
 b) Wolok — Umtragestelle zwischen zwei Fluessen
 c) Pelzhaendlerlager
@@ -211,7 +211,7 @@ h) Waage der Salzstrasse
 i) Wegpfahl mit Zeichen
 j) Winterlager mit Schlittenspur
 
-### Franken — Atlantikkueste
+### Franken — Estrande
 a) Zollbruecke
 b) Wechselstall fuer Pferde
 c) Ladestelle mit Tretkran
@@ -223,7 +223,7 @@ h) Weinschenke
 i) Muehlenwehr
 j) Wachturm gegen Nordmaenner
 
-### Alemannen — Alpenland
+### Alemannen — Nevadin
 a) Passhospiz
 b) Wechselstall fuer Saumtiere
 c) Klause mit Wegzoll in der Enge
@@ -235,7 +235,7 @@ h) Furt ueber den Gletscherbach
 i) Holzriese
 j) Kaesespeicher
 
-### Sachsen — Mittelgebirge
+### Sachsen — Nebelrode
 a) Hohlwegbuendel — ausgefahrene Karrenspuren
 b) Warte auf dem Kamm
 c) Landwehrdurchlass
@@ -247,7 +247,7 @@ h) Kalkofen
 i) Furt mit gelegtem Steinbett
 j) Rastplatz der Salzstrasse
 
-### Andalusier — Steppe
+### Andalusier — Samarcia
 a) Funduq — Karawanserei
 b) Aljibe — Zisterne am Weg
 c) Wachturm der Signalkette
@@ -259,7 +259,7 @@ h) Wehrspeicher
 i) Oelmuehle
 j) Grenzstein der Mark
 
-### Italiener — Mittelmeer
+### Italiener — Macchia
 a) Via-Rest mit Meilenstein
 b) Pilgerhospiz
 c) Fischtrockenplatz
@@ -271,7 +271,7 @@ h) Ziegelei
 i) Osteria an der Kreuzung
 j) Saumpfad zum Bergwerk
 
-### Byzantiner — Griechische Inseln
+### Byzantiner — Thalassia
 a) Skala — Anlegebucht mit Bootshaeusern
 b) Zisternenhof
 c) Wachturm ueber der Meerenge

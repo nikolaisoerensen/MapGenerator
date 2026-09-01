@@ -1069,7 +1069,7 @@ class MapDisplay2D(QWidget):
         Griechischen Inseln gehoert zu ihnen, und die Seewege brauchen das) -
         aber gefaerbt wird sie dort nicht: der Ozean wuerde sonst in neun Farben
         zerfallen, und die Kuestenlinie, das wichtigste Merkmal der Karte, waere
-        weg. Gemessen am 2026-08-06 sind 77 % der Huegelland-Zuordnung offenes
+        weg. Gemessen am 2026-08-06 sind 77 % der Clonagh-Zuordnung offenes
         Meer jenseits des Kontinents.
         """
         import matplotlib.patheffects as pe
@@ -1110,7 +1110,7 @@ class MapDisplay2D(QWidget):
         self.ax.imshow(rand, origin='lower', interpolation='nearest')
 
         # BESCHRIFTUNG AM WEITESTEN INNEN LIEGENDEN PUNKT, nicht am Schwerpunkt.
-        # Regionen sind teils konkav (Fjordland um seinen Hauptfjord herum) oder
+        # Regionen sind teils konkav (Skerrheim um seinen Hauptfjord herum) oder
         # zweigeteilt; ihr Schwerpunkt kann im Wasser oder in der Nachbarregion
         # liegen. Das Maximum der Abstandstransformation liegt garantiert im
         # Gebiet und mit groesstem Abstand zu dessen Rand - also dort, wo eine

@@ -24,7 +24,7 @@ eine Region hat drei Archetypen unterschiedlichen Charakters, und der
 steilste Drittel gehoert zur Steilkueste, der flachste zum Strand.
 Distanz und Hoehe wurden dabei NICHT mit aufgeteilt; beide blieben
 Regionswerte. Genau das erzeugt die vier bekannten Hoehenausreisser
-(smoke_test_kuestenprofiltreue): die Taiga-Hoehen stammen von den
+(smoke_test_kuestenprofiltreue): die Morobora-Hoehen stammen von den
 Stockholmer Schaeren (15-30 m) und gelten deshalb auch fuer die
 Kola-Steilkueste, die das gar nicht einhalten kann.
 

@@ -74,9 +74,9 @@ Anordnung: Spalte = West → Ost, Zeile = Nord → Süd.
 
 |  | West | Mitte | Ost |
 |---|---|---|---|
-| **Nord** | Fjordland *(Wikinger)* | Hügelland *(Kelten)* | Taiga *(Slawen)* |
-| **Mitte** | Atlantikküste *(Franken)* | Mittelgebirge *(Franken)* | Alpenland |
-| **Süd** | Steppe/Trockenland *(Andalus)* | Mittelmeer *(Italien)* | Griechische Inseln *(Phönizier)* |
+| **Nord** | Skerrheim *(Wikinger)* | Hügelland *(Kelten)* | Morobora *(Slawen)* |
+| **Mitte** | Atlantikküste *(Franken)* | Nebelrode *(Franken)* | Nevadin |
+| **Süd** | Samarcia/Trockenland *(Andalus)* | Macchia *(Italien)* | Thalassia *(Phönizier)* |
 
 ### Höhen sind auf 4 km umgerechnet, nicht abgeschrieben
 
@@ -86,15 +86,15 @@ Relief zu Breite**, nicht der Meterwert:
 
 | # | Region | Basis | Gipfel | Relief | Charakter |
 |---|---|---|---|---|---|
-| 1 | Fjordland | −30 | 700 | 730 | **ein** Hauptfjord, Hochfläche, steile Wände |
+| 1 | Skerrheim | −30 | 700 | 730 | **ein** Hauptfjord, Hochfläche, steile Wände |
 | 2 | Hügelland | 20 | 220 | 200 | sanfte Wellen, breite Sohlen, dichtes Bachnetz |
-| 3 | Taiga | 60 | 260 | 200 | flach, weite Mulden, Seen, träge Mäander |
+| 3 | Morobora | 60 | 260 | 200 | flach, weite Mulden, Seen, träge Mäander |
 | 4 | Atlantikküste | −40 | 120 | 160 | Küstenebene mit Ästuar, Kliff im Norden |
-| 5 | Mittelgebirge | 150 | 550 | 400 | dichte dendritische Zertalung |
-| 6 | Alpenland | 400 | 1400 | 1000 | Trogtäler, scharfe Grate |
-| 7 | Steppe/Trockenland | 80 | 380 | 300 | Trockentäler, weite Flächen, wenig Netz |
-| 8 | Mittelmeer | −50 | 350 | 400 | Küstengebirge direkt am Meer, kurze steile Läufe |
-| 9 | Griechische Inseln | −80 | 250 | 330 | Archipel, viel Wasser, kleine steile Inseln |
+| 5 | Nebelrode | 150 | 550 | 400 | dichte dendritische Zertalung |
+| 6 | Nevadin | 400 | 1400 | 1000 | Trogtäler, scharfe Grate |
+| 7 | Samarcia/Trockenland | 80 | 380 | 300 | Trockentäler, weite Flächen, wenig Netz |
+| 8 | Macchia | −50 | 350 | 400 | Küstengebirge direkt am Meer, kurze steile Läufe |
+| 9 | Thalassia | −80 | 250 | 330 | Archipel, viel Wasser, kleine steile Inseln |
 
 Kegelkarst und Tafelland sind gestrichen — *"macht für mich keinen sinn in
 europa"*.
@@ -124,8 +124,8 @@ Zwei Zutaten dazu:
 ### Das Meer entsteht aus demselben Feld
 
 Kein eigener Inselgradient mehr. Die Küste ist dort, wo die überblendete
-**Basishöhe plus Relief unter 0** fällt — und weil Atlantikküste, Mittelmeer
-und Griechische Inseln negative Basishöhen haben, entstehen Buchten und
+**Basishöhe plus Relief unter 0** fällt — und weil Atlantikküste, Macchia
+und Thalassia negative Basishöhen haben, entstehen Buchten und
 Archipel an genau den richtigen Stellen. Ringsum zieht ein Randabfall die
 äußeren 1.5 km auf −200 m.
 
@@ -214,7 +214,7 @@ wächst flussabwärts monoton.
 ### Stufe C — Täler eingraben
 
 `taeler_eingraben`, aber Breite und Tiefe **je Region** aus dem Parameterfeld —
-im Alpenland tiefe Tröge, im Hügelland breite flache Sohlen.
+im Nevadin tiefe Tröge, im Hügelland breite flache Sohlen.
 
 *Abnahme:* Überhöhung über dem lokalen Tiefpunkt sinkt; größter Nachbarsprung
 und p99.9 protokolliert.

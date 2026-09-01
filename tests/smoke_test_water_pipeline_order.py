@@ -771,7 +771,7 @@ def run_scale_invariance():
     # Toleranz bewusst weiter als bei map_size: map_distance aendert bei
     # gleichbleibender TERRAIN.AMPLITUDE die tatsaechliche Gelaendeform. Eine
     # 2-km-Karte mit 4000 m Relief ist Hochgebirge, eine 50-km-Karte mit
-    # demselben Relief ein sanftes Huegelland - dass dort unterschiedlich viel
+    # demselben Relief ein sanftes Clonagh - dass dort unterschiedlich viel
     # Wasser stehen bleibt und sich sammelt, ist richtig und nicht der Fehler,
     # den dieser Test sucht. Ueber den 25-fachen map_distance-Bereich liegt
     # der gemessene Unterschied bei etwa Faktor 3.3; als Regression gilt eine

@@ -459,7 +459,7 @@ class BiomeClassificationSystem:
             "temp_map": lambda: self.data_lod_manager.get_calculator_output(
                 "weather.temperature", "temp_map", lod_level),
             # JULITEMPERATUR, NICHT JAHRESMITTEL (2026-08-11, Nutzerbefund via
-            # Mittelmeer-Fehlklassifikation, siehe docs/OFFENE_PUNKTE.md 9.1).
+            # Macchia-Fehlklassifikation, siehe docs/OFFENE_PUNKTE.md 9.1).
             # `weather.temperature`s "temp_map" ist das JAHRESMITTEL ueber alle
             # 6 saisonalen Perioden (weather_generator.py _calc_temperature(),
             # `temp_map = np.mean(np.stack(monthly_temp_maps, ...)`). Sowohl
@@ -469,13 +469,13 @@ class BiomeClassificationSystem:
             # (BAUMGRENZE_JULI_C/FIRN_JULI_C) sind aber explizit gegen Juli
             # kalibriert - mit dem Jahresmittel verglichen liegt jeder Wert um
             # etwa die halbe Jahresspanne zu kalt. Gemessen am Beispiel
-            # Mittelmeer (Jahresmittel/Spanne 16.9/17.5, Juli-Referenz laut
+            # Macchia (Jahresmittel/Spanne 16.9/17.5, Juli-Referenz laut
             # docs/BIOME_MATRIX.md 25.6 Grad): der Median-Landpixel kam mit
             # dem Jahresmittel auf 16.4 Grad statt Juli, wodurch Steineichen-
             # wald (Bereich 21-28 Grad) fast ueberall ausserhalb seines
             # Bereichs lag und komplett aus den Top-Biomen verschwand, waehrend
             # Bruchwald (Bereich 14-22, toleranter nach unten) 47% der Region
-            # dominierte - beide Biome sind fuer Mittelmeer als Affinitaet
+            # dominierte - beide Biome sind fuer Macchia als Affinitaet
             # gelistet, aber in völlig falschem Verhaeltnis.
             # `temp_map_monthly[3]` ist bereits vorhanden (Periode 3 = Juli bei
             # TICKS_JE_JAHR=6 und Zeitpunkt m/6, siehe dortiger Kommentar) -
@@ -1159,28 +1159,28 @@ class BaseBiomeClassifier:
         # dagegen ueber die Regionsgewichte weich ueberblendet - dieselbe
         # Bauform, die auch das Gelaende und das Klima benutzen.
         #
-        # WARUM ES NOETIG IST: Taiga und Mittelgebirge liegen nur 2 K und 40 mm
+        # WARUM ES NOETIG IST: Morobora und Nebelrode liegen nur 2 K und 40 mm
         # auseinander, sollen aber Nadel- gegen Buchenwald sein. Ueber
         # Temperatur und Niederschlag allein sind sie nicht zu trennen.
         #
         # Die Liste je Region ist die Erwartung aus docs/BIOME_MATRIX.md
         # Abschnitt 3 - dieselbe, gegen die auch geprueft wird.
         self.regions_biome_affinitaet = {
-            "Huegelland":         ("hochmoor", "grasland", "feuchtwiese",
+            "Clonagh":         ("hochmoor", "grasland", "feuchtwiese",
                                    "heide", "bruchwald"),
-            "Fjordland":          ("hochmoor", "nadelwald", "bergwald", "fjell"),
-            "Taiga":              ("nadelwald", "mischwald", "hochmoor",
+            "Skerrheim":          ("hochmoor", "nadelwald", "bergwald", "fjell"),
+            "Morobora":              ("nadelwald", "mischwald", "hochmoor",
                                    "grasland"),
-            "Atlantikkueste":     ("feuchtwiese", "eichenwald", "grasland",
+            "Estrande":     ("feuchtwiese", "eichenwald", "grasland",
                                    "bruchwald"),
-            "Alpenland":          ("bergwald", "fjell", "buchenwald", "grasland"),
-            "Mittelgebirge":      ("buchenwald", "mischwald", "grasland",
+            "Nevadin":          ("bergwald", "fjell", "buchenwald", "grasland"),
+            "Nebelrode":      ("buchenwald", "mischwald", "grasland",
                                    "bergwald"),
-            "Steppe":             ("trockensteppe", "halbwueste", "macchia",
+            "Samarcia":             ("trockensteppe", "halbwueste", "macchia",
                                    "steineichenwald"),
-            "Mittelmeer":         ("steineichenwald", "macchia", "grasland",
+            "Macchia":         ("steineichenwald", "macchia", "grasland",
                                    "bruchwald"),
-            "Griechische Inseln": ("macchia", "trockensteppe", "steineichenwald"),
+            "Thalassia": ("macchia", "trockensteppe", "steineichenwald"),
         }
 
         self._rescale_precip_moisture_ranges()
@@ -1291,7 +1291,7 @@ class BaseBiomeClassifier:
             fitness_maps[:, :, biome_id] = combined_fitness
 
         # Der Regionsbonus - er entscheidet dort, wo das Klima allein nicht
-        # trennt (Taiga gegen Mittelgebirge: 2 K und 40 mm auseinander).
+        # trennt (Morobora gegen Nebelrode: 2 K und 40 mm auseinander).
         bonus = self._affinitaetsbonus((height, width), region_map)
         if bonus is not None:
             fitness_maps = fitness_maps + bonus
@@ -1326,9 +1326,9 @@ class BaseBiomeClassifier:
 # Wie stark die Regionszugehoerigkeit die Biomwahl beeinflusst.
 #
 # Die Klimaeignung liegt bei 0..1; 0.35 heisst also, dass ein regionstypisches
-# Biom rund ein Drittel Vorsprung bekommt. Genug, um Taiga von Mittelgebirge zu
+# Biom rund ein Drittel Vorsprung bekommt. Genug, um Morobora von Nebelrode zu
 # trennen (2 K und 40 mm auseinander), zu wenig, um das Klima zu ueberstimmen -
-# ein Gipfel im Alpenland wird trotzdem Fjell und nicht Buchenwald.
+# ein Gipfel im Nevadin wird trotzdem Fjell und nicht Buchenwald.
 # Die Baumgrenze und die Firngrenze als JULITEMPERATUR, nicht als Hoehe.
 #
 # In Norwegen auf 60 Grad Nord liegt die Baumgrenze bei rund 900 bis 1100 m,
@@ -1383,7 +1383,7 @@ class SuperBiomeOverrideSystem:
         Wendet alle Super-Biome-Overrides in Priority-Reihenfolge an
 
         `see_eis` (optional, (H,W) bool, core.terrain_weltkarte.seegliederung(),
-        docs/OFFENE_PUNKTE.md 3.6) - Seeeis vor der Taiga-Kueste, NACH der
+        docs/OFFENE_PUNKTE.md 3.6) - Seeeis vor der Morobora-Kueste, NACH der
         Ocean-Zuweisung angewandt (ueberschreibt "Ocean" dort, wo Eis ist).
         None (alter Nicht-Weltkarten-Pfad) laesst Ocean unveraendert.
         """
@@ -1400,6 +1400,45 @@ class SuperBiomeOverrideSystem:
         # Ocean-Detection (Priority 0)
         ocean_mask = self._detect_ocean_connectivity(heightmap, water_biomes_map)
         super_biome_mask[ocean_mask] = self.super_biome_offset + 0  # Ocean
+
+        # ABGESCHLOSSENE BECKEN UNTER DEM MEERESSPIEGEL (2026-08-25).
+        #
+        # Nutzerbefund mit Bild: *"hier ist die kontur vom 0 m level zu sehen
+        # aber das basin ist mit biomen. eigentlich muesste das in der karte
+        # blau dargestellt werden (und in 3D)."*
+        #
+        # URSACHE: `_detect_ocean_connectivity()` ist eine FLUTFUELLUNG VOM
+        # KARTENRAND. Eine Senke unter 0 m, die keine Verbindung zum offenen
+        # Meer hat, wird davon nie erreicht - und wenn die Wassersimulation
+        # sie auch nicht als See fuellt (`water_biomes_map == 4`), faellt sie
+        # durch beide Raster und wird nach Hoehe/Temperatur/Niederschlag als
+        # LANDBIOM klassifiziert. Gemessen am 2026-08-25 (128 px, Seed
+        # 20260804): 83 Pixel in 23 Becken, groesstes 33 Pixel, Tiefen bis
+        # -73.5 m - mitten im Bild, mit Wald oder Samarcia eingefaerbt.
+        #
+        # ZUWEISUNG ALS SEE, NICHT ALS OZEAN, und das ist Absicht: diese
+        # Becken sind per Definition NICHT mit dem Meer verbunden. Sie als
+        # Ozean zu fuehren waere eine falsche Aussage ueber die
+        # Erreichbarkeit - Seewege, Kuestenlogik und die Seegliederung lesen
+        # `ocean`.
+        #
+        # HIER und nicht in der Anzeige, damit 2D und 3D dieselbe Karte
+        # bekommen (stehende Regel in CLAUDE.md).
+        #
+        # WAS DAS BEWUSST NICHT ABBILDET: eine echte Trockensenke unter dem
+        # Meeresspiegel (Totes Meer, Death Valley) gibt es in diesem Modell
+        # damit nicht mehr. Das ist der Preis fuer die Eindeutigkeit "unter 0
+        # ist Wasser", auf der der ganze Rest des Projekts aufbaut
+        # (`land = H > 0` steht an Dutzenden Stellen).
+        unterwasser = heightmap < self.sea_level
+        ohne_zuweisung = super_biome_mask == 0
+        abgeschlossen = unterwasser & ohne_zuweisung
+        if abgeschlossen.any():
+            super_biome_mask[abgeschlossen] = self.super_biome_offset + 1  # Lake
+            logging.getLogger(__name__).info(
+                "%d Pixel unter dem Meeresspiegel ohne Anbindung ans Meer "
+                "als See eingestuft (abgeschlossene Becken)",
+                int(abgeschlossen.sum()))
 
         # SEEEIS (2026-08-11) - eigene, sichtbare Kategorie statt eines
         # unbenutzten Datenfelds. Nutzer: "wie willst du das meereis
@@ -1421,11 +1460,39 @@ class SuperBiomeOverrideSystem:
         super_biome_probabilities['beach'] = beach_probabilities
 
         # Priority 7-8: Proximity-basierte Super-Biomes
+        #
+        # UFER GIBT ES NUR AN LAND (2026-08-25).
+        #
+        # `_calculate_lake_edge_probabilities()` und
+        # `_calculate_river_bank_probabilities()` messen den ABSTAND zu Seen
+        # bzw. Fluessen und bekommen die Heightmap gar nicht zu sehen. Ihr
+        # Wahrscheinlichkeitsfeld reicht deshalb in BEIDE Richtungen - auch
+        # ins Wasser hinein. Im Supersampling wurden daraus echte Pixel:
+        # gemessen 3142 `river_bank` und 467 `lake_edge` UNTER dem
+        # Meeresspiegel, zusammen 8 % aller Unterwasserpixel. Ein Flussufer
+        # mitten auf dem Meer.
+        #
+        # In `biome_map` fiel das nicht auf, weil dort die harten
+        # Wasserzuweisungen (Ocean/Lake/River) gewinnen - erst das
+        # Supersampling setzt die Wahrscheinlichkeiten in Pixel um und
+        # ueberschreibt damit auch Wasser. Dieselbe Klasse wie der
+        # Snow-/Alpine-Fall, der weiter oben schon einmal auffiel.
+        #
+        # `beach` ist mitmaskiert, aber mit Spielraum: ein Strand DARF knapp
+        # unter der Nulllinie liegen (die Bedingung dort ist
+        # `h <= sea_level + 5`), nur nicht im tiefen Wasser.
+        an_land = heightmap >= self.sea_level
+
         lake_edge_probabilities = self._calculate_lake_edge_probabilities(water_biomes_map)
-        super_biome_probabilities['lake_edge'] = lake_edge_probabilities
+        super_biome_probabilities['lake_edge'] = lake_edge_probabilities * an_land
 
         river_bank_probabilities = self._calculate_river_bank_probabilities(water_biomes_map)
-        super_biome_probabilities['river_bank'] = river_bank_probabilities
+        super_biome_probabilities['river_bank'] = river_bank_probabilities * an_land
+
+        # Strand: bis 5 m unter der Nulllinie erlaubt, tiefer nicht.
+        super_biome_probabilities['beach'] = (
+            super_biome_probabilities['beach']
+            * (heightmap >= self.sea_level - 5.0))
 
         # Priority 9-10: Höhen-basierte Super-Biomes
         snow_probabilities = self._calculate_snow_level_probabilities(heightmap, temp_map)
@@ -1435,7 +1502,7 @@ class SuperBiomeOverrideSystem:
         # "vereinzelte weisse Punkte im Meer"). Beide Wahrscheinlichkeiten
         # haengen NUR an der Julitemperatur (siehe dortige Docstrings,
         # 2.2-Umbau) - ohne Landfilter erfuellt jedes hinreichend KALTE
-        # Meerespixel (auf der Weltkarte z.B. See-Nord vor der Taiga, siehe
+        # Meerespixel (auf der Weltkarte z.B. See-Nord vor der Morobora, siehe
         # SEE_MITTEL_NORD in weather_generator.py) rein rechnerisch dieselbe
         # Bedingung wie ein Gipfel. `_apply_supersampling_cpu()` ueberschreibt
         # dann STOCHASTISCH einzelne Sub-Pixel des schon korrekt als "Ocean"
@@ -1520,6 +1587,76 @@ class SuperBiomeOverrideSystem:
     def _calculate_cliff_probabilities(self, heightmap):
         """
         Berechnet Cliff-Probabilities mit Slope-Threshold und Edge-Softness
+
+        ============================================================
+        WARUM AN DER KUESTE FAST KEINE KLIPPEN ENTSTEHEN
+        (Nutzerfrage 2026-08-25: *"ich sehe die cliffs nicht so ganz.
+        wird die slopemap vor oder nach den vektoren berechnet?"*)
+        ============================================================
+
+        ERST DIE REIHENFOLGE, weil sie der naheliegende Verdacht war und
+        NICHT die Ursache ist:
+
+          terrain.redistribution  ruft weltfeld(), und DORT wird die
+                                  Vektorkueste angewandt (VEKTOR_KUESTE_AKTIV
+                                  in core/terrain_weltkarte.py)
+          erosion.slope           rechnet auf der KOMBINIERTEN Heightmap
+          diese Funktion          bekommt ebenfalls die kombinierte Heightmap
+                                  (get_calculator_combined_heightmap, siehe
+                                  _get_prepared_biome_inputs)
+
+        Die Vektorkueste steckt also in jeder Heightmap, die hier ankommt.
+        Nachgemessen am 2026-08-25: die kombinierte Heightmap war sogar
+        BITGLEICH mit terrain.redistribution/heightmap (Erosion ist per
+        EROSION_AKTIV abgeschaltet). **Die Reihenfolge ist richtig.**
+
+        Diese Funktion benutzt ausserdem gar nicht die `slopemap`, sondern
+        rechnet ihren eigenen Gradienten - eine Fehlerquelle weniger.
+
+        DIE ECHTE URSACHE sind zwei Dinge, die zusammenkommen:
+
+        1. DAS PROFIL IST FEINER ALS DAS RASTER. Die gemessenen Kuesten-
+           profile sind nur auf ihren ersten 50-100 m steil:
+
+               Moher-Klippen       0-50 m  48.9 Grad
+               Amalfi-Steilkueste  0-50 m  27.4 Grad
+               Santorini-Kliff     0-50 m  26.5 Grad
+               Algarve-Klippen     0-50 m  24.9 Grad
+               Luce-Bay-Straende   0-50 m   4.5 Grad
+
+           Und 50 m sind:  0.30 px bei 128 px Karte,  0.60 px bei 256,
+           1.20 px bei 512,  2.40 px bei 1024,  4.81 px bei 2048.
+           **Unterhalb von etwa 1024 px ist die Klippe schmaler als ein
+           Pixel** und kann im Raster gar nicht steil werden. Dieselbe
+           Grenze wie in docs/OFFENE_PUNKTE.md 6.19.
+
+        2. DIE MEISTEN ARCHETYPEN SIND GAR NICHT SO STEIL. Von den fuenf
+           oben ueberschreitet nur Moher 45 Grad. Selbst bei perfekter
+           Aufloesung waeren die uebrigen keine "Klippe" im Sinne dieser
+           Schwelle.
+
+        GEMESSEN, an der Wasserlinie (< 200 m) gegen Inland (> 1 km):
+
+               256 px:  Kueste p90 26.2 Grad, >45 Grad 0.16 %  |  Inland 2.80 %
+               512 px:  Kueste p90 29.3 Grad, >45 Grad 0.73 %  |  Inland 6.63 %
+              1024 px:  Kueste p90 29.7 Grad, >45 Grad 1.93 %  |  Inland 11.43 %
+
+           **Die Kueste ist der FLACHSTE Teil der Karte**, gemessen an der
+           Dichte steiler Pixel - nicht der steilste. Der p90 bleibt bei
+           allen drei Groessen zwischen 26 und 30 Grad.
+
+        WAS DARAUS FOLGT, falls jemand spaeter wieder hier landet:
+
+          * Klippen sind bei diesem Massstab ein GEBIRGS-Merkmal, kein
+            Kuestenmerkmal. Das ist keine Fehlfunktion.
+          * Wer Kuestenklippen sehen will, muss `cliff_slope` auf etwa
+            30 Grad senken - dort liegt der gemessene p90 der Kueste.
+            Bei 45 Grad (Vorgabe seit 2026-08-25) trifft man sie nicht.
+          * Eine feinere Karte hilft, aber langsam: von 256 auf 1024 px
+            steigt der Anteil steiler Kuestenpixel nur von 0.16 auf 1.93 %.
+          * Am Raster zu drehen bringt hier weniger als am Profil. Wer
+            steilere Kuesten WILL, muss die Vorlagen aendern - und die sind
+            aus echten DEMs gemessen (core/vektor_kueste.py).
         """
         # Gradient berechnen - ohne spacing rechnet np.gradient() mit 1 Pixel = 1m
         # Horizontal-Abstand, obwohl ein Pixel real ~50-300m abdeckt (siehe

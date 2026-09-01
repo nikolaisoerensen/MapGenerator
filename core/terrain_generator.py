@@ -38,6 +38,24 @@ import math
 from typing import Dict, List, Tuple, Optional, Any
 
 
+
+# BREITE DER GEZEICHNETEN FLUSSLINIE, in Pixeln (nur `river_water`).
+#
+# r = GRUND + JE_DEKADE * log10(1 + Wassermenge). Gemessen reicht die Menge
+# von 0.38 bis 725 je Knoten, das sind knapp drei Dekaden:
+#
+#     Bach    (Menge   1)  ->  r = 0.6 px
+#     Zufluss (Menge  20)  ->  r = 1.3 px
+#     Strom   (Menge 700)  ->  r = 2.0 px
+#
+# Bewusst flach: der Hauptstrom soll erkennbar dicker sein, aber die Karte
+# nicht zulaufen. Die Werte gelten fuer jede Aufloesung gleich - eine Linie
+# von 2 px ist bei 1024 px feiner als bei 384, was richtig ist, weil dort
+# mehr Laeufe nebeneinanderliegen.
+FLUSS_BREITE_GRUND_PX = 0.30
+FLUSS_BREITE_JE_DEKADE_PX = 0.60
+
+
 class TerrainData:
     """
     Funktionsweise: Container für alle Terrain-Daten mit Validity-System und Cache-Management
@@ -73,6 +91,7 @@ class TerrainData:
         self.river_mask: Optional[np.ndarray] = None
         self.river_order: Optional[np.ndarray] = None
         self.river_generation: Optional[np.ndarray] = None
+        self.river_water: Optional[np.ndarray] = None
         self.region_map: Optional[np.ndarray] = None
         # (3, H, W): Jahresmittel, Jahresspanne, Niederschlag - siehe
         # _weltkarte_heightmap. Weich ueber die Regionsgrenzen gemischt.
@@ -84,7 +103,7 @@ class TerrainData:
         self.ufer_region_a: Optional[np.ndarray] = None
         self.ufer_region_b: Optional[np.ndarray] = None
         # Seetyp-Regeln (2026-08-11, docs/OFFENE_PUNKTE.md 3.6): bool, True wo
-        # die naechste Uferregion die Taiga ist.
+        # die naechste Uferregion die Morobora ist.
         self.see_eis: Optional[np.ndarray] = None
         # Kuesten-Archetypen (2026-08-12, docs/OFFENE_PUNKTE.md 3.8): lokaler
         # Index (0..2, -1 = keiner) INNERHALB der Region, ueber
@@ -599,8 +618,8 @@ GPU_SCHATTEN = True
 # Bezugsrelief fuer die Gewichtung des Erosionsfilters (Meter).
 #
 # Eine Region mit diesem Relief bekommt Gewicht 1.0, doppelt so viel Relief
-# das Doppelte - geklemmt auf MIN..MAX, damit weder die Steppe (183 m) leer
-# ausgeht noch das Alpenland (1000 m) zerfranst.
+# das Doppelte - geklemmt auf MIN..MAX, damit weder die Samarcia (183 m) leer
+# ausgeht noch das Nevadin (1000 m) zerfranst.
 #
 # FEST und nicht aus dem Kartenmittel abgeleitet: eine Normierung auf das
 # jeweilige Bild waere derselbe Fehler, den die Hoehenskala schon einmal hatte.
@@ -1552,7 +1571,8 @@ class BaseTerrainGenerator:
         # Die vier Weltkarten-Ausgaben mitnehmen. OHNE Pflichtpruefung: im alten
         # Pfad (WELTKARTE_AKTIV = False) gibt es sie nicht, und ein fehlendes
         # Flussnetz darf den Zusammenbau nicht scheitern lassen.
-        for schluessel in ("river_mask", "river_order", "river_generation",
+        for schluessel in ("river_mask", "river_order", "river_generation", "river_water",
+                           "hinterland_height", "voronoi_map",
                            "region_map", "klima_map", "seegrad",
                            "ufer_region_a", "ufer_region_b", "see_eis",
                            "kuesten_archetyp", "kuesten_staerke", "spielkarte"):
@@ -1773,8 +1793,53 @@ class BaseTerrainGenerator:
                                         ("weltfluesse", 25.0),
                                         ("ridge_und_klima", 2.0)])
 
+        # DIE DREI ABSCHALTHAEKCHEN (Nutzerwunsch 2026-08-25):
+        #
+        #   *"kannst du mir einmal fuer flussnetzwerk und erosionfilter und
+        #   kuestentypen jeweils checkboxen einfuegen, mit denen ich die
+        #   effekte immer auch ausschalten kann?"*
+        #
+        # Zweck ist das VERGLEICHEN: welche Stufe traegt wieviel zum Bild
+        # bei. Vorgabe ist ueberall AN, ein fehlender Parameter aendert also
+        # nichts - Tools und Smoke-Tests rufen unveraendert auf.
+        p = self._current_parameters or {}
+
+        def _an(schluessel):
+            return bool(p.get(schluessel, True))
+
+        kuesten_an = _an("kuesten_archetypen_aktiv")
+        filter_an = _an("erosion_filter_aktiv")
+        fluesse_an = _an("river_network_aktiv")
+
+        # DIE EINSTELLUNGEN DES REGIONSREITERS UND DER FORMREGLER.
+        #
+        # Bis zum 2026-08-26 kam hier NICHTS davon an: der Regionsreiter
+        # hielt seine Ueberschreibungen fuer sich, und `weltfeld()` las
+        # ausschliesslich den Katalog. Man konnte eine Region einstellen,
+        # "Generieren" druecken und bekam dieselbe Karte - ohne Absturz und
+        # ohne Meldung. Gefunden nur, indem nachgesehen wurde, WER die
+        # Ueberschreibungen liest (niemand).
+        #
+        # `regionen_ueberschreibung` ist ein geschachteltes Dict
+        # {Regionsname: {Regler: Wert}} und gilt NUR FUER DIESEN LAUF - der
+        # Katalog bleibt die Vorgabe (Nutzerentscheidung 2026-08-25).
+        ueberschreibung = p.get("regionen_ueberschreibung") or None
+        kontinentform_regler = p.get("kontinentform")
+        if ueberschreibung:
+            self.logger.info(
+                "Regionsueberschreibungen aktiv: %s",
+                ", ".join(f"{n} ({', '.join(v)})"
+                          for n, v in ueberschreibung.items()))
+        if kontinentform_regler is not None:
+            self.logger.info("Kontinentform-Regler auf %.2f",
+                             float(kontinentform_regler))
+
         heightmap, felder = weltfeld(
-            size, seed, shader_manager=self.shader_manager, schritte=schritte)
+            size, seed, shader_manager=self.shader_manager, schritte=schritte,
+            kuesten_aktiv=kuesten_an,
+            regionen_ueberschreibung=ueberschreibung,
+            kontinentform_regler=(None if kontinentform_regler is None
+                                  else float(kontinentform_regler)))
         mpp = WELT_KM * 1000.0 / float(size)
 
         # DER EROSIONSFILTER - nach dem Weltfeld, VOR dem Flussnetz.
@@ -1785,7 +1850,12 @@ class BaseTerrainGenerator:
         # frisch eingegrabenen Taeler wieder zuschuetten.
         ridge_ersatz = None
         with _s(schritte, "erosionsfilter", "Erosionsfilter"):
-            gefiltert = self._weltkarte_erosionsfilter(heightmap, felder)
+            if filter_an:
+                gefiltert = self._weltkarte_erosionsfilter(heightmap, felder)
+            else:
+                gefiltert = None
+                self.logger.info("Erosionsfilter UEBERSPRUNGEN "
+                                 "(erosion_filter_aktiv=False)")
         if gefiltert is not None:
             heightmap = gefiltert["heightmap"]
             ridge_ersatz = gefiltert["ridge_map"]
@@ -1793,11 +1863,16 @@ class BaseTerrainGenerator:
         fluss_maske = np.zeros((size, size), dtype=np.float32)
         fluss_ordnung = np.zeros((size, size), dtype=np.float32)
         fluss_generation = np.zeros((size, size), dtype=np.float32)
+        fluss_wasser = np.zeros((size, size), dtype=np.float32)
 
-        if getattr(vd, "WELTFLUESSE_AKTIV", False):
+        if not fluesse_an:
+            self.logger.info("Flussnetz und Taeler UEBERSPRUNGEN "
+                             "(river_network_aktiv=False)")
+        elif getattr(vd, "WELTFLUESSE_AKTIV", False):
             with _s(schritte, "weltfluesse", "Flussnetz und Taeler"):
-                heightmap, fluss_maske, fluss_ordnung, fluss_generation = \
-                    self._weltfluesse(heightmap, felder, size, seed)
+                (heightmap, fluss_maske, fluss_ordnung, fluss_generation,
+                 fluss_wasser) = self._weltfluesse(
+                     heightmap, felder, size, seed)
 
         # ridge_map ist ein Anzeige-Output des Erosionsfilters. Solange der bei
         # aktiver Weltkarte nicht laeuft, liefert die Hangneigung ein
@@ -1842,6 +1917,23 @@ class BaseTerrainGenerator:
             "river_mask": fluss_maske,
             "river_order": fluss_ordnung,
             "river_generation": fluss_generation,
+            # Die EINE Flusskarte (Nutzervorgabe 2026-08-26): wieviel Wasser
+            # an dieser Stelle berechnet wurde, in Niederschlag mal Flaeche.
+            # Ersetzt die Rot/Gruen-Faerbung nach Generation als Leitansicht.
+            "river_water": fluss_wasser,
+            # DIE HOEHENFAKTOR-ANSICHT (Nutzerwunsch 2026-08-26:
+            # *"kannst du mir die voronoiansicht als erstes bauen? ich
+            # will den hoehenfaktor sehen koennen (3d und 2D)"*).
+            #
+            # `hinterlandhoehe_m`: je Pixel die gemessene Hoehe des
+            # Hinterlands seines Kuestengebiets, in Metern (Band
+            # 400-700 m, Zweipunktmethode des Nutzers). NaN auf See und
+            # im alpinen Sonderfall.
+            # `voronoi_map`: die Zellnummern, aus denen die Gebiete
+            # gewachsen sind - dieselben Zellen, die auch die Regionen
+            # bilden.
+            "hinterland_height": felder.get("hinterlandhoehe_m"),
+            "voronoi_map": felder.get("voronoi"),
             "region_map": felder["regionen"].astype(np.int16),
             "klima_map": klima,
             # Seegliederung (docs/KLIMA_UND_SEE.md §2, docs/OFFENE_PUNKTE.md
@@ -1961,7 +2053,7 @@ class BaseTerrainGenerator:
             region_map=felder.get("regionen"))
         if netz is None:
             leer = np.zeros((size, size), dtype=np.float32)
-            return heightmap, leer, leer.copy(), leer.copy()
+            return heightmap, leer, leer.copy(), leer.copy(), leer.copy()
 
         geschnitten = taeler_eingraben(
             heightmap, netz, felder,
@@ -1975,13 +2067,43 @@ class BaseTerrainGenerator:
         maske = np.zeros((size, size), dtype=np.float32)
         ordnung = np.zeros((size, size), dtype=np.float32)
         generation = np.zeros((size, size), dtype=np.float32)
+        # DIE WASSERMENGE ALS EIGENE KARTE (2026-08-26).
+        #
+        # Nutzervorgabe: *"ich verstehe noch immer nicht die mehrteilung mit
+        # roten und gruenen fluessen, jetzt wo wir quasi wassermengen und so
+        # haben. koennen wir nur eine karte haben die darstellt wie viel
+        # wasser fuer die fluesse berechnet wurde?"*
+        #
+        # `netz["flaeche"]` IST diese Groesse: sie akkumuliert seit dem
+        # 2026-08-24 Niederschlag mal Flaeche flussabwaerts, nicht mehr
+        # blosse Knotenzahl (siehe `baue_stufe` in terrain_weltfluesse.py).
+        #
+        # NICHT `flow_map` GENOMMEN, obwohl es die naheliegende Wahl waere:
+        # die gehoert zur WASSER-Stufe (`get_water_data`), der Flussreiter
+        # liest aber Terrain-Daten. Sie hier zu zeigen hiesse, den Reiter von
+        # einer spaeteren Pipelinestufe abhaengig zu machen - er zeigte dann
+        # nichts, solange die noch nicht gerechnet hat.
+        wasser = np.zeros((size, size), dtype=np.float32)
+        # DIESELBE SPLINE WIE BEIM EINSCHNEIDEN (2026-08-25).
+        #
+        # Hier stand `punkte[e]*(1-t) + punkte[i]*t`, also eine gerade Sehne
+        # zwischen zwei Netzknoten - genauso wie in `taeler_eingraben()`. Der
+        # Nutzer sah das als Zacken: *"die fluesse sind hier sehr zackig
+        # gezeichnet"*. Gemessen am Hauptstrom (384 px, 40 Knoten) war der
+        # groesste Richtungswechsel 143.5 Grad; mit der Spline sind es 33.3.
+        #
+        # WICHTIG, dass BEIDE Stellen dieselbe Funktion benutzen: die Maske
+        # ist das, was man sieht, das Einschneiden das, was man begeht. Zwei
+        # verschiedene Kurven waeren zwei Wahrheiten - der gezeichnete Fluss
+        # laege dann neben seinem Tal.
+        from core.terrain_weltfluesse import hauptkinder, kantenpunkte
+        kinder = hauptkinder(eltern, netz["flaeche"])
         for i in range(len(punkte)):
             e = eltern[i]
             if e < 0:
                 continue
             schritte = max(int(np.linalg.norm(punkte[i] - punkte[e]) * 2.0), 2)
-            for t in np.linspace(0.0, 1.0, schritte):
-                p = punkte[e] * (1.0 - t) + punkte[i] * t
+            for p in kantenpunkte(punkte, eltern, kinder, e, i, schritte):
                 y = int(np.clip(round(p[0]), 0, size - 1))
                 x = int(np.clip(round(p[1]), 0, size - 1))
                 if geschnitten[y, x] <= 0.0:
@@ -1990,7 +2112,36 @@ class BaseTerrainGenerator:
                 ordnung[y, x] = max(ordnung[y, x], float(strahler[i]))
                 generation[y, x] = max(generation[y, x],
                                        float(3 - netz["lauf_stufe"][i]))
-        return geschnitten, maske, ordnung, generation
+                # DIE LINIE WIRD MIT DER WASSERMENGE BREITER (2026-08-26).
+                #
+                # Nutzervorgabe: *"du solltest dort auch die dicke der linie
+                # langsam steigen lassen mit der wassermenge. damit es
+                # deutlicher ist."*
+                #
+                # NUR AUF DER ANZEIGEKARTE, nicht auf `maske`. `river_mask`
+                # geht in die Biomklassifikation (Uferbiome, siehe
+                # `river_bank` in core/biome_generator.py) - sie zu
+                # verbreitern haette dort stillschweigend die Biomverteilung
+                # verschoben. `river_water` ist ein reines Anzeigeprodukt und
+                # darf breit sein.
+                #
+                # Logarithmisch, weil die Wassermenge es auch ist: gemessen
+                # 0.38 bis 725 je Knoten (Median 1.33). Linear waere der
+                # Hauptstrom 500-mal breiter als ein Bach.
+                menge = float(netz["flaeche"][i])
+                r = FLUSS_BREITE_GRUND_PX + FLUSS_BREITE_JE_DEKADE_PX * np.log10(
+                    1.0 + max(menge, 0.0))
+                rad = int(r)
+                if rad <= 0:
+                    wasser[y, x] = max(wasser[y, x], menge)
+                else:
+                    y0, y1 = max(0, y - rad), min(size, y + rad + 1)
+                    x0, x1 = max(0, x - rad), min(size, x + rad + 1)
+                    yy, xx = np.ogrid[y0:y1, x0:x1]
+                    scheibe = (yy - y) ** 2 + (xx - x) ** 2 <= r * r
+                    ziel = wasser[y0:y1, x0:x1]
+                    np.maximum(ziel, np.where(scheibe, menge, 0.0), out=ziel)
+        return geschnitten, maske, ordnung, generation, wasser
 
     def _apply_river_network(self, P: np.ndarray, amplitude: float):
         """
@@ -2159,8 +2310,8 @@ class BaseTerrainGenerator:
            weniger davon ab. Uebergeben wird deshalb max(H, 0).
 
         DIE GEWICHTUNG kommt aus `relief_m` - dem Feld, das ohnehin schon je
-        Pixel vorliegt. Das Alpenland mit 1000 m Relief bekommt damit rund das
-        Achtfache an Struktur wie das Huegelland mit 115 m.
+        Pixel vorliegt. Das Nevadin mit 1000 m Relief bekommt damit rund das
+        Achtfache an Struktur wie das Clonagh mit 115 m.
         """
         from gui.config.value_default import EROSION_FILTER_AKTIV
         if not EROSION_FILTER_AKTIV:
