@@ -43,6 +43,48 @@ die Sichtpruefung hat sechs neue benannt (3.14, 5.15, 6.24-6.26, 9.3), die
 vorher unsichtbar waren — darunter mit 5.15 (Siedlungen Regional zeigt nichts)
 ein echter Fehler, den kein headless-Test gefunden haette.
 
+
+## OFFEN und spezifiziert: Overlays bekommen eine Naht (2026-09-14)
+
+**Spezifikation: [`docs/SPEC_OVERLAYS.md`](SPEC_OVERLAYS.md)** — dort steht
+Problem, Loesung, Nutzergeschichten, Bau- und Pruefentscheidungen
+vollstaendig. Hier nur der Anlass und der eine Punkt, der SOFORT wirkt.
+
+**Ein lebender Fehler, heute im Arbeitsverzeichnis.**
+`BiomeTab.apply_overlays()` steigt in der ersten Zeile aus, wenn die Ansicht
+nicht 2D ist (`gui/tabs/biome_tab.py:507`). Die 3D-Zweige darunter — am
+2026-08-25 ausdruecklich als Behebung eingebaut, mit 25 Zeilen Begruendung —
+**koennen nie ausgefuehrt werden.** Betroffen sind Siedlungen UND
+Flussgenerationen, letztere obwohl die Methode auf beiden Anzeigen existiert.
+
+Das ist **Vorfall 4** derselben Fehlerklasse (nach 2026-08-24
+`overlay_river_generations`, 2026-08-25 `overlay_river_network`, 2026-08-25
+`overlay_settlements`) und der dritte, der als behoben verbucht wurde, ohne
+es zu sein.
+
+`tests/smoke_test_display_methoden_existieren.py` meldet trotzdem gruen —
+seine Ausnahme fuer `overlay_settlements` **begruendet sich mit genau der
+unerreichbaren Zeile.** Der Test ist gruen wegen des toten Codes. Er prueft
+Namensexistenz, nicht Erreichbarkeit; diese Luecke ist die eigentliche
+Ursache dafuer, dass die Fehlerklasse viermal durchkam.
+
+| | # | Sache | Aufwand | Issue |
+|---|---|---|---|---|
+| [ ] | 14.1 | **Der vorzeitige Ausstieg in `biome_tab.py:507`.** Einzeiler, wirkt sofort, bringt Siedlungen und Flussnetz im 3D zurueck. Kann VOR dem Umbau passieren; der Kommentarblock darueber ist dabei richtigzustellen, er beschreibt eine Behebung, die nie gewirkt hat. | 0.5 | #5 |
+| [ ] | 14.2 | **Waechtertest auf Erreichbarkeit umstellen.** Heute prueft er, OB eine Anzeigemethode existiert. Er muss pruefen, ob der Zweig, der sie ruft, ueberhaupt laufen kann. Ohne diesen Punkt wiederholt sich der Fall — 14.1 allein verhindert nur den heutigen. | 1 | #7 |
+| [ ] | 14.3 | **`_push_overlays()` in `BaseMapTab`** nach dem Vorbild von `_push_data_to_current_display()`, dazu das Register beider Wege je Overlay. Bestehende Naht verbreitern, keine neue (Nutzerentscheidung 2026-09-14). | 3 | #8 |
+| [ ] | 14.4 | **Reiter umstellen, einzeln, mit Sichtpruefung dazwischen** — Biome zuerst (dort sitzt der Fehler, beide Overlays haben ihren Rasterweg), dann Siedlungen, Regional, Fluss. Regional ist der unangenehmste: dort verschluckt ein `except Exception: logger.debug` um den ganzen Block jeden Fehler, und alle fuenf Weichen greifen in 3D nicht. | 3 | #9 #10 #11 |
+| [ ] | 14.5 | **`gui/tabs/overview_tab.py` ist vollstaendig tot** *(Nebenbefund)*. Der Reiter ruft vier Methoden auf, die es nirgends im Programm gibt. Kein Teil der Overlay-Arbeit, aber ein Waechtertest nach 14.2 wird darueber stolpern — also vorher entscheiden: loeschen oder bauen. | 1 | #6 |
+| [ ] | 14.6 | **Rasterfunktionen in ein eigenes Modul** *(Vorarbeit, streichbar)*. Die fuenf `rasterize_*_rgba()` liegen heute in der 2D-Anzeige, und drei Reiter importieren sie von dort **im 3D-Pfad** - die 3D-Ansicht haengt am 2D-Modul, obwohl sie es sonst nicht braucht. Aendert kein Verhalten; macht 14.3 ordentlicher, weil das Register dann auf ein neutrales Modul zeigt. | 0.5 | #4 |
+| [ ] | 14.7 | **Aufraeumen nach der Umstellung.** Reste der Weichenlogik weg (Ausgangslage 43 `hasattr` in `gui/`), die drei Namensraeume fuer denselben Layer ins Register, und die heute registerlosen 3D-Layernamen (`"uebersicht"`, `"wegbaender"`) dazu - ein Tippfehler dort erzeugt kein `KeyError`, sondern ein Nichts. Danach zeigt jede Waechtertest-Begruendung aufs Register statt auf eine Reiterzeile. | 2 | #12 |
+**Die stehende Regel und warum sie nicht reicht.** `CLAUDE.md` haelt seit dem
+2026-08-25 fest, dass jede 2D-Anzeige in derselben Aenderung auch in 3D
+gebaut wird. Die Regel ist richtig und wurde trotzdem gebrochen — weil sie
+eine Gedaechtnisleistung verlangt, wo 43 `hasattr`-Weichen in `gui/` jedem
+Reiter erlauben, sie stillschweigend zu verfehlen. Der Umbau macht aus der
+Regel eine Eigenschaft eines Moduls.
+
+
 ## Kuesten-Kalibrierung nach dem Verteilungsfix (2026-08-24)
 
 Der Verteilungsfix (`SAAT_KOHAERENZ_STATIONEN`, siehe SITZUNGSLOG) hat
