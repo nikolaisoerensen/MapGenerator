@@ -552,12 +552,26 @@ class BiomeTab(BaseMapTab):
             heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
             if heightmap is not None:
                 if zeigen:
-                    from gui.widgets.overlay_rasterizer import rasterize_settlements_rgba
-                    rgba = rasterize_settlements_rgba(
-                        settlements or [], landmarks or [], roadsites or [],
-                        [], [], map_size=heightmap.shape[0],
-                        resolution=heightmap.shape[0])
-                    display.update_overlay_data("settlement", "uebersicht", rgba)
+                    # NACHTRAG 2026-09-16: apply_overlays() laeuft bei JEDEM
+                    # Haken/Anzeige-Wechsel neu, auch wenn nur Fluesse oder
+                    # der Anzeigemodus betroffen sind. rasterize_settlements_rgba()
+                    # baute bisher trotzdem jedes Mal ein frisches Array, und
+                    # MapDisplay3D._overlay_cache_pruefen() cacht ueber die
+                    # Objekt-Identitaet des Arrays - ein frisches Array sieht
+                    # dort immer wie "geaendert" aus, also volles Textur-Upload
+                    # bei jedem irrelevanten Klick. Fingerabdruck aus den
+                    # Quell-Objekten spart den Neubau, wenn sich nichts geaendert
+                    # hat (derselbe Trick wie beim Flussnetz weiter unten).
+                    fingerabdruck = (id(settlements), id(landmarks), id(roadsites),
+                                      heightmap.shape[0])
+                    if fingerabdruck != getattr(self, '_settlement_overlay_fingerabdruck', None):
+                        from gui.widgets.overlay_rasterizer import rasterize_settlements_rgba
+                        rgba = rasterize_settlements_rgba(
+                            settlements or [], landmarks or [], roadsites or [],
+                            [], [], map_size=heightmap.shape[0],
+                            resolution=heightmap.shape[0])
+                        display.update_overlay_data("settlement", "uebersicht", rgba)
+                        self._settlement_overlay_fingerabdruck = fingerabdruck
                 if hasattr(display, 'set_layer_visibility'):
                     display.set_layer_visibility("settlement", "uebersicht", zeigen)
 
@@ -589,6 +603,13 @@ class BiomeTab(BaseMapTab):
                 # Im 3D bleibt eine einmal gesetzte Textur liegen, bis sie
                 # abgeschaltet wird (2D zeichnet ohnehin neu).
                 display.clear_river_overlay()
+        else:
+            # LAUT MELDEN STATT LAUTLOS NICHTS TUN.
+            self.logger.warning(
+                "Flussnetz-Overlay nicht moeglich: %s kennt "
+                "overlay_river_generations nicht - in dieser "
+                "Ansicht bleiben die Laeufe unsichtbar.",
+                type(display).__name__ if display else "kein Ziel")
 
     @pyqtSlot()
     def update_display_mode(self):
