@@ -3372,6 +3372,20 @@ class MapDisplay3DWidget(QWidget):
         self._setup_ui()
         self._connect_signals()
 
+    @property
+    def heightmap(self):
+        """
+        Durchreiche auf das innere MapDisplay3D: Aufrufer wie
+        BaseMapTab._siedlungen_3d() lesen `display.heightmap` auf DIESEM
+        Wrapper (dem Objekt, das sie ueber self.map_display_3d.display in
+        der Hand haben), nicht auf self.display_3d. Ohne diese Property
+        liefert getattr(self, "heightmap", None) immer None, weil
+        update_heightmap() das Array nur auf self.display_3d setzt -
+        das 3D-Settlement-Overlay baute seine Textur dadurch nie
+        (gefunden im Nachtlauf 2026-09-16, Code-Review).
+        """
+        return getattr(self.display_3d, "heightmap", None)
+
     def _setup_ui(self):
         """
         Funktionsweise: Erstellt UI-Layout mit 3D-Display und Tab-spezifischen Controls
