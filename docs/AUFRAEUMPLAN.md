@@ -49,7 +49,7 @@ Wasser → Biome → Siedlungen. Jeder Reiter hängt an einem Knoten.
 | TERRAIN | 10 | keine |
 | RIVER_NETWORK | 11 | keine |
 | EROSION_FILTER | 7 | keine |
-| EROSION | 13 | keine |
+| EROSION | 13 | laeuft (`EROSION_AKTIV = True`, `gui/config/value_default.py:1088`) — drei rote Tests dazu sind ungeklaert, siehe `docs/TESTBERICHT.md` Abschnitt 3 |
 | GEOLOGY | 15 | keine |
 
 **Alle Regler sind verdrahtet.** Ein erster Grep behauptete das Gegenteil;
@@ -185,12 +185,15 @@ Alpenspitzen** (4.3). Erst 3. reparieren, dann messen, wie viel Gröbe
 überhaupt noch nötig ist — sonst wird eine Auflösung gesenkt, um einen
 Geländefehler zu verstecken.
 
-### 4.7 Erosion reaktivieren
+### 4.7 ~~Erosion reaktivieren~~ — gestrichen (Ticket #63, veraltet)
 
-Zuerst mit **ausgeschaltetem Häkchen**, aber einschaltbar. Offen ist dabei
-der bekannte Befund `erosion_gpu_parity` (Faktor 385 zwischen GPU und CPU) —
-der muss vor einer Reaktivierung geklärt sein, sonst rechnet das Programm je
-nach Hardware etwas anderes.
+Dieser Punkt ist veraltet: die Erosion läuft längst, `EROSION_AKTIV = True`
+in `gui/config/value_default.py:1088`. Der Punkt wurde faelschlich als
+Beleg benutzt, um die roten Erosionstests jahrelang wegzuerklaeren ("die
+Erosionskette ist bewusst abgeschaltet") — die zentrale Korrektur dazu
+steht in `docs/TESTBERICHT.md` Abschnitt 3. Der GPU/CPU-Befund
+`erosion_gpu_parity` (frueher Faktor 385) bleibt als eigener, ungeklaerter
+Testbefund bestehen und ist davon unabhaengig zu klaeren.
 
 ---
 
@@ -711,4 +714,4 @@ möchte das du mit dem zuletzt beschriebenen anfängst."*
 | 4 | Erosionsfilter-Beschriftungen, `detail` streichen (4.5) | klein | Messung liegt vor; Schlüssel NICHT umbenennen (ATEF-Quelle) |
 | 5 | Terrain-Reiter mit Regionsauswahl (4.2) | **groß** | Entscheidung liegt vor: Anpassung gilt nur für die aktuelle Karte, Katalog bleibt Vorgabe |
 | 6 | Geologie-Querschnitt (4.6) | mittel | Erst nach den Alpenspitzen, sonst versteckt es den Fehler |
-| 7 | Erosion reaktivieren (4.7) | **groß** | Braucht vorher die GPU/CPU-Klärung (Faktor 385) |
+| — | ~~Erosion reaktivieren (4.7)~~ | — | **ENTFAELLT** — 4.7 gestrichen (veraltet, Erosion laeuft laengst); der GPU/CPU-Befund `erosion_gpu_parity` bleibt als eigener ungeklaerter Testbefund offen |

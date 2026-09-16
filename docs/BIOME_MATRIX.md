@@ -198,7 +198,9 @@ ist, kein Problem; faellt sie aus, wird das Programm unbenutzbar. Mit 5 statt
 `gui/config/value_default.py:1088`), seit dem 27.08.2026. Hier stand bis zum
 16.09.2026, er sei abgeschaltet und koste nichts - das war falsch. Er kostet
 also, und die Regionsgewichtung hat er inzwischen: gemessen formt er in den
-Bergen 64.5 m um und in den Niederungen 17.6, Faktor 3.7.
+Bergen 64.5 m um und in den Niederungen 17.6, Faktor 3.7 (zentrale
+Richtigstellung in `docs/TESTBERICHT.md` Abschnitt 3, Ticket #28/#63 — beide
+Tickets haben denselben veralteten Befund unabhaengig voneinander gefunden).
 
 ### Was ich NICHT vereinfachen wuerde
 

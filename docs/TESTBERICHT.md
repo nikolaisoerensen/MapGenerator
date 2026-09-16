@@ -102,24 +102,30 @@ sondern eine Eigenschaft grober Testauflösungen. Notiert in
 |---|---|---|
 | `erosion_field` | Farbskala `[0.5, 300]`, typischer Wert 0,22 | Farbskalenproblem, kein Rechenproblem — seit 24.08. |
 | `erosion_gpu_parity` | Export 38,5 gegen 0,1 m auf der CPU | **echter Paritätsbruch**, Faktor 385, seit 24.08. |
-| `erosion_quality` | Kanalnetz 45 px statt > 60, Ebenen 7,2 % statt 15–55 % | **offen, Ursache ungeklärt** |
+| `erosion_quality` | Kanalnetz 45 px statt > 60, Ebenen 7,2 % statt 15–55 % | **ungeklärt** — frühere Erklärung ("Erosionskette abgeschaltet") war falsch, siehe unten |
 | `regionen_welt` | 4 Befunde, u. a. Macchia Hang 18,6 statt 14,5 | die Küsten-Archetypen verstimmen die Regionseichung — in CLAUDE.md beschrieben |
 | `pipeline_outputs` | 5 Befunde | seit 24.08. |
 | `settlement_placement` | 6 Befunde, u. a. 2 Städte statt 1 je Kultur | seit 24.08. |
 | `weather_temperature_direktnormierung` | 3 Befunde, Skerrheim 7,86 statt 8,60 K | seit 24.08. |
 
-**Die vier Erosionsbefunde sind offen und nicht erklärt.** Hier stand bis
+**Die drei Erosionsbefunde sind offen und nicht erklärt.** Hier stand bis
 zum 16.09.2026 das Gegenteil: sie seien kein Zufall, weil die Erosionskette
-bewusst abgeschaltet sei. Das war falsch. `EROSION_AKTIV = True` steht in
-[`gui/config/value_default.py:1088`](../gui/config/value_default.py#L1088),
-und die Erosion läuft seit dem 27.08.2026 im Betrieb mit — die vier Befunde
-entstehen also unter laufender Erosion.
+bewusst abgeschaltet sei. Das war **doppelt falsch** (Ticket #28 und #63
+haben das unabhaengig voneinander gefunden und behoben): erstens laeuft die
+Erosion seit dem 27.08.2026 im Betrieb mit - `EROSION_AKTIV = True` steht in
+[`gui/config/value_default.py:1088`](../gui/config/value_default.py#L1088)
+und ist die einzig gueltige Aussage zum Schalter. Zweitens stimmte schon die
+Zahl nicht: die Tabelle oben listet nur **drei** Erosionsbefunde
+(`erosion_field`, `erosion_gpu_parity`, `erosion_quality`), keine vier.
 
 Der Satz hat real etwas angerichtet: solange er dort stand, sah jeder Leser
-vier gewollte Fehlschläge statt vier ungeklärter, und niemand fasste sie an.
+drei gewollte Fehlschläge statt drei ungeklärter, und niemand fasste sie an.
 Der schwerste darunter, der Paritätsbruch mit Faktor 385 zwischen GPU und
 CPU, stand damit scheinbar vor einer Reaktivierung statt mitten im laufenden
-Betrieb.
+Betrieb. `erosion_field` und `erosion_gpu_parity` haben eigene, vom Schalter
+unabhaengige Erklaerungen; der tatsaechliche Grund fuer `erosion_quality`
+bleibt **ungeklaert** - das ist eine offene Aufgabe, kein erledigter oder
+bewusster Zustand.
 
 Eine falsche Erklärung ist schlimmer als keine: keine Erklärung lädt zum
 Nachsehen ein, eine falsche schliesst die Frage.

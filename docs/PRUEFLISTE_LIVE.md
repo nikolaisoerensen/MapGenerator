@@ -165,15 +165,22 @@ anderen Reiter wechseln, eine Minute arbeiten, zurückwechseln.**
 
 ## 4. Erosionsreiter
 
+**Korrektur (Ticket #63):** Diese Prüfung ist veraltet. `EROSION_AKTIV`
+steht schon länger auf `True` (`gui/config/value_default.py:1088`) — die
+zentrale Richtigstellung dazu steht in `docs/TESTBERICHT.md` Abschnitt 3.
+
 Erosion-Reiter öffnen.
 
-* **Erwartet:** **kein** Hinweisstreifen und **freie Regler**. Die
-  Erosionskette läuft (`EROSION_AKTIV = True`,
+* **Erwartet:** **kein** Hinweisstreifen und **freie Regler**, alle 13
+  bedienbar. Die Erosionskette läuft (`EROSION_AKTIV = True`,
   `gui/config/value_default.py:1088`). Den gelben Streifen zeigt das Programm
-  nur bei `False` (`value_default.py:1725`).
+  nur bei `False` (`_create_stilllegungs_hinweis()` in
+  `gui/tabs/erosion_tab.py` prüft `EROSION_AKTIV` zur Laufzeit).
 * Hier stand bis zum 16.09.2026 die umgekehrte Erwartung. Wer danach prüfte,
-  hätte das richtige Verhalten als Fehler gemeldet.
-* **Achten auf:** dass die Regler auch tatsächlich etwas bewirken. Vier
+  hätte das richtige Verhalten als Fehler gemeldet. Zeigt der Reiter
+  trotzdem den Streifen mit gesperrten Reglern, ist das jetzt umgekehrt ein
+  echter Fehler.
+* **Achten auf:** dass die Regler auch tatsächlich etwas bewirken. Drei
   Erosionstests sind rot und ihre Ursache ist ungeklärt (siehe
   `docs/TESTBERICHT.md`, Abschnitt 3).
 
