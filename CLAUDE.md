@@ -13,6 +13,7 @@
 | `docs/FLUESSE_UND_WASSER.md` | **Fluesse und Wasserverteilung — die Ordnung dieses Themas.** Befund, geklaerte Fakten, Bloecke 1-5 mit Reihenfolge. Was dort nicht steht, ist nicht beschlossen. |
 | `docs/AUFRAEUMPLAN.md` | **Aufbau des Programms und die naechsten Ziele.** Wo die GUI-Regler und die neun Regionsparameter auseinanderlaufen, der gemessene Nevadin-Spitzenbefund, acht Ziele mit empfohlener Reihenfolge. |
 | `docs/OFFENE_PUNKTE.md` | **Die einzige Aufgabenliste.** `docs/TODO.md` gibt es nicht mehr, sie ist dort in Abschnitt 12 aufgegangen. |
+| `docs/NACHTBETRIEB.md` | **Wer nachts allein arbeitet, liest zuerst das.** Sperrliste (wo nicht hingefasst wird, mit Begruendung), Nachtbranch, ein Commit je Ticket, Morgenbericht, Ruecknahme einzelner Tickets. |
 | `docs/TESTBERICHT.md` | Was gerade gruen ist und was nicht, mit Erklaerung je Fehlschlag |
 | `docs/PRUEFLISTE_LIVE.md` | Was am laufenden Programm zu pruefen ist — alles, was headless nicht geht |
 | `docs/archiv/` | Historisch, gilt nicht mehr — nicht als Beschreibung des Ist-Zustands lesen |

@@ -1,0 +1,150 @@
+# Sperrliste fuer den Nachtbetrieb
+#
+# Nachts arbeiten Agenten allein. Diese Datei sagt, wo sie nicht hinfassen.
+# Sie ist nicht Dokumentation, sondern wird durchgesetzt: `nachtbetrieb/sperre.py`
+# prueft vor jedem Commit und vor jedem Merge die geaenderten Dateien dagegen.
+#
+# ZWEI STUFEN, und der Unterschied ist wichtig:
+#
+#   stufe = "sperre"   Der Lauf bricht ab. Die Aenderung kommt nicht durch.
+#   stufe = "warnung"  Der Lauf laeuft weiter, aber der Treffer steht im
+#                      Morgenbericht, mit Datei und Grund.
+#
+# "warnung" ist kein weichgespueltes "sperre". Es ist fuer Dateien, in denen
+# echte Arbeit stattfindet UND etwas Empfindliches wohnt - eine harte Sperre
+# waere dort falsch, stilles Durchwinken auch. Sobald das Empfindliche in eine
+# eigene Datei umgezogen ist (Ticket #29 tut das fuer die Regionsparameter),
+# wird daraus eine harte Sperre und der Eintrag hier verschwindet.
+#
+# MUSTER: Glob-Schreibweise, immer mit Schraegstrichen, immer relativ zur
+# Projektwurzel.
+#   *   trifft beliebig viele Zeichen, aber KEINEN Schraegstrich
+#   **  trifft beliebig viele Zeichen, auch Schraegstriche
+#   ?   trifft genau ein Zeichen, keinen Schraegstrich
+# `ausnahme` sticht `muster`: eine Datei, die auf eine Ausnahme passt, ist frei.
+#
+# EINTRAEGE ENTFERNT NUR DER NUTZER. Diese Datei und `nachtbetrieb/sperre.py`
+# stehen selbst im ersten Eintrag - ein Nachtlauf, der die Sperrliste
+# aufweichen wollte, bricht an seiner eigenen Pruefung ab. Der Selbstschutz
+# wird beim Laden geprueft; fehlt er, verweigert `lade_sperrliste()` den Dienst.
+
+[[eintrag]]
+name = "Die Sperrliste selbst"
+stufe = "sperre"
+muster = ["nachtbetrieb/sperrliste.toml", "nachtbetrieb/sperre.py"]
+grund = """
+Eine Schutzvorrichtung, die sich selbst abschalten kann, ist keine. Wer nachts
+an einer gesperrten Datei haengenbleibt, hat zwei Wege: das Ticket
+steckenlassen und eine Notiz schreiben, oder morgens fragen. Nicht: die Regel
+aendern, die im Weg steht.
+"""
+
+[[eintrag]]
+name = "Abhaengigkeiten"
+stufe = "sperre"
+muster = ["requirements.txt", "pyproject.toml", "uv.lock"]
+grund = """
+numpy ist auf 2.4.6 festgenagelt, obwohl 2.5.1 existiert. Das ist kein
+vergessenes Update: numba verlangt NumPy <= 2.4, und mit numpy 2.5 schlaegt
+`import numba` fehl - opensimplex faengt das still ab und rechnet mit seinem
+Attrappen-Dekorator weiter. Gemessen am 2026-07-30: noise2array 256x256
+braucht dann 0.3831 s statt 0.0018 s. Faktor 213 im heissen Pfad, ohne
+Fehlermeldung, ohne roten Test.
+
+Ein Agent, der "Abhaengigkeiten aktualisieren" fuer eine Verbesserung haelt,
+macht das Programm damit ueber Nacht langsam, und niemand sieht warum.
+"""
+
+[[eintrag]]
+name = "Anweisungen an den Agenten"
+stufe = "sperre"
+muster = ["CLAUDE.md", "docs/SOLLBESCHREIBUNG.md", "docs/NACHTBETRIEB.md"]
+grund = """
+Diese Dateien sind Anweisung, nicht Arbeitsmaterial. Die Sollbeschreibung sagt,
+was das Programm koennen soll; CLAUDE.md sagt, wie hier gearbeitet wird. Wer
+sie nachts umschreibt, aendert nicht den Code, sondern den Massstab, an dem der
+Code gemessen wird - und morgens stimmt beides wieder ueberein, ohne dass
+etwas besser geworden waere.
+
+Die Sollbeschreibung waechst ueber die Karte #13: eine geschlossene Frage wird
+eingetragen, wenn ihr Entscheidungsticket geschlossen ist. Das ist Tagarbeit.
+"""
+
+[[eintrag]]
+name = "Bandgrenzen und Referenzdaten"
+stufe = "sperre"
+muster = [
+    "tests/daten/**",
+    "tests/referenz/**",
+    "**/bandgrenzen*.toml",
+    "**/bandgrenzen*.json",
+]
+grund = """
+Ein Band aufzuweichen, bis der Test gruen wird, ist genau die Bewegung, die
+verhindert werden soll. Die Bandgrenzen sind das Ziel; der Code hat sich nach
+ihnen zu richten, nicht umgekehrt. Dasselbe gilt fuer Referenzbilder: sie
+erneuern sich nicht selbst, sonst vergleicht der Bildvergleich das Ergebnis
+mit sich selbst und ist immer gruen.
+
+Verschiebt sich ein Ziel wirklich, ist das eine Entscheidung mit Begruendung -
+am Tag, mit einem Commit, den man spaeter wiederfindet. (Tickets #47 und #50
+legen diese Dateien an; bis dahin sperren die Muster ins Leere, und das ist
+richtig so.)
+"""
+
+[[eintrag]]
+name = "Shader-Quellen"
+stufe = "sperre"
+muster = ["shaders/**"]
+grund = """
+GLSL-Fehler fallen nicht beim Import auf, sondern erst beim Dispatch - und
+jede GPU-Operation faengt ihren Fehler ab und rechnet still auf der CPU
+weiter. Ein kaputter Shader sieht im Testlauf aus wie ein langsamer Rechner.
+Am 2026-07-30 lief die gesamte Pipeline wochenlang ohne GPU, weil eine
+Pfadberechnung eine Ebene danebenzeigte; im Log stand nur eine WARNING je
+Aufruf.
+
+Shader-Arbeit gehoert an den Tag, mit einem echten Lauf danach und einem Blick
+auf die WARNINGs, nicht nur auf den Rueckgabewert.
+"""
+
+[[eintrag]]
+name = "Git- und Werkzeugkonfiguration"
+stufe = "sperre"
+muster = [".gitignore", ".gitattributes", ".github/**", ".claude/**"]
+grund = """
+Wer nachts die Ignorierliste aendert, kann Dateien aus dem Blick nehmen, ohne
+sie zu loeschen - der Diff sieht klein aus, das Repo ist trotzdem ein anderes.
+"""
+
+[[eintrag]]
+name = "Regionsparameter"
+stufe = "warnung"
+muster = ["core/terrain_weltkarte.py"]
+grund = """
+In dieser Datei stehen die neun Regionsparametersaetze (rauheit, potenz,
+wasser_soll, flaeche_soll, kuestenform ...). Sie sind muehsam eingemessen, und
+`tests/smoke_test_regionen_welt.py` ist der empfindlichste Waechter des
+Projekts: die Kuesten-Archetypen galten als regressionsfrei, bis genau dieser
+Test zeigte, dass Samarcia von 6.6 auf 10.6 gesprungen war.
+
+Keine harte Sperre, weil in dieser Datei auch echte Gelaendearbeit stattfindet.
+Aber jede Beruehrung steht im Morgenbericht. Sobald Ticket #29 die neun
+Parametersaetze in eine eigene Datei geholt hat, wird daraus eine harte Sperre
+auf diese Datei, und dieser Eintrag hier faellt weg.
+"""
+
+[[eintrag]]
+name = "Testbericht und Sitzungslog"
+stufe = "warnung"
+muster = ["docs/TESTBERICHT.md", "docs/SITZUNGSLOG.md"]
+grund = """
+Beide sind Protokoll: sie halten fest, was gemessen wurde. Ein Nachtlauf DARF
+hier anhaengen - genau dafuer sind sie da -, aber nicht umschreiben. Der
+Unterschied ist von aussen nicht zu sehen, deshalb steht jede Beruehrung im
+Morgenbericht und wird gegengelesen.
+
+Der Anlass steht in Ticket #28: im Testbericht stand eine Erklaerung fuer einen
+Fehlschlag, die nachweislich falsch war ("Erosion ist abgeschaltet", waehrend
+EROSION_AKTIV = True). Eine falsche Erklaerung ist schlimmer als keine.
+"""
