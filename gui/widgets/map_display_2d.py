@@ -1564,11 +1564,29 @@ class MapDisplay2D(QWidget):
 
         Gezeichnet wird von fein nach grob, damit ein Strom ueber seinem
         Nebenfluss liegt und nicht umgekehrt.
+
+        Raeumt vorher alte Fluss-Punkte ab (wie overlay_regions() es mit
+        _region_overlay_artists tut): _push_overlays() ruft diese Methode bei
+        JEDEM Haken-Wechsel neu auf, nicht nur beim naechsten vollen
+        update_display() (das den Axes-Inhalt ohnehin per ax.clear() leert).
+        Ohne dieses Abraeumen haeufen sich bei jedem erneuten Zuschalten des
+        Flussnetz-Overlays weitere scatter()-Artists auf denselben Axes an -
+        seit _push_overlays() den 2D-Zweig immer mitschickt (auch waehrend die
+        3D-Ansicht aktiv ist, siehe base_tab.py), passiert das bei jedem
+        Overlay-Wechsel, nicht nur beim Betrachten der 2D-Ansicht (gefunden im
+        Code-Review nacht/2026-09-16).
         """
         if self.current_data is None:
             return
         if not isinstance(generation_map, np.ndarray) or generation_map.ndim != 2:
             return
+
+        for artist in getattr(self, '_river_overlay_artists', []):
+            try:
+                artist.remove()
+            except (ValueError, NotImplementedError):
+                pass
+        self._river_overlay_artists = []
 
         stufen = [(1.0, "#e8c020", 1.4, 5)] if zeige_mikro else []
         stufen += [(2.0, "#25a03a", 2.0, 6), (3.0, "#e03030", 3.0, 7)]
@@ -1578,8 +1596,9 @@ class MapDisplay2D(QWidget):
             if not treffer.any():
                 continue
             yy, xx = np.nonzero(treffer)
-            self.ax.scatter(xx, yy, s=breite, c=farbe, marker='s',
-                            linewidths=0, zorder=zorder)
+            pfad = self.ax.scatter(xx, yy, s=breite, c=farbe, marker='s',
+                                    linewidths=0, zorder=zorder)
+            self._river_overlay_artists.append(pfad)
         self.canvas.draw_idle()
 
     def overlay_elevation_contours(self, heightmap):
