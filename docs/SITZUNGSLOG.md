@@ -10,6 +10,57 @@ gekennzeichnet; alles andere ist geprueft.
 
 ---
 
+# 2026-09-16 — Uebersichts-Reiter: geloescht statt gebaut (Ticket #6)
+
+## Entscheidung
+
+`gui/tabs/overview_tab.py` enthielt zwei getrennte Dinge: einen
+funktionierenden Teil (Weltstatistik, Qualitaetspruefung, Export, Regler-
+Zusammenfassung) und eine seit jeher tote "Composite View"-Funktion
+(vier Buttons fuer Gesamtwelt-/Klima-/Zivilisations-/Geologie-Ansicht).
+Die toten Methoden riefen ausschliesslich `self.map_display.XXX()` auf -
+ein Attribut, das in dieser Klasse **nirgends** zugewiesen wird. Jeder
+Klick waere lautlos ins Leere gelaufen (`AttributeError`, gefangen durch
+den umgebenden `hasattr(self, 'map_display')`-Wächter, der immer
+zutrifft und die Methode sofort verlaesst).
+
+Ticket #6 fragte "loeschen oder bauen" - **entschieden: loeschen, aber
+NUR die tote Composite-View-Funktion, nicht den ganzen Reiter.** Der
+Rest des Reiters (Statistik, QS, Export, Parameter-Zusammenfassung) ist
+echte, benutzte Funktionalitaet und war vom Befund nicht betroffen. Eine
+woertliche Lesart des Tickets ("Der Reiter ist wirkungslos") haette den
+kompletten Reiter nahegelegt - das haette funktionierenden Code
+zerstoert, den niemand kaputt gemeldet hat. `docs/SPEC_OVERLAYS.md`
+(2026-09-14) nennt genau diese Composite-View-Stelle explizit als "Out
+of Scope" fuer die dortige Overlay-Architektur und verlangt "einen
+eigenen Punkt" dafuer - das ist der Ursprung dieses Tickets.
+
+## Was entfernt wurde
+
+`CompositeViewControlsWidget`-Klasse komplett, ihre Einbindung in
+`setup_overview_ui()`, der Refresh-Aufruf in `on_data_updated()`, das
+`setEnabled()` in `check_world_completeness()`, `update_composite_view()`
+und alle fuenf `render_*_view()`-Methoden, sowie der zugehoerige
+Composite-Export-Block in `export_png_collection()`. Modul-Docstring
+entsprechend korrigiert (Composite-View-Behauptung entfernt, Begruendung
+mit Verweis hierhin ergaenzt).
+
+## Geprueft
+
+* `import gui.tabs.overview_tab` laeuft weiter fehlerfrei.
+* Grep auf `composite|Composite|map_display\b|QComboBox|QCheckBox` in der
+  Datei zeigt keine Ueberbleibsel des geloeschten Features mehr - nur
+  unbetroffene Treffer (neuer Docstring-Text, `format_combo` im
+  unveraenderten Export-Widget).
+* `tests/smoke_test_display_methoden_existieren.py` erfasst diesen
+  Befund NICHT (sein `hasattr()`-Regex greift nur, wenn der
+  Objekt-Ausdruck "display"/"map_display"/... im Text enthaelt - hier war
+  nur der aeussere `hasattr(self, 'map_display')` betroffen, dessen
+  Objektausdruck `"self"` lautet). Ein zukuenftiger Erreichbarkeitstest
+  (SPEC_OVERLAYS.md, Testentscheidung 3) waere der richtige Ort dafuer.
+
+---
+
 # 2026-08-27 — Live-Vorschau im Flussreiter (Schritt 3 von 5)
 
 Damit steht die Wochenvorgabe vom 2026-08-26 vollstaendig:

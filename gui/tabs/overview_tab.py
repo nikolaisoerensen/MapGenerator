@@ -6,9 +6,13 @@ Funktionsweise: Finale Welt-Übersicht und Export mit vollständiger Integration
 - Export in verschiedene Formate (PNG, OBJ, JSON)
 - Welt-Statistiken und Zusammenfassung
 - Parameter-Set Export für Reproduzierbarkeit
-- Multi-Layer Composite-Views
-- Performance-Report über alle Generatoren
 - Finale Qualitätskontrolle und Validation
+
+Kein Composite-View-Rendering (Ticket #6, 2026-09-16): die frühere
+Multi-Panel/Composite-Ansicht rief ausschließlich Methoden auf
+`self.map_display` auf, das in dieser Klasse nirgends zugewiesen wird -
+vollständig toter Code seit jeher, siehe docs/SITZUNGSLOG.md und
+docs/SPEC_OVERLAYS.md (Out of Scope).
 """
 
 import os
@@ -81,16 +85,11 @@ class OverviewTab(BaseMapTab):
     def setup_overview_ui(self):
         """
         Funktionsweise: Erstellt komplette UI für Overview-Tab
-        Aufgabe: World-Summary, Composite-Views, Export-Controls, Performance-Report
+        Aufgabe: World-Summary, Export-Controls, Quality-Assurance, Parameter-Summary
         """
         # World Completeness Status
         self.completeness_status = WorldCompletenessWidget()
         self.control_panel.layout().addWidget(self.completeness_status)
-
-        # Composite View Controls
-        self.composite_controls = CompositeViewControlsWidget()
-        self.composite_controls.view_changed.connect(self.update_composite_view)
-        self.control_panel.layout().addWidget(self.composite_controls)
 
         # World Statistics (erweitert)
         self.world_statistics = WorldStatisticsWidget()
@@ -144,14 +143,6 @@ class OverviewTab(BaseMapTab):
         # Sichtbarkeit).
         self.check_world_completeness()
 
-        # Composite View aktualisieren, aber NUR wenn dieser Tab gerade
-        # sichtbar ist (2026-08-11, siehe BaseMapTab.on_data_updated() für den
-        # vollen Befund) - sonst redraw't Overview bei JEDER Daten-Änderung
-        # irgendeines Generators mit, auch wenn niemand hinschaut.
-        if (self.world_data_complete
-                and self.viewport_widget is not None and self.viewport_widget.isVisible()):
-            self.update_composite_view()
-
     def check_world_completeness(self):
         """
         Funktionsweise: Prüft Vollständigkeit aller Generator-Outputs
@@ -183,9 +174,6 @@ class OverviewTab(BaseMapTab):
 
         # Export nur aktivieren wenn komplett
         self.export_controls.setEnabled(self.world_data_complete)
-
-        # Composite Views aktivieren
-        self.composite_controls.setEnabled(self.world_data_complete)
 
         if self.world_data_complete:
             # World Statistics mit allen Daten aktualisieren
@@ -448,158 +436,6 @@ class OverviewTab(BaseMapTab):
 
         return min(100, complexity_score)
 
-    @pyqtSlot(str)
-    def update_composite_view(self, view_type: str = None):
-        """
-        Funktionsweise: Aktualisiert Composite-View basierend auf Selection
-        Parameter: view_type (str) - Art der Composite-Darstellung
-        """
-        if not self.world_data_complete:
-            return
-
-        # render_*_view() unten rufen self.map_display auf, das hier nie
-        # zugewiesen wird (Composite-Multi-Panel-Rendering war nie an ein
-        # echtes Display-Objekt angebunden - ruft u.a. display_super_biomes()/
-        # overlay_elevation_contours()/display_multi_panel_analysis() auf, die
-        # auch auf keiner echten MapDisplay2D/3D-Klasse existieren). Bisher
-        # sonst bei jedem data_updated-Signal (siehe on_data_updated()) erneut
-        # als ERROR geloggt, sobald alle Generatoren fertig sind - hier still
-        # überspringen statt der Feature-Attrappe hinterherzulaufen.
-        if not hasattr(self, 'map_display') or self.map_display is None:
-            self.logger.debug("Composite view rendering skipped: no map_display wired up yet")
-            return
-
-        if view_type is None:
-            view_type = self.composite_controls.get_current_view_type()
-
-        available_data = self.collect_all_available_data()
-
-        try:
-            if view_type == "complete_world":
-                self.render_complete_world_view(available_data)
-            elif view_type == "layered_analysis":
-                self.render_layered_analysis_view(available_data)
-            elif view_type == "climate_overview":
-                self.render_climate_overview(available_data)
-            elif view_type == "civilization_overview":
-                self.render_civilization_overview(available_data)
-            elif view_type == "geological_cross_section":
-                self.render_geological_cross_section(available_data)
-            else:
-                self.render_complete_world_view(available_data)
-
-        except Exception as e:
-            self.logger.error(f"Failed to render composite view '{view_type}': {e}")
-
-    def render_complete_world_view(self, available_data: Dict[str, Dict[str, Any]]):
-        """
-        Funktionsweise: Rendert komplette Welt-Ansicht mit allen Layern
-        Parameter: available_data (nested dict)
-        """
-        # Basis: Biome Map
-        if "biome_map_super" in available_data["biome"]:
-            biome_map = available_data["biome"]["biome_map_super"]
-            self.map_display.display_super_biomes(biome_map)
-        elif "biome_map" in available_data["biome"]:
-            biome_map = available_data["biome"]["biome_map"]
-            self.map_display.display_base_biomes(biome_map)
-
-        # Overlays hinzufügen
-        if self.composite_controls.show_settlements():
-            settlements = available_data["settlement"].get("settlement_list")
-            landmarks = available_data["settlement"].get("landmark_list")
-            if settlements:
-                self.map_display.overlay_settlements(settlements, landmarks)
-
-        if self.composite_controls.show_rivers():
-            flow_map = available_data["water"].get("flow_map")
-            if flow_map is not None:
-                self.map_display.overlay_river_network(flow_map)
-
-        if self.composite_controls.show_elevation_contours():
-            heightmap = available_data["terrain"].get("heightmap")
-            if heightmap is not None:
-                self.map_display.overlay_elevation_contours(heightmap)
-
-        if self.composite_controls.show_3d_terrain():
-            heightmap = available_data["terrain"].get("heightmap")
-            if heightmap is not None:
-                self.map_display.overlay_3d_terrain(heightmap)
-
-    def render_layered_analysis_view(self, available_data: Dict[str, Dict[str, Any]]):
-        """
-        Funktionsweise: Rendert Layer-Analysis View mit Multi-Panel Display
-        Parameter: available_data (nested dict)
-        """
-        # Multi-Panel Layout für verschiedene Layer
-        panels = []
-
-        # Panel 1: Terrain
-        if "heightmap" in available_data["terrain"]:
-            panels.append(("Terrain", available_data["terrain"]["heightmap"]))
-
-        # Panel 2: Climate
-        if "temp_map" in available_data["weather"]:
-            panels.append(("Temperature", available_data["weather"]["temp_map"]))
-
-        # Panel 3: Hydrology
-        if "water_map" in available_data["water"]:
-            panels.append(("Water", available_data["water"]["water_map"]))
-
-        # Panel 4: Biomes
-        if "biome_map" in available_data["biome"]:
-            panels.append(("Biomes", available_data["biome"]["biome_map"]))
-
-        self.map_display.display_multi_panel_analysis(panels)
-
-    def render_climate_overview(self, available_data: Dict[str, Dict[str, Any]]):
-        """Climate-fokussierte Darstellung"""
-        # Basis: Temperature Map
-        if "temp_map" in available_data["weather"]:
-            temp_map = available_data["weather"]["temp_map"]
-            self.map_display.display_temperature_map(temp_map)
-
-            # Precipitation Overlay
-            if "precip_map" in available_data["weather"]:
-                precip_map = available_data["weather"]["precip_map"]
-                self.map_display.overlay_precipitation_contours(precip_map)
-
-            # Wind Vectors
-            if "wind_map" in available_data["weather"]:
-                wind_map = available_data["weather"]["wind_map"]
-                heightmap = available_data["terrain"].get("heightmap")
-                if heightmap is not None:
-                    self.map_display.overlay_wind_vectors(wind_map, heightmap)
-
-    def render_civilization_overview(self, available_data: Dict[str, Dict[str, Any]]):
-        """Civilization-fokussierte Darstellung"""
-        # Basis: Civilization Map
-        if "civ_map" in available_data["settlement"]:
-            civ_map = available_data["settlement"]["civ_map"]
-            self.map_display.display_civilization_map(civ_map)
-
-            # Settlement Overlays
-            settlements = available_data["settlement"].get("settlement_list")
-            landmarks = available_data["settlement"].get("landmark_list")
-            roadsites = available_data["settlement"].get("roadsite_list")
-
-            if settlements:
-                self.map_display.overlay_detailed_settlements(settlements, landmarks, roadsites)
-
-            # Road Network
-            road_network = available_data["settlement"].get("road_network")
-            if road_network:
-                self.map_display.overlay_road_network(road_network)
-
-    def render_geological_cross_section(self, available_data: Dict[str, Dict[str, Any]]):
-        """Geologische Cross-Section Darstellung"""
-        # 3D Geological View
-        heightmap = available_data["terrain"].get("heightmap")
-        rock_map = available_data["geology"].get("rock_map")
-
-        if heightmap is not None and rock_map is not None:
-            self.map_display.display_geological_cross_section(heightmap, rock_map)
-
     @pyqtSlot(str, dict)
     @pyqtSlot(str, str)
     def export_layers_to_disk(self, filename_prefix: str, output_root: str):
@@ -679,18 +515,6 @@ class OverviewTab(BaseMapTab):
         try:
             # Hauptverzeichnis erstellen
             os.makedirs(export_dir, exist_ok=True)
-
-            # Composite Views exportieren
-            composite_dir = os.path.join(export_dir, "composite_views")
-            os.makedirs(composite_dir, exist_ok=True)
-
-            composite_views = ["complete_world", "layered_analysis", "climate_overview", "civilization_overview"]
-            for view_type in composite_views:
-                self.update_composite_view(view_type)
-                self.map_display.save_current_view(
-                    os.path.join(composite_dir, f"{view_type}.png"),
-                    dpi=dpi
-                )
 
             # Individual Maps pro Generator exportieren
             for generator, maps in available_data.items():
@@ -1111,80 +935,6 @@ class WorldCompletenessWidget(QGroupBox):
             missing_text = "No missing data"
 
         self.missing_data_label.setText(missing_text)
-
-class CompositeViewControlsWidget(QGroupBox):
-    """
-    Funktionsweise: Widget für Composite-View Controls
-    Aufgabe: Auswahl verschiedener Composite-Darstellungen und Overlay-Optionen
-    """
-
-    view_changed = pyqtSignal(str)
-
-    def __init__(self):
-        super().__init__("Composite Views")
-        self.setup_ui()
-
-    def setup_ui(self):
-        """Erstellt UI für Composite-View Controls"""
-        layout = QVBoxLayout()
-
-        # View Type Selection
-        self.view_type_combo = QComboBox()
-        self.view_type_combo.addItems([
-            "Complete World",
-            "Layered Analysis",
-            "Climate Overview",
-            "Civilization Overview",
-            "Geological Cross-Section"
-        ])
-        self.view_type_combo.currentTextChanged.connect(self.on_view_changed)
-        layout.addWidget(QLabel("View Type:"))
-        layout.addWidget(self.view_type_combo)
-
-        # Overlay Options
-        overlay_group = QGroupBox("Overlays")
-        overlay_layout = QVBoxLayout()
-
-        self.settlements_cb = QCheckBox("Show Settlements")
-        self.settlements_cb.setChecked(True)
-        overlay_layout.addWidget(self.settlements_cb)
-
-        self.rivers_cb = QCheckBox("Show Rivers")
-        self.rivers_cb.setChecked(True)
-        overlay_layout.addWidget(self.rivers_cb)
-
-        self.elevation_contours_cb = QCheckBox("Show Elevation Contours")
-        overlay_layout.addWidget(self.elevation_contours_cb)
-
-        self.terrain_3d_cb = QCheckBox("Show 3D Terrain")
-        overlay_layout.addWidget(self.terrain_3d_cb)
-
-        overlay_group.setLayout(overlay_layout)
-        layout.addWidget(overlay_group)
-
-        self.setLayout(layout)
-
-    @pyqtSlot(str)
-    def on_view_changed(self, view_text: str):
-        """Slot für View-Type Änderungen"""
-        view_type = view_text.lower().replace(" ", "_")
-        self.view_changed.emit(view_type)
-
-    def get_current_view_type(self) -> str:
-        """Return: Current view type"""
-        return self.view_type_combo.currentText().lower().replace(" ", "_")
-
-    def show_settlements(self) -> bool:
-        return self.settlements_cb.isChecked()
-
-    def show_rivers(self) -> bool:
-        return self.rivers_cb.isChecked()
-
-    def show_elevation_contours(self) -> bool:
-        return self.elevation_contours_cb.isChecked()
-
-    def show_3d_terrain(self) -> bool:
-        return self.terrain_3d_cb.isChecked()
 
 class QualityAssuranceWidget(QGroupBox):
     """
