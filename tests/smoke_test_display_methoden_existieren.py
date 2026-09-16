@@ -141,14 +141,14 @@ NUR_EINE_ANZEIGE = {
                       "_push_data_to_current_display() in base_tab.py.",
     "draw_plot_physics_snapshot": "Diagnosebild des Plot-Physik-Labors, "
                                   "bewusst nur 2D.",
-    "overlay_settlements": "2D-ZWEIG EINES PAARES, kein Loch. Der Biome-Reiter "
-                           "ruft seit dem 2026-08-25 direkt daneben "
+    "overlay_settlements": "2D-ZWEIG EINES PAARES, kein Loch. Seit Ticket #8-#11 "
+                           "(docs/SPEC_OVERLAYS.md) ruft KEIN Reiter mehr direkt "
+                           "auf; BaseMapTab._push_overlays() ruft ueber das "
+                           "Register \"siedlungen\" fuer 3D stattdessen "
                            "`update_overlay_data(\"settlement\", \"uebersicht\", "
-                           "rgba)` fuer die 3D-Ansicht (RGBA-Skin, wie "
-                           "SettlementTab.apply_3d_overlays). Die Methode "
-                           "selbst gibt es zu Recht nur in 2D - matplotlib "
-                           "zeichnet Punkte direkt, OpenGL braucht eine "
-                           "Textur.",
+                           "rgba)` (RGBA-Skin). Die Methode selbst gibt es zu "
+                           "Recht nur in 2D - matplotlib zeichnet Punkte "
+                           "direkt, OpenGL braucht eine Textur.",
     "overlay_roads": "Im 3D sind Wege echte Bandgeometrie "
                      "(gui/widgets/wege_geometrie.py, docs 6.28), keine "
                      "Overlay-Methode.",

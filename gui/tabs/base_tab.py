@@ -167,11 +167,20 @@ def _fluesse_zeichnen(display, overlay: "Overlay") -> None:
     Signatur auf MapDisplay2D und MapDisplay3DWidget (2026-08-24 fuer 3D
     nachgebaut) - hier gibt es die zwei Dialekte aus Punkt 3 nicht, deshalb
     eine Funktion fuer beide Registerseiten statt zwei fast identischer.
+
+    `overlay.daten` ist entweder direkt die Generationskarte (Baeche/Mikro
+    immer aus, so ruft es BiomeTab - dort gibt es keinen Mikro-Haken) oder
+    ein Tupel `(generation_map, zeige_mikro)` (so ruft es RiverTab, Ticket
+    #11 - dort steuert `mikro_checkbox` das mit).
     """
     if overlay.sichtbar:
-        generation_map = overlay.daten
+        daten = overlay.daten
+        if isinstance(daten, tuple):
+            generation_map, zeige_mikro = daten
+        else:
+            generation_map, zeige_mikro = daten, False
         if generation_map is not None and hasattr(display, "overlay_river_generations"):
-            display.overlay_river_generations(np.asarray(generation_map), zeige_mikro=False)
+            display.overlay_river_generations(np.asarray(generation_map), zeige_mikro=zeige_mikro)
     elif hasattr(display, "clear_river_overlay"):
         # Im 3D bleibt eine einmal gesetzte Textur liegen, bis sie
         # abgeschaltet wird (2D zeichnet ohnehin neu, siehe _siedlungen_2d).

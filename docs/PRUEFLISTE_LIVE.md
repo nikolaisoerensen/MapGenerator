@@ -256,6 +256,32 @@ dass die Siedlungstextur jetzt einen Fingerabdruck-Cache hat (vorher keinen).
 | 10.2 | Straßen-Häkchen an-/abschalten, dabei Settlements-Häkchen unverändert lassen | Wegbänder (3D) und Straßenlinien (2D) reagieren, Siedlungspunkte bleiben unverändert/flackern nicht | Fingerabdruck-Cache reagiert falsch auf reine Wege-Änderungen |
 | 10.3 | Anklickbare Objekte (Städte/Wege) im 3D antippen | Info-Popup erscheint weiterhin wie zuvor | `setze_auswahlobjekte()` wurde in diesem Umbau nicht angefasst, sollte also unverändert funktionieren |
 
+## 11. Regional-Reiter und Fluss-Reiter auf das Register umgestellt (Ticket #11, 2026-09-16)
+
+Zwei Reiter in einem Ticket, weil beide dieselbe Ursache hatten (siehe
+docs/OFFENE_PUNKTE.md 14.4): der Siedlungs-Zweig in
+`settlement_regional_tab.py._overlays_zeichnen()` und der Flussnetz-Zweig in
+`river_tab.py.update_display_mode()` liefen über `hasattr()`-Weichen auf
+GENAU dem gerade sichtbaren Display statt über beide. Auf dem Regional-Reiter
+war das zusätzlich in einen `except Exception: logger.debug(...)` gehüllt,
+der jeden Fehler lautlos verschluckte (jetzt `logger.warning`, damit ein
+künftiger Fehler in der Konsole auftaucht statt nur im Log-Level "debug").
+
+Unverändert blieben auf dem Regional-Reiter bewusst: `overlay_region_grid`,
+`overlay_regions`, `overlay_city_boundary_contour` (echte 3D-Schuld, siehe
+`FEHLT_IM_3D` in `tests/smoke_test_display_methoden_existieren.py` — dafür
+gibt es noch keinen 3D-Weg, das ist kein stiller Fehler mehr, sondern
+dokumentierte, offene Arbeit) und `overlay_plot_boundaries` (hat bereits
+einen eigenen, funktionierenden 3D-Weg über `apply_3d_overlays()` und die
+`"plots"`-Textur — nicht Teil des Registers, aber nicht kaputt).
+
+| # | Was ansehen | Was richtig ist | Was schiefgehen kann |
+|---|---|---|---|
+| 11.1 | Regional-Reiter öffnen, eine Region mit Siedlungen wählen, zwischen 2D und 3D wechseln | Siedlungspunkte erscheinen in BEIDEN Ansichten | Vorher: in 3D fehlten sie immer (keine der fünf Weichen trifft dort zu) |
+| 11.2 | Regional-Reiter: Stadtgrenze/Regionsraster/Plot-Feingewebe ansehen, nur in 2D (3D ist hier weiterhin dokumentierte Schuld, siehe oben) | Alle drei zeichnen wie vorher in 2D; das Plot-Feingewebe zeigt jetzt auch tatsächlich Kanten (alter Argumentfehler war schon vor diesem Ticket behoben) | Regression durch die entfernte `overlay_settlements`-Zeile wäre ein NameError/AttributeError beim Öffnen des Reiters |
+| 11.3 | Fluss-Reiter: Ansicht "Flussnetz" wählen, zwischen 2D und 3D wechseln, dabei "Bäche (Mikro)" an-/abhaken | Flussnetz erscheint in BEIDEN Ansichten, Mikro-Häkchen wirkt in beiden gleich | Vorher: in 3D fehlten die Flüsse (nur eine laute Warnung, keine Anzeige) |
+| 11.4 | Fluss-Reiter: von "Flussnetz" auf "Höhe"/"Wassermenge" wechseln, danach wieder zurück | Flussnetz-Textur verschwindet beim Wegschalten in BEIDEN Ansichten (auch der gerade nicht sichtbaren) und kommt beim Zurückschalten wieder | Vorher wurde nur die gerade sichtbare Ansicht abgeräumt; wechselte man Reiter/Modus mehrfach, konnte im 3D eine alte Textur hängen bleiben |
+
 ---
 
 ## Was diese Sitzung NICHT geprüft hat

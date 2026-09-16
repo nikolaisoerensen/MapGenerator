@@ -3567,11 +3567,12 @@ class MapDisplay3DWidget(QWidget):
 
         DIESE WEITERLEITUNG IST DER PUNKT, an dem es beim ersten Anlauf
         scheiterte. `gui/tabs/base_tab.py` legt das 3D-Widget in einen
-        `DisplayWrapper`, und `river_tab._anzeigeziel()` greift ueber
-        `.display` darauf zu - das ist DIESE Klasse, nicht die innere
-        `MapDisplay3D`. Die Methode allein in der GL-Klasse zu haben
-        genuegt also nicht; `hasattr` schlaegt hier fehl und der Aufruf
-        faellt lautlos aus - genau der Fehler, der behoben werden sollte.
+        `DisplayWrapper`, und `BaseMapTab._push_overlays()` (frueher:
+        `river_tab._anzeigeziel()`) greift ueber `.display` darauf zu - das
+        ist DIESE Klasse, nicht die innere `MapDisplay3D`. Die Methode allein
+        in der GL-Klasse zu haben genuegt also nicht; `hasattr` schlaegt hier
+        fehl und der Aufruf faellt lautlos aus - genau der Fehler, der
+        behoben werden sollte.
         """
         self.display_3d.overlay_river_generations(generation_map, zeige_mikro)
 
