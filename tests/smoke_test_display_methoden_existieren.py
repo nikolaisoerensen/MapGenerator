@@ -25,9 +25,17 @@ Name, den keine von beiden kennt, ist immer ein Fehler - entweder ein
 Tippfehler oder eine Methode, die es nie gab. Beides fuehrt zu genau dem
 stillen Nichtstun oben.
 
-Bewusst NICHT geprueft: ob die Weiche fuer JEDE Anzeigeart einen Treffer hat.
-Manche Aufrufe sind absichtlich nur fuer 3D gedacht (z.B. `update_shademap`).
-Der Fehler oben war ein Name, den KEINE Klasse hatte.
+Bewusst NICHT geprueft in `run()`: ob die Weiche fuer JEDE Anzeigeart einen
+Treffer hat. Manche Aufrufe sind absichtlich nur fuer 3D gedacht (z.B.
+`update_shademap`). Der Fehler oben war ein Name, den KEINE Klasse hatte.
+
+ERREICHBARKEIT (Ticket #7, docs/OFFENE_PUNKTE.md 14.2): `run()` und
+`run_einseitige_sind_begruendet()` pruefen nur den Methodennamen - nicht, ob
+die Funktion, die ihn per hasattr abfragt, ueberhaupt jemals aufgerufen wird.
+`run_zweige_sind_erreichbar()` schliesst das: eine Anzeige-Weiche in einer
+Funktion, die im ganzen `gui/`-Baum nirgends gerufen wird, ist tote Weiche -
+derselbe Fehler wie in 14.5 (vier Aufrufe ins Leere), nur umgekehrt (eine
+Funktion mit korrekter Weiche, die selbst niemand ruft).
 """
 import re
 import sys
@@ -64,14 +72,22 @@ _TAB_VERZEICHNIS = Path("gui/tabs")
 
 
 def sammle_hasattr_namen():
-    """Alle `hasattr(<irgendwas>, "name")`-Aufrufe in gui/tabs/*.py."""
+    """Alle `hasattr(<irgendwas>, "name")`-Aufrufe in gui/tabs/*.py, mit dem
+    Namen der Funktion, in der die Weiche steht (fuer die Erreichbarkeits-
+    pruefung unten - eine leere Zeichenkette, wenn keine `def`-Zeile davor
+    gefunden wurde, z.B. auf Modulebene)."""
     muster = re.compile(r"hasattr\(\s*([A-Za-z_][\w\.\[\]'\"]*)\s*,\s*['\"](\w+)['\"]\s*\)")
+    def_muster = re.compile(r"^\s*def\s+(\w+)\s*\(")
     treffer = []
     for pfad in sorted(_TAB_VERZEICHNIS.glob("*.py")):
         text = pfad.read_text(encoding="utf-8")
+        aktuelle_funktion = ""
         for zeilennr, zeile in enumerate(text.split("\n"), 1):
+            def_treffer = def_muster.match(zeile)
+            if def_treffer:
+                aktuelle_funktion = def_treffer.group(1)
             for objekt, name in muster.findall(zeile):
-                treffer.append((pfad.name, zeilennr, objekt, name))
+                treffer.append((pfad.name, zeilennr, objekt, name, aktuelle_funktion))
     return treffer
 
 
@@ -91,7 +107,7 @@ def run():
 
     fehler = []
     geprueft = 0
-    for datei, zeile, objekt, name in treffer:
+    for datei, zeile, objekt, name, _funktion in treffer:
         if name in _KEIN_DISPLAY_NAME:
             continue
         ist_display_objekt = any(v in objekt for v in verdaechtige_objekte)
@@ -215,7 +231,7 @@ def run_einseitige_sind_begruendet():
     def hat_3d(name):
         return any(hasattr(k, name) for k in klassen_3d)
 
-    namen = {name for _d, _z, _o, name in sammle_hasattr_namen()
+    namen = {name for _d, _z, _o, name, _f in sammle_hasattr_namen()
              if name not in _KEIN_DISPLAY_NAME}
     einseitig = {}
     for name in sorted(namen):
@@ -278,6 +294,97 @@ def run_einseitige_sind_begruendet():
     return True
 
 
+# FUNKTIONEN, DEREN NAME NIE ALS TEXT-AUFRUF VORKOMMT, WEIL DAS FRAMEWORK SIE
+# RUFT (Qt-Ueberschreibungen) - keine tote Funktion, nur ohne sichtbare
+# Aufrufstelle im eigenen Quelltext. Wer hier steht, muss begruenden warum.
+_RAHMEN_RUFT_SELBST = {
+    "paintEvent", "resizeEvent", "showEvent", "closeEvent", "__init__",
+}
+
+
+def _wird_aufgerufen(funktionsname):
+    """
+    Ob `funktionsname` irgendwo im `gui/`-Baum als Aufruf ODER als Referenz
+    (per Namen an eine Registrierungsstelle uebergeben, z.B. Dict-Eintrag in
+    _OVERLAY_REGISTER oder Qt-`connect(self.foo)`-Slot) vorkommt - nicht nur
+    definiert wird. Reiner Namensaufruf allein (`funktionsname(`) reicht
+    nicht: `_siedlungen_2d`/`_siedlungen_3d`/`_fluesse_zeichnen` werden nie
+    mit Klammer aufgerufen, sondern als Wert in _OVERLAY_REGISTER abgelegt und
+    erst ueber `eintrag["2d"](...)` in _push_overlays() indirekt ausgefuehrt;
+    `on_settlement_plot_live_update` haengt nur als `.connect(self.foo)`-Slot
+    an einem Signal. Beides ist echte Erreichbarkeit, nur eben indirekt - die
+    reine Namensnennung ausserhalb der eigenen `def`-Zeile ist der einzige
+    gemeinsame Nenner, den eine Textsuche ohne Call-Graph dafuer pruefen kann.
+    Grobe Textsuche (kein AST/Call-Graph), aber genug fuer
+    genau die Fehlerklasse aus docs/OFFENE_PUNKTE.md 14.5: der
+    Uebersichts-Reiter rief vier Methoden auf, die es nirgends im Programm
+    gab - der umgekehrte Fall waere eine Methode, die es gibt, aber die
+    NIEMAND ruft. Beides ist derselbe Fehler aus verschiedener Richtung, und
+    CLAUDE.md nennt ihn ausdruecklich ("gruene Tests koennen eine tote
+    Funktion verdecken", adaptive_terrain_mesh.py 2026-08-12).
+    """
+    referenz_muster = re.compile(r"\b" + re.escape(funktionsname) + r"\b")
+    def_muster = re.compile(r"^\s*def\s+" + re.escape(funktionsname) + r"\s*\(")
+    for pfad in Path("gui").rglob("*.py"):
+        for zeile in pfad.read_text(encoding="utf-8").split("\n"):
+            if def_muster.match(zeile):
+                continue
+            if referenz_muster.search(zeile):
+                return True
+    return False
+
+
+def run_zweige_sind_erreichbar():
+    """
+    TICKET #7 (docs/OFFENE_PUNKTE.md 14.2): `run()` oben prueft nur, OB eine
+    per hasattr angesprochene Anzeigemethode irgendwo existiert. Das faengt
+    einen Tippfehler im Methodennamen - aber nicht den Fall, dass die ganze
+    Funktion, in der die hasattr-Weiche steht, nie aufgerufen wird. Dann ist
+    der Methodenname korrekt, die Anzeigeklasse hat ihn auch, und trotzdem
+    erscheint das Overlay nie: die Weiche wird schlicht nie erreicht.
+
+    Ohne diese Pruefung wiederholt sich exakt der Fall aus 14.5
+    (`gui/tabs/overview_tab.py` rief vier Methoden auf, die es nirgends gab)
+    nur umgekehrt: eine Methode MIT hasattr-Weiche, die selbst nie gerufen
+    wird - `run()` allein sieht das nicht, weil sie ja korrekt geschrieben
+    ist, nur eben totes Gewebe.
+    """
+    betroffene_funktionen = {}
+    for datei, zeile, objekt, name, funktion in sammle_hasattr_namen():
+        if name in _KEIN_DISPLAY_NAME or not funktion:
+            continue
+        if not any(v in objekt for v in
+                   ("display", "ziel", "anzeige", "current_display", "map_display")):
+            continue
+        betroffene_funktionen.setdefault(funktion, []).append((datei, zeile, name))
+
+    unerreichbar = []
+    for funktion, stellen in sorted(betroffene_funktionen.items()):
+        if funktion in _RAHMEN_RUFT_SELBST:
+            continue
+        if not _wird_aufgerufen(funktion):
+            unerreichbar.append((funktion, stellen))
+
+    print(f"{len(betroffene_funktionen)} Funktionen mit mindestens einer "
+          f"Anzeige-hasattr-Weiche gefunden")
+
+    if unerreichbar:
+        print("\nFEHLGESCHLAGEN - diese Funktionen werden NIRGENDS im "
+              "gui/-Baum aufgerufen, die hasattr-Weiche darin wird also nie")
+        print("erreicht, egal ob der Methodenname stimmt:\n")
+        for funktion, stellen in unerreichbar:
+            datei, zeile, name = stellen[0]
+            print(f"  {funktion}()  ({datei}:{zeile}, hasattr(..., {name!r}))")
+        print("\nEntweder verdrahten (aufrufen lassen) oder loeschen "
+              "(siehe 14.5: loeschen oder bauen), oder in "
+              "_RAHMEN_RUFT_SELBST begruenden, falls das Framework sie ruft.")
+        return False
+
+    print("OK - jede Funktion mit einer Anzeige-hasattr-Weiche wird auch "
+          "tatsaechlich irgendwo aufgerufen.")
+    return True
+
+
 def run_regionaltab_zeichnet_basiskarte():
     """Gezielt: der Reiter, an dem der Fehler auftrat, darf die Basiskarte
     NICHT mehr ueber eine eigene hasattr-Weiche zeichnen, sondern muss den
@@ -305,6 +412,7 @@ if __name__ == "__main__":
     ergebnisse = {
         "hasattr_namen_existieren": run(),
         "einseitige_sind_begruendet": run_einseitige_sind_begruendet(),
+        "zweige_sind_erreichbar": run_zweige_sind_erreichbar(),
         "regionaltab_zeichnet_basiskarte": run_regionaltab_zeichnet_basiskarte(),
     }
     print("\n=== SUMMARY ===")
