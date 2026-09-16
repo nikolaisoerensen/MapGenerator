@@ -129,9 +129,18 @@ def _siedlungen_3d(display, overlay: "Overlay") -> None:
     VOR den Overlays, siehe update_biome_display()).
 
     sichtbar=False raeumt die Textur ueber set_layer_visibility() ab, ohne
-    sie neu zu bauen - dieselbe Fingerabdruck-lose Kurzform, weil das Bauen
-    hier (anders als bei apply_overlays() bisher) nur laeuft, wenn tatsaechlich
-    etwas sichtbar sein soll.
+    sie neu zu bauen.
+
+    Fingerabdruck-Cache auf `display` selbst (uebersteht Aufrufe, weil das
+    Display-Objekt pro Reiter dauerhaft existiert, siehe `display.heightmap`):
+    _push_overlays() laeuft bei JEDEM Haken-/Anzeige-Wechsel neu, auch wenn nur
+    Fluesse betroffen sind. Ohne Fingerabdruck baut rasterize_settlements_rgba()
+    dann bei jedem irrelevanten Klick ein frisches Array, und
+    MapDisplay3D._overlay_cache_pruefen() cacht ueber die Objekt-Identitaet des
+    Arrays - ein frisches Array sieht dort immer wie "geaendert" aus, also
+    volles Textur-Upload bei jedem Klick (Nachtrag 2026-09-16, urspruenglich in
+    BiomeTab.apply_overlays() behoben, jetzt hierher gezogen, weil dieser
+    Adapter fuer alle Reiter gilt statt nur fuer Biome).
     """
     if not hasattr(display, "set_layer_visibility"):
         return
@@ -140,11 +149,14 @@ def _siedlungen_3d(display, overlay: "Overlay") -> None:
     if hat_inhalt and hasattr(display, "update_overlay_data"):
         heightmap = getattr(display, "heightmap", None)
         if heightmap is not None:
-            from gui.widgets.overlay_rasterizer import rasterize_settlements_rgba
-            rgba = rasterize_settlements_rgba(
-                settlements or [], landmarks or [], roadsites or [], [], [],
-                map_size=heightmap.shape[0], resolution=heightmap.shape[0])
-            display.update_overlay_data("settlement", "uebersicht", rgba)
+            fingerabdruck = (id(settlements), id(landmarks), id(roadsites), heightmap.shape[0])
+            if fingerabdruck != getattr(display, "_siedlungen_overlay_fingerabdruck", None):
+                from gui.widgets.overlay_rasterizer import rasterize_settlements_rgba
+                rgba = rasterize_settlements_rgba(
+                    settlements or [], landmarks or [], roadsites or [], [], [],
+                    map_size=heightmap.shape[0], resolution=heightmap.shape[0])
+                display.update_overlay_data("settlement", "uebersicht", rgba)
+                display._siedlungen_overlay_fingerabdruck = fingerabdruck
     display.set_layer_visibility("settlement", "uebersicht", hat_inhalt)
 
 

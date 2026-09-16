@@ -226,6 +226,21 @@ ob am Bildschirm wirklich etwas erscheint.
 | 8.3 | Häkchen in 3D wieder abwählen | Die jeweilige Textur verschwindet sofort | Bleibt die alte Textur liegen, greift die Sichtbarkeits-Abschaltung nicht |
 | 8.4 | Häkchen in **2D** setzen, danach erst auf 3D umschalten | Übernahme sofort, ohne erneutes Generieren | |
 
+## 9. Biome-Reiter auf das Overlay-Register umgestellt (Ticket #9, 2026-09-16)
+
+`BiomeTab.apply_overlays()` ruft jetzt nicht mehr selbst `overlay_settlements`/
+`update_overlay_data` per `hasattr`-Weiche auf, sondern meldet die zwei
+Overlays (`"siedlungen"`, `"fluesse"`) als `Overlay(name, sichtbar, daten)` an
+`self._push_overlays()` (`gui/tabs/base_tab.py`) — dieselbe Methode, die
+später auch Settlement/Regional/Fluss bedienen soll (Ticket #10/#11). Fachlich
+soll sich am Bildschirm **nichts ändern**; die Punkte 8.1–8.4 oben gelten
+unverändert und sind der eigentliche Test dieser Umstellung. Zusätzlich neu:
+
+| # | Was ansehen | Was richtig ist | Was schiefgehen kann |
+|---|---|---|---|
+| 9.1 | Settlements UND Flussnetz gleichzeitig anhaken, mehrfach zwischen 2D/3D wechseln | Beide Texturen bleiben stabil sichtbar, kein Flackern, keine veraltete Textur | Fingerabdruck-Cache in `_siedlungen_3d` (base_tab.py) baut die RGBA-Textur falsch gar nicht neu, wenn sich Siedlungsdaten geändert haben |
+| 9.2 | Nur Flussnetz an-/abhaken, Settlements-Häkchen dabei unverändert lassen | Kein sichtbares Neuladen/Aufblitzen der Siedlungstextur | Ohne den Fingerabdruck-Cache würde hier bei jedem Flussnetz-Klick unnötig die komplette Siedlungstextur neu gebaut (war der Anlass für Commit 927eecc) |
+
 ---
 
 ## Was diese Sitzung NICHT geprüft hat
