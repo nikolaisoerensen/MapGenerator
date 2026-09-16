@@ -1,7 +1,8 @@
 """
 Path: tests/smoke_test_nachtbetrieb.py
 
-Prueft das Nachtverfahren: Sperrliste (#57) und Branchverfahren (#58).
+Prueft das Nachtverfahren: Sperrliste (#57), Branchverfahren (#58),
+Zeitgrenze samt Steckenbleib-Notiz (#59) und Morgenbericht (#60).
 
 Der Test baut sich fuer die Branch-Teile ein eigenes Wegwerf-Repository in
 einem Temperaeverzeichnis und arbeitet dort. Er fasst das echte Repository
@@ -15,6 +16,7 @@ adaptiven Netz, das monatelang nur mit Groessen getestet wurde, die im
 Programm nicht vorkommen.
 """
 
+import re
 import shutil
 import subprocess
 import sys
@@ -23,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from nachtbetrieb import branch, sperre  # noqa: E402
+from nachtbetrieb import branch, morgenbericht, sperre, zeitgrenze  # noqa: E402
 
 
 def _git(repo, *args):
@@ -239,6 +241,235 @@ def run_sperre_verhindert_commit():
         shutil.rmtree(repo, ignore_errors=True)
 
 
+def run_grenze_waechst_mit_den_tests():
+    print("\n--- Die Zeitgrenze wird gerechnet, nicht geraten ---")
+    faelle = [
+        (0.0, "ohne eigene Tests"),
+        (2.0, "ein schneller Test"),
+        (35.0, "der langsamste Schnelltest (erosion_quality, gemessen)"),
+        (120.0, "die Eichungsreihe smoke_test_regionen_welt (rund 2 min)"),
+        (161.0, "die ganze Schnellreihe, 28 Dateien (gemessen 2026-09-16)"),
+        (1200.0, "Tests, die allein 20 Minuten brauchen"),
+    ]
+    for dauer, was in faelle:
+        g = zeitgrenze.grenze(dauer)
+        print("  %-58s %5.0f s Tests -> %3.0f min%s"
+              % (was, dauer, g.minuten, "  (gedeckelt)" if g.gedeckelt else ""))
+    # Die Forderung des Tickets woertlich: ein Ticket, dessen Tests allein
+    # schon 20 Minuten brauchen, kann keine 30-Minuten-Grenze haben.
+    lang = zeitgrenze.grenze(1200.0)
+    kurz = zeitgrenze.grenze(0.0)
+    ok = (kurz.sekunden == zeitgrenze.GRUNDGRENZE_S
+          and lang.sekunden > kurz.sekunden
+          and lang.minuten >= 120
+          and lang.gedeckelt
+          and "Streufaktor" in kurz.begruendung)
+    print("  20-Minuten-Tests bekommen %.0f min, nicht 30 - wie gefordert."
+          % lang.minuten)
+    print("  Monoton: %s" % all(
+        zeitgrenze.grenze(a).sekunden <= zeitgrenze.grenze(b).sekunden
+        for a, b in zip([0, 2, 35, 120, 161, 1200], [2, 35, 120, 161, 1200, 3000])))
+    return ok
+
+
+def run_notiz_verweigert_die_uhr():
+    print("\n--- 'Zeitlimit erreicht' wird als Notiz abgelehnt ---")
+    nackt = zeitgrenze.Steckenbleib(nummer=77, titel="Irgendwas",
+                                    grenze_s=1800, verstrichen_s=1800.0)
+    try:
+        zeitgrenze.notiz(nackt)
+    except zeitgrenze.NotizUnvollstaendig as fehler:
+        print("  abgelehnt, wie es sein soll:")
+        print("  " + str(fehler).replace("\n", "\n  "))
+    else:
+        print("  FEHLER: die leere Notiz wurde angenommen.")
+        return False
+
+    # Roter Test ohne Meldung ist ebenfalls zu wenig - der Name eines Tests
+    # sagt nicht, woran er scheitert.
+    halb = zeitgrenze.Steckenbleib(
+        nummer=77, titel="Irgendwas", grenze_s=1800, verstrichen_s=1800.0,
+        stand="halb", versuche=["a"], vermutung="b",
+        roter_test="tests/smoke_test_x.py")
+    try:
+        zeitgrenze.notiz(halb)
+        print("  FEHLER: roter Test ohne Meldung ging durch.")
+        return False
+    except zeitgrenze.NotizUnvollstaendig:
+        print("  Roter Test ohne Fehlermeldung: ebenfalls abgelehnt.")
+    return True
+
+
+def run_abbruch_laesst_alles_liegen():
+    print("\n--- Kuenstlich verzoegertes Ticket: Abbruch ohne Verlust ---")
+    repo = _wegwerf_repo()
+    ordner = Path(tempfile.mkdtemp(prefix="laufbericht_"))
+    try:
+        branch.starte_nacht(repo=repo)
+        vorher_branch = branch.aktueller_branch(repo=repo)
+        (repo / "halbe_arbeit.py").write_text("# bis hierhin gekommen\n",
+                                              encoding="utf-8")
+
+        # Die Verzoegerung ist eine gestellte Uhr, kein echtes Warten. Ein
+        # Test, der eine halbe Stunde schlaeft, wird abgeschaltet - und dann
+        # prueft niemand mehr den Abbruch.
+        g = zeitgrenze.grenze(120.0)
+        gestellt = [0.0]
+        uhr = zeitgrenze.Uhr(g.sekunden, jetzt=lambda: gestellt[0])
+        print("  Grenze: %.0f min. Nach 10 min abgelaufen? %s"
+              % (g.minuten, (gestellt.__setitem__(0, 600) or uhr.abgelaufen())))
+        gestellt[0] = g.sekunden + 90
+        print("  Nach %.0f min abgelaufen? %s  (Rest %.0f s)"
+              % (gestellt[0] / 60.0, uhr.abgelaufen(), uhr.rest()))
+        if not uhr.abgelaufen():
+            print("  FEHLER: die Uhr laeuft nicht ab.")
+            return False
+
+        eintrag = zeitgrenze.Steckenbleib(
+            nummer=104, titel="Erosionskanaele zusammenhaengend bekommen",
+            grenze_s=g.sekunden, verstrichen_s=uhr.verstrichen(),
+            grenze_begruendung=g.begruendung,
+            stand="Schwellenlogik in core/erosion_generator.py umgestellt, "
+                  "Kanalnetz-Test laeuft, Sedimentation noch unberuehrt.",
+            roter_test="tests/smoke_test_erosion_quality.py",
+            meldung="(c) zusammenhaengendes Kanalnetz "
+                    "(groesste Komponente 45 px, Schwelle > 60)",
+            versuche=["Schwelle von 0.6 auf 0.4 gesenkt - Komponente wuchs "
+                      "auf 51 px, reicht nicht",
+                      "Erosionsschritte verdoppelt - Laufzeit x2, Komponente "
+                      "unveraendert"],
+            vermutung="Nicht die Schwelle, sondern die Reihenfolge: die "
+                      "Sedimentation fuellt die Rinne wieder auf, bevor der "
+                      "naechste Schritt sie vertieft. Erst die Kopplung "
+                      "messen, dann wieder an Zahlen drehen.")
+        pfad = zeitgrenze.festhalten(eintrag, ordner)
+        text = zeitgrenze.notiz(eintrag)
+        print("  --- die Notiz ---")
+        print("  " + text.replace("\n", "\n  "))
+
+        # Was der saubere Abbruch NICHT getan haben darf.
+        noch_da = (repo / "halbe_arbeit.py").exists()
+        offen = bool(_git(repo, "status", "--porcelain"))
+        gleicher_branch = branch.aktueller_branch(repo=repo) == vorher_branch
+        keine_commits = len(branch.commits_der_nacht(repo=repo)) == 0
+        print("\n  Arbeit liegt noch da:      %s" % noch_da)
+        print("  uncommittet geblieben:     %s" % offen)
+        print("  Branch unveraendert:       %s (%s)" % (gleicher_branch,
+                                                        vorher_branch))
+        print("  kein Commit angelegt:      %s" % keine_commits)
+        print("  Notiz abgelegt:            %s" % pfad.name)
+
+        gesammelt = zeitgrenze.sammle(ordner)
+        gefunden = len(gesammelt) == 1 and gesammelt[0].nummer == 104
+        print("  wieder einlesbar:          %s" % gefunden)
+        return all([noch_da, offen, gleicher_branch, keine_commits, gefunden])
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+        shutil.rmtree(ordner, ignore_errors=True)
+
+
+def run_rueckfallmarken_zeigen_ins_ziel():
+    print("\n--- Jede Rueckfallmarke kommt im Quelltext wirklich vor ---")
+    wurzel = Path(__file__).resolve().parent.parent
+    quellen = []
+    for ordner in ("core", "managers", "gui"):
+        for pfad in (wurzel / ordner).rglob("*.py"):
+            quellen.append(pfad.read_text(encoding="utf-8", errors="replace"))
+    gesamt = "\n".join(quellen)
+    ok = True
+    for marke in morgenbericht.RUECKFAELLE:
+        trifft = bool(re.search(marke.muster, gesamt))
+        ok = ok and trifft
+        print("  %-38s %s  %s" % (marke.name, "ja " if trifft else "NEIN",
+                                  marke.ort))
+    if not ok:
+        print("  Eine Marke, die ins Leere zeigt, meldet fuer immer null "
+              "Rueckfaelle - und null sieht aus wie 'alles in Ordnung'.")
+    return ok
+
+
+def run_bericht_hat_vier_bloecke():
+    print("\n--- Der Morgenbericht: vier Bloecke plus Steckengebliebene ---")
+    testlauf = {"gesamtdauer_s": 161.0, "ergebnisse": [
+        {"datei": "smoke_test_a.py", "code": 0, "dauer": 1.0, "fails": [],
+         "ausgabe": "alles gut"},
+        {"datei": "smoke_test_erosion_quality.py", "code": 1, "dauer": 35.0,
+         "fails": ["[FAIL] (c) zusammenhaengendes Kanalnetz (45 px)",
+                   "[FAIL] (d) Sedimentation erzeugt Ebenen (7.2%)",
+                   "[FAIL] Schwelle senkt Erosionsanteil",
+                   "[FAIL] Schrittzahl bleibt vergleichbar"],
+         "ausgabe": "WARNING core.erosion_generator GPU-Erosion "
+                    "fehlgeschlagen (kein Kontext) - CPU-Pfad\n"
+                    "WARNING GPU-Erosion nicht verfuegbar () - CPU-Pfad\n"
+                    "DEBUG: Adaptives Mesh nicht anwendbar (Heightmap-"
+                    "Groesse) - Gleichmaessig-Gitter"},
+    ]}
+    treffer, zeilen = morgenbericht.zaehle_rueckfaelle(
+        [e["ausgabe"] for e in testlauf["ergebnisse"]])
+    heute = morgenbericht.kennzahlen_aus_testlauf(testlauf)
+    gestern = {"Testdateien gruen": 2, "Testdateien rot": 0,
+               "Gesamtlaufzeit der Tests (s)": 140.0}
+    steckenbleib = [zeitgrenze.Steckenbleib(
+        nummer=104, titel="Erosionskanaele", grenze_s=1980,
+        verstrichen_s=2070.0, stand="halb", versuche=["x"],
+        vermutung="Reihenfolge von Erosion und Sedimentation")]
+
+    text = morgenbericht.baue(
+        commits=[{"nummer": 57, "titel": "Sperrliste anlegen",
+                  "tests": "gruen - tests/smoke_test_nachtbetrieb.py"}],
+        testlauf=testlauf, kennzahlen_heute=heute, kennzahlen_gestern=gestern,
+        rueckfaelle=treffer, durchsuchte_zeilen=zeilen,
+        steckengeblieben=steckenbleib, branch="nacht/2026-09-16",
+        datum="2026-09-17 07:00")
+    print("  " + text.replace("\n", "\n  "))
+
+    noetig = {
+        "Block 1": "#57",
+        "Block 2 nennt die Meldung": "zusammenhaengendes Kanalnetz",
+        "Block 2 kuerzt ehrlich": "und 1 weitere",
+        "Block 3 Vortagswert": "140.0",
+        "Block 3 Prozent": "%",
+        "Block 4 Anzahl": "2x",
+        "Block 4 Ort": "core/erosion_generator.py",
+        "Steckengeblieben": "#104",
+        "Quellen genannt": "Quellen:",
+    }
+    ok = True
+    print("")
+    for was, wort in noetig.items():
+        da = wort in text
+        ok = ok and da
+        print("  %-30s %s" % (was, "ok" if da else "FEHLT: " + wort))
+    zeilenzahl = len(text.splitlines())
+    passt = zeilenzahl <= 60
+    print("  %-30s %d Zeilen %s" % ("Eine Seite", zeilenzahl,
+                                    "ok" if passt else "ZU LANG"))
+    return ok and passt
+
+
+def run_bericht_ereignislos_und_leer():
+    print("\n--- Ruhige Nacht in einem Satz, leere Messung als Befund ---")
+    ruhig = morgenbericht.baue(
+        commits=[{"nummer": 57, "titel": "Sperrliste", "tests": "gruen"}],
+        testlauf={"gesamtdauer_s": 1.0, "ergebnisse":
+                  [{"datei": "a.py", "code": 0, "dauer": 1.0, "fails": [],
+                    "ausgabe": ""}]},
+        kennzahlen_heute={"Testdateien gruen": 1},
+        durchsuchte_zeilen=12, datum="2026-09-17 07:00")
+    print("  " + ruhig.replace("\n", "\n  "))
+    hat_satz = "Ruhige Nacht" in ruhig
+
+    leer = morgenbericht.baue(durchsuchte_zeilen=0, datum="2026-09-17 07:00")
+    ehrlich = ("Null durchsuchte Zeilen heisst NICHT null Rueckfaelle" in leer
+               and "wurde nicht gemessen" in leer)
+    print("\n  Ruhige Nacht in einem Satz gesagt:            %s" % hat_satz)
+    print("  Nichtmessung wird als Nichtmessung gemeldet:  %s" % ehrlich)
+    if not ehrlich:
+        print("  Ein leerer Block, der aussieht wie ein gruener, ist genau "
+              "der Fehler, gegen den dieser Bericht gebaut ist.")
+    return hat_satz and ehrlich
+
+
 if __name__ == "__main__":
     ergebnisse = {
         "sperrliste_laedt": run_sperrliste_laedt(),
@@ -250,8 +481,14 @@ if __name__ == "__main__":
         "kein_commit_auf_main": run_kein_commit_auf_main(),
         "ein_commit_je_ticket": run_ein_commit_je_ticket_und_ruecknahme(),
         "sperre_verhindert_commit": run_sperre_verhindert_commit(),
+        "grenze_waechst_mit_den_tests": run_grenze_waechst_mit_den_tests(),
+        "notiz_verweigert_die_uhr": run_notiz_verweigert_die_uhr(),
+        "abbruch_laesst_alles_liegen": run_abbruch_laesst_alles_liegen(),
+        "rueckfallmarken_zeigen_ins_ziel": run_rueckfallmarken_zeigen_ins_ziel(),
+        "bericht_hat_vier_bloecke": run_bericht_hat_vier_bloecke(),
+        "bericht_ereignislos_und_leer": run_bericht_ereignislos_und_leer(),
     }
     print("\n=== SUMMARY ===")
     for name, ergebnis in ergebnisse.items():
-        print("%-32s %s" % (name, "PASS" if ergebnis else "FAIL"))
+        print("%-36s %s" % (name, "PASS" if ergebnis else "FAIL"))
     sys.exit(0 if all(ergebnisse.values()) else 1)

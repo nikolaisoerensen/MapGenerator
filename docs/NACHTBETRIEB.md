@@ -108,7 +108,63 @@ während `EROSION_AKTIV = True` stand.
 
 ---
 
-## 4. Der Morgen
+## 4. Die Zeitgrenze und die Steckenbleib-Notiz
+
+Ein Ticket darf sich nicht die ganze Nacht nehmen. Sonst steht morgens eine
+einzige halbfertige Sache da statt sechs fertiger.
+
+Die Grenze ist aber **keine feste Zahl**. Ein Ticket, dessen Tests allein
+schon zwanzig Minuten laufen, kann keine Dreissig-Minuten-Grenze haben — die
+waere schon abgelaufen, bevor das erste Mal gemessen wurde. Sie wird deshalb
+**gerechnet**:
+
+```
+Grenze = 3 Versuche × (300 s Arbeit + 3 × Testlaufzeit)
+```
+
+Drei Versuche, weil ein Ticket typischerweise bauen, reparieren und
+bestaetigen muss. Der Faktor 3 auf die Tests ist der *Streufaktor*: dieselbe
+Last schwankt auf dieser Maschine um Faktor zwei bis drei. Die 300 s Arbeit je
+Versuch sind ausdruecklich **geschaetzt**, nicht gemessen — das steht auch so
+im Quelltext, damit sie niemand fuer einen Messwert haelt. Darunter liegt eine
+Untergrenze von 30 min, darueber ein Deckel von 3 h; die Nacht hat rund acht.
+
+```bash
+python tools/nachtlauf.py grenze --tests-dauer 120
+```
+
+Der Befehl nennt die Grenze **und ihre Rechnung**. Eine Zahl ohne Begruendung
+kann man nicht bestreiten, und was man nicht bestreiten kann, korrigiert man
+auch nicht.
+
+### Abgebrochen heisst nicht verworfen
+
+Laeuft die Grenze ab, passiert genau eines: es wird eine **Notiz**
+geschrieben. Der Branch bleibt, die halbfertige Arbeit bleibt liegen, das
+Ticket bleibt **offen** und wird nicht neu gestartet.
+
+```bash
+python tools/nachtlauf.py steckengeblieben 104 "Erosionskanaele"     --gelaufen 34 --tests-dauer 120     --stand "Schwellenlogik umgestellt, Sedimentation noch unberuehrt"     --roter-test tests/smoke_test_erosion_quality.py     --meldung "(c) Kanalnetz (groesste Komponente 45 px, Schwelle > 60)"     --versuch "Schwelle 0.6 auf 0.4 gesenkt - 51 px, reicht nicht"     --versuch "Erosionsschritte verdoppelt - Laufzeit x2, unveraendert"     --vermutung "Nicht die Schwelle, sondern die Reihenfolge: die Sedimentation fuellt die Rinne wieder auf, bevor der naechste Schritt sie vertieft."
+```
+
+Fehlt davon etwas, **verweigert das Werkzeug die Notiz** und sagt, was fehlt.
+Das ist Absicht:
+
+> „Zeitlimit erreicht" ist keine Notiz, das ist eine Uhr. Wer morgens hier
+> weitermacht, faengt sonst bei null an und verliert dieselbe Zeit noch
+> einmal.
+
+Verlangt sind vier Dinge: **wo die Arbeit steht**, **was rot ist samt
+Fehlermeldung** (der Name eines Tests sagt nicht, woran er scheitert), **was
+schon versucht wurde** — damit es morgens niemand ein zweites Mal versucht —
+und **die naechste Vermutung**.
+
+Die Notizen liegen als JSON in `nachtbetrieb/laufberichte/` und werden bei
+`starten` geloescht: sonst zaehlte der Morgenbericht die von vorgestern mit.
+
+---
+
+## 5. Der Morgen
 
 ```bash
 python tools/nachtlauf.py stand
@@ -144,7 +200,48 @@ nicht auf `main`.
 
 ---
 
-## 5. Die Befehle
+## 6. Der Morgenbericht auf einer Seite
+
+`stand` zeigt, was der Branch enthaelt. Der **Bericht** zeigt, was die Nacht
+bedeutet — auf einer Seite, weil ein Bericht, den man scrollen muss, morgens
+nicht gelesen wird.
+
+```bash
+python tools/nachtlauf.py bericht --testlauf laufberichte/schnelllauf.json     --protokoll laufberichte/nacht.log
+```
+
+| Block | Was drinsteht | Woher |
+|---|---|---|
+| 1 Geschlossen | ein Ticket je Zeile, mit Teststand | `git log` ueber den Nachtbranch |
+| 2 Rot | jede rote Testdatei mit ihren Meldungen | `tools/testlauf.py --bericht` |
+| 3 Kennzahlen | heute, gestern, Veraenderung in Prozent | derselbe Bericht |
+| 4 Stille Rueckfaelle | wo das Programm lautlos auf einen Ersatzpfad ausgewichen ist | die mitgeschriebene Ausgabe |
+| Steckengeblieben | die Notizen aus Abschnitt 4 | `nachtbetrieb/laufberichte/` |
+
+**Block 4 ist der Grund, warum es diesen Bericht gibt.** Der teuerste Fehler
+dieses Projekts ist nicht der Absturz, sondern der stille Rueckfall: das
+adaptive 3D-Netz lief monatelang nicht, die GPU-Erosion faellt mit Faktor 385
+weniger Abtrag auf die CPU zurueck — beides lieferte plausible Ergebnisse,
+beides blieb gruen. Der Bericht sucht deshalb in der mitgeschriebenen Ausgabe
+nach **neun namentlich bekannten Ersatzpfaden**, jeder mit Quellzeile und
+einem Satz dazu, was er kostet.
+
+Zwei Dinge sagt der Bericht ausdruecklich, statt sie zu verschweigen:
+
+* Wurde **kein Testlauf abgelegt**, steht dort *„Das ist KEIN gruener Befund —
+  es wurde nicht gemessen."*
+* Wurden **null Zeilen durchsucht**, steht dort, dass null durchsuchte Zeilen
+  nicht null Rueckfaelle heisst.
+
+Denn eine leere Messung, die aussieht wie ein gutes Ergebnis, ist genau der
+Fehler, gegen den der ganze Block gebaut ist.
+
+War nichts los, sagt der Bericht das in **einem Satz** und man liest den Rest
+nicht.
+
+---
+
+## 7. Die Befehle
 
 | Befehl | Was er tut |
 |---|---|
@@ -153,13 +250,16 @@ nicht auf `main`.
 | `abschliessen <nr> "<titel>" [--tests …]` | ein Ticket, ein Commit, mit Sperrprüfung davor |
 | `stand` | Commits, Tickets, Testlage, Sperrlage in einem Aufruf |
 | `zuruecknehmen <nr>` | genau dieses Ticket zurück, die anderen unberührt |
+| `grenze --tests-dauer <s>` | wieviel Zeit ein Ticket bekommt — **und die Rechnung dazu** |
+| `steckengeblieben <nr> …` | Ticket sauber abbrechen: Notiz schreiben, sonst nichts anfassen |
+| `bericht [--testlauf …] [--protokoll …]` | der Morgenbericht auf einer Seite |
 
 Rückgabewert `0` heißt in Ordnung, `1` heißt abgebrochen. Ein Steuerskript kann
 sich daran halten.
 
 ---
 
-## 6. Die Naht
+## 8. Die Nähte
 
 Alles läuft über **`sperre.pruefe(dateien)`**: Pfade hinein, Treffer heraus.
 Ob die Pfade aus `git diff`, aus einem Test oder von Hand kommen, ist dieser
@@ -176,9 +276,27 @@ unbemerkt vorbei.
 Für die Branch-Teile baut der Test sich ein Wegwerf-Repository in einem
 Temporärverzeichnis. Er committet nie ins echte Projekt.
 
+Die Zeitgrenze hat dieselbe Form: alles läuft über **`zeitgrenze.grenze(s)`**
+und **`zeitgrenze.notiz(steckenbleib)`**. Beide **rechnen nur** — sie rufen
+kein `git` auf, schreiben nichts fest und brechen nichts ab. Genau das ist der
+saubere Abbruch: wer nichts anfasst, kann auch nichts verlieren. Deshalb kann
+der Test einen abgelaufenen Lauf mit einer **gestellten Uhr** vorführen, ohne
+eine halbe Stunde zu warten — ein Test, der wirklich wartet, wird abgeschaltet,
+und dann prüft niemand mehr den Abbruch.
+
+Block 4 des Berichts läuft über **`morgenbericht.zaehle_rueckfaelle(texte)`**:
+Text hinein, Treffer und **die Zahl der durchsuchten Zeilen** heraus. Die
+zweite Zahl ist nicht schmückend — ohne sie wäre „keine Rückfälle gefunden"
+nicht von „nichts durchsucht" zu unterscheiden.
+
+Und weil ein Wächter, der ins Leere zeigt, schlimmer ist als keiner, prüft der
+Test zusätzlich, dass **jedes der neun Muster im Quelltext wirklich noch
+vorkommt**. Verschwindet eine Logzeile bei einem Umbau, schlägt er fehl,
+statt ab dann für immer null Rückfälle zu melden.
+
 ---
 
-## 7. Dateien
+## 9. Dateien
 
 | Datei | Wofür |
 |---|---|
@@ -186,7 +304,10 @@ Temporärverzeichnis. Er committet nie ins echte Projekt.
 | [`nachtbetrieb/sperre.py`](../nachtbetrieb/sperre.py) | die Durchsetzung dieser Liste |
 | [`nachtbetrieb/branch.py`](../nachtbetrieb/branch.py) | Branch, Commit-Format, Stand, Rücknahme |
 | [`tools/nachtlauf.py`](../tools/nachtlauf.py) | die Bedienung |
-| [`tests/smoke_test_nachtbetrieb.py`](../tests/smoke_test_nachtbetrieb.py) | führt beides je einmal vor, neun Gruppen |
+| [`nachtbetrieb/zeitgrenze.py`](../nachtbetrieb/zeitgrenze.py) | Zeitgrenze rechnen, Steckenbleib-Notiz erzwingen und ablegen |
+| [`nachtbetrieb/morgenbericht.py`](../nachtbetrieb/morgenbericht.py) | die vier Blöcke, die neun Rückfallmarken |
+| `nachtbetrieb/laufberichte/` | Notizen und Kennzahlen eines Laufs; nicht versioniert |
+| [`tests/smoke_test_nachtbetrieb.py`](../tests/smoke_test_nachtbetrieb.py) | führt alles je einmal vor, fünfzehn Gruppen |
 
 `nachtbetrieb/` ist bewusst **kein Teil des Programms**: es steht nicht in der
 `include`-Liste von `pyproject.toml` und wird nie von `core/`, `gui/` oder

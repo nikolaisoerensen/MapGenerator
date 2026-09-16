@@ -25,13 +25,57 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from nachtbetrieb import branch, sperre  # noqa: E402
+from nachtbetrieb import branch, morgenbericht, sperre, zeitgrenze  # noqa: E402
 
 
 def _starten(args):
     name = branch.starte_nacht(basis=args.basis)
+    geloescht = zeitgrenze.aufraeumen()
     print("Nachtbranch angelegt und ausgecheckt: %s" % name)
+    if geloescht:
+        print("%d Steckenbleib-Notiz(en) der letzten Nacht entfernt - sonst "
+              "zaehlte der Morgenbericht sie mit." % geloescht)
     print("Alles Weitere passiert hier. main bleibt unberuehrt.")
+    return 0
+
+
+def _grenze(args):
+    g = zeitgrenze.grenze(args.tests_dauer)
+    print("Testlaufzeit %.0f s  ->  Zeitgrenze %.0f min (%d s)"
+          % (g.test_dauer_s, g.minuten, g.sekunden))
+    print(g.begruendung)
+    return 0
+
+
+def _steckengeblieben(args):
+    """Bricht ein Ticket sauber ab: Notiz schreiben, sonst nichts anfassen."""
+    eintrag = zeitgrenze.Steckenbleib(
+        nummer=args.nummer, titel=args.titel,
+        grenze_s=zeitgrenze.grenze(args.tests_dauer).sekunden,
+        verstrichen_s=args.gelaufen * 60.0,
+        stand=args.stand, roter_test=args.roter_test or "",
+        meldung=args.meldung or "", versuche=list(args.versuch or ()),
+        vermutung=args.vermutung,
+        grenze_begruendung=zeitgrenze.grenze(args.tests_dauer).begruendung)
+    try:
+        text = zeitgrenze.notiz(eintrag)
+    except zeitgrenze.NotizUnvollstaendig as fehler:
+        print(str(fehler))
+        return 1
+    pfad = zeitgrenze.festhalten(eintrag)
+    print(text)
+    print("\nAbgelegt: %s" % pfad)
+    print("Der Branch und die begonnene Arbeit bleiben unveraendert liegen.")
+    return 0
+
+
+def _bericht(args):
+    text = morgenbericht.sammle_und_baue(
+        basis=args.basis, testlauf_json=args.testlauf,
+        protokolle=args.protokoll or ())
+    pfad = morgenbericht.schreibe(text, pfad=args.ziel)
+    print(text)
+    print("\nGeschrieben: %s" % pfad)
     return 0
 
 
@@ -108,6 +152,43 @@ def baue_parser():
     z = unter.add_parser("zuruecknehmen", help="genau ein Ticket rueckgaengig")
     z.add_argument("nummer", type=int)
     z.set_defaults(funktion=_zuruecknehmen)
+
+    g = unter.add_parser("grenze",
+                         help="wieviel Zeit ein Ticket bekommt, und warum")
+    g.add_argument("--tests-dauer", type=float, default=0.0,
+                   help="GEMESSENE Laufzeit der Tests dieses Tickets in "
+                        "Sekunden, aus tools/testlauf.py --bericht")
+    g.set_defaults(funktion=_grenze)
+
+    k = unter.add_parser(
+        "steckengeblieben",
+        help="Ticket sauber abbrechen: Notiz schreiben, sonst nichts anfassen")
+    k.add_argument("nummer", type=int)
+    k.add_argument("titel")
+    k.add_argument("--gelaufen", type=float, required=True,
+                   help="wie lange das Ticket schon lief, in Minuten")
+    k.add_argument("--tests-dauer", type=float, default=0.0)
+    k.add_argument("--stand", required=True,
+                   help="wo die Arbeit steht - was fertig ist, was halb")
+    k.add_argument("--roter-test", default="",
+                   help="welcher Test rot ist (darf fehlen, wenn keiner lief)")
+    k.add_argument("--meldung", default="",
+                   help="seine Fehlermeldung, nicht nur sein Name")
+    k.add_argument("--versuch", action="append", default=[],
+                   help="was schon probiert wurde; mehrfach angebbar")
+    k.add_argument("--vermutung", required=True,
+                   help="woran es als naechstes liegen koennte")
+    k.set_defaults(funktion=_steckengeblieben)
+
+    b = unter.add_parser("bericht", help="der Morgenbericht auf einer Seite")
+    b.add_argument("--testlauf", default=None,
+                   help="JSON aus tools/testlauf.py --bericht")
+    b.add_argument("--protokoll", action="append", default=[],
+                   help="mitgeschriebene Ausgabe fuer Block 4; mehrfach")
+    b.add_argument("--ziel", default=None,
+                   help="Zieldatei (Vorgabe: nachtbetrieb/laufberichte/"
+                        "morgenbericht.md)")
+    b.set_defaults(funktion=_bericht)
     return p
 
 

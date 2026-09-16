@@ -1,0 +1,4 @@
+# Arbeitsstand eines Nachtlaufs, nicht Teil des Projekts.
+# Der Morgenbericht liest ihn, dann ist er verbraucht.
+*
+!.gitignore
