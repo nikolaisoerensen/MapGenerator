@@ -11,6 +11,17 @@
 # der nachts einzelne Tool-Aufrufe bestaetigt, wuerde die Sitzung sonst beim
 # ersten Bash/git-Befehl haengen bleiben. Das ist eine bewusste Entscheidung
 # des Nutzers (2026-09-16), keine Standardeinstellung.
+#
+# Wieso eine Schleife um den claude-Aufruf: `claude -p "..."` ist EIN
+# einzelner Durchlauf. Der Agent arbeitet darin zwar von sich aus mehrere
+# Tickets ab, entscheidet aber selbst, wann er "fertig genug" ist und schliesst
+# dann mit einer Zusammenfassung ab - das kann vor dem Ende der Ticketliste
+# passieren. Es gibt keine CLI-Option, die eine feste Anzahl an Arbeitsschritten
+# erzwingt. Deshalb wird hier von aussen wiederholt: nach jedem Aufruf wird
+# geprueft, ob der Morgenbericht (das einzige verlaessliche "fertig"-Signal aus
+# docs/NACHTBETRIEB.md, Schritt 6) neu geschrieben wurde. Wenn nicht, wird die
+# GLEICHE Sitzung mit --continue fortgesetzt statt neu zu beginnen - so bleibt
+# der Kontext (bereits erledigte Tickets, offener Nachtbranch) erhalten.
 
 $ErrorActionPreference = "Stop"
 
@@ -21,13 +32,30 @@ $logVerzeichnis = Join-Path $projektpfad "nachtbetrieb\laufberichte"
 New-Item -ItemType Directory -Force -Path $logVerzeichnis | Out-Null
 $zeitstempel = Get-Date -Format "yyyy-MM-dd_HHmmss"
 $logDatei = Join-Path $logVerzeichnis "taskplaner_$zeitstempel.log"
+$morgenberichtDatei = Join-Path $logVerzeichnis "morgenbericht.md"
 
-$prompt = @'
+# Sicherheitsgrenzen der AEUSSEREN Schleife (nicht zu verwechseln mit der
+# Zeitgrenze JE TICKET aus tools/nachtlauf.py grenze):
+$maxDurchlaeufe = 20
+$maxDauerStunden = 7
+$maxOhneFortschritt = 2
+
+$erstAufrufPrompt = @'
 Du fuehrst heute Nacht den Nachtbetrieb dieses Projekts eigenstaendig durch.
 Lies zuerst docs/NACHTBETRIEB.md vollstaendig - dort stehen die verbindlichen
 Regeln fuer diesen Lauf. Es ist niemand da, der Rueckfragen beantwortet:
 triff die noetigen Entscheidungen selbst und dokumentiere sie ehrlich im
 Morgenbericht statt zu warten.
+
+WICHTIG - wann diese Sitzung als fertig gilt: Diese Sitzung wird von einem
+aeusseren Skript ggf. mehrfach mit --continue fortgesetzt. Fasse NICHT
+zusammen und hoere NICHT auf, solange noch mindestens ein offenes,
+bearbeitbares Ticket aus docs/OFFENE_PUNKTE.md uebrig ist ODER Schritt 5
+(Code-Review) bzw. Schritt 6 (Morgenbericht) unten noch nicht erledigt sind.
+Bearbeite in dieser Sitzung so viele Tickets wie in vernuenftiger Zeit
+moeglich, dann schliesse deine Antwort einfach ab (kein "Zusammenfassung und
+Ende") - das aeussere Skript prueft danach selbst, ob der Morgenbericht schon
+existiert, und setzt sonst fort.
 
 Ablauf:
 
@@ -54,27 +82,93 @@ Ablauf:
    was schon versucht wurde, und die naechste Hypothese. Danach zum
    naechsten Ticket weitergehen - nicht an einem Ticket haengen bleiben.
 
-5. Wenn alle moeglichen Tickets bearbeitet sind (oder keine Zeit/kein
-   Ticket mehr sinnvoll bearbeitbar ist): `/code-review` auf dem Nachtbranch
-   gegen main laufen lassen. Kleine, sichere Funde selbst beheben und
-   committen. Groessere oder riskante Funde nur im Morgenbericht vermerken,
-   nicht selbst anfassen.
+5. Wenn ALLE Tickets aus docs/OFFENE_PUNKTE.md entweder committet, wegen
+   Sperre uebersprungen oder als steckengeblieben dokumentiert sind:
+   `/code-review` auf dem Nachtbranch gegen main laufen lassen. Kleine,
+   sichere Funde selbst beheben und committen. Groessere oder riskante
+   Funde nur im Morgenbericht vermerken, nicht selbst anfassen.
 
 6. `python tools/nachtlauf.py bericht` ausfuehren, um den Morgenbericht zu
-   erzeugen.
+   erzeugen. Dies ist der letzte Schritt - erst danach gilt der Lauf als
+   fertig.
 
 7. NICHT nach main mergen und NICHT pushen. Das bleibt ein manueller
    Morgenschritt fuer den Nutzer (`python tools/nachtlauf.py stand`,
    dann gezielt mergen oder mit `python tools/nachtlauf.py zuruecknehmen`
    einzelne Tickets verwerfen).
 
-Arbeite die Nacht durch, ohne auf Antworten zu warten. Wenn etwas wirklich
-nicht automatisiert entscheidbar ist, notiere es ehrlich im Morgenbericht
-statt zu raten oder die Sperrliste/NACHTBETRIEB.md-Regeln zu umgehen.
+Wenn etwas wirklich nicht automatisiert entscheidbar ist, notiere es ehrlich
+im Morgenbericht statt zu raten oder die Sperrliste/NACHTBETRIEB.md-Regeln zu
+umgehen.
+'@
+
+$weiterPrompt = @'
+Mach direkt weiter, ohne Rueckfragen. Falls noch offene, bearbeitbare Tickets
+aus docs/OFFENE_PUNKTE.md uebrig sind: das naechste davon bearbeiten (Sperrliste
+und Zeitgrenze weiter beachten, ein Commit je Ticket ueber
+tools/nachtlauf.py abschliessen). Wenn KEIN Ticket mehr offen/bearbeitbar ist,
+aber Schritt 5 (/code-review gegen main) oder Schritt 6
+(tools/nachtlauf.py bericht) aus der ersten Anweisung noch nicht erledigt sind:
+genau damit weitermachen. Erst wenn tools/nachtlauf.py bericht bereits gelaufen
+ist, ist nichts mehr zu tun - dann kurz bestaetigen, dass der Nachtbetrieb
+abgeschlossen ist.
 '@
 
 Set-Location $projektpfad
 
-& $claudeExe -p $prompt --permission-mode bypassPermissions *> $logDatei
+$start = Get-Date
+$commitVorher = ""
+try {
+    $commitVorher = (& git rev-parse HEAD 2>$null)
+} catch {}
+$ohneFortschritt = 0
+$fertig = $false
+
+for ($i = 1; $i -le $maxDurchlaeufe; $i++) {
+    if (((Get-Date) - $start).TotalHours -ge $maxDauerStunden) {
+        "Zeitbudget ($maxDauerStunden h) erschoepft nach $($i - 1) Durchlaeufen - Schleife beendet, ohne dass der Morgenbericht sicher fertig ist." | Add-Content $logDatei
+        break
+    }
+
+    "=== Durchlauf $i / $maxDurchlaeufe  ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) ===" | Add-Content $logDatei
+
+    if ($i -eq 1) {
+        & $claudeExe -p $erstAufrufPrompt --permission-mode bypassPermissions *>> $logDatei
+    } else {
+        & $claudeExe --continue -p $weiterPrompt --permission-mode bypassPermissions *>> $logDatei
+    }
+
+    if (Test-Path $morgenberichtDatei) {
+        $berichtZeit = (Get-Item $morgenberichtDatei).LastWriteTime
+        if ($berichtZeit -ge $start) {
+            "Morgenbericht gefunden ($morgenberichtDatei, geschrieben $berichtZeit) - Nachtbetrieb fertig nach $i Durchlauf/Durchlaeufen." | Add-Content $logDatei
+            $fertig = $true
+            break
+        }
+    }
+
+    # Fortschritts-Sicherung: kam kein neuer Commit dazu, zaehlt das als ein
+    # Durchlauf ohne Fortschritt. Zwei davon in Folge brechen die Schleife ab -
+    # sonst wuerde ein haengender Agent das ganze Zeitbudget sinnlos verbrauchen.
+    $commitJetzt = ""
+    try {
+        $commitJetzt = (& git rev-parse HEAD 2>$null)
+    } catch {}
+    if ($commitJetzt -eq $commitVorher) {
+        $ohneFortschritt++
+        "Kein neuer Commit seit dem letzten Durchlauf (jetzt $ohneFortschritt von $maxOhneFortschritt ohne Fortschritt)." | Add-Content $logDatei
+        if ($ohneFortschritt -ge $maxOhneFortschritt) {
+            "Kein Fortschritt in $maxOhneFortschritt aufeinanderfolgenden Durchlaeufen - Schleife abgebrochen, damit sie sich nicht sinnlos wiederholt." | Add-Content $logDatei
+            break
+        }
+    } else {
+        $ohneFortschritt = 0
+    }
+    $commitVorher = $commitJetzt
+}
+
+if (-not $fertig) {
+    "Nachtbetrieb NICHT ueber den Morgenbericht abgeschlossen - siehe obige Zeilen fuer den Grund (Zeitbudget, kein Fortschritt, oder maximale Durchlaufzahl erreicht)." | Add-Content $logDatei
+}
 
 "Nachtlauf beendet: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Add-Content $logDatei
