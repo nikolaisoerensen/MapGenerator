@@ -39,7 +39,8 @@ import logging
 import time
 import hashlib
 import weakref
-from typing import Optional, List, Dict, Any
+import numpy as np
+from typing import Optional, List, Dict, Any, Callable
 from dataclasses import dataclass
 
 from gui.widgets.widgets import BaseButton, StatusIndicator, DisplayWrapper, NavigationPanel
@@ -70,6 +71,105 @@ def get_error_handler():
         return noop_decorator
 
 error_handler = get_error_handler()
+
+
+@dataclass(frozen=True)
+class Overlay:
+    """
+    Ein Vektor-Overlay als WERT, kein Aufruf (docs/SPEC_OVERLAYS.md Punkt 2).
+    Ein Reiter meldet nur Name/Sichtbarkeit/Daten an BaseMapTab._push_overlays();
+    WIE gezeichnet wird (2D per overlay_*(), 3D per RGBA-Skin), entscheidet
+    ausschliesslich das Register unten - der Reiter kennt den Unterschied
+    nicht mehr und kann ihn deshalb nicht mehr falsch treffen.
+
+    `sichtbar=False` ist ein vollwertiger Zustand, kein Weglassen: erst
+    dadurch kann das Register eine liegengebliebene 3D-Textur abraeumen
+    (siehe `clear_river_overlay`, bislang der einzige Weg dafuer).
+    """
+    name: str
+    sichtbar: bool
+    daten: Any = None
+
+
+# ---------------------------------------------------------------------------
+# Overlay-Register (docs/SPEC_OVERLAYS.md Punkt 3): "privat zur implementation
+# von BaseMapTab, aber mit eigenen Tests" - deshalb hier als Modulfunktionen
+# statt als Methoden, unabhaengig von jedem Reiter pruefbar (siehe
+# tests/smoke_test_push_overlays.py), aber nicht als oeffentliches Interface
+# gedacht. Haelt je Overlay-Name BEIDE Wege nebeneinander - das ist die
+# locality, um die es in der Spezifikation geht. Ein Name ohne Eintrag ist in
+# _push_overlays() unten ein Fehler, keine stille Auslassung.
+# ---------------------------------------------------------------------------
+
+def _siedlungen_2d(display, overlay: "Overlay") -> None:
+    """
+    2D-Adapter fuer das Siedlungs-Overlay (Staedte/Landmarken/Roadsites) -
+    ruft MapDisplay2D.overlay_settlements() genau wie bisher SettlementTab
+    und BiomeTab je einzeln. sichtbar=False zeichnet nichts; die 2D-Anzeige
+    baut ihr Bild bei jedem update_display() ohnehin neu auf, ein separates
+    Abraeumen braucht es dort nicht (anders als in 3D, siehe _siedlungen_3d).
+    """
+    if not overlay.sichtbar or not hasattr(display, "overlay_settlements"):
+        return
+    settlements, landmarks, roadsites = overlay.daten
+    if settlements or landmarks or roadsites:
+        display.overlay_settlements(settlements, landmarks, roadsites)
+
+
+def _siedlungen_3d(display, overlay: "Overlay") -> None:
+    """
+    3D-Adapter: RGBA-Skin per `rasterize_settlements_rgba()` auf das Gelaende,
+    derselbe Weg wie `SettlementTab.apply_3d_overlays()` (laut CLAUDE.md das
+    Vorbild fuer "in 2D sichtbar -> auch in 3D") - kein neuer GLSL-Code.
+
+    Nutzt `display.heightmap` (von update_heightmap() gesetzt) statt eines
+    eigenen DataLODManager-Zugriffs, damit dieser Adapter ohne Reiter-Kontext
+    auskommt - `_push_data_to_current_display()` hat die 3D-Heightmap zu
+    diesem Zeitpunkt bereits gepusht (laeuft laut Vorbild-Reihenfolge immer
+    VOR den Overlays, siehe update_biome_display()).
+
+    sichtbar=False raeumt die Textur ueber set_layer_visibility() ab, ohne
+    sie neu zu bauen - dieselbe Fingerabdruck-lose Kurzform, weil das Bauen
+    hier (anders als bei apply_overlays() bisher) nur laeuft, wenn tatsaechlich
+    etwas sichtbar sein soll.
+    """
+    if not hasattr(display, "set_layer_visibility"):
+        return
+    settlements, landmarks, roadsites = overlay.daten
+    hat_inhalt = bool(overlay.sichtbar and (settlements or landmarks or roadsites))
+    if hat_inhalt and hasattr(display, "update_overlay_data"):
+        heightmap = getattr(display, "heightmap", None)
+        if heightmap is not None:
+            from gui.widgets.overlay_rasterizer import rasterize_settlements_rgba
+            rgba = rasterize_settlements_rgba(
+                settlements or [], landmarks or [], roadsites or [], [], [],
+                map_size=heightmap.shape[0], resolution=heightmap.shape[0])
+            display.update_overlay_data("settlement", "uebersicht", rgba)
+    display.set_layer_visibility("settlement", "uebersicht", hat_inhalt)
+
+
+def _fluesse_zeichnen(display, overlay: "Overlay") -> None:
+    """
+    Gemeinsamer Adapter fuer 2D UND 3D: `overlay_river_generations()` und
+    `clear_river_overlay()` existieren unter DEMSELBEN Namen und derselben
+    Signatur auf MapDisplay2D und MapDisplay3DWidget (2026-08-24 fuer 3D
+    nachgebaut) - hier gibt es die zwei Dialekte aus Punkt 3 nicht, deshalb
+    eine Funktion fuer beide Registerseiten statt zwei fast identischer.
+    """
+    if overlay.sichtbar:
+        generation_map = overlay.daten
+        if generation_map is not None and hasattr(display, "overlay_river_generations"):
+            display.overlay_river_generations(np.asarray(generation_map), zeige_mikro=False)
+    elif hasattr(display, "clear_river_overlay"):
+        # Im 3D bleibt eine einmal gesetzte Textur liegen, bis sie
+        # abgeschaltet wird (2D zeichnet ohnehin neu, siehe _siedlungen_2d).
+        display.clear_river_overlay()
+
+
+_OVERLAY_REGISTER: Dict[str, Dict[str, Callable[[Any, "Overlay"], None]]] = {
+    "siedlungen": {"2d": _siedlungen_2d, "3d": _siedlungen_3d},
+    "fluesse": {"2d": _fluesse_zeichnen, "3d": _fluesse_zeichnen},
+}
 
 
 class BaseMapTab(QWidget):
@@ -691,6 +791,43 @@ class BaseMapTab(QWidget):
                 self.map_display_3d.display.set_sun_direction(elevation, azimuth)
             except Exception as e:
                 self.logger.debug(f"3D-Sonnenstand-Update übersprungen: {e}")
+
+    def _push_overlays(self, overlays: List["Overlay"]) -> None:
+        """
+        Geschwistermethode zu _push_data_to_current_display(), aber fuer
+        Vektor-Overlays (Siedlungen, Fluesse, ...) statt Skalarlayer
+        (docs/SPEC_OVERLAYS.md).
+
+        Ein Reiter meldet nur noch WAS gezeigt werden soll (siehe Overlay-
+        Werttyp oben); WIE - per overlay_*()-Aufruf in 2D, per RGBA-Skin in
+        3D - entscheidet ausschliesslich das Register (_OVERLAY_REGISTER).
+
+        Laeuft IMMER gegen BEIDE Anzeigen, unabhaengig von current_view -
+        `current_view` kommt hier absichtlich NICHT vor (Spezifikation
+        Punkt 4, durch tests/smoke_test_push_overlays.py nachgeprueft):
+        self.map_display_3d existiert je Reiter immer (siehe setup_ui()),
+        auch waehrend gerade 2D sichtbar ist - exakt dieselbe Begruendung
+        wie oben in _push_data_to_current_display() fuer Skalarlayer. Genau
+        das Fehlen dieser Regel war die Ursache aller vier Vorfaelle aus
+        CLAUDE.md (zuletzt BiomeTab.apply_overlays(), Ticket #5).
+
+        Ein unbekannter Overlay-Name ist ein Fehler beim Start, keine stille
+        Auslassung (Spezifikation Punkt 5, erste Zeile) - wer ein neues
+        Overlay anmeldet, ohne es in _OVERLAY_REGISTER einzutragen, bekommt
+        das sofort gemeldet statt eines lautlos wirkungslosen Hakens.
+        """
+        for overlay in overlays:
+            eintrag = _OVERLAY_REGISTER.get(overlay.name)
+            if eintrag is None:
+                raise ValueError(
+                    f"Unbekanntes Overlay '{overlay.name}' - nicht in "
+                    f"_OVERLAY_REGISTER (gui/tabs/base_tab.py) angemeldet. "
+                    f"Siehe docs/SPEC_OVERLAYS.md, Implementation Decisions 3+5."
+                )
+            if self.map_display_2d is not None:
+                eintrag["2d"](self.map_display_2d.display, overlay)
+            if self.map_display_3d is not None:
+                eintrag["3d"](self.map_display_3d.display, overlay)
 
     @error_handler
     def update_display_mode(self):
