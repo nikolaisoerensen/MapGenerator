@@ -102,16 +102,27 @@ sondern eine Eigenschaft grober Testauflösungen. Notiert in
 |---|---|---|
 | `erosion_field` | Farbskala `[0.5, 300]`, typischer Wert 0,22 | Farbskalenproblem, kein Rechenproblem — seit 24.08. |
 | `erosion_gpu_parity` | Export 38,5 gegen 0,1 m auf der CPU | **echter Paritätsbruch**, Faktor 385, seit 24.08. |
-| `erosion_quality` | Kanalnetz 45 px statt > 60, Ebenen 7,2 % statt 15–55 % | Erosionskette ist abgeschaltet |
+| `erosion_quality` | Kanalnetz 45 px statt > 60, Ebenen 7,2 % statt 15–55 % | **offen, Ursache ungeklärt** |
 | `regionen_welt` | 4 Befunde, u. a. Macchia Hang 18,6 statt 14,5 | die Küsten-Archetypen verstimmen die Regionseichung — in CLAUDE.md beschrieben |
 | `pipeline_outputs` | 5 Befunde | seit 24.08. |
 | `settlement_placement` | 6 Befunde, u. a. 2 Städte statt 1 je Kultur | seit 24.08. |
 | `weather_temperature_direktnormierung` | 3 Befunde, Skerrheim 7,86 statt 8,60 K | seit 24.08. |
 
-Die vier Erosionsbefunde sind kein Zufall: die Erosionskette ist bewusst
-abgeschaltet (siehe `docs/PRUEFLISTE_LIVE.md`, Teil B, Abschnitt 4). Sie
-wieder anzuschalten ist ein eigener Schritt und wird diese Befunde
-mitbringen.
+**Die vier Erosionsbefunde sind offen und nicht erklärt.** Hier stand bis
+zum 16.09.2026 das Gegenteil: sie seien kein Zufall, weil die Erosionskette
+bewusst abgeschaltet sei. Das war falsch. `EROSION_AKTIV = True` steht in
+[`gui/config/value_default.py:1088`](../gui/config/value_default.py#L1088),
+und die Erosion läuft seit dem 27.08.2026 im Betrieb mit — die vier Befunde
+entstehen also unter laufender Erosion.
+
+Der Satz hat real etwas angerichtet: solange er dort stand, sah jeder Leser
+vier gewollte Fehlschläge statt vier ungeklärter, und niemand fasste sie an.
+Der schwerste darunter, der Paritätsbruch mit Faktor 385 zwischen GPU und
+CPU, stand damit scheinbar vor einer Reaktivierung statt mitten im laufenden
+Betrieb.
+
+Eine falsche Erklärung ist schlimmer als keine: keine Erklärung lädt zum
+Nachsehen ein, eine falsche schliesst die Frage.
 
 ## 4. Was neu grün ist
 

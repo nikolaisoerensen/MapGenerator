@@ -49,7 +49,7 @@ Wasser → Biome → Siedlungen. Jeder Reiter hängt an einem Knoten.
 | TERRAIN | 10 | keine |
 | RIVER_NETWORK | 11 | keine |
 | EROSION_FILTER | 7 | keine |
-| EROSION | 13 | (Erosion ist abgeschaltet) |
+| EROSION | 13 | keine |
 | GEOLOGY | 15 | keine |
 
 **Alle Regler sind verdrahtet.** Ein erster Grep behauptete das Gegenteil;

@@ -167,10 +167,15 @@ anderen Reiter wechseln, eine Minute arbeiten, zurückwechseln.**
 
 Erosion-Reiter öffnen.
 
-* **Erwartet:** oben ein **gelber Hinweisstreifen**, dass die Erosionskette
-  abgeschaltet ist und die Regler deshalb gesperrt sind.
-* Das ist der Punkt, an dem bisher unklar war, ob die wirkungslosen Regler
-  Absicht oder ein Fehler sind.
+* **Erwartet:** **kein** Hinweisstreifen und **freie Regler**. Die
+  Erosionskette läuft (`EROSION_AKTIV = True`,
+  `gui/config/value_default.py:1088`). Den gelben Streifen zeigt das Programm
+  nur bei `False` (`value_default.py:1725`).
+* Hier stand bis zum 16.09.2026 die umgekehrte Erwartung. Wer danach prüfte,
+  hätte das richtige Verhalten als Fehler gemeldet.
+* **Achten auf:** dass die Regler auch tatsächlich etwas bewirken. Vier
+  Erosionstests sind rot und ihre Ursache ist ungeklärt (siehe
+  `docs/TESTBERICHT.md`, Abschnitt 3).
 
 ## 5. Export
 
