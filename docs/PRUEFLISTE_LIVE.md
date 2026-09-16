@@ -203,6 +203,22 @@ Delatin braucht ~20 s und zeigt währenddessen den Fortschritt.
 Küstenform noch der Meeresboden noch die Regionsübergänge. Das hängt an
 nichts anderem als daran, dass du es dir einmal ansiehst.
 
+## 8. Biome-Reiter: Settlements/Flussnetz in 3D (Ticket #5, 2026-09-16)
+
+`BiomeTab.apply_overlays()` stieg bis heute in der ersten Zeile aus, sobald
+die Ansicht nicht 2D war — die am 2026-08-25 eingebauten 3D-Zweige für
+Settlements und Flussnetz wurden dadurch nie erreicht. Headless geprüft ist
+jetzt nur, dass der Code bei `current_view == "3d"` überhaupt bis zu diesen
+Aufrufen durchläuft (`tests/smoke_test_biome_overlays_3d.py`) — **nicht**,
+ob am Bildschirm wirklich etwas erscheint.
+
+| # | Was ansehen | Was richtig ist | Was schiefgehen kann |
+|---|---|---|---|
+| 8.1 | Karte generieren, Biome-Reiter, Häkchen **Settlements** setzen, dann auf **3D** umschalten | Siedlungen/Landmarken/Roadsites erscheinen als Textur auf dem Gelände | Bleibt 3D leer, ist das derselbe Registerfehler wie schon dreimal zuvor |
+| 8.2 | Dasselbe mit Häkchen **Flussnetz** | Das Flussnetz erscheint auf dem Gelände | |
+| 8.3 | Häkchen in 3D wieder abwählen | Die jeweilige Textur verschwindet sofort | Bleibt die alte Textur liegen, greift die Sichtbarkeits-Abschaltung nicht |
+| 8.4 | Häkchen in **2D** setzen, danach erst auf 3D umschalten | Übernahme sofort, ohne erneutes Generieren | |
+
 ---
 
 ## Was diese Sitzung NICHT geprüft hat

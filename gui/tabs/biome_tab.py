@@ -504,11 +504,12 @@ class BiomeTab(BaseMapTab):
         Contours läuft über die globale Shell-Checkbox, siehe set_contour_overlay())
         """
         current_display = self.get_current_display()
-        if not current_display or self.current_view != "2d":
+        if not current_display:
             return
         display = current_display.display
 
-        # SIEDLUNGEN - IN BEIDEN ANSICHTEN (2026-08-25).
+        # SIEDLUNGEN - IN BEIDEN ANSICHTEN (2026-08-25, Behebung am
+        # 2026-09-16 erst SCHARF geschaltet - siehe Nachtrag unten).
         #
         # Hier stand nur `overlay_settlements`, und die gibt es
         # ausschliesslich auf MapDisplay2D. In der 3D-Ansicht traf die
@@ -525,6 +526,17 @@ class BiomeTab(BaseMapTab):
         #
         # Der 3D-Weg ist die RGBA-Skin-Route, dieselbe, die
         # SettlementTab.apply_3d_overlays() benutzt - kein neuer GLSL-Code.
+        #
+        # NACHTRAG 2026-09-16 (Ticket #5): DIESE BEHEBUNG HAT NIE GEWIRKT.
+        # Direkt ueber dieser Stelle stand bis heute
+        # `if not current_display or self.current_view != "2d": return` -
+        # ein Zeilen frueherer Ausstieg, der die gesamte Methode samt der
+        # 3D-Zweige darunter verlassen hat, sobald die Ansicht nicht 2D war.
+        # Der hasattr-Code unten war fachlich richtig, wurde aber fuer die
+        # 3D-Ansicht NIE erreicht - Vorfall 4 derselben Fehlerklasse, und der
+        # dritte, der als behoben verbucht wurde, ohne es zu sein. Behoben
+        # durch Entfernen der `current_view`-Bedingung aus dem Ausstieg oben;
+        # `tests/smoke_test_biome_overlays_3d.py` deckt genau diesen Ausfall ab.
         settlements = self.data_lod_manager.get_settlement_data("settlement_list")
         landmarks = self.data_lod_manager.get_settlement_data("landmark_list")
         roadsites = self.data_lod_manager.get_settlement_data("roadsite_list")
