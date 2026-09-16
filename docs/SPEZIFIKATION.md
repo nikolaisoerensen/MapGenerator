@@ -480,7 +480,9 @@ vorbestehend und von dieser Aenderung nicht beruehrt.
 ### Weiter offen
 
 * `smoke_test_erosion_gpu_parity`: Export 38.5 (GPU) gegen 0.1 m (CPU),
-  unverstanden seit der relief-relativen Kapazitaet.
+  unverstanden seit der relief-relativen Kapazitaet. **Nachtrag 16.09.2026:**
+  war kein Rechenfehler, sondern ein zu grobes GPU-Meldeintervall; behoben,
+  seither gruen. Aktueller Stand in `docs/TESTBERICHT.md` Abschnitt 3.
 * Die Becken laufen weiterhin nicht bis zum Ueberlauf voll (Befund 1). Die
   Klemme verhindert, dass neue entstehen, sie loest die vorhandenen nicht auf.
 * Routing-Variante bricht im Nebelrode nach 25 Schritten ab - Ursache

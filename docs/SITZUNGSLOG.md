@@ -10,6 +10,48 @@ gekennzeichnet; alles andere ist geprueft.
 
 ---
 
+# 2026-09-16 — Testbericht behauptete einen laengst behobenen Befund (Fund beim Abschluss-Testlauf)
+
+## Befund
+
+Beim einmaligen Voll-Testlauf am Ende der Nacht (`tools/testlauf.py`, 73
+Dateien) war `smoke_test_erosion_gpu_parity.py` gruen - obwohl
+`docs/TESTBERICHT.md` Abschnitt 3 ihn zu diesem Zeitpunkt noch als
+"echter Paritätsbruch, Faktor 385" auffuehrte, und ich selbst diese Zeile
+wenige Stunden vorher in Ticket #63 unveraendert stehen liess.
+
+Einzeln nachgemessen (`tests/smoke_test_erosion_gpu_parity.py` direkt
+gestartet, echte GPU, kein Fallback): ein Schritt GPU gegen CPU Abweichung
+0, Langlauf beide Seiten 0,1 m Export - PASS auf ganzer Linie.
+
+**Ursache der falschen Doku:** der Fund war bereits am 27.08.2026 behoben
+(`docs/SITZUNGSLOG.md`, Eintrag "Erosion wieder eingeschaltet" desselben
+Tages) - ein zu grobes GPU-Meldeintervall (`PROGRESS_REPORT_INTERVAL = 500`
+statt `CONVERGENCE_CHECK_INTERVAL = 25`), kein echter Zahlenfehler. Die
+Behebung geschah aber offenbar NACH dem Testlauf, aus dem
+`docs/TESTBERICHT.md` an jenem Tag geschrieben wurde - die Datei wurde
+seither nie neu erzeugt und blieb drei Wochen falsch.
+
+## Behoben
+
+`docs/TESTBERICHT.md` (Abschnitt 3, Tabelle und Fliesstext), `docs/AUFRAEUMPLAN.md`
+(Abschnitt 4.7 und die Ziel-Tabelle) und der Nachtrag in
+`docs/SPEZIFIKATION.md` §7 korrigiert. `docs/NACHTBETRIEB.md` und
+`docs/SOLLBESCHREIBUNG.md` enthalten dieselbe veraltete Behauptung
+(Faktor 385 / "ungeklaerter Faktor 385"), sind aber hart gesperrt und daher
+nachts nicht anfassbar - offener Punkt fuer den Nutzer oder eine Tagsitzung.
+
+## Lehre
+
+Dieselbe Lehre wie bei Ticket #28/#63, nur am anderen Ende: nicht nur eine
+falsche Erklaerung fuer einen roten Test ueberlebt eine Behebung, sondern
+auch eine korrekte Erklaerung fuer einen inzwischen gruenen Test kann liegen
+bleiben, wenn der Bericht nach der Behebung nie neu geschrieben wird. Ohne
+den Voll-Testlauf am Nachtende waere das nicht aufgefallen - ein Grund mehr,
+ihn nicht zu ueberspringen.
+
+---
+
 # 2026-09-16 — Uebersichts-Reiter: geloescht statt gebaut (Ticket #6)
 
 ## Entscheidung

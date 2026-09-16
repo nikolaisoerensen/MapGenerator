@@ -191,9 +191,11 @@ Dieser Punkt ist veraltet: die Erosion läuft längst, `EROSION_AKTIV = True`
 in `gui/config/value_default.py:1088`. Der Punkt wurde faelschlich als
 Beleg benutzt, um die roten Erosionstests jahrelang wegzuerklaeren ("die
 Erosionskette ist bewusst abgeschaltet") — die zentrale Korrektur dazu
-steht in `docs/TESTBERICHT.md` Abschnitt 3. Der GPU/CPU-Befund
-`erosion_gpu_parity` (frueher Faktor 385) bleibt als eigener, ungeklaerter
-Testbefund bestehen und ist davon unabhaengig zu klaeren.
+steht in `docs/TESTBERICHT.md` Abschnitt 3. Der dort ebenfalls genannte
+GPU/CPU-Befund `erosion_gpu_parity` (frueher als Faktor 385 gefuehrt) ist
+kein offener Befund mehr - er war ein zu grobes GPU-Meldeintervall, laengst
+behoben und am 16.09.2026 erneut gruen gemessen; die Korrektur dazu steht
+ebenfalls in `docs/TESTBERICHT.md` Abschnitt 3.
 
 ---
 
@@ -714,4 +716,4 @@ möchte das du mit dem zuletzt beschriebenen anfängst."*
 | 4 | Erosionsfilter-Beschriftungen, `detail` streichen (4.5) | klein | Messung liegt vor; Schlüssel NICHT umbenennen (ATEF-Quelle) |
 | 5 | Terrain-Reiter mit Regionsauswahl (4.2) | **groß** | Entscheidung liegt vor: Anpassung gilt nur für die aktuelle Karte, Katalog bleibt Vorgabe |
 | 6 | Geologie-Querschnitt (4.6) | mittel | Erst nach den Alpenspitzen, sonst versteckt es den Fehler |
-| — | ~~Erosion reaktivieren (4.7)~~ | — | **ENTFAELLT** — 4.7 gestrichen (veraltet, Erosion laeuft laengst); der GPU/CPU-Befund `erosion_gpu_parity` bleibt als eigener ungeklaerter Testbefund offen |
+| — | ~~Erosion reaktivieren (4.7)~~ | — | **ENTFAELLT** — 4.7 gestrichen (veraltet, Erosion laeuft laengst); der GPU/CPU-Befund `erosion_gpu_parity` ist ebenfalls kein offener Testbefund mehr (16.09.2026 gruen gemessen, siehe `docs/TESTBERICHT.md` Abschnitt 3) |

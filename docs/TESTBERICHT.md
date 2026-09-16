@@ -101,34 +101,49 @@ sondern eine Eigenschaft grober Testauflösungen. Notiert in
 | Test | Befund | Stand |
 |---|---|---|
 | `erosion_field` | Farbskala `[0.5, 300]`, typischer Wert 0,22 | Farbskalenproblem, kein Rechenproblem — seit 24.08. |
-| `erosion_gpu_parity` | Export 38,5 gegen 0,1 m auf der CPU | **echter Paritätsbruch**, Faktor 385, seit 24.08. |
 | `erosion_quality` | Kanalnetz 45 px statt > 60, Ebenen 7,2 % statt 15–55 % | **ungeklärt** — frühere Erklärung ("Erosionskette abgeschaltet") war falsch, siehe unten |
 | `regionen_welt` | 4 Befunde, u. a. Macchia Hang 18,6 statt 14,5 | die Küsten-Archetypen verstimmen die Regionseichung — in CLAUDE.md beschrieben |
 | `pipeline_outputs` | 5 Befunde | seit 24.08. |
 | `settlement_placement` | 6 Befunde, u. a. 2 Städte statt 1 je Kultur | seit 24.08. |
 | `weather_temperature_direktnormierung` | 3 Befunde, Skerrheim 7,86 statt 8,60 K | seit 24.08. |
 
-**Die drei Erosionsbefunde sind offen und nicht erklärt.** Hier stand bis
-zum 16.09.2026 das Gegenteil: sie seien kein Zufall, weil die Erosionskette
-bewusst abgeschaltet sei. Das war **doppelt falsch** (Ticket #28 und #63
-haben das unabhaengig voneinander gefunden und behoben): erstens laeuft die
-Erosion seit dem 27.08.2026 im Betrieb mit - `EROSION_AKTIV = True` steht in
+**`erosion_gpu_parity` stand bis zum 16.09.2026 ebenfalls in dieser
+Tabelle**, mit "Export 38,5 gegen 0,1 m auf der CPU, echter Paritätsbruch,
+Faktor 385". Das war schon lange falsch: `docs/SITZUNGSLOG.md`, Eintrag
+"Erosion wieder eingeschaltet" vom 27.08.2026 (demselben Tag wie dieser
+Bericht, aber offenbar danach), beschreibt den echten Fund — kein
+Rechenfehler, sondern ein zu
+grobes Fortschritts-Meldeintervall auf der GPU-Seite
+(`PROGRESS_REPORT_INTERVAL = 500` statt des `CONVERGENCE_CHECK_INTERVAL = 25`
+der CPU-Seite), das die GPU zwanzigmal zu lange weiterlaufen liess, bevor sie
+ihre Konvergenz prüfte. Behoben, seither grün. Am 16.09.2026 erneut
+gegengemessen (`tests/smoke_test_erosion_gpu_parity.py`, echte GPU, kein
+Fallback): ein Schritt GPU gegen CPU Abweichung 0, Langlauf beide Seiten
+0,1 m Export. Der Bericht behauptete drei Wochen lang das Gegenteil eines
+bereits gelösten Befunds, weil er nach der Behebung nicht nachgezogen wurde.
+
+**Die zwei verbleibenden Erosionsbefunde sind offen und nicht erklärt.**
+Hier stand bis zum 16.09.2026 das Gegenteil: sie seien kein Zufall, weil die
+Erosionskette bewusst abgeschaltet sei. Das war **doppelt falsch** (Ticket
+#28 und #63 haben das unabhaengig voneinander gefunden und behoben): erstens
+laeuft die Erosion seit dem 27.08.2026 im Betrieb mit -
+`EROSION_AKTIV = True` steht in
 [`gui/config/value_default.py:1088`](../gui/config/value_default.py#L1088)
 und ist die einzig gueltige Aussage zum Schalter. Zweitens stimmte schon die
-Zahl nicht: die Tabelle oben listet nur **drei** Erosionsbefunde
-(`erosion_field`, `erosion_gpu_parity`, `erosion_quality`), keine vier.
+Zahl nicht: die Tabelle listete zu jenem Zeitpunkt drei Erosionsbefunde
+(`erosion_field`, `erosion_gpu_parity`, `erosion_quality`), keine vier - und
+`erosion_gpu_parity` war, wie oben beschrieben, ohnehin bereits behoben.
 
 Der Satz hat real etwas angerichtet: solange er dort stand, sah jeder Leser
-drei gewollte Fehlschläge statt drei ungeklärter, und niemand fasste sie an.
-Der schwerste darunter, der Paritätsbruch mit Faktor 385 zwischen GPU und
-CPU, stand damit scheinbar vor einer Reaktivierung statt mitten im laufenden
-Betrieb. `erosion_field` und `erosion_gpu_parity` haben eigene, vom Schalter
-unabhaengige Erklaerungen; der tatsaechliche Grund fuer `erosion_quality`
-bleibt **ungeklaert** - das ist eine offene Aufgabe, kein erledigter oder
-bewusster Zustand.
+gewollte Fehlschläge statt ungeklärter, und niemand fasste sie an.
+`erosion_field` hat eine eigene, vom Schalter unabhaengige Erklaerung; der
+tatsaechliche Grund fuer `erosion_quality` bleibt **ungeklaert** - das ist
+eine offene Aufgabe, kein erledigter oder bewusster Zustand.
 
 Eine falsche Erklärung ist schlimmer als keine: keine Erklärung lädt zum
-Nachsehen ein, eine falsche schliesst die Frage.
+Nachsehen ein, eine falsche schliesst die Frage. Das gilt fuer die
+Erosionskette ebenso wie fuer eine laengst behobene GPU-Messung, die
+wochenlang als offen weitergefuehrt wurde.
 
 ## 4. Was neu grün ist
 
