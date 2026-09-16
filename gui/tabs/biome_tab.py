@@ -540,7 +540,7 @@ class BiomeTab(BaseMapTab):
             heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
             if heightmap is not None:
                 if zeigen:
-                    from gui.widgets.map_display_2d import rasterize_settlements_rgba
+                    from gui.widgets.overlay_rasterizer import rasterize_settlements_rgba
                     rgba = rasterize_settlements_rgba(
                         settlements or [], landmarks or [], roadsites or [],
                         [], [], map_size=heightmap.shape[0],

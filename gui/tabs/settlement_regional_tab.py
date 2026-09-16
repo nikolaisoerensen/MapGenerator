@@ -367,7 +367,7 @@ class SettlementRegionalTab(BaseMapTab):
             plot_edges = self.data_lod_manager.get_settlement_data("plot_edges")
             plot_cores = self.data_lod_manager.get_settlement_data("plot_cores")
             wilderness_polygons = self.data_lod_manager.get_settlement_data("wilderness_polygons")
-            from gui.widgets.map_display_2d import rasterize_plot_boundaries_rgba
+            from gui.widgets.overlay_rasterizer import rasterize_plot_boundaries_rgba
             rgba = rasterize_plot_boundaries_rgba(
                 plot_nodes, plot_edges, plot_cores, wilderness_polygons,
                 map_size=heightmap.shape[0], resolution=heightmap.shape[0])

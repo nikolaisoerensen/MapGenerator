@@ -31,7 +31,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from gui.widgets.map_display_2d import rasterize_fluesse_rgba
+from gui.widgets.overlay_rasterizer import rasterize_fluesse_rgba
 
 
 def _testfeld(n=64):

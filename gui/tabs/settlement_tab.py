@@ -841,7 +841,7 @@ class SettlementTab(BaseMapTab):
         # Landmarken, Roadsites), fuer die er voellig genuegt.
         hat_punkte = bool(settlements or landmarks or roadsites)
         if hat_punkte:
-            from gui.widgets.map_display_2d import rasterize_settlements_rgba
+            from gui.widgets.overlay_rasterizer import rasterize_settlements_rgba
             rgba = rasterize_settlements_rgba(
                 settlements, landmarks, roadsites, [], [],
                 map_size=heightmap.shape[0], resolution=heightmap.shape[0])

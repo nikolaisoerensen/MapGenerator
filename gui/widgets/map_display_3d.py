@@ -2937,7 +2937,7 @@ class MapDisplay3D(QOpenGLWidget):
             if hoehe is None:
                 return
 
-            from gui.widgets.map_display_2d import (
+            from gui.widgets.overlay_rasterizer import (
                 rasterize_regions_rgba, rasterize_kuesten_archetypen_rgba,
                 rasterize_fluesse_rgba)
             # DAS FLUSSNETZ ZUERST, denn es braucht `regionen` NICHT.
