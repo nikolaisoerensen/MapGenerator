@@ -241,6 +241,21 @@ unverändert und sind der eigentliche Test dieser Umstellung. Zusätzlich neu:
 | 9.1 | Settlements UND Flussnetz gleichzeitig anhaken, mehrfach zwischen 2D/3D wechseln | Beide Texturen bleiben stabil sichtbar, kein Flackern, keine veraltete Textur | Fingerabdruck-Cache in `_siedlungen_3d` (base_tab.py) baut die RGBA-Textur falsch gar nicht neu, wenn sich Siedlungsdaten geändert haben |
 | 9.2 | Nur Flussnetz an-/abhaken, Settlements-Häkchen dabei unverändert lassen | Kein sichtbares Neuladen/Aufblitzen der Siedlungstextur | Ohne den Fingerabdruck-Cache würde hier bei jedem Flussnetz-Klick unnötig die komplette Siedlungstextur neu gebaut (war der Anlass für Commit 927eecc) |
 
+## 10. Siedlungs-Reiter (`settlement_tab.py`) auf das Register umgestellt (Ticket #10, 2026-09-16)
+
+Nur die Siedlungspunkte (Städte/Landmarken/Roadsites, Layer `"uebersicht"`)
+laufen jetzt über `self._push_overlays()`. Regionsraster, Straßen (2D-Linien),
+Regionsfarben und die 3D-Wegbänder (`"wegbaender"`) sind **unverändert** und
+liefen vorher schon richtig (Settlement-Reiter war nicht Teil des Fehlers,
+siehe CLAUDE.md "das Vorbild"). Am Bildschirm soll sich nichts ändern außer
+dass die Siedlungstextur jetzt einen Fingerabdruck-Cache hat (vorher keinen).
+
+| # | Was ansehen | Was richtig ist | Was schiefgehen kann |
+|---|---|---|---|
+| 10.1 | Siedlungs-Reiter, Häkchen Settlements/Landmarks/Roadsites einzeln durchschalten, in 2D UND 3D | Punkte erscheinen/verschwinden in BEIDEN Ansichten passend zu den Häkchen | Bleibt 3D leer oder veraltet, ist das derselbe Registerfehler wie bei Biome |
+| 10.2 | Straßen-Häkchen an-/abschalten, dabei Settlements-Häkchen unverändert lassen | Wegbänder (3D) und Straßenlinien (2D) reagieren, Siedlungspunkte bleiben unverändert/flackern nicht | Fingerabdruck-Cache reagiert falsch auf reine Wege-Änderungen |
+| 10.3 | Anklickbare Objekte (Städte/Wege) im 3D antippen | Info-Popup erscheint weiterhin wie zuvor | `setze_auswahlobjekte()` wurde in diesem Umbau nicht angefasst, sollte also unverändert funktionieren |
+
 ---
 
 ## Was diese Sitzung NICHT geprüft hat

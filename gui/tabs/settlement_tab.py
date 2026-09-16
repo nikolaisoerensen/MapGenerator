@@ -15,7 +15,7 @@ from PyQt6.QtGui import *
 import numpy as np
 import logging
 
-from .base_tab import BaseMapTab
+from .base_tab import BaseMapTab, Overlay
 from gui.config.value_default import SETTLEMENT, get_parameter_config, validate_parameter_set, VALIDATION_RULES
 from gui.widgets.widgets import ParameterSlider, StatusIndicator
 
@@ -708,8 +708,27 @@ class SettlementTab(BaseMapTab):
 
         self._apply_settlement_overlays()
 
-        # 3D Overlays
+        # 3D Overlays (Wegbaender/Plots/Auswahlobjekte - noch nicht im Register)
         self.apply_3d_overlays()
+
+        # Siedlungspunkte (Staedte/Landmarken/Roadsites) UEBER DAS REGISTER
+        # (Ticket #10, docs/SPEC_OVERLAYS.md): ersetzt die bisherige
+        # Verdopplung aus `overlay_settlements()` in _apply_settlement_overlays()
+        # (nur 2D, current_view-gated) und der `uebersicht`-Textur in
+        # apply_3d_overlays() (nur 3D, ohne Fingerabdruck-Cache) durch einen
+        # gemeinsamen Aufruf - derselbe Weg, den BiomeTab.apply_overlays()
+        # bereits benutzt.
+        settlements = self.data_lod_manager.get_settlement_data("settlement_list")
+        landmarks = self.data_lod_manager.get_settlement_data("landmark_list")
+        roadsites = self.data_lod_manager.get_settlement_data("roadsite_list")
+        display_settlements = settlements if self.show_settlements_cb.isChecked() else []
+        display_landmarks = landmarks if self.show_landmarks_cb.isChecked() else []
+        display_roadsites = roadsites if self.show_roadsites_cb.isChecked() else []
+        siedlungen_sichtbar = bool(display_settlements or display_landmarks or display_roadsites)
+        self._push_overlays([
+            Overlay("siedlungen", sichtbar=siedlungen_sichtbar,
+                    daten=(display_settlements, display_landmarks, display_roadsites)),
+        ])
 
     def _apply_settlement_overlays(self):
         """
@@ -738,18 +757,9 @@ class SettlementTab(BaseMapTab):
                     heightmap.shape[0],
                     spielkarte=self.data_lod_manager.get_terrain_data("spielkarte"))
 
-        if hasattr(display, 'overlay_settlements') and (
-                self.show_settlements_cb.isChecked() or self.show_landmarks_cb.isChecked()
-                or self.show_roadsites_cb.isChecked()):
-            settlements = self.data_lod_manager.get_settlement_data("settlement_list")
-            landmarks = self.data_lod_manager.get_settlement_data("landmark_list")
-            roadsites = self.data_lod_manager.get_settlement_data("roadsite_list")
-
-            display_settlements = settlements if self.show_settlements_cb.isChecked() else []
-            display_landmarks = landmarks if self.show_landmarks_cb.isChecked() else []
-            display_roadsites = roadsites if self.show_roadsites_cb.isChecked() else []
-
-            display.overlay_settlements(display_settlements, display_landmarks, display_roadsites)
+        # Siedlungspunkte (Settlements/Landmarks/Roadsites) laufen seit Ticket
+        # #10 NICHT mehr hier, sondern gemeinsam mit dem 3D-Weg ueber
+        # self._push_overlays() in update_settlement_display() - siehe dort.
 
         # Verbindungsstrassen (docs/SIEDLUNGEN_ENTWURF.md §4): Landwege
         # durchgezogen orange, Seewege gestrichelt in eigenem Blau (§4.4
@@ -792,17 +802,13 @@ class SettlementTab(BaseMapTab):
         Plot-Layer wuerde also nicht von selbst verschwinden, wenn er nicht
         mehr gefuellt wird. Explizit ausblenden statt nur "nicht mehr fuellen".
 
-        SEIT 2026-08-13 zeichnet dieser Reiter dafuer die globale
-        Siedlungsuebersicht in 3D (Nutzer-Vorgabe nach der Sichtpruefung:
-        "3D Settlements global sollte jetzt umgesetzt werden"): Staedte,
-        Landmarken, Roadsites und die Land-/Seewege werden mit
-        `rasterize_settlements_rgba()` auf eine RGBA-Textur gezeichnet und als
-        Alpha-Skin auf das Gelaende gelegt - derselbe Weg wie Regionen und
-        Kuestentypen im Terrain-Reiter, kein neuer GLSL-Code. Die drei
-        `settlements`/`landmarks`/`roads`-Layer der 3D-Anzeige bleiben
-        ungenutzt: ihr Renderer `_render_settlement_markers()` ist seit jeher
-        ein leerer TODO-Stub, und echte 3D-Marker-Geometrie waere deutlich
-        mehr Arbeit als dieselbe Zeichnung als Textur.
+        Die Siedlungspunkte selbst (Staedte/Landmarken/Roadsites als
+        RGBA-Skin auf dem Gelaende) baut seit Ticket #10 nicht mehr diese
+        Methode, sondern das gemeinsame Overlay-Register ueber
+        self._push_overlays() (update_settlement_display()) - derselbe Weg,
+        den auch BiomeTab benutzt. Hier bleiben nur die Wege ("wegbaender",
+        echte Bandgeometrie statt Textur, docs/OFFENE_PUNKTE.md 6.28 - noch
+        nicht im Register) und die anklickbaren Auswahlobjekte.
 
         Die Auswahl folgt DENSELBEN Checkboxen wie die 2D-Ansicht - was in 2D
         ausgeschaltet ist, fehlt auch auf dem Skin.
@@ -818,9 +824,14 @@ class SettlementTab(BaseMapTab):
 
         heightmap = self.data_lod_manager.get_terrain_data("heightmap")
         if heightmap is None:
-            display_3d.set_layer_visibility("settlement", "uebersicht", False)
             return
 
+        # Die Siedlungspunkte-Textur ("uebersicht") baut seit Ticket #10 nicht
+        # mehr diese Methode, sondern self._push_overlays() in
+        # update_settlement_display() (Overlay "siedlungen", mit
+        # Fingerabdruck-Cache aus base_tab.py._siedlungen_3d). Die Variablen
+        # settlements/landmarks/roadsites werden hier trotzdem gebraucht - fuer
+        # die anklickbaren Auswahlobjekte weiter unten.
         settlements = (self.data_lod_manager.get_settlement_data("settlement_list") or []
                        if self.show_settlements_cb.isChecked() else [])
         landmarks = (self.data_lod_manager.get_settlement_data("landmark_list") or []
@@ -832,21 +843,6 @@ class SettlementTab(BaseMapTab):
             sea_roads = self.data_lod_manager.get_settlement_data("sea_roads") or []
         else:
             roads, sea_roads = [], []
-
-        # WEGE ALS ECHTE BANDGEOMETRIE, NICHT MEHR ALS TEXTUR (2026-08-13,
-        # docs/OFFENE_PUNKTE.md 6.28). Sie werden deshalb aus dem Textur-Skin
-        # HERAUSGENOMMEN - lagen beide uebereinander, saehe man die pixelige
-        # Texturfassung durch das scharfe Band hindurch, und der ganze Zweck
-        # waere dahin. Der Skin traegt weiterhin die Punktobjekte (Staedte,
-        # Landmarken, Roadsites), fuer die er voellig genuegt.
-        hat_punkte = bool(settlements or landmarks or roadsites)
-        if hat_punkte:
-            from gui.widgets.overlay_rasterizer import rasterize_settlements_rgba
-            rgba = rasterize_settlements_rgba(
-                settlements, landmarks, roadsites, [], [],
-                map_size=heightmap.shape[0], resolution=heightmap.shape[0])
-            display_3d.update_overlay_data("settlement", "uebersicht", rgba)
-        display_3d.set_layer_visibility("settlement", "uebersicht", hat_punkte)
 
         hat_wege = bool(roads or sea_roads)
         if hat_wege:
