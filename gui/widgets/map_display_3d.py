@@ -1033,6 +1033,17 @@ class MapDisplay3D(QOpenGLWidget):
             self.rendering_error.emit(f"Unknown tab type: {tab_type}")
             return
 
+        if layer_name not in self.overlay_data[tab_type]:
+            # Ohne diese Pruefung legt die Zuweisung unten einfach einen neuen
+            # Dict-Schluessel an (Ticket 14.7, docs/OFFENE_PUNKTE.md): ein
+            # Tippfehler im layer_name erzeugt dann KEINEN Fehler, sondern ein
+            # Overlay, das nirgends gelesen wird - "ein Nichts" statt eines
+            # KeyError. Die gueltigen Namen je tab_type stehen alle schon oben
+            # in self.overlay_data (__init__).
+            self.rendering_error.emit(
+                f"Unknown layer name '{layer_name}' for tab type '{tab_type}'")
+            return
+
         expected_shape = self.heightmap.shape if self.heightmap is not None else None
 
         if tab_type == "settlement" and layer_name in ["settlements", "landmarks", "roads"]:
@@ -1069,9 +1080,17 @@ class MapDisplay3D(QOpenGLWidget):
         Parameter: tab_type (str), layer_name (str), visible (bool)
         """
         if tab_type not in self.layer_visibility:
+            self.rendering_error.emit(f"Unknown tab type: {tab_type}")
             return
 
         if layer_name not in self.layer_visibility[tab_type]:
+            # Bisher stiller Rueckfall (Ticket 14.7, docs/OFFENE_PUNKTE.md):
+            # ein Tippfehler im layer_name erzeugte keinen Fehler, sondern
+            # schaltete lautlos gar nichts - CLAUDE.md "jeder stille
+            # Rueckfall auf einen Ersatzpfad braucht eine laute Logzeile",
+            # hier ueber dasselbe Fehlersignal wie update_overlay_data() oben.
+            self.rendering_error.emit(
+                f"Unknown layer name '{layer_name}' for tab type '{tab_type}'")
             return
 
         self.layer_visibility[tab_type][layer_name] = visible
