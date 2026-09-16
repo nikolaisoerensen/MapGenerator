@@ -6,9 +6,16 @@ soll. Nicht, was er kann — das steht im Ist-Stand-Inventar
 Gegen dieses Dokument wird jede Umsetzung geprüft, und aus dem Abgleich
 zwischen ihm und dem Ist-Stand entstehen die Arbeitstickets.
 
-**Stand 2026-09-14: GERÜST, nicht fertig.** Ausformuliert ist, was
-entschieden ist. Alles andere steht als **Frage** da, mit dem Ticket, das sie
-beantwortet:
+**Stand 2026-09-16: alle 45 Fragen des ersten Durchgangs sind beantwortet.**
+Jede Antwort steht an der Stelle, an der vorher die Frage stand, und nennt das
+Entscheidungsticket, in dem sie gefallen ist:
+
+> **✅ ENTSCHIEDEN — [#NN](link):** die Antwort, mit Verweis auf das
+> Arbeitsticket, das sie umsetzt.
+
+Zwei Stellen sind ausdrücklich als **Offen geblieben** markiert: der Fragebogen
+hat sie nie gestellt. Sie kommen in den nächsten Durchgang. Eine neue Frage
+wird wieder als solche eingetragen:
 
 > **❓ OFFEN — #NN:** die Frage im Wortlaut.
 
@@ -214,10 +221,10 @@ die billigst erreichbare Quelle und die Kosten dorthin liefert, mit
 Kappungsgrenze und GPU-Fassung. Er wird heute für Stadtgrenzen und Parzellen
 benutzt.
 
-> **❓ OFFEN — [#27](https://github.com/nikolaisoerensen/MapGenerator/issues/27):** Gehört diese Gliederung zur Kartenausgabe — Zugehörigkeitskarte, Kostenkarte, Nachbarschaftsgraph der Siedlungen — oder rechnet das Spiel sie selbst?
-> **❓ OFFEN — #27:** Sollen die Wege des Wegenetzes die Kosten senken? Heute zählt nur die Hangneigung; eine Straße macht den Weg nicht billiger, was der Sache widerspricht.
-> **❓ OFFEN — #27:** Trennt Wasser oder verbindet es? Seewege gibt es bereits.
-> **❓ OFFEN — #27:** Wie fein sollen die Stücke sein? Genannt wurden 100 m Segmentkante und rund 300 m Sicht — bei 10,4 m je Bildpunkt sind 100 m knapp zehn Bildpunkte.
+> **✅ ENTSCHIEDEN — [#27](https://github.com/nikolaisoerensen/MapGenerator/issues/27):** Die Gliederung **bleibt spielseitig**. Der Editor liefert die Wegekosten, aus denen sie folgt; wie fein das Spiel daraus seine Simulation staffelt — grob je Voronoi-Zelle, nicht je Bildpunkt —, ist nicht Sache des Karteneditors.
+> **✅ ENTSCHIEDEN — [#27](https://github.com/nikolaisoerensen/MapGenerator/issues/27):** **Ja, nach Wegart gestaffelt.** Ein Trampelpfad, ein Karrenweg und eine gepflasterte Straße kosten je Kilometer Unterschiedliches. Der Haken ist die Rückkopplung: ein Weg macht sich selbst schneller und zieht damit weitere Wege an sich, weshalb kleine direkte Verbindungen seltener entstehen. Dazu kommt die Wegersparnis durch Mitbenutzung. Das ist ein kalibriertes System und muss im Betrieb gemessen werden, sonst läuft es weg.
+> **✅ ENTSCHIEDEN — [#27](https://github.com/nikolaisoerensen/MapGenerator/issues/27):** **Beides.** Wasser verbindet längs — Wege folgen Ufern, und ein Teil der Händler fährt mit Booten, die Mehrzahl bleibt auf Straßen — und trennt quer. Eine Querung ohne Brücke ist teuer; **steht die Brücke, ist sie billig**. Die Brücke ist damit ein Bauwerk im selben Regelkreis, kein fester Geländewert.
+> **✅ ENTSCHIEDEN — [#27](https://github.com/nikolaisoerensen/MapGenerator/issues/27):** **Nicht in Metern, sondern in Höhenkosten.** Nach unten sieht man weit, nach oben fast nichts — nur Bergumrisse im Nebel. Für die Simulations-Detaillierung zählen Wegkosten, grob je Voronoi-Zelle. Das gilt für Objekte wie für Stadteinzugsgebiete. **Spielseitig, Langzeitziel** — im Karteneditor derzeit ohne Bedeutung.
 
 ### 5. Die Zeit
 
@@ -238,10 +245,10 @@ Zuweisung je Region.
 
 Vielfalt ist erwünscht, hat aber ihren Preis in der Stabilität der Simulation.
 
-> **❓ OFFEN — [#26](https://github.com/nikolaisoerensen/MapGenerator/issues/26):** Welche Rohstoffe soll es überhaupt geben?
-> **❓ OFFEN — #26:** Eine Dichtekarte je Stoff, oder genügt eine Zuordnungstabelle Biom/Schicht → Stoff?
-> **❓ OFFEN — #26:** Werden Stoffe je **Parzelle** hinterlegt oder je Bildpunkt — und wie wird daraus eine Berufsstätte?
-> **❓ OFFEN — #26:** Gibt die Geologie genug her? Sie liefert heute Gesteinsarten und Härte; ob daraus eine brauchbare Erzverteilung folgt, ist ungeprüft.
+> **✅ ENTSCHIEDEN — [#26](https://github.com/nikolaisoerensen/MapGenerator/issues/26):** Das wird **gemeinsam erarbeitet**, in vier Runden: erst die Kategorien, dann die Stoffe je Kategorie — abgeleitet aus dem, was die neun Regionen, die Biome und die Geologie tatsächlich hergeben —, dann die Fertigungszweige je Stoff, zuletzt der Lückenabgleich von den herzustellenden Gegenständen rückwärts. Das bestehende Godot-Projekt liefert die Vorlage. Siehe [Rohstoffkategorien, Stoffe und Fertigungszweige](https://github.com/nikolaisoerensen/MapGenerator/issues/69).
+> **✅ ENTSCHIEDEN — [#26](https://github.com/nikolaisoerensen/MapGenerator/issues/26):** **Die Tabelle zuerst**, eine Karte nur dort, wo die Tabelle nicht ausreicht. Eine Dichtekarte je Stoff ist teuer und für die meisten Stoffe überflüssig.
+> **✅ ENTSCHIEDEN — [#26](https://github.com/nikolaisoerensen/MapGenerator/issues/26):** **Je Bildpunkt.** Eine Berufsstätte greift über ein **Einzugsgebiet** darauf zu, nicht über die Parzelle, auf der sie steht.
+> **✅ ENTSCHIEDEN — [#26](https://github.com/nikolaisoerensen/MapGenerator/issues/26):** **Erst nachsehen, dann entscheiden** — siehe [Gibt die Geologie eine Erzwahrscheinlichkeit her](https://github.com/nikolaisoerensen/MapGenerator/issues/68). Gebraucht wird je Ort eine **Wahrscheinlichkeitsverteilung**, keine feste Zuweisung: niemand weiß vorher genau, was unter einer Mine liegt. Man leitet es aus dem Geförderten ab, abhängig von Können und Glück; Prospektion und Wirtshausgerüchte grenzen nur grob ein. Eine Mine ist teuer und kein Anfangsgebäude — man beginnt mit einer Lehmgrube, später vielleicht einem Steinbruch. Die Mechanik selbst ist **spielseitig**.
 
 ### 7. Eignungsfelder: viele Felder, eine Rechnung
 
@@ -259,8 +266,8 @@ eigene Geländeanalyse wäre eine zweite Wahrheit."*
 Moore, Abgelegenheit), die Auswahl trifft das Spiel. So liegen die dunklen Orte
 nicht in jedem Durchgang gleich.
 
-> **❓ OFFEN — [#19](https://github.com/nikolaisoerensen/MapGenerator/issues/19):** Wird die Typentabelle zu einem Register, damit „billig hinzuzufügen" eine Tatsache statt eines Versprechens ist?
-> **❓ OFFEN — #19:** Die Eignungsrechnung sieht die Biomkarte **nicht** — die Kante im Rechengraphen fehlt. Alles, was auf „alter Wald" oder „Moor" hören soll, braucht sie zuerst. Wird sie gezogen?
+> **✅ ENTSCHIEDEN — [#19](https://github.com/nikolaisoerensen/MapGenerator/issues/19):** **Offen geblieben** und nicht entschieden — die Frage nach dem Register wurde im Durchgang nicht gestellt. Sie kommt in den nächsten Fragebogen.
+> **✅ ENTSCHIEDEN — [#19](https://github.com/nikolaisoerensen/MapGenerator/issues/19):** **Ja, die Kante wird gezogen.** Die Eignungsrechnung bekommt die Biomkarte, und zwar so, dass sich die Eignungswerte messbar ändern — eine Kante ohne Wirkung sieht wie Erfolg aus und ist keiner. Siehe [Biomkarte in die Siedlungs-Eignungsrechnung einhängen](https://github.com/nikolaisoerensen/MapGenerator/issues/34).
 
 ### 8. Stehende Regeln, die weiter gelten
 
@@ -272,33 +279,33 @@ nicht in jedem Durchgang gleich.
 
 ### 9. Gelände und Geologie
 
-> **❓ OFFEN — [#17](https://github.com/nikolaisoerensen/MapGenerator/issues/17):** Sollen die Regler Landschaftsbeschreibungen werden? `SPEZIFIKATION.md` §1 verlangt es wörtlich; der Reiter zeigt Frequenz, Oktaven, Persistenz, Lakunarität, Umverteilungspotenz. Das Programm hat insgesamt 112 sichtbare Regler.
-> **❓ OFFEN — #17:** Gehören die neun Regionsparametersätze in die Oberfläche? Heute sind sie Modulkonstanten; wer das Nevadin ändern will, editiert eine Programmdatei.
-> **❓ OFFEN — #17:** Was soll die Erosion leisten? Sie **läuft** seit dem 2026-08-27, während vier Dokumente sie als abgeschaltet führen. Der ungeklärte Faktor 385 zwischen GPU und CPU steht damit im laufenden Betrieb: das Programm rechnet je nach Hardware etwas anderes.
-> **❓ OFFEN — #17:** Zwei Ansichten des Gelände-Reiters sind unerreichbar — sie werden angelegt und in die Knopfgruppe gehängt, aber nie ins Layout eingefügt. Gewollt oder Versehen?
-> **❓ OFFEN — #17:** Was gehört von Küstenarchetypen, Hinterland, Flussnetz-mit-Hochebene, Erosionsfilter, Geologie-Querschnitt und adaptivem 3D-Netz ins Sollbild?
+> **✅ ENTSCHIEDEN — [#17](https://github.com/nikolaisoerensen/MapGenerator/issues/17):** **Offen geblieben** — die Frage nach Landschaftsbeschreibungen statt Rauschparametern wurde im Durchgang nicht entschieden. Sie kommt in den nächsten Fragebogen.
+> **✅ ENTSCHIEDEN — [#17](https://github.com/nikolaisoerensen/MapGenerator/issues/17):** **In eine Datei** (TOML oder JSON), nicht in die Oberfläche. Die Oberfläche zeigt sie **nur lesend**. Die Werte selbst dürfen sich dabei nicht ändern. Siehe [Die neun Regionsparametersätze in eine Datei](https://github.com/nikolaisoerensen/MapGenerator/issues/29).
+> **✅ ENTSCHIEDEN — [#17](https://github.com/nikolaisoerensen/MapGenerator/issues/17):** **Parität ist Pflicht.** Der Faktor 385 zwischen GPU und CPU wird gefunden und behoben. Zeigt die Messung aber, dass die CPU-Erosion unbrauchbar langsam ist — sechs Minuten gegen fünfundzwanzig Sekunden —, wird sie **laut stillgelegt** statt repariert. Erst messen, dann entscheiden. Siehe [CPU-Erosion messen und die Konsequenz ziehen](https://github.com/nikolaisoerensen/MapGenerator/issues/30).
+> **✅ ENTSCHIEDEN — [#17](https://github.com/nikolaisoerensen/MapGenerator/issues/17):** **Versehen.** Beide werden eingebaut — und nach der stehenden Regel in derselben Änderung für 2D **und** 3D. Siehe [Zwei unerreichbare Gelände-Ansichten sichtbar machen](https://github.com/nikolaisoerensen/MapGenerator/issues/31).
+> **✅ ENTSCHIEDEN — [#17](https://github.com/nikolaisoerensen/MapGenerator/issues/17):** **Nur was wiedererkennbares Gelände erzeugt**: Küstenarchetypen, Hinterland, Flussnetz und Erosion. Der Geologie-Querschnitt und das adaptive 3D-Netz sind Anzeige und Rechenersparnis, kein Sollbild.
 
 ### 10. Wetter und Wasser
 
-> **❓ OFFEN — [#18](https://github.com/nikolaisoerensen/MapGenerator/issues/18):** Bleibt die Atmosphäre dreischichtig? Sie ist der letzte große Rechenposten, und außerhalb ihrer eigenen Datei wird bestätigt nur die Bodenschicht gelesen.
-> **❓ OFFEN — #18:** Die Seenfläche steht auf 0,0 % gegen ein Ziel größer null, obwohl die Seegliederung ausgebaut ist. Widerspruch oder überholte Messung?
-> **❓ OFFEN — #18:** Gehört eine geschlossene Wasserbilanz ins Sollbild? Sie weicht heute um +10,7 % ab, ungeklärt.
-> **❓ OFFEN — #18:** Mäander und Breitenvariation sind als Ziel formuliert und bis heute nicht gemessen. Sind es echte Ziele?
+> **✅ ENTSCHIEDEN — [#18](https://github.com/nikolaisoerensen/MapGenerator/issues/18):** **Offen geblieben** — ob die Atmosphäre dreischichtig bleibt, wurde im Durchgang nicht entschieden. Sie kommt in den nächsten Fragebogen.
+> **✅ ENTSCHIEDEN — [#18](https://github.com/nikolaisoerensen/MapGenerator/issues/18):** **Erst nachmessen, dann entscheiden.** Bei 256, 512 und 1024 Bildpunkten, drei Seeds, je Region. Erst wenn die Zahl steht, ist klar, ob es ein Widerspruch oder eine überholte Messung war. Siehe [Seenfläche neu messen](https://github.com/nikolaisoerensen/MapGenerator/issues/32).
+> **✅ ENTSCHIEDEN — [#18](https://github.com/nikolaisoerensen/MapGenerator/issues/18):** **Ja, mit einem Toleranzband von zehn Prozent.** Wichtig ist nur, dass es nicht ausufert; auf zwei Prozent genau muss es nicht sein. Die Bandgrenze steht versioniert im Repo, nicht im Testcode. Siehe [Wasserbilanz mit Toleranzband von zehn Prozent zusichern](https://github.com/nikolaisoerensen/MapGenerator/issues/70).
+> **✅ ENTSCHIEDEN — [#18](https://github.com/nikolaisoerensen/MapGenerator/issues/18):** **Ja, echte Ziele** — und sie bekommen endlich eine Kennzahl: die **Sinuosität**, Lauflänge geteilt durch Luftlinie. Erwartet wird, dass Flachlandflüsse stärker mäandern als Gebirgsflüsse; das wird gemessen, nicht angenommen. Siehe [Sinuosität als Kennzahl für Mäander](https://github.com/nikolaisoerensen/MapGenerator/issues/33).
 
 ### 11. Biome und Siedlungen
 
-> **❓ OFFEN — #19:** Was liest das Spiel wirklich von der aufwendigsten Schicht des Programms?
-> **❓ OFFEN — #19:** Gehören Parzellen — also Stadtgrundrisse — in den Karteneditor, oder entstehen sie im Spiel?
-> **❓ OFFEN — #19:** Bleibt die Plot Physics Lab als eigenes Werkzeug?
-> **❓ OFFEN — #19:** Tragen die neun an reale Völker angelehnten Kulturen ins Spiel, oder sind es Arbeitsbenennungen?
+> **✅ ENTSCHIEDEN — [#19](https://github.com/nikolaisoerensen/MapGenerator/issues/19):** **Eine feste Feldliste, und nur die Außenform.** Der Editor liefert die **Kontur der Stadtgrenze**, die **Anschlusspunkte der Wege**, sowie **Größe, Typ, Rang und Kultur**. Mehr nicht. Alles, was nicht in dieser Liste steht, ist Innenleben des Editors und darf sich ändern, ohne das Spiel zu brechen. Siehe [Die Feldliste der Siedlungsnaht festschreiben](https://github.com/nikolaisoerensen/MapGenerator/issues/35).
+> **✅ ENTSCHIEDEN — [#19](https://github.com/nikolaisoerensen/MapGenerator/issues/19):** **Im Spiel.** Man klickt eine Stadt im Simulator an und sieht die Parzelle als Bild — gezeichnet aus Stadtgrenze, Weganschlüssen, Größe, Typ und **Kultur**. Zuerst nur Straßennetze und Häuserformen, später Symbole für das, was darin steckt (Schneider und dergleichen).
+> **✅ ENTSCHIEDEN — [#19](https://github.com/nikolaisoerensen/MapGenerator/issues/19):** **Ja, als Werkzeug** — nicht als Programmteil des Editors.
+> **✅ ENTSCHIEDEN — [#19](https://github.com/nikolaisoerensen/MapGenerator/issues/19):** **Arbeitsbenennungen.** Die Völker sind an echte Kulturen angelehnt und bekommen im Spiel vielleicht eigene Namen; derzeit reichen die Platzhalter oder die echten Namen.
 
 ### 12. Anzeige, Bedienung und Export
 
-> **❓ OFFEN — [#20](https://github.com/nikolaisoerensen/MapGenerator/issues/20):** Ist 3D die Hauptansicht oder die Kontrollansicht? Davon hängt ab, was jede neue Anzeige kostet.
-> **❓ OFFEN — #20:** Das LOD-System steht in `OFFENE_PUNKTE.md` als „entfernen" und im README als Merkmal. Eines von beidem ist falsch.
-> **❓ OFFEN — #20:** Wie fein muss es im Spiel sein? Gefordert sind „mindestens zehnmal genauer bei den Texturen". Zu trennen sind drei verschieden teure Dinge: die **Geländeform** (Höhenkarte, heute 10,4 m je Bildpunkt), die **Texturwahl** (Zuordnungskarte, ebenfalls 10,4 m) und die **Texturschärfe** selbst (Engine, kachelt im Zentimeterbereich, hängt gar nicht an uns). Scharfe Kanten — Wegrand, Feldgrenze, Ufer — kommen am billigsten aus den Vektordaten, die bereits exportiert werden.
-> **❓ OFFEN — #20:** Trägt die Entscheidung „2048 Bildpunkte für die ganze Welt" noch? Mit der nahtlosen Welt entfällt die Möglichkeit, je Region feiner zu backen.
-> **❓ OFFEN — #20:** Die Flüsse fehlen im Vektorexport, weil der Knotengraph nach der Berechnung verworfen wird. Gehören sie hinein?
+> **✅ ENTSCHIEDEN — [#20](https://github.com/nikolaisoerensen/MapGenerator/issues/20):** **Offen geblieben** — ob 3D Haupt- oder Kontrollansicht ist, wurde im Durchgang nicht entschieden. Es kommt in den nächsten Fragebogen. Unberührt gilt weiter die stehende Regel: was in 2D sichtbar ist, wird in derselben Änderung auch in 3D gebaut.
+> **✅ ENTSCHIEDEN — [#20](https://github.com/nikolaisoerensen/MapGenerator/issues/20):** **`OFFENE_PUNKTE.md` hat recht, die README ist veraltet** — es sind zwei verschiedene Dinge mit demselben Namen. Das **Anzeige-LOD des Editors** wird nicht mehr verwendet und wird entfernt. Das **Simulations-LOD des Spiels** — entfernte Ereignisse gröber rechnen, Einheiten erst bei Annäherung erzeugen, und das ohne Ruckeln, also stufenweise nachladen — ist ein **Ziel des Spiels** und noch nicht geplant. Siehe [Das alte Anzeige-LOD entfernen und die README berichtigen](https://github.com/nikolaisoerensen/MapGenerator/issues/36).
+> **✅ ENTSCHIEDEN — [#20](https://github.com/nikolaisoerensen/MapGenerator/issues/20):** **Scharfe Kanten aus den Vektordaten, das Raster bleibt grob.** Das gilt auch für das Mesh. Wird es an einer Stelle zu grob, kann dort später um einen Faktor vier nachgeschärft werden — aber erst, wenn es so weit ist.
+> **✅ ENTSCHIEDEN — [#20](https://github.com/nikolaisoerensen/MapGenerator/issues/20):** **Ja, 2048 trägt.** Die Feinheit kommt aus Vektoren und Texturen, nicht aus mehr Bildpunkten.
+> **✅ ENTSCHIEDEN — [#20](https://github.com/nikolaisoerensen/MapGenerator/issues/20):** **Ja.** Der Knotengraph wird behalten und als **Linienzüge** exportiert, mit Flussordnung und Breite je Abschnitt. Ein Fluss, der nur als Raster existiert, ist im Spiel eine Treppe. Siehe [Flussnetz als Linienzüge exportieren](https://github.com/nikolaisoerensen/MapGenerator/issues/37).
 
 ---
 
@@ -339,11 +346,11 @@ sonst lohnt keine Reise und kein Rezept hat einen Heimatort. Das ist messbar:
 nennenswerter Menge hergibt?* Nicht vom Generator erzwungen, sondern am
 Ergebnis gemessen — zwei Enden gegeneinander.
 
-> **❓ OFFEN — [#16](https://github.com/nikolaisoerensen/MapGenerator/issues/16):** Welcher Stauchungsfaktor gilt, und steht er überhaupt irgendwo?
-> **❓ OFFEN — #16:** Wird Ähnlichkeit an Verhältnissen statt an Absolutwerten gemessen?
-> **❓ OFFEN — #16:** Welche Kennzahlen beschreiben eine Region — Hangverteilung, Talbreiten, Wasseranteil, Küstenform, Baumgrenze, Biomanteile?
-> **❓ OFFEN — #16:** Gibt es Referenzbilder oder Referenzdaten, und wer beschafft sie?
-> **❓ OFFEN — #16:** Was geschieht mit der leeren 20-Landschaften-Liste aus `SPEZIFIKATION.md` §2?
+> **✅ ENTSCHIEDEN — [#16](https://github.com/nikolaisoerensen/MapGenerator/issues/16):** **Offen geblieben** — wo der Stauchungsfaktor steht, wurde im Durchgang nicht geklärt. Er wird beim Verschmelzen der Dokumente gesucht; siehe [Spezifikation und Sollbeschreibung zu einer Datei verschmelzen](https://github.com/nikolaisoerensen/MapGenerator/issues/44).
+> **✅ ENTSCHIEDEN — [#16](https://github.com/nikolaisoerensen/MapGenerator/issues/16):** **Beides.** Weite absolute Bänder als Leitplanke — damit nichts völlig entgleist —, **Verhältnisse als eigentliche Bewertung**: ob Gebirge zu Flachland, Tal zu Grat, Wasser zu Land im richtigen Verhältnis stehen. Ein Land ist nicht daran wiedererkennbar, dass ein Berg 2400 m hoch ist, sondern daran, dass er dreimal so hoch ist wie der Hügel davor.
+> **✅ ENTSCHIEDEN — [#16](https://github.com/nikolaisoerensen/MapGenerator/issues/16):** **Erst messen, was wirklich beschreibt.** Die Liste wird nicht ausgedacht, sondern erarbeitet: welche Kennzahlen eine Landschaft tatsächlich unterscheidbar machen und welche davon aus dem Perlin-Rauschen ohnehin schon herausfallen. Siehe [Welche Kennzahlen eine Landschaft wirklich beschreiben](https://github.com/nikolaisoerensen/MapGenerator/issues/66).
+> **✅ ENTSCHIEDEN — [#16](https://github.com/nikolaisoerensen/MapGenerator/issues/16):** **Echte Geländedaten, je ein Vorbild pro Region** — SRTM oder Copernicus, dazu wo möglich geologische Karten, Baumbestände und Biomkarten. Langfristig etwa zehn Orte je Region, damit die Kennzahl eine Streuung hat und nicht an einem Einzelfall hängt. Siehe [Reale Vorbildorte je Region beschaffen](https://github.com/nikolaisoerensen/MapGenerator/issues/67).
+> **✅ ENTSCHIEDEN — [#16](https://github.com/nikolaisoerensen/MapGenerator/issues/16):** **Auf die neun Regionen umschreiben.** Die vier alten Geländetypen und die leere Zwanzig-Landschaften-Liste stammen aus der Zeit vor der Regionseinteilung. Siehe [Spezifikation Abschnitt 2 auf die neun Regionen umschreiben](https://github.com/nikolaisoerensen/MapGenerator/issues/43).
 
 ### Das Prüfumfeld
 
@@ -351,21 +358,21 @@ Die Ausgangslage: 70 Testdateien, 19 Minuten Gesamtlaufzeit, 60 grün. Die
 Erzeugung ist seed-abhängig, teils auf der GPU, und die wertvollste Prüfung ist
 bis heute der Blick des Nutzers auf den Bildschirm.
 
-> **❓ OFFEN — [#22](https://github.com/nikolaisoerensen/MapGenerator/issues/22):** An welcher Naht setzt ein Test an — Generator, Reiter, Anzeige, ganze Kette?
-> **❓ OFFEN — #22:** Was ist schnell genug für rot-grün-umbauen? 19 Minuten sind es nicht.
-> **❓ OFFEN — #22:** Wie wird aus einer Kennzahl des Prüfmaßstabs eine Zusicherung?
-> **❓ OFFEN — #22:** Wie wird mit Seeds umgegangen — fester Seed, mehrere, Bandbreiten?
-> **❓ OFFEN — #22:** Was geschieht mit den zehn roten Tests?
-> **❓ OFFEN — #22:** **Wie wird eine Sichtprüfung ersetzt oder eingegrenzt?** Ohne eine Antwort darauf kann nachts niemand arbeiten.
+> **✅ ENTSCHIEDEN — [#22](https://github.com/nikolaisoerensen/MapGenerator/issues/22):** **Erst den Bestand sichten.** 70 Testdateien liegen da; welche veraltet sind, welche an der falschen Naht ansetzen und welche fehlen, wird einmal durchgegangen und bewertet, bevor neue dazukommen. Es braucht deutlich mehr Tests als heute — aber nicht mehr von denselben. Siehe [Den Testbestand sichten und bewerten](https://github.com/nikolaisoerensen/MapGenerator/issues/45).
+> **✅ ENTSCHIEDEN — [#22](https://github.com/nikolaisoerensen/MapGenerator/issues/22):** **Zwei Ränge.** **Wächter** laufen unter zwei Minuten und gehören zu jeder Änderung; die **Eichung** darf nachts eine Stunde brauchen. Heute sind es 19 Minuten für alles — das ist für keinen der beiden Zwecke die richtige Zahl. Siehe [Testläufe in Wächter und Eichung trennen](https://github.com/nikolaisoerensen/MapGenerator/issues/46).
+> **✅ ENTSCHIEDEN — [#22](https://github.com/nikolaisoerensen/MapGenerator/issues/22):** **Als Band, nicht als Punkt.** Eine Zusicherung lautet „der Wasseranteil liegt zwischen 4 und 9 Prozent“, nicht „ist 6,5“. Die Bandgrenzen stehen als **versionierte Daten** im Repo, nicht verstreut im Testcode — dann ist an der Dateihistorie ablesbar, wann ein Ziel verschoben wurde und warum. Siehe [Bandgrenzen als versionierte Daten](https://github.com/nikolaisoerensen/MapGenerator/issues/47).
+> **✅ ENTSCHIEDEN — [#22](https://github.com/nikolaisoerensen/MapGenerator/issues/22):** **Fester Seed für die Wächter, drei wechselnde für die nächtliche Eichung.** Der feste Seed macht Fehlschläge reproduzierbar; die wechselnden fangen das ab, was nur bei genau diesem einen Seed zufällig gut aussieht. Siehe [Seedführung für Wächter und Eichung festlegen](https://github.com/nikolaisoerensen/MapGenerator/issues/48).
+> **✅ ENTSCHIEDEN — [#22](https://github.com/nikolaisoerensen/MapGenerator/issues/22):** **Je ein Ticket mit Frist.** Kein Sammelposten — jeder der zehn roten Tests bekommt eine eigene Zeile, eine eigene Ursache und ein eigenes Datum. Bis dahin ist er ausdrücklich als bekannt markiert, danach ist er ein Fehler. Siehe [Die zehn roten Tests einzeln aufschlüsseln](https://github.com/nikolaisoerensen/MapGenerator/issues/49).
+> **✅ ENTSCHIEDEN — [#22](https://github.com/nikolaisoerensen/MapGenerator/issues/22):** **Bildvergleich mit Toleranz.** Fester Seed, fester Ausschnitt, hinterlegtes Referenzbild, Abweichung in Prozent. Das ersetzt die Sichtprüfung nicht vollständig, grenzt sie aber auf das ein, was wirklich neu aussieht. Siehe [Bildvergleich mit Referenzbildern aufsetzen](https://github.com/nikolaisoerensen/MapGenerator/issues/50).
 
 ### Der nächtliche Betrieb
 
-> **❓ OFFEN — [#23](https://github.com/nikolaisoerensen/MapGenerator/issues/23):** Was muss ein Ticket enthalten, damit ein Agent es allein abschließen kann?
-> **❓ OFFEN — #23:** Woran wird „fertig" erkannt, ohne dass jemand hinsieht?
-> **❓ OFFEN — #23:** Was darf ausdrücklich **nicht** allein laufen?
-> **❓ OFFEN — #23:** Wie kommen Änderungen nach `main` — Branch je Ticket, Pull Request, wer prüft, wann zusammengeführt wird?
-> **❓ OFFEN — #23:** Was geschieht, wenn ein Agent stecken bleibt oder etwas rot hinterlässt?
-> **❓ OFFEN — #23:** Wie sieht der Nutzer morgens in einem Blick, was in der Nacht geschah?
+> **✅ ENTSCHIEDEN — [#23](https://github.com/nikolaisoerensen/MapGenerator/issues/23):** **Alle Abnahmekriterien des Tickets sind als Test formuliert und grün.** Ein Ticket, dessen Kriterien man nicht als Test schreiben kann, ist kein Nachtticket.
+> **✅ ENTSCHIEDEN — [#23](https://github.com/nikolaisoerensen/MapGenerator/issues/23):** **Daran, dass die Tests grün sind — nicht an der Einschätzung des Agenten.** „Fertig“ ist ein Messwert, keine Meinung.
+> **✅ ENTSCHIEDEN — [#23](https://github.com/nikolaisoerensen/MapGenerator/issues/23):** **Eine Sperrliste im Repo.** Dateien und Themen, an die nachts niemand geht. Siehe [Sperrliste für den Nachtbetrieb anlegen](https://github.com/nikolaisoerensen/MapGenerator/issues/57).
+> **✅ ENTSCHIEDEN — [#23](https://github.com/nikolaisoerensen/MapGenerator/issues/23):** **Alles auf einen Nacht-Branch, morgens ein Merge.** Ein Branch ist eine abzweigende Arbeitskopie des Projekts: nachts wird nur dort geschrieben, `main` bleibt unberührt. Morgens wird gegengelesen — auch mit Code-Review — und einzelne Fehler werden korrigiert, bevor zusammengeführt wird. Siehe [Das Nacht-Branch-Verfahren aufsetzen](https://github.com/nikolaisoerensen/MapGenerator/issues/58).
+> **✅ ENTSCHIEDEN — [#23](https://github.com/nikolaisoerensen/MapGenerator/issues/23):** **Zeitgrenze je Ticket.** Läuft sie ab, bleibt der Branch stehen und eine Notiz geht ins Ticket: was versucht wurde, woran es hing. Kein Agent arbeitet sich stundenlang an derselben Stelle fest. Siehe [Zeitgrenze und Steckenbleib-Notiz je Ticket](https://github.com/nikolaisoerensen/MapGenerator/issues/59).
+> **✅ ENTSCHIEDEN — [#23](https://github.com/nikolaisoerensen/MapGenerator/issues/23):** **Ein Morgenbericht auf einer Seite:** was geschlossen wurde, was rot ist, welche Kennzahlen sich bewegt haben, welche stillen Rückfälle gemeldet wurden. Siehe [Der Morgenbericht auf einer Seite](https://github.com/nikolaisoerensen/MapGenerator/issues/60).
 
 ---
 
