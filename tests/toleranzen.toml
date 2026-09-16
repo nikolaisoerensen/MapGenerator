@@ -1,0 +1,30 @@
+# Toleranzbaender fuer Eichlaeufe - versionierte NUTZERENTSCHEIDUNGEN, nicht
+# im Testcode vergraben.
+#
+# NAME BEWUSST NICHT "bandgrenzen*.toml"/"bandgrenzen*.json": genau dieses
+# Muster ist in nachtbetrieb/sperrliste.toml hart gesperrt (Eintrag "Bandgrenzen
+# und Referenzdaten"). Diese Datei hier ist etwas anderes - kein Referenzbild,
+# keine Messreihe, sondern eine Handvoll von Hand entschiedener Prozentzahlen -
+# und sie liegt bewusst AUSSERHALB des gesperrten Namensmusters, damit die
+# Sperre nicht aus reiner Namensaehnlichkeit zuschlaegt.
+#
+# Jede Zahl hier ist eine bewusste NUTZERENTSCHEIDUNG mit Datum und Quelle im
+# Kommentar. Wird sie geaendert, ist das eine Verschiebung des Ziels und
+# gehoert an den Tag, mit einem Commit, den man spaeter wiederfindet - nicht
+# in einen Nachtlauf, der einen roten Test still gruen bekommen will (dieselbe
+# Begruendung wie bei den echten Bandgrenzen, nur eben nicht durch die
+# Sperrliste erzwungen, weil diese Datei noch jung ist).
+#
+# Gelesen von: tests/smoke_test_wasserbilanz_toleranz.py
+
+[wasserbilanz]
+# Nutzer-Entscheidung zu Ticket #18 (docs/SOLLBESCHREIBUNG.md), woertlich:
+# "Ja, mit einem Toleranzband von zehn Prozent. Wichtig ist nur, dass es nicht
+# ausufert; auf zwei Prozent genau muss es nicht sein." Ticket #70 verlangt,
+# dass genau diese Zahl versioniert im Repo steht statt hart im Test.
+#
+# Bezugsgroesse: Niederschlag (Summe ueber die Karte) gegen Randabfluss +
+# Verdunstung + Zuwachs im Wasserspeicher, ueber einen vollstaendigen
+# Erzeugungslauf Terrain -> Weather -> Hydrology. Siehe
+# tests/smoke_test_wasserbilanz_toleranz.py fuer die genaue Rechnung.
+toleranz_prozent = 10.0
