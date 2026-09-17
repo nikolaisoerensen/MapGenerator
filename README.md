@@ -15,7 +15,9 @@ including live 2D and 3D (OpenGL) previews.
 - **Biome**: climate-based biome classification
 - **Settlement**: settlement/road placement and a physics-based plot/parcel
   simulation (city blocks, wilderness boundaries, traffic-weighted roads)
-- Numeric LOD system for fast, progressive previews at increasing resolution
+- Staged preview generation: fast low-resolution passes (128 px) that refine
+  automatically up to full resolution (1024 px) as generation continues,
+  rather than blocking on the final result
 - 2D (matplotlib) and 3D (OpenGL) map views with per-layer overlays
 - A standalone "Plot Physics Lab" tool (`tools/biome_lab/`) for iterating on
   the settlement/plot-physics simulation outside the main app
