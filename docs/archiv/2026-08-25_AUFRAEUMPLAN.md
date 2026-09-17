@@ -175,7 +175,7 @@ Sieben Regler, alle funktional, aber die Namen erklären sich nicht
 mit Namen, die sagen, was man sieht.** Zusammenfassen, wo zwei Regler
 dasselbe Bild in zwei Richtungen drehen.
 
-### 4.6 Geologie-Querschnitt gröber rechnen
+### 4.6 Geologie-Querschnitt gröber rechnen — **GEMESSEN, LOHNT SICH NICHT (Ticket #62, 2026-09-17)**
 
 *"vielleicht kann man hier die gesamte auflösung und rechengenauigkeit etwas
 herunterfahren. also es könnte 8 mal weniger genau sein."*
@@ -184,6 +184,48 @@ Achtung: die Zacken im Querschnitt sind **zum Teil dieselbe Ursache wie die
 Alpenspitzen** (4.3). Erst 3. reparieren, dann messen, wie viel Gröbe
 überhaupt noch nötig ist — sonst wird eine Auflösung gesenkt, um einen
 Geländefehler zu verstecken.
+
+**Messung (Ticket #62, 2026-09-17), nach 4.3.** Zwei getrennte Kosten
+geprüft:
+
+1. **Backend** (`core/geology_generator.py._compute_outcrop()`): die
+   Schicht-Obergrenzen `layer_boundaries` (13 Schichten × H × W) fallen als
+   Zwischenergebnis der `layer_id_map`-Berechnung an, die für rock_map/
+   hardness_map ohnehin auf voller Auflösung gebraucht wird. Sie
+   "gröber" zu rechnen würde die reale Gesteinskarte vergröbern, nicht
+   nur die Diagnose-Ansicht — genau die Vermischung, vor der der Ticket-
+   Text warnt ("ein Querschnitt ... kein Datenprodukt, an dem etwas
+   hängt"). Hier gibt es nichts eigenständig zu vergröbern.
+2. **Anzeige** (`MapDisplay2D._render_geology_cross_section()`, reines
+   matplotlib-Profil, kein Raster): mit synthetischen, aber realistisch
+   geformten Daten (13 Schichten, Terrainrauschen, Intrusions-Ellipse)
+   gemessen, Redraw auf wiederverwendeter Achse (wie im echten Tab:
+   `ax.clear()` + Neuzeichnen), 60 Wiederholungen je Fall:
+
+   | map_size | Original (volle Auflösung) | Grob (300 Stützstellen) | Ersparnis Median | Ersparnis Bestfall |
+   |---|---|---|---|---|
+   | 512 px | 12.20 ms (min 10.75, std 4.56) | 14.35 ms (min 10.64, std 5.76) | −17.6 % (also LANGSAMER) | +1.0 % |
+   | 1024 px | 21.05 ms (min 14.82, std 10.79) | 22.53 ms (min 12.61, std 5.21) | −7.1 % (also LANGSAMER) | +14.9 % |
+
+   Die Streuung (Std 4.6–10.8 ms) ist größer als der behauptete Effekt
+   (0.1–4.8 ms je nach Lauf, im Medianfall sogar negativ). Ursache: der
+   Redraw kostet ca. 11–15 ms **unabhängig von der Punktzahl** — Achsen-
+   Neuaufbau und die 14-teilige Legende dominieren, nicht die Anzahl der
+   `fill_between()`-Stützstellen (512/1024 vs. 300). Eine Reduktion der
+   Auflösung trifft also nicht die eigentliche Kostenstelle.
+   Bildvergleich (grob gegen Original, dieselben Daten): mittlere
+   Pixel-Differenz 0.13–0.25 von 255, unter 0.3 % der Pixel mit
+   Differenz > 10 — optisch nicht unterscheidbar, aber das ist bei einem
+   Messeffekt von 0 ms auch kein Verkaufsargument mehr.
+
+   Skript: `.scratch/geologie-querschnitt-messung/messen_querschnitt.py`
+   (Wegwerf-Messskript, nicht Teil des Programms).
+
+**Ergebnis: keine Änderung.** Weder Backend noch Anzeige haben eine
+Kostenstelle, die durch "gröber rechnen" sinnvoll adressiert wird — die
+Anzeige ist durchgehend von matplotlib-Fixkosten dominiert, das Backend
+teilt sich die Berechnung mit einem echten, nicht verzichtbaren
+Datenprodukt. Punkt 4.6 ist damit abgeschlossen, ohne Codeänderung.
 
 ### 4.7 ~~Erosion reaktivieren~~ — gestrichen (Ticket #63, veraltet)
 
@@ -715,5 +757,5 @@ möchte das du mit dem zuletzt beschriebenen anfängst."*
 | **1** | **Flussnetz live (4.10)** | klein | Regler stehen, nur der Vorschau-Pfad fehlt |
 | 4 | Erosionsfilter-Beschriftungen, `detail` streichen (4.5) | klein | Messung liegt vor; Schlüssel NICHT umbenennen (ATEF-Quelle) |
 | 5 | Terrain-Reiter mit Regionsauswahl (4.2) | **groß** | Entscheidung liegt vor: Anpassung gilt nur für die aktuelle Karte, Katalog bleibt Vorgabe |
-| 6 | Geologie-Querschnitt (4.6) | mittel | Erst nach den Alpenspitzen, sonst versteckt es den Fehler |
+| — | Geologie-Querschnitt (4.6) | — | **ERLEDIGT 2026-09-17** — gemessen, lohnt sich nicht (Redraw von matplotlib-Fixkosten dominiert, nicht von der Punktzahl; Backend teilt sich die Rechnung mit der echten Gesteinskarte) |
 | — | ~~Erosion reaktivieren (4.7)~~ | — | **ENTFAELLT** — 4.7 gestrichen (veraltet, Erosion laeuft laengst); der GPU/CPU-Befund `erosion_gpu_parity` ist ebenfalls kein offener Testbefund mehr (16.09.2026 gruen gemessen, siehe `docs/TESTBERICHT.md` Abschnitt 3) |
