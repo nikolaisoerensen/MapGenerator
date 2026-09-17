@@ -3349,6 +3349,21 @@ class DataLODManager(QObject):
                 self.set_terrain_data_lod(schluessel, wert, lod_level, parameters)
                 data_keys.append(schluessel)
 
+        # river_graph (Ticket #37) ist ein dict (punkte/eltern/strahler/
+        # flaeche/meter_pro_pixel), kein np.ndarray. set_terrain_data_lod()
+        # liefe hier durch _validate_lod_input() - die lehnt alles ab, was
+        # kein numpy-Array ist, mit einer WARNING, aber ohne Fehler. Das
+        # Ergebnis waere der immer gleiche stille Fehlschlag: river_graph
+        # ginge nie in den Speicher, get_terrain_data("river_graph") faende
+        # nie etwas, und niemand saehe das ohne Log-Auswertung. Deshalb direkt
+        # im Store abgelegt - der Lesepfad (_get_data_lod) prueft den Typ
+        # ohnehin nicht.
+        graph = getattr(terrain_data, "river_graph", None)
+        if graph is not None and isinstance(lod_level, int) and lod_level >= 1:
+            self._terrain_data[f"lod_{lod_level}_river_graph"] = graph
+            self._current_lods["terrain"] = max(self._current_lods["terrain"], lod_level)
+            data_keys.append("river_graph")
+
         # Cache und Metadaten
         self._update_cache_timestamp("terrain", lod_level, "complete", parameters)
         self._current_lods["terrain"] = max(self._current_lods["terrain"], lod_level)

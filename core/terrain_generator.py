@@ -92,6 +92,12 @@ class TerrainData:
         self.river_order: Optional[np.ndarray] = None
         self.river_generation: Optional[np.ndarray] = None
         self.river_water: Optional[np.ndarray] = None
+        # Der Knotengraph des Flussnetzes (Ticket #37) - kein Raster wie die
+        # vier river_*-Karten oben, sondern ein dict mit punkte/eltern/
+        # strahler/flaeche/meter_pro_pixel. Wird nur vom Vektorexport
+        # (gui/utils/map_export.py) gelesen, nicht von den 2D/3D-Anzeigen -
+        # deshalb keine eigene Anzeigeschicht noetig.
+        self.river_graph: Optional[dict] = None
         self.region_map: Optional[np.ndarray] = None
         # (3, H, W): Jahresmittel, Jahresspanne, Niederschlag - siehe
         # _weltkarte_heightmap. Weich ueber die Regionsgrenzen gemischt.
@@ -1572,6 +1578,7 @@ class BaseTerrainGenerator:
         # Pfad (WELTKARTE_AKTIV = False) gibt es sie nicht, und ein fehlendes
         # Flussnetz darf den Zusammenbau nicht scheitern lassen.
         for schluessel in ("river_mask", "river_order", "river_generation", "river_water",
+                           "river_graph",
                            "hinterland_height", "voronoi_map",
                            "region_map", "klima_map", "seegrad",
                            "ufer_region_a", "ufer_region_b", "see_eis",
@@ -1864,6 +1871,7 @@ class BaseTerrainGenerator:
         fluss_ordnung = np.zeros((size, size), dtype=np.float32)
         fluss_generation = np.zeros((size, size), dtype=np.float32)
         fluss_wasser = np.zeros((size, size), dtype=np.float32)
+        fluss_graph = None
 
         if not fluesse_an:
             self.logger.info("Flussnetz und Taeler UEBERSPRUNGEN "
@@ -1871,7 +1879,7 @@ class BaseTerrainGenerator:
         elif getattr(vd, "WELTFLUESSE_AKTIV", False):
             with _s(schritte, "weltfluesse", "Flussnetz und Taeler"):
                 (heightmap, fluss_maske, fluss_ordnung, fluss_generation,
-                 fluss_wasser) = self._weltfluesse(
+                 fluss_wasser, fluss_graph) = self._weltfluesse(
                      heightmap, felder, size, seed)
 
         # ridge_map ist ein Anzeige-Output des Erosionsfilters. Solange der bei
@@ -1921,6 +1929,16 @@ class BaseTerrainGenerator:
             # an dieser Stelle berechnet wurde, in Niederschlag mal Flaeche.
             # Ersetzt die Rot/Gruen-Faerbung nach Generation als Leitansicht.
             "river_water": fluss_wasser,
+            # DER KNOTENGRAPH FUER DEN VEKTOREXPORT (Ticket #37). `mpp` ist
+            # hier bereits als "Meter pro Pixel DIESER Heightmap-Aufloesung"
+            # berechnet (direkt nach `weltfeld()` oben) - genau der Massstab,
+            # in dem `fluss_graph["punkte"]` liegen. Der Export
+            # (gui/utils/map_export.py) rechnet damit in Meter um, OHNE den
+            # export-eigenen `_pfad_in_meter()`-Massstab zu benutzen, der auf
+            # eine andere, feste Aufloesung (EXPORT_KANTENLAENGE_PX) geeicht
+            # ist.
+            "river_graph": (dict(fluss_graph, meter_pro_pixel=mpp)
+                            if fluss_graph is not None else None),
             # DIE HOEHENFAKTOR-ANSICHT (Nutzerwunsch 2026-08-26:
             # *"kannst du mir die voronoiansicht als erstes bauen? ich
             # will den hoehenfaktor sehen koennen (3d und 2D)"*).
@@ -2007,12 +2025,26 @@ class BaseTerrainGenerator:
         """
         Flussnetz in drei Rechenstufen, dann die Taeler eingraben.
 
-        Rueckgabe: (heightmap mit Taelern, maske, ordnung, generation).
+        Rueckgabe: (heightmap mit Taelern, maske, ordnung, generation, wasser,
+        fluss_graph).
 
         NUR UEBER WASSER GEZEICHNET. Die Laeufe reichen konstruktionsbedingt bis
         MUENDUNGSTIEFE_M (-50 m), damit ein Fluss sichtbar ins Meer muendet und
         die Muendungsrichtung stimmt. Alles unterhalb von 0 m wird in Maske und
         Ordnung weggelassen - dort ist Meer, kein Fluss.
+
+        `fluss_graph` (Ticket #37) ist der Knotengraph, der frueher an dieser
+        Stelle nach der Rasterung verworfen wurde (docs/OFFENE_PUNKTE.md
+        §13.5, Entscheidung in Issue #20, Frage 20.4). Er traegt `punkte`
+        (Nx2, Pixelkoordinaten dieser Heightmap-Aufloesung), `eltern`
+        (Elternindex je Knoten, -1 = Muendung), `strahler` (Flussordnung je
+        Knoten) und `flaeche` (Wassermenge je Knoten - dieselbe Groesse, aus
+        der auch die Linienbreite unten berechnet wird). `meter_pro_pixel`
+        fehlt hier bewusst: die Heightmap hat ihre eigene, von der
+        Kartengroesse abhaengige Aufloesung, die NICHT mit der festen
+        Export-Aufloesung aus map_export.py uebereinstimmt - der Aufrufer
+        haengt den fuer DIESE Aufloesung gueltigen Massstab an, weil er ihn
+        ohnehin schon fuer die Heightmap berechnet hat.
         """
         from core.terrain_weltfluesse import (flussnetz, taeler_eingraben,
                                               MUENDUNGSTIEFE_M, ERBE_KOSTEN)
@@ -2053,7 +2085,8 @@ class BaseTerrainGenerator:
             region_map=felder.get("regionen"))
         if netz is None:
             leer = np.zeros((size, size), dtype=np.float32)
-            return heightmap, leer, leer.copy(), leer.copy(), leer.copy()
+            return (heightmap, leer, leer.copy(), leer.copy(), leer.copy(),
+                    None)
 
         geschnitten = taeler_eingraben(
             heightmap, netz, felder,
@@ -2141,7 +2174,18 @@ class BaseTerrainGenerator:
                     scheibe = (yy - y) ** 2 + (xx - x) ** 2 <= r * r
                     ziel = wasser[y0:y1, x0:x1]
                     np.maximum(ziel, np.where(scheibe, menge, 0.0), out=ziel)
-        return geschnitten, maske, ordnung, generation, wasser
+
+        # DER GRAPH UEBERLEBT JETZT DIE RASTERUNG (Ticket #37). Vorher endete
+        # die Funktion hier mit `return geschnitten, maske, ordnung,
+        # generation, wasser` - `punkte`/`eltern`/`strahler`/`flaeche` waren
+        # lokale Variablen, die mit dem Funktionsende verschwanden. Der
+        # Vektorexport (gui/utils/map_export.py) braucht genau diese vier
+        # Felder, um Fluesse als Linienzuege statt als Pixelmaske zu
+        # exportieren.
+        fluss_graph = dict(punkte=punkte, eltern=np.asarray(eltern),
+                            strahler=np.asarray(strahler),
+                            flaeche=np.asarray(netz["flaeche"]))
+        return geschnitten, maske, ordnung, generation, wasser, fluss_graph
 
     def _apply_river_network(self, P: np.ndarray, amplitude: float):
         """

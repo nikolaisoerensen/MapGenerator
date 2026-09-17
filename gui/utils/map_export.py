@@ -214,6 +214,50 @@ def _pfad_in_meter(pfad, meter_pro_pixel, nachkomma=2):
     return punkte
 
 
+def _flusslinien_aus_graph(graph):
+    """
+    Baut aus dem Knotengraphen (`punkte`/`eltern`/`strahler`/`flaeche`) die
+    Liste der Linienzuege - jeder Zug ist eine Kette von Knotenindizes.
+
+    Ticket #37 (Nutzerentscheidung, siehe docs/OFFENE_PUNKTE.md §13.5): NICHT
+    jede einzelne Kante als eigenes Zwei-Punkte-Segment exportieren (Tausende
+    winzige Segmente je Karte), sondern maximale Ketten zwischen zwei
+    "Astpunkten". Ein Astpunkt ist ein Knoten, der KEIN gewoehnlicher
+    Durchlaufknoten ist - also eine Quelle (kein Kind haengt an ihm), eine
+    Muendung (`eltern == -1`) oder ein Zusammenfluss (mind. zwei Kinder haengen
+    an ihm). Jede Kette beginnt an einer Quelle ODER an einem Zusammenfluss
+    (fuer den Ast UNTERHALB des Zusammenflusses) und laeuft ueber `eltern[]`
+    abwaerts, bis der naechste Astpunkt erreicht ist - der wird noch
+    mitgenommen (er ist der gemeinsame Endpunkt zur naechsten Kette), aber
+    von dort nicht weiterverfolgt, damit kein Kettenstueck doppelt exportiert
+    wird.
+    """
+    eltern = np.asarray(graph["eltern"]).astype(np.int64)
+    n = eltern.shape[0]
+    kinder_anzahl = np.zeros(n, dtype=np.int64)
+    for e in eltern:
+        if e >= 0:
+            kinder_anzahl[e] += 1
+
+    astpunkte = np.where((kinder_anzahl == 0) | (kinder_anzahl >= 2))[0]
+
+    ketten = []
+    for start in astpunkte.tolist():
+        kette = [start]
+        aktuell = start
+        while True:
+            naechster = int(eltern[aktuell])
+            if naechster < 0:
+                break
+            kette.append(naechster)
+            if kinder_anzahl[naechster] != 1:
+                break
+            aktuell = naechster
+        if len(kette) >= 2:
+            ketten.append(kette)
+    return ketten
+
+
 def vektordaten(data_lod_manager, meter_pro_pixel):
     """
     Wege, Seewege, Grundstuecksgrenzen und Ortslagen als JSON-taugliches dict.
@@ -226,7 +270,7 @@ def vektordaten(data_lod_manager, meter_pro_pixel):
     dlm = data_lod_manager
     daten = {"einheit": "meter", "meter_pro_pixel": round(meter_pro_pixel, 4),
              "wege": [], "seewege": [], "grundstuecksgrenzen": [],
-             "orte": [], "fehlt": []}
+             "orte": [], "fluesse": [], "fehlt": []}
     if dlm is None:
         daten["fehlt"].append("kein DataLODManager uebergeben")
         return daten
@@ -273,21 +317,52 @@ def vektordaten(data_lod_manager, meter_pro_pixel):
                                   * meter_pro_pixel, 2),
             })
 
-    # FLUESSE FEHLEN, UND ZWAR AUS EINEM BESTIMMTEN GRUND.
-    #
-    # `core/terrain_weltfluesse.flussnetz()` baut sehr wohl einen Knotengraphen
-    # (`punkte`, `eltern`, `reihenfolge`, Strahler-Ordnung) - aber
-    # `core/terrain_generator.py` behaelt daraus nur die RASTER `river_mask`
-    # und `river_order` (dort Zeile 1707) und wirft den Graphen weg. Aus einem
-    # Raster wieder Linienzuege zu machen (Skelettieren, Graph verfolgen,
-    # Ausduennen) waere Arbeit mit eigenen Fehlerquellen fuer etwas, das
-    # vorher schon vorlag.
-    #
-    # Der richtige Weg ist, den Graphen aufzuheben. Das ist ein Eingriff in
-    # die Ausgaben des Terrain-Generators und gehoert nicht in den Exporteur.
-    daten["fehlt"].append(
-        "fluesse (Knotengraph wird in core/terrain_generator.py:1707 "
-        "verworfen, es bleiben nur river_mask/river_order als Raster)")
+    # FLUESSE ALS LINIENZUEGE (Ticket #37). Der Knotengraph, der frueher nach
+    # der Rasterung verworfen wurde (docs/OFFENE_PUNKTE.md §13.5), haengt jetzt
+    # an "river_graph" (core/terrain_generator.py _weltfluesse()). Er traegt
+    # SEINEN EIGENEN Massstab (`meter_pro_pixel` IM GRAPHEN) - das ist
+    # ABSICHTLICH NICHT derselbe Wert wie der `meter_pro_pixel`-Parameter
+    # dieser Funktion. Die Heightmap, in der das Flussnetz gerechnet wurde,
+    # liegt in ihrer EIGENEN, von der Kartengroesse abhaengigen Aufloesung
+    # (`core/terrain_generator.py._weltkarte_heightmap()`), waehrend der
+    # Parameter hier auf EXPORT_KANTENLAENGE_PX geeicht ist. Beide Massstaebe
+    # zu vermischen wuerde die Fluesse an der falschen Stelle einzeichnen.
+    graph = _hole("terrain", "river_graph")
+    if not graph:
+        daten["fehlt"].append("fluesse (river_graph nicht generiert - "
+                              "WELTFLUESSE_AKTIV/WELTKARTE_AKTIV pruefen)")
+    else:
+        graph_mpp = graph.get("meter_pro_pixel")
+        punkte = np.asarray(graph["punkte"])
+        strahler = np.asarray(graph["strahler"])
+        flaeche = np.asarray(graph["flaeche"])
+        if not graph_mpp or punkte.ndim != 2 or punkte.shape[0] == 0:
+            daten["fehlt"].append("fluesse (river_graph ohne Knoten oder "
+                                  "ohne meter_pro_pixel)")
+        else:
+            from core.terrain_generator import (FLUSS_BREITE_GRUND_PX,
+                                                 FLUSS_BREITE_JE_DEKADE_PX)
+
+            for kette in _flusslinien_aus_graph(graph):
+                zug = []
+                for knoten in kette:
+                    x, y = punkte[knoten]
+                    menge = float(flaeche[knoten])
+                    # Radius wie bei river_water (dieselbe Formel,
+                    # core/terrain_generator.py Zeile ~2165), aber in Meter
+                    # dieses Graphen umgerechnet und als Liniendurchmesser
+                    # (2x Radius) exportiert - Godot & Co. erwarten eine
+                    # Linienbreite, keinen Radius.
+                    radius_px = FLUSS_BREITE_GRUND_PX + FLUSS_BREITE_JE_DEKADE_PX * np.log10(
+                        1.0 + max(menge, 0.0))
+                    zug.append({
+                        "x": round(float(x) * graph_mpp, 2),
+                        "y": round(float(y) * graph_mpp, 2),
+                        "strahler": int(strahler[knoten]),
+                        "breite_m": round(2.0 * radius_px * graph_mpp, 2),
+                    })
+                if len(zug) >= 2:
+                    daten["fluesse"].append(zug)
     return daten
 
 
@@ -489,13 +564,20 @@ def export_all_layers(data_lod_manager, parameter_manager, output_root, filename
         vektor = vektordaten(data_lod_manager, mpp_v)
         with open(os.path.join(output_dir, VEKTOR_DATEI), "w",
                   encoding="utf-8") as vf:
-            json.dump(vektor, vf, indent=2, ensure_ascii=False)
+            # allow_nan=False (Ticket #37, Akzeptanzkriterium "von Godot
+            # einlesbar"): kein Godot-Binary in dieser Umgebung verfuegbar,
+            # also kein echter Einlesetest moeglich. Strenges RFC-8259-JSON
+            # (kein NaN/Infinity, die json.dump sonst als nicht-standardkonforme
+            # Woerter schriebe) ist der staerkste hier pruefbare Ersatzbeleg -
+            # jeder RFC-konforme JSON-Parser (auch Godots) liest die Datei.
+            json.dump(vektor, vf, indent=2, ensure_ascii=False, allow_nan=False)
         manifest["vektor"] = {
             "file": VEKTOR_DATEI,
             "wege": len(vektor["wege"]),
             "seewege": len(vektor["seewege"]),
             "grundstuecksgrenzen": len(vektor["grundstuecksgrenzen"]),
             "orte": len(vektor["orte"]),
+            "fluesse": len(vektor["fluesse"]),
             "fehlt": vektor["fehlt"],
         }
     except Exception as e:                              # noqa: BLE001
