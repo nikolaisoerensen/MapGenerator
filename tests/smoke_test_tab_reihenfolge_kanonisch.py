@@ -94,8 +94,7 @@ def pruefe_nur_eine_definition_im_repo():
         if muster.search(text):
             fundstellen.append(str(pfad))
 
-    if fundstellen != ["managers\\navigation_manager.py"] and \
-       fundstellen != ["managers/navigation_manager.py"]:
+    if len(fundstellen) != 1 or Path(fundstellen[0]) != Path("managers/navigation_manager.py"):
         print(f"[FAIL] GENERATOR_TAB_ORDER wird an {len(fundstellen)} Stellen "
               f"zugewiesen, erwartet genau 1 (managers/navigation_manager.py): "
               f"{fundstellen}")
@@ -128,6 +127,19 @@ def pruefe_widgets_liest_dieselbe_konstante():
         print("[OK] widgets.py und navigation_manager.py teilen dasselbe "
               "Listenobjekt (Identitaet geprueft, nicht nur Gleichheit)")
 
+    # _NAV_TAB_ORDER (die "main_menu"-lose Variante fuer NavigationPanel) muss
+    # aus GENERATOR_TAB_ORDER abgeleitet sein, nicht erneut hartkodiert.
+    if "_NAV_TAB_ORDER = GENERATOR_TAB_ORDER[1:]" not in _WIDGETS_QUELLE:
+        print("[FAIL] widgets.py leitet _NAV_TAB_ORDER nicht per Slice von "
+              "GENERATOR_TAB_ORDER ab")
+        ok = False
+    elif list(widgets_modul._NAV_TAB_ORDER) != nm.GENERATOR_TAB_ORDER[1:]:
+        print("[FAIL] widgets._NAV_TAB_ORDER weicht von GENERATOR_TAB_ORDER[1:] ab")
+        ok = False
+    else:
+        print("[OK] widgets._NAV_TAB_ORDER = GENERATOR_TAB_ORDER[1:] (einmal "
+              "abgeleitet, nicht an jeder Nutzungsstelle neu)")
+
     # Die alte Bugmuster-Suche: drei fast identische, hartkodierte
     # Tab-Namenslisten. Keine davon darf mehr im Quelltext als Literal stehen.
     alte_kopien = re.findall(
@@ -145,8 +157,9 @@ def pruefe_widgets_liest_dieselbe_konstante():
 
 def pruefe_go_previous_und_go_next_nutzen_konstante():
     """Gezielt an den zwei Stellen, die vorher 'erosion' vergessen hatten:
-    go_previous() und go_next() muessen jetzt GENERATOR_TAB_ORDER referenzieren,
-    nicht mehr ihre eigene verkuerzte Liste."""
+    go_previous() und go_next() muessen jetzt die von GENERATOR_TAB_ORDER
+    abgeleitete _NAV_TAB_ORDER referenzieren, nicht mehr ihre eigene
+    verkuerzte Liste."""
     ok = True
     for name in ("go_previous", "go_next"):
         treffer = re.search(
@@ -156,15 +169,15 @@ def pruefe_go_previous_und_go_next_nutzen_konstante():
             ok = False
             continue
         rumpf = treffer.group(0)
-        if "GENERATOR_TAB_ORDER" not in rumpf:
-            print(f"[FAIL] {name}() liest GENERATOR_TAB_ORDER nicht")
+        if "_NAV_TAB_ORDER" not in rumpf:
+            print(f"[FAIL] {name}() liest _NAV_TAB_ORDER nicht")
             ok = False
         elif '"geology", "weather"' in rumpf or "'geology', 'weather'" in rumpf:
             print(f"[FAIL] {name}() hat noch eine eigene Literal-Liste ohne "
                   f"'erosion'")
             ok = False
         else:
-            print(f"[OK] {name}() liest GENERATOR_TAB_ORDER")
+            print(f"[OK] {name}() liest _NAV_TAB_ORDER")
     return ok
 
 

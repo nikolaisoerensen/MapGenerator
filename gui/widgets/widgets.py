@@ -24,6 +24,12 @@ from gui.config.gui_default import ColorSchemes
 # ein Import von hier aus erzeugt also keinen Zirkel.
 from managers.navigation_manager import GENERATOR_TAB_ORDER
 
+# Ohne das vorangestellte "main_menu", weil NavigationPanel erst ab dem
+# ersten Generator-Reiter navigiert. Einmal hier ableiten statt an jeder
+# Nutzungsstelle erneut zu slicen (Ticket #56 hat genau diese Art von
+# Kopie-statt-Verweis-Duplikation behoben, nicht eine neue eingefuehrt).
+_NAV_TAB_ORDER = GENERATOR_TAB_ORDER[1:]
+
 
 class BaseButton(QPushButton):
     """
@@ -784,9 +790,8 @@ class NavigationPanel(QGroupBox):
             return
 
         # Tab-Reihenfolge - kanonisch in managers/navigation_manager.py
-        # (GENERATOR_TAB_ORDER), hier nur ohne das vorangestellte "main_menu",
-        # weil dieses Panel erst ab dem ersten Generator-Reiter navigiert.
-        tab_order = GENERATOR_TAB_ORDER[1:]
+        # (GENERATOR_TAB_ORDER), siehe _NAV_TAB_ORDER oben im Modul.
+        tab_order = _NAV_TAB_ORDER
 
         if self.current_tab in tab_order:
             current_index = tab_order.index(self.current_tab)
@@ -803,8 +808,8 @@ class NavigationPanel(QGroupBox):
         # Kanonische Reihenfolge, siehe update_navigation_buttons() oben.
         # War hier vorher eine eigene, um "erosion" verkuerzte Kopie (Ticket
         # #56) - reiner Kopierfehler, kein bewusster Ausschluss des
-        # Erosion-Reiters.
-        tab_order = GENERATOR_TAB_ORDER[1:]
+        # Erosion-Reiters. Siehe _NAV_TAB_ORDER oben im Modul.
+        tab_order = _NAV_TAB_ORDER
 
         if self.current_tab in tab_order:
             current_index = tab_order.index(self.current_tab)
@@ -815,8 +820,8 @@ class NavigationPanel(QGroupBox):
     @pyqtSlot()
     def go_next(self):
         """Navigation zu Next Tab"""
-        # Kanonische Reihenfolge, siehe update_navigation_buttons() oben.
-        tab_order = GENERATOR_TAB_ORDER[1:]
+        # Kanonische Reihenfolge, siehe _NAV_TAB_ORDER oben im Modul.
+        tab_order = _NAV_TAB_ORDER
 
         if self.current_tab in tab_order:
             current_index = tab_order.index(self.current_tab)
