@@ -19,6 +19,42 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from gui.config.gui_default import WindowSettings
 
 
+# KANONISCHE TAB-REIHENFOLGE (Ticket #56, 2026-09-17).
+#
+# Diese Liste ist die Vorwaerts/Zurueck-Reihenfolge der GENERATOR-Pipeline
+# (main_menu + die Reiter, durch die sich der Nutzer sequentiell durcharbeitet,
+# plus die abschliessende Overview). Vorher stand sie an FUENF Stellen separat:
+# hier, in gui/map_editor.py (dort aber als LEERE Liste, siehe Kommentar an
+# self.tab_order dort - die wird dynamisch aus tab_configs gefuellt und ist
+# deshalb bewusst NICHT an diese Konstante gekoppelt, siehe dort) und
+# DREIMAL in gui/widgets/widgets.py (NavigationPanel.update_navigation_buttons/
+# go_previous/go_next) - wobei zwei der drei Kopien "erosion" schlicht
+# vergessen hatten (Kopierfehler, keine Absicht).
+#
+# ENTSCHEIDUNG "erosion": GEHOERT dazu. gui/tabs/erosion_tab.py::ErosionTab
+# ist ein echter, registrierter Reiter (siehe tab_configs in
+# gui/map_editor.py._setup_tabs(), Eintrag ("erosion", "Erosion", ErosionTab,
+# ...) zwischen "geology" und "weather") - kein Platzhalter, kein totes Feature.
+# EROSION_AKTIV (gui/config/value_default.py) schaltet nur die BERECHNUNG ab,
+# nicht den Reiter selbst; der Tab bleibt sichtbar und navigierbar. Die zwei
+# Kopien ohne "erosion" in widgets.py waren damit ein Bug, keine bewusste
+# Auslassung - diese Konstante behebt ihn, indem es nur noch eine Wahrheit
+# gibt.
+GENERATOR_TAB_ORDER = [
+    "main_menu",
+    "terrain",
+    "geology",
+    # Erosion sitzt zwischen Geology und Weather - dieselbe Reihenfolge
+    # wie in der Pipeline (siehe CALCULATOR_GRAPH).
+    "erosion",
+    "weather",
+    "water",
+    "biome",
+    "settlement",
+    "overview",
+]
+
+
 class NavigationManager(QObject):
     """
     Funktionsweise: Zentrale Verwaltung der Tab-Navigation zwischen allen Map-Editor Komponenten
@@ -39,20 +75,12 @@ class NavigationManager(QObject):
         self.data_lod_manager = data_lod_manager
         self.current_tab = "main_menu"
 
-        # Tab-Reihenfolge wie in Dokumentation definiert
-        self.tab_order = [
-            "main_menu",
-            "terrain",
-            "geology",
-            # Erosion sitzt zwischen Geology und Weather - dieselbe Reihenfolge
-            # wie in der Pipeline (siehe CALCULATOR_GRAPH).
-            "erosion",
-            "weather",
-            "water",
-            "biome",
-            "settlement",
-            "overview"
-        ]
+        # Tab-Reihenfolge wie in Dokumentation definiert.
+        # Kopie (nicht Referenz) der Modul-Konstante GENERATOR_TAB_ORDER, damit
+        # eine Instanz ihre eigene Liste besitzt, falls sie zur Laufzeit
+        # veraendert wird (siehe z.B. Tests). Die Konstante selbst ist die
+        # kanonische Quelle, siehe Kommentar dort.
+        self.tab_order = list(GENERATOR_TAB_ORDER)
 
         # Window-Geometrie Cache
         self.window_geometries = {}

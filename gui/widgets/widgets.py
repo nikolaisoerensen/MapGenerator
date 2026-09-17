@@ -19,6 +19,10 @@ from typing import Any, Dict, List, Optional
 import random
 
 from gui.config.gui_default import ColorSchemes
+# Kanonische Generator-Tab-Reihenfolge (Ticket #56) - NICHT hier erneut als
+# Liste eintragen. NavigationManager importiert selbst nur PyQt6+gui_default,
+# ein Import von hier aus erzeugt also keinen Zirkel.
+from managers.navigation_manager import GENERATOR_TAB_ORDER
 
 
 class BaseButton(QPushButton):
@@ -779,9 +783,10 @@ class NavigationPanel(QGroupBox):
         if not self.navigation_manager:
             return
 
-        # Tab-Reihenfolge
-        tab_order = ["terrain", "geology", "erosion", "weather", "water",
-                     "biome", "settlement", "overview"]
+        # Tab-Reihenfolge - kanonisch in managers/navigation_manager.py
+        # (GENERATOR_TAB_ORDER), hier nur ohne das vorangestellte "main_menu",
+        # weil dieses Panel erst ab dem ersten Generator-Reiter navigiert.
+        tab_order = GENERATOR_TAB_ORDER[1:]
 
         if self.current_tab in tab_order:
             current_index = tab_order.index(self.current_tab)
@@ -795,7 +800,11 @@ class NavigationPanel(QGroupBox):
     @pyqtSlot()
     def go_previous(self):
         """Navigation zu Previous Tab"""
-        tab_order = ["terrain", "geology", "weather", "water", "biome", "settlement", "overview"]
+        # Kanonische Reihenfolge, siehe update_navigation_buttons() oben.
+        # War hier vorher eine eigene, um "erosion" verkuerzte Kopie (Ticket
+        # #56) - reiner Kopierfehler, kein bewusster Ausschluss des
+        # Erosion-Reiters.
+        tab_order = GENERATOR_TAB_ORDER[1:]
 
         if self.current_tab in tab_order:
             current_index = tab_order.index(self.current_tab)
@@ -806,7 +815,8 @@ class NavigationPanel(QGroupBox):
     @pyqtSlot()
     def go_next(self):
         """Navigation zu Next Tab"""
-        tab_order = ["terrain", "geology", "weather", "water", "biome", "settlement", "overview"]
+        # Kanonische Reihenfolge, siehe update_navigation_buttons() oben.
+        tab_order = GENERATOR_TAB_ORDER[1:]
 
         if self.current_tab in tab_order:
             current_index = tab_order.index(self.current_tab)
