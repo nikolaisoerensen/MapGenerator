@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QGridLayout, QGroupBox, QRadioButton, QButtonGroup, QLabel,
     QCheckBox)
 
-from gui.tabs.base_tab import BaseMapTab
+from gui.tabs.base_tab import BaseMapTab, Overlay
 
 
 class SettlementRegionalTab(BaseMapTab):
@@ -286,6 +286,22 @@ class SettlementRegionalTab(BaseMapTab):
             self._auf_region_zoomen(ziel, gebiet, size)
             self._statistik_auffrischen(gebiet, hoehe, size)
             self.apply_3d_overlays()
+
+            # Siedlungspunkte (Staedte/Landmarken/Roadsites) UEBER DAS REGISTER
+            # (Ticket #11, docs/SPEC_OVERLAYS.md): frueher lief das ueber
+            # `ziel.overlay_settlements(...)` in _overlays_zeichnen(), eine
+            # Methode, die es NUR auf MapDisplay2D gibt. Genau wie bei den
+            # anderen vier hasattr-Weichen dort griff das in der 3D-Ansicht
+            # nie - `_push_overlays()` bedient beide Anzeigen aus demselben
+            # Register-Eintrag "siedlungen" (siehe BiomeTab/SettlementTab).
+            settlements = self.data_lod_manager.get_settlement_data("settlement_list") or []
+            landmarks = self.data_lod_manager.get_settlement_data("landmark_list") or []
+            roadsites = self.data_lod_manager.get_settlement_data("roadsite_list") or []
+            siedlungen_sichtbar = bool(settlements or landmarks or roadsites)
+            self._push_overlays([
+                Overlay("siedlungen", sichtbar=siedlungen_sichtbar,
+                        daten=(settlements, landmarks, roadsites)),
+            ])
         except Exception as fehler:                      # pragma: no cover
             self.logger.error("Regionsanzeige fehlgeschlagen: %s", fehler)
 
@@ -320,11 +336,9 @@ class SettlementRegionalTab(BaseMapTab):
                 if hoehe is not None and region_map is not None:
                     ziel.overlay_regions(region_map, hoehe, alpha=0.40)
 
-            if hasattr(ziel, "overlay_settlements"):
-                ziel.overlay_settlements(
-                    self.data_lod_manager.get_settlement_data("settlement_list") or [],
-                    self.data_lod_manager.get_settlement_data("landmark_list") or [],
-                    self.data_lod_manager.get_settlement_data("roadsite_list") or [])
+            # Siedlungspunkte laufen seit Ticket #11 NICHT mehr hier ueber
+            # `ziel.overlay_settlements(...)`, sondern in update_display_mode()
+            # ueber das Overlay-Register (`_push_overlays()`) - siehe dort.
 
             if hasattr(ziel, "overlay_city_boundary_contour"):
                 city_mask = self.data_lod_manager.get_settlement_data("city_mask")
@@ -346,7 +360,12 @@ class SettlementRegionalTab(BaseMapTab):
                 wilderness_polygons = self.data_lod_manager.get_settlement_data("wilderness_polygons")
                 ziel.overlay_plot_boundaries(plot_nodes, plot_edges, plot_cores, wilderness_polygons)
         except Exception as fehler:                      # pragma: no cover
-            self.logger.debug("Overlay nicht verfuegbar: %s", fehler)
+            # Vorher logger.debug() - lief damit in der Konsole nie auf,
+            # obwohl genau dieser Block jahrelang den overlay_plot_boundaries-
+            # Argumentfehler (siehe Kommentar oben) lautlos verschluckt hat.
+            # STEHENDE REGEL (CLAUDE.md): "jeder stille Rueckfall auf einen
+            # Ersatzpfad braucht eine laute Logzeile" - warning statt debug.
+            self.logger.warning("Overlay nicht verfuegbar: %s", fehler)
 
     def apply_3d_overlays(self):
         """
@@ -367,7 +386,7 @@ class SettlementRegionalTab(BaseMapTab):
             plot_edges = self.data_lod_manager.get_settlement_data("plot_edges")
             plot_cores = self.data_lod_manager.get_settlement_data("plot_cores")
             wilderness_polygons = self.data_lod_manager.get_settlement_data("wilderness_polygons")
-            from gui.widgets.map_display_2d import rasterize_plot_boundaries_rgba
+            from gui.widgets.overlay_rasterizer import rasterize_plot_boundaries_rgba
             rgba = rasterize_plot_boundaries_rgba(
                 plot_nodes, plot_edges, plot_cores, wilderness_polygons,
                 map_size=heightmap.shape[0], resolution=heightmap.shape[0])

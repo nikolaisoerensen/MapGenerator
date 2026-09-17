@@ -250,35 +250,6 @@ def _validate_overlay_data(overlay_data, expected_shape=None):
     return True
 
 
-def _validate_settlement_data(settlement_data):
-    """
-    Funktionsweise: Validiert Settlement-Positionsdaten
-    Aufgabe: Prüft Settlement-Positionen auf korrekte 3D-Koordinaten
-    Parameter: settlement_data - Liste oder Array von Positionen
-    Rückgabe: bool - True wenn valide, False sonst
-    """
-    if settlement_data is None or len(settlement_data) == 0:
-        return True
-
-    try:
-        # Kann Liste von Tupeln oder numpy Array sein
-        if isinstance(settlement_data, list):
-            for pos in settlement_data:
-                if len(pos) != 3:
-                    return False
-                if not all(isinstance(coord, (int, float)) for coord in pos):
-                    return False
-        elif isinstance(settlement_data, np.ndarray):
-            if settlement_data.shape[1] != 3:
-                return False
-        else:
-            return False
-    except:
-        return False
-
-    return True
-
-
 def _create_perspective_matrix(fov, aspect, near, far):
     """
     Funktionsweise: Erstellt Perspective-Projection-Matrix
@@ -587,13 +558,15 @@ class MapDisplay3D(QOpenGLWidget):
                       # Verdunstungskarte blieb im 3D unsichtbar.
                       "evaporation": False},
             "biome": {"biome_map": True, "super_biome_mask": False},
-            "settlement": {"plots": True, "settlements": True, "landmarks": True, "roads": True, "civ_map": False,
+            "settlement": {"plots": True, "civ_map": False,
                            # "uebersicht": globale Siedlungsuebersicht als RGBA-Skin
                            # (Staedte/Landmarken/Roadsites als Punkte, Land-/Seewege als
                            # Linien) - 2026-08-13, Nutzer-Vorgabe "3D Settlements global
-                           # sollte jetzt umgesetzt werden". Ersetzt funktional die drei
-                           # nie implementierten Marker-Layer darueber (siehe
-                           # _render_settlement_markers(), ein leerer TODO-Stub).
+                           # sollte jetzt umgesetzt werden". Deckt bereits ab, was frueher
+                           # drei eigene "settlements"/"landmarks"/"roads"-Marker-Layer
+                           # zeigen sollten - die waren nie mehr als ein leerer TODO-Stub
+                           # (_render_settlement_markers(), entfernt Ticket #65) und ihre
+                           # Checkboxen im 3D-Fenster taten sichtbar nichts.
                            "uebersicht": False,
                            # Wege als echte Bandgeometrie (6.28)
                            "wegbaender": False}
@@ -623,7 +596,7 @@ class MapDisplay3D(QOpenGLWidget):
                       # 2026-08-26 nachgetragen, siehe layer_visibility oben.
                       "evaporation": None},
             "biome": {"biome_map": None, "super_biome_mask": None},
-            "settlement": {"plots": None, "settlements": [], "landmarks": [], "roads": [], "civ_map": None,
+            "settlement": {"plots": None, "civ_map": None,
                            "uebersicht": None, "wegbaender": None}
         }
 
@@ -1033,14 +1006,21 @@ class MapDisplay3D(QOpenGLWidget):
             self.rendering_error.emit(f"Unknown tab type: {tab_type}")
             return
 
+        if layer_name not in self.overlay_data[tab_type]:
+            # Ohne diese Pruefung legt die Zuweisung unten einfach einen neuen
+            # Dict-Schluessel an (Ticket 14.7, docs/OFFENE_PUNKTE.md): ein
+            # Tippfehler im layer_name erzeugt dann KEINEN Fehler, sondern ein
+            # Overlay, das nirgends gelesen wird - "ein Nichts" statt eines
+            # KeyError. Die gueltigen Namen je tab_type stehen alle schon oben
+            # in self.overlay_data (__init__).
+            self.rendering_error.emit(
+                f"Unknown layer name '{layer_name}' for tab type '{tab_type}'")
+            return
+
         expected_shape = self.heightmap.shape if self.heightmap is not None else None
 
-        if tab_type == "settlement" and layer_name in ["settlements", "landmarks", "roads"]:
-            if not _validate_settlement_data(data):
-                self.rendering_error.emit(f"Invalid settlement data for {layer_name}")
-                return
-        elif layer_name in ("region_overlay", "kuesten_overlay", "wegbaender",
-                            "river_overlay"):
+        if layer_name in ("region_overlay", "kuesten_overlay", "wegbaender",
+                          "river_overlay"):
             # Rohes Payload-Dict wie fuer den 2D-Renderer (regionen/heightmap/
             # ggf. kuesten_archetyp/kuesten_staerke), KEIN fertiges Array -
             # wird erst beim Zeichnen rasterisiert, siehe
@@ -1069,9 +1049,17 @@ class MapDisplay3D(QOpenGLWidget):
         Parameter: tab_type (str), layer_name (str), visible (bool)
         """
         if tab_type not in self.layer_visibility:
+            self.rendering_error.emit(f"Unknown tab type: {tab_type}")
             return
 
         if layer_name not in self.layer_visibility[tab_type]:
+            # Bisher stiller Rueckfall (Ticket 14.7, docs/OFFENE_PUNKTE.md):
+            # ein Tippfehler im layer_name erzeugte keinen Fehler, sondern
+            # schaltete lautlos gar nichts - CLAUDE.md "jeder stille
+            # Rueckfall auf einen Ersatzpfad braucht eine laute Logzeile",
+            # hier ueber dasselbe Fehlersignal wie update_overlay_data() oben.
+            self.rendering_error.emit(
+                f"Unknown layer name '{layer_name}' for tab type '{tab_type}'")
             return
 
         self.layer_visibility[tab_type][layer_name] = visible
@@ -1946,15 +1934,6 @@ class MapDisplay3D(QOpenGLWidget):
         # darauf liegen, und mit eigenem Draw-Call.
         if self.layer_visibility["settlement"].get("wegbaender"):
             self._render_wegbaender()
-
-        if self.layer_visibility["settlement"]["settlements"]:
-            self._render_settlement_markers("settlements")
-
-        if self.layer_visibility["settlement"]["landmarks"]:
-            self._render_settlement_markers("landmarks")
-
-        if self.layer_visibility["settlement"]["roads"]:
-            self._render_settlement_markers("roads")
 
     def _render_terrain_base(self):
         """
@@ -2937,7 +2916,7 @@ class MapDisplay3D(QOpenGLWidget):
             if hoehe is None:
                 return
 
-            from gui.widgets.map_display_2d import (
+            from gui.widgets.overlay_rasterizer import (
                 rasterize_regions_rgba, rasterize_kuesten_archetypen_rgba,
                 rasterize_fluesse_rgba)
             # DAS FLUSSNETZ ZUERST, denn es braucht `regionen` NICHT.
@@ -3063,21 +3042,6 @@ class MapDisplay3D(QOpenGLWidget):
             gl.glUniform1i(use_overlay_location, 0)
         if use_alpha_overlay_location >= 0:
             gl.glUniform1i(use_alpha_overlay_location, 0)
-
-    def _render_settlement_markers(self, marker_type):
-        """
-        Funktionsweise: Rendert Settlement-Feature-Marker
-        Aufgabe: 3D-Marker für Settlements, Landmarks und Roads
-        Parameter: marker_type (str) - Typ der Settlement-Features
-        """
-        marker_data = self.overlay_data["settlement"][marker_type]
-        if not marker_data:
-            return
-
-        # TODO: Implementierung verschiedener Marker-Typen
-        # - Settlements: Größere Zylinder/Kugeln
-        # - Landmarks: Icon-basierte Marker
-        # - Roads: Kleinere Verbindungspunkte
 
     def _update_animation(self):
         """
@@ -3353,6 +3317,20 @@ class MapDisplay3DWidget(QWidget):
         self._setup_ui()
         self._connect_signals()
 
+    @property
+    def heightmap(self):
+        """
+        Durchreiche auf das innere MapDisplay3D: Aufrufer wie
+        BaseMapTab._siedlungen_3d() lesen `display.heightmap` auf DIESEM
+        Wrapper (dem Objekt, das sie ueber self.map_display_3d.display in
+        der Hand haben), nicht auf self.display_3d. Ohne diese Property
+        liefert getattr(self, "heightmap", None) immer None, weil
+        update_heightmap() das Array nur auf self.display_3d setzt -
+        das 3D-Settlement-Overlay baute seine Textur dadurch nie
+        (gefunden im Nachtlauf 2026-09-16, Code-Review).
+        """
+        return getattr(self.display_3d, "heightmap", None)
+
     def _setup_ui(self):
         """
         Funktionsweise: Erstellt UI-Layout mit 3D-Display und Tab-spezifischen Controls
@@ -3459,15 +3437,19 @@ class MapDisplay3DWidget(QWidget):
     def _setup_settlement_controls(self):
         """
         Funktionsweise: Erstellt Controls für Settlement-Tab
-        Aufgabe: Plots, Settlements, Landmarks, Roads und Civ-Map Controls
+        Aufgabe: Plots- und Civ-Map-Controls. Staedte/Landmarken/Roadsites
+        selbst haben hier bewusst KEINE eigene Checkbox mehr - sie laufen
+        seit je als globaler RGBA-Skin ueber "uebersicht" (siehe
+        SettlementTab.apply_3d_overlays(), dort werden dieselben Checkboxen
+        wie in der 2D-Ansicht ausgewertet). Die frueheren drei Checkboxen
+        "Settlements"/"Landmarks"/"Roads" schalteten nur den leeren
+        _render_settlement_markers()-Stub um (Ticket #65) - sichtbar
+        anklickbar, aber wirkungslos, weil dieser Pfad nie Daten bekam.
         """
         self._clear_tab_controls()
 
         settlement_layers = [
             ("Plots", "plots", True),
-            ("Settlements", "settlements", True),
-            ("Landmarks", "landmarks", True),
-            ("Roads", "roads", True),
             ("Civ Map", "civ_map", False)
         ]
 
@@ -3567,11 +3549,12 @@ class MapDisplay3DWidget(QWidget):
 
         DIESE WEITERLEITUNG IST DER PUNKT, an dem es beim ersten Anlauf
         scheiterte. `gui/tabs/base_tab.py` legt das 3D-Widget in einen
-        `DisplayWrapper`, und `river_tab._anzeigeziel()` greift ueber
-        `.display` darauf zu - das ist DIESE Klasse, nicht die innere
-        `MapDisplay3D`. Die Methode allein in der GL-Klasse zu haben
-        genuegt also nicht; `hasattr` schlaegt hier fehl und der Aufruf
-        faellt lautlos aus - genau der Fehler, der behoben werden sollte.
+        `DisplayWrapper`, und `BaseMapTab._push_overlays()` (frueher:
+        `river_tab._anzeigeziel()`) greift ueber `.display` darauf zu - das
+        ist DIESE Klasse, nicht die innere `MapDisplay3D`. Die Methode allein
+        in der GL-Klasse zu haben genuegt also nicht; `hasattr` schlaegt hier
+        fehl und der Aufruf faellt lautlos aus - genau der Fehler, der
+        behoben werden sollte.
         """
         self.display_3d.overlay_river_generations(generation_map, zeige_mikro)
 

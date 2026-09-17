@@ -441,6 +441,16 @@ class TerrainTab(BaseMapTab):
         layout.addWidget(region_radio)
         layout.addWidget(kuesten_radio)
         layout.addWidget(spielkarten_radio)
+        # BUGFIX (Issue #31, 2026-09-17): hoehenfaktor_radio/voronoi_radio waren
+        # oben vollstaendig verdrahtet (Titel, Tooltip, Signal, Button-Group),
+        # fehlten hier aber im sichtbaren Layout - dadurch fuer den Nutzer
+        # unerreichbar, obwohl Daten (core/terrain_generator.py:
+        # "hinterland_height"/"voronoi_map"), 2D-Farbskala
+        # (gui/config/gui_default.py layer_ranges) und 3D-Overlay-Registrierung
+        # (base_tab.py _LAYER_NAME_MAP_3D/_LAYER_SELECTION_KEYS_3D,
+        # map_display_3d.py _render_overlay) bereits vorhanden waren.
+        layout.addWidget(hoehenfaktor_radio)
+        layout.addWidget(voronoi_radio)
 
         return layout
 

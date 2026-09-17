@@ -194,10 +194,13 @@ Python-Funktion und ist 23x langsamer als die GPU-Fassung. Solange die GPU da
 ist, kein Problem; faellt sie aus, wird das Programm unbenutzbar. Mit 5 statt
 42 Rechnungen waere auch der CPU-Weg wieder tragbar.
 
-**d) Der Erosionsfilter** ist abgeschaltet (`EROSION_AKTIV = False`) und kostet
-nichts — aber wenn er zurueckkommt (Nutzerwunsch 2026-08-07), sollte er die
-Regionsgewichtung gleich mitbekommen und nicht als zweiter Simulationskreis
-danebenstehen.
+**d) Der Erosionsfilter** LAEUFT (`EROSION_AKTIV = True`,
+`gui/config/value_default.py:1088`), seit dem 27.08.2026. Hier stand bis zum
+16.09.2026, er sei abgeschaltet und koste nichts - das war falsch. Er kostet
+also, und die Regionsgewichtung hat er inzwischen: gemessen formt er in den
+Bergen 64.5 m um und in den Niederungen 17.6, Faktor 3.7 (zentrale
+Richtigstellung in `docs/TESTBERICHT.md` Abschnitt 3, Ticket #28/#63 — beide
+Tickets haben denselben veralteten Befund unabhaengig voneinander gefunden).
 
 ### Was ich NICHT vereinfachen wuerde
 

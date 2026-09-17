@@ -31,7 +31,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from gui.widgets.map_display_2d import rasterize_fluesse_rgba
+from gui.widgets.overlay_rasterizer import rasterize_fluesse_rgba
 
 
 def _testfeld(n=64):
@@ -183,16 +183,27 @@ def verdrahtung_im_3d():
     # DER TAB-TYP. `river_tab` meldet sich als "terrain" an - deshalb liegt
     # das Overlay dort. Ein eigener "river"-Tabtyp waere nie erreicht
     # worden. Diese Zusicherung faengt es, wenn jemand das aendert.
+    #
+    # Seit Ticket #11 (docs/SPEC_OVERLAYS.md) ruft river_tab nicht mehr
+    # direkt `ziel.clear_river_overlay()` auf einer einzelnen Anzeige auf -
+    # das lief nur auf der gerade sichtbaren Ansicht und liess die andere
+    # mit einer haengengebliebenen Textur zurueck. Stattdessen meldet der
+    # Reiter `Overlay("fluesse", sichtbar=False)` an
+    # `BaseMapTab._push_overlays()`, das Register ruft
+    # `clear_river_overlay()` dann auf BEIDEN Anzeigen (siehe
+    # tests/smoke_test_push_overlays.py::fluesse_unsichtbar_raeumt_3d_ab).
     quelle_tab = open(os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "gui", "tabs", "river_tab.py"), encoding="utf-8").read()
     ok = ('self.generator_type = "terrain"' in quelle_tab
-          and "clear_river_overlay" in quelle_tab)
+          and "_push_overlays" in quelle_tab
+          and '"fluesse"' in quelle_tab)
     print(f"[{'OK' if ok else 'FEHLER'}] river_tab: meldet sich als "
-          f"'terrain' an UND schaltet das Netz beim Moduswechsel ab")
+          f"'terrain' an UND schaltet das Netz ueber das Overlay-Register ab")
     if not ok:
         fehler.append("river_tab: generator_type nicht mehr 'terrain' oder "
-                      "clear_river_overlay wird nicht gerufen")
+                      "das Fluesse-Overlay laeuft nicht mehr ueber "
+                      "_push_overlays()")
     return fehler
 
 

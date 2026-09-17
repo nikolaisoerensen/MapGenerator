@@ -163,7 +163,7 @@ def run_kein_commit_auf_main():
     try:
         (repo / "neu.txt").write_text("x\n", encoding="utf-8")
         try:
-            branch.ticket_abschliessen(99, "Darf nicht", repo=repo)
+            branch.ticket_abschliessen(99, "Darf nicht", ["neu.txt"], repo=repo)
         except branch.NachtlaufFehler as fehler:
             print("  verweigert, wie es sein soll: %s"
                   % str(fehler).splitlines()[0])
@@ -182,10 +182,12 @@ def run_ein_commit_je_ticket_und_ruecknahme():
         print("  Nachtbranch: %s" % name)
 
         (repo / "ticket_a.txt").write_text("Arbeit A\n", encoding="utf-8")
-        branch.ticket_abschliessen(101, "Erstes Ticket", repo=repo,
+        branch.ticket_abschliessen(101, "Erstes Ticket", ["ticket_a.txt"],
+                                   repo=repo,
                                    tests="gruen - tests/smoke_test_a.py")
         (repo / "ticket_b.txt").write_text("Arbeit B\n", encoding="utf-8")
-        branch.ticket_abschliessen(102, "Zweites Ticket", repo=repo,
+        branch.ticket_abschliessen(102, "Zweites Ticket", ["ticket_b.txt"],
+                                   repo=repo,
                                    tests="gruen - tests/smoke_test_b.py")
 
         print("  --- stand() ---")
@@ -227,7 +229,8 @@ def run_sperre_verhindert_commit():
         branch.starte_nacht(repo=repo)
         (repo / "requirements.txt").write_text("numpy==2.5.1\n", encoding="utf-8")
         try:
-            branch.ticket_abschliessen(103, "numpy aktualisieren", repo=repo)
+            branch.ticket_abschliessen(103, "numpy aktualisieren",
+                                       ["requirements.txt"], repo=repo)
         except branch.NachtlaufFehler as fehler:
             print("  abgebrochen, wie es sein soll:")
             print("  " + str(fehler).replace("\n", "\n  "))
@@ -236,6 +239,61 @@ def run_sperre_verhindert_commit():
                   % bool(offen))
             return bool(offen)
         print("  FEHLER: der Commit ging durch.")
+        return False
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+
+
+def run_fremde_datei_bleibt_aussen_vor():
+    print("\n--- Eine fremde uncommittete Datei landet NICHT im Ticket-Commit ---")
+    repo = _wegwerf_repo()
+    try:
+        branch.starte_nacht(repo=repo)
+
+        # Eine voellig unabhaengige Datei, die zufaellig schon im
+        # Arbeitsverzeichnis liegt - z.B. Handarbeit aus einer parallelen
+        # Sitzung. Genau die durfte "git add -A" frueher versehentlich
+        # mitcommitten.
+        (repo / "fremde_handarbeit.txt").write_text(
+            "gehoert nicht zum Ticket\n", encoding="utf-8")
+        (repo / "ticket_c.txt").write_text("Arbeit C\n", encoding="utf-8")
+
+        kurz, _ = branch.ticket_abschliessen(
+            105, "Ticket mit fremder Datei daneben", ["ticket_c.txt"],
+            repo=repo, tests="gruen - tests/smoke_test_c.py")
+
+        committete_dateien = _git(repo, "show", "--name-only",
+                                  "--format=", kurz).splitlines()
+        print("  Commit enthaelt: %s" % committete_dateien)
+
+        nur_ticket_datei = committete_dateien == ["ticket_c.txt"]
+        fremde_bleibt_uncommittet = "fremde_handarbeit.txt" in _git(
+            repo, "status", "--porcelain")
+        print("  Nur ticket_c.txt committet:              %s" % nur_ticket_datei)
+        print("  fremde_handarbeit.txt bleibt uncommittet: %s"
+              % fremde_bleibt_uncommittet)
+        if not (nur_ticket_datei and fremde_bleibt_uncommittet):
+            print("  FEHLER: das waere genau der git-add--A-Fehler von "
+                  "2026-09-17 gewesen.")
+            return False
+        return True
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+
+
+def run_ohne_dateien_wird_abgelehnt():
+    print("\n--- Ohne benannte Dateien gibt es keinen Commit ---")
+    repo = _wegwerf_repo()
+    try:
+        branch.starte_nacht(repo=repo)
+        (repo / "ticket_d.txt").write_text("Arbeit D\n", encoding="utf-8")
+        try:
+            branch.ticket_abschliessen(106, "Ohne Dateiliste", [], repo=repo)
+        except branch.NachtlaufFehler as fehler:
+            print("  verweigert, wie es sein soll: %s"
+                  % str(fehler).splitlines()[0])
+            return True
+        print("  FEHLER: ein Commit ohne benannte Dateien ging durch.")
         return False
     finally:
         shutil.rmtree(repo, ignore_errors=True)
@@ -480,6 +538,8 @@ if __name__ == "__main__":
         "branchname_kollidiert_nicht": run_branchname_kollidiert_nicht(),
         "kein_commit_auf_main": run_kein_commit_auf_main(),
         "ein_commit_je_ticket": run_ein_commit_je_ticket_und_ruecknahme(),
+        "fremde_datei_bleibt_aussen_vor": run_fremde_datei_bleibt_aussen_vor(),
+        "ohne_dateien_wird_abgelehnt": run_ohne_dateien_wird_abgelehnt(),
         "sperre_verhindert_commit": run_sperre_verhindert_commit(),
         "grenze_waechst_mit_den_tests": run_grenze_waechst_mit_den_tests(),
         "notiz_verweigert_die_uhr": run_notiz_verweigert_die_uhr(),

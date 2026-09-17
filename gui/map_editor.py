@@ -161,7 +161,24 @@ class MapEditorWindow(QMainWindow):
         self.parameter_stack = None
         self.statistics_stack = None
         self.side_tab_widget = None
-        self.tab_order = []  # lowercase tab names, Index == main_tab_bar/stack index
+        # lowercase tab names, Index == main_tab_bar/stack index.
+        #
+        # TICKET #56: wird NICHT aus managers.navigation_manager.GENERATOR_TAB_ORDER
+        # gespeist, obwohl das auf den ersten Blick wie dieselbe Liste aussieht.
+        # Es ist eine ANDERE Menge: diese hier ist die vollstaendige Reihenfolge
+        # der main_tab_bar/viewport_stack-Spalte, wie sie unten in
+        # _setup_tabs()/tab_configs steht (region, kontinent, terrain, rivers,
+        # geology, erosion, weather, water, biome, settlement,
+        # settlement_regional, overview) und wird dynamisch nur aus den
+        # tatsaechlich erfolgreich erzeugten Tabs befuellt (_add_successful_tab/
+        # _add_error_tab). GENERATOR_TAB_ORDER ist dagegen nur die Teilmenge der
+        # linearen Generator-Pipeline fuer die Previous/Next-Navigation
+        # (NavigationManager/NavigationPanel) - ohne region/kontinent/rivers/
+        # settlement_regional, dafuer mit vorangestelltem "main_menu". Beide
+        # zusammenzulegen wuerde entweder Reiter aus der Tab-Leiste werfen oder
+        # NavigationManager fremde Reiter unterschieben - das Ticket verlangt
+        # ausdruecklich, dass die sichtbare Reihenfolge unveraendert bleibt.
+        self.tab_order = []
         self.tabs = {}
         # Fertigkeits-Zustand je Generator, gespiegelt in der Tab-Beschriftung.
         # Siehe _set_tab_state() - das ist der Ersatz fuer die grobe

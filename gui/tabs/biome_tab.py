@@ -16,7 +16,7 @@ from PyQt6.QtGui import *
 import numpy as np
 import logging
 
-from .base_tab import BaseMapTab
+from .base_tab import BaseMapTab, Overlay
 from gui.config.value_default import BIOME, get_parameter_config, validate_parameter_set, VALIDATION_RULES
 from gui.widgets.widgets import ParameterSlider, StatusIndicator, BaseButton, BiomeLegendDialog
 from core.biome_generator import (
@@ -499,84 +499,41 @@ class BiomeTab(BaseMapTab):
 
     def apply_overlays(self):
         """
-        Funktionsweise: Wendet alle aktivierten Overlays auf Display an
-        Aufgabe: Settlements, Rivers basierend auf Checkboxes (Elevation
-        Contours läuft über die globale Shell-Checkbox, siehe set_contour_overlay())
-        """
-        current_display = self.get_current_display()
-        if not current_display or self.current_view != "2d":
-            return
-        display = current_display.display
+        Funktionsweise: Wendet alle aktivierten Overlays ueber das Register
+        an (Elevation Contours laeuft ueber die globale Shell-Checkbox, siehe
+        set_contour_overlay())
+        Aufgabe: Settlements, Rivers basierend auf Checkboxes
 
-        # SIEDLUNGEN - IN BEIDEN ANSICHTEN (2026-08-25).
-        #
-        # Hier stand nur `overlay_settlements`, und die gibt es
-        # ausschliesslich auf MapDisplay2D. In der 3D-Ansicht traf die
-        # hasattr-Weiche nie zu und der Haken tat lautlos nichts - genau
-        # derselbe Ausfall wie beim Flussnetz eine Zeile weiter unten, und
-        # wie am 2026-08-24 bei `overlay_river_generations`. Dreimal
-        # dieselbe Fehlerklasse.
-        #
-        # Nutzer dazu: *"im uebrigen werden mal wieder alle features, die in
-        # 2D anzeigbar sind, auch in 3D dargestellt ... flussnetz und
-        # settlements haekchen soll auch in 3D vorhanden sein."* Die Regel
-        # steht jetzt in CLAUDE.md und wird von
-        # tests/smoke_test_display_methoden_existieren.py bewacht.
-        #
-        # Der 3D-Weg ist die RGBA-Skin-Route, dieselbe, die
-        # SettlementTab.apply_3d_overlays() benutzt - kein neuer GLSL-Code.
+        Ticket #9 (docs/SPEC_OVERLAYS.md): ersetzt die bisherige, tab-eigene
+        hasattr-Weiche (die nur DIE EINE gerade sichtbare Anzeige bediente und
+        deshalb schon dreimal denselben lautlosen Ausfall hatte, siehe
+        CLAUDE.md "STEHENDE REGEL") durch self._push_overlays() aus
+        BaseMapTab. Das Register (_OVERLAY_REGISTER, base_tab.py) kennt pro
+        Overlay-Name je einen 2D- und einen 3D-Weg und schickt IMMER beide an
+        - unabhaengig davon, welche Ansicht gerade sichtbar ist, und ohne dass
+        dieser Reiter noch selbst zwischen `overlay_settlements` (2D) und
+        `update_overlay_data`+`set_layer_visibility` (3D) unterscheiden muss.
+        """
         settlements = self.data_lod_manager.get_settlement_data("settlement_list")
         landmarks = self.data_lod_manager.get_settlement_data("landmark_list")
         roadsites = self.data_lod_manager.get_settlement_data("roadsite_list")
-        zeigen = bool(self.settlements_overlay.isChecked()
-                      and (settlements or landmarks or roadsites))
-
-        if hasattr(display, 'overlay_settlements'):
-            # 2D
-            if zeigen:
-                display.overlay_settlements(settlements, landmarks)
-        elif hasattr(display, 'update_overlay_data'):
-            # 3D - als Alpha-Skin auf das Gelaende
-            heightmap = self.data_lod_manager.get_terrain_data_combined("heightmap")
-            if heightmap is not None:
-                if zeigen:
-                    from gui.widgets.map_display_2d import rasterize_settlements_rgba
-                    rgba = rasterize_settlements_rgba(
-                        settlements or [], landmarks or [], roadsites or [],
-                        [], [], map_size=heightmap.shape[0],
-                        resolution=heightmap.shape[0])
-                    display.update_overlay_data("settlement", "uebersicht", rgba)
-                if hasattr(display, 'set_layer_visibility'):
-                    display.set_layer_visibility("settlement", "uebersicht", zeigen)
+        siedlungen_sichtbar = bool(self.settlements_overlay.isChecked()
+                                    and (settlements or landmarks or roadsites))
 
         # FLUSSNETZ - DIESELBE QUELLE UND DASSELBE OVERLAY WIE IM FLUSS-REITER
-        # (docs/ANZEIGE_UND_SEEN.md B.1).
-        #
-        # Hier stand bis zum 2026-08-25 `overlay_river_network(flow_map)`. Das
-        # hatte zwei Fehler, und beide waren unsichtbar:
-        #
-        # 1. ZWEITE QUELLE. `flow_map` kommt aus dem Wassergenerator und ist
-        #    eine Abflussmenge, aus der das Overlay per 90.-Perzentil selbst
-        #    eine Flussmaske schnitt. Der Fluss-Reiter zeigt dagegen
-        #    `river_generation` aus dem Weltflussnetz. Zwei Quellen fuer
-        #    dieselbe Aussage - dieselbe Falle wie bei `lake` (SPEZIFIKATION
-        #    §4.5), und man sah in zwei Reitern zwei verschiedene Flusssysteme.
-        # 2. NUR 2D. `overlay_river_network` gibt es ausschliesslich auf
-        #    MapDisplay2D. In der 3D-Ansicht traf die hasattr-Weiche nie zu und
-        #    fiel lautlos aus - genau der Ausfall, der am 2026-08-24 schon
-        #    einmal fuer `overlay_river_generations` behoben wurde.
-        #
-        # `overlay_river_generations` gibt es auf BEIDEN Anzeigen.
-        if hasattr(display, 'overlay_river_generations'):
-            if self.rivers_overlay.isChecked():
-                generation = self.data_lod_manager.get_terrain_data("river_generation")
-                if generation is not None:
-                    display.overlay_river_generations(np.asarray(generation),
-                                                       zeige_mikro=False)
-            elif hasattr(display, 'clear_river_overlay'):
-                # Im 3D bleibt eine einmal gesetzte Textur liegen, bis sie
-                # abgeschaltet wird (2D zeichnet ohnehin neu).
-                display.clear_river_overlay()
+        # (docs/ANZEIGE_UND_SEEN.md B.1). `river_generation` aus dem
+        # Weltflussnetz, NICHT die aus `flow_map` selbst geschnittene
+        # Perzentil-Maske - zwei Quellen fuer dieselbe Aussage waren die Falle
+        # vom 2026-08-25 (man sah in zwei Reitern zwei verschiedene Flusssysteme).
+        generation = self.data_lod_manager.get_terrain_data("river_generation")
+        fluesse_sichtbar = bool(self.rivers_overlay.isChecked() and generation is not None)
+
+        self._push_overlays([
+            Overlay("siedlungen", sichtbar=siedlungen_sichtbar,
+                    daten=(settlements, landmarks, roadsites)),
+            Overlay("fluesse", sichtbar=fluesse_sichtbar,
+                    daten=np.asarray(generation) if fluesse_sichtbar else None),
+        ])
 
     @pyqtSlot()
     def update_display_mode(self):

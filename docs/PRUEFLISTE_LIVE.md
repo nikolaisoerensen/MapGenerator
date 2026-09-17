@@ -165,12 +165,24 @@ anderen Reiter wechseln, eine Minute arbeiten, zurückwechseln.**
 
 ## 4. Erosionsreiter
 
+**Korrektur (Ticket #63):** Diese Prüfung ist veraltet. `EROSION_AKTIV`
+steht schon länger auf `True` (`gui/config/value_default.py:1088`) — die
+zentrale Richtigstellung dazu steht in `docs/TESTBERICHT.md` Abschnitt 3.
+
 Erosion-Reiter öffnen.
 
-* **Erwartet:** oben ein **gelber Hinweisstreifen**, dass die Erosionskette
-  abgeschaltet ist und die Regler deshalb gesperrt sind.
-* Das ist der Punkt, an dem bisher unklar war, ob die wirkungslosen Regler
-  Absicht oder ein Fehler sind.
+* **Erwartet:** **kein** Hinweisstreifen und **freie Regler**, alle 13
+  bedienbar. Die Erosionskette läuft (`EROSION_AKTIV = True`,
+  `gui/config/value_default.py:1088`). Den gelben Streifen zeigt das Programm
+  nur bei `False` (`_create_stilllegungs_hinweis()` in
+  `gui/tabs/erosion_tab.py` prüft `EROSION_AKTIV` zur Laufzeit).
+* Hier stand bis zum 16.09.2026 die umgekehrte Erwartung. Wer danach prüfte,
+  hätte das richtige Verhalten als Fehler gemeldet. Zeigt der Reiter
+  trotzdem den Streifen mit gesperrten Reglern, ist das jetzt umgekehrt ein
+  echter Fehler.
+* **Achten auf:** dass die Regler auch tatsächlich etwas bewirken. Drei
+  Erosionstests sind rot und ihre Ursache ist ungeklärt (siehe
+  `docs/TESTBERICHT.md`, Abschnitt 3).
 
 ## 5. Export
 
@@ -197,6 +209,78 @@ Delatin braucht ~20 s und zeigt währenddessen den Fortschritt.
 **Die gesamte Vektor-Küste ist visuell unbestätigt** — weder die neue
 Küstenform noch der Meeresboden noch die Regionsübergänge. Das hängt an
 nichts anderem als daran, dass du es dir einmal ansiehst.
+
+## 8. Biome-Reiter: Settlements/Flussnetz in 3D (Ticket #5, 2026-09-16)
+
+`BiomeTab.apply_overlays()` stieg bis heute in der ersten Zeile aus, sobald
+die Ansicht nicht 2D war — die am 2026-08-25 eingebauten 3D-Zweige für
+Settlements und Flussnetz wurden dadurch nie erreicht. Headless geprüft ist
+jetzt nur, dass der Code bei `current_view == "3d"` überhaupt bis zu diesen
+Aufrufen durchläuft (`tests/smoke_test_biome_overlays_3d.py`) — **nicht**,
+ob am Bildschirm wirklich etwas erscheint.
+
+| # | Was ansehen | Was richtig ist | Was schiefgehen kann |
+|---|---|---|---|
+| 8.1 | Karte generieren, Biome-Reiter, Häkchen **Settlements** setzen, dann auf **3D** umschalten | Siedlungen/Landmarken/Roadsites erscheinen als Textur auf dem Gelände | Bleibt 3D leer, ist das derselbe Registerfehler wie schon dreimal zuvor |
+| 8.2 | Dasselbe mit Häkchen **Flussnetz** | Das Flussnetz erscheint auf dem Gelände | |
+| 8.3 | Häkchen in 3D wieder abwählen | Die jeweilige Textur verschwindet sofort | Bleibt die alte Textur liegen, greift die Sichtbarkeits-Abschaltung nicht |
+| 8.4 | Häkchen in **2D** setzen, danach erst auf 3D umschalten | Übernahme sofort, ohne erneutes Generieren | |
+
+## 9. Biome-Reiter auf das Overlay-Register umgestellt (Ticket #9, 2026-09-16)
+
+`BiomeTab.apply_overlays()` ruft jetzt nicht mehr selbst `overlay_settlements`/
+`update_overlay_data` per `hasattr`-Weiche auf, sondern meldet die zwei
+Overlays (`"siedlungen"`, `"fluesse"`) als `Overlay(name, sichtbar, daten)` an
+`self._push_overlays()` (`gui/tabs/base_tab.py`) — dieselbe Methode, die
+später auch Settlement/Regional/Fluss bedienen soll (Ticket #10/#11). Fachlich
+soll sich am Bildschirm **nichts ändern**; die Punkte 8.1–8.4 oben gelten
+unverändert und sind der eigentliche Test dieser Umstellung. Zusätzlich neu:
+
+| # | Was ansehen | Was richtig ist | Was schiefgehen kann |
+|---|---|---|---|
+| 9.1 | Settlements UND Flussnetz gleichzeitig anhaken, mehrfach zwischen 2D/3D wechseln | Beide Texturen bleiben stabil sichtbar, kein Flackern, keine veraltete Textur | Fingerabdruck-Cache in `_siedlungen_3d` (base_tab.py) baut die RGBA-Textur falsch gar nicht neu, wenn sich Siedlungsdaten geändert haben |
+| 9.2 | Nur Flussnetz an-/abhaken, Settlements-Häkchen dabei unverändert lassen | Kein sichtbares Neuladen/Aufblitzen der Siedlungstextur | Ohne den Fingerabdruck-Cache würde hier bei jedem Flussnetz-Klick unnötig die komplette Siedlungstextur neu gebaut (war der Anlass für Commit 927eecc) |
+
+## 10. Siedlungs-Reiter (`settlement_tab.py`) auf das Register umgestellt (Ticket #10, 2026-09-16)
+
+Nur die Siedlungspunkte (Städte/Landmarken/Roadsites, Layer `"uebersicht"`)
+laufen jetzt über `self._push_overlays()`. Regionsraster, Straßen (2D-Linien),
+Regionsfarben und die 3D-Wegbänder (`"wegbaender"`) sind **unverändert** und
+liefen vorher schon richtig (Settlement-Reiter war nicht Teil des Fehlers,
+siehe CLAUDE.md "das Vorbild"). Am Bildschirm soll sich nichts ändern außer
+dass die Siedlungstextur jetzt einen Fingerabdruck-Cache hat (vorher keinen).
+
+| # | Was ansehen | Was richtig ist | Was schiefgehen kann |
+|---|---|---|---|
+| 10.1 | Siedlungs-Reiter, Häkchen Settlements/Landmarks/Roadsites einzeln durchschalten, in 2D UND 3D | Punkte erscheinen/verschwinden in BEIDEN Ansichten passend zu den Häkchen | Bleibt 3D leer oder veraltet, ist das derselbe Registerfehler wie bei Biome |
+| 10.2 | Straßen-Häkchen an-/abschalten, dabei Settlements-Häkchen unverändert lassen | Wegbänder (3D) und Straßenlinien (2D) reagieren, Siedlungspunkte bleiben unverändert/flackern nicht | Fingerabdruck-Cache reagiert falsch auf reine Wege-Änderungen |
+| 10.3 | Anklickbare Objekte (Städte/Wege) im 3D antippen | Info-Popup erscheint weiterhin wie zuvor | `setze_auswahlobjekte()` wurde in diesem Umbau nicht angefasst, sollte also unverändert funktionieren |
+
+## 11. Regional-Reiter und Fluss-Reiter auf das Register umgestellt (Ticket #11, 2026-09-16)
+
+Zwei Reiter in einem Ticket, weil beide dieselbe Ursache hatten (siehe
+docs/OFFENE_PUNKTE.md 14.4): der Siedlungs-Zweig in
+`settlement_regional_tab.py._overlays_zeichnen()` und der Flussnetz-Zweig in
+`river_tab.py.update_display_mode()` liefen über `hasattr()`-Weichen auf
+GENAU dem gerade sichtbaren Display statt über beide. Auf dem Regional-Reiter
+war das zusätzlich in einen `except Exception: logger.debug(...)` gehüllt,
+der jeden Fehler lautlos verschluckte (jetzt `logger.warning`, damit ein
+künftiger Fehler in der Konsole auftaucht statt nur im Log-Level "debug").
+
+Unverändert blieben auf dem Regional-Reiter bewusst: `overlay_region_grid`,
+`overlay_regions`, `overlay_city_boundary_contour` (echte 3D-Schuld, siehe
+`FEHLT_IM_3D` in `tests/smoke_test_display_methoden_existieren.py` — dafür
+gibt es noch keinen 3D-Weg, das ist kein stiller Fehler mehr, sondern
+dokumentierte, offene Arbeit) und `overlay_plot_boundaries` (hat bereits
+einen eigenen, funktionierenden 3D-Weg über `apply_3d_overlays()` und die
+`"plots"`-Textur — nicht Teil des Registers, aber nicht kaputt).
+
+| # | Was ansehen | Was richtig ist | Was schiefgehen kann |
+|---|---|---|---|
+| 11.1 | Regional-Reiter öffnen, eine Region mit Siedlungen wählen, zwischen 2D und 3D wechseln | Siedlungspunkte erscheinen in BEIDEN Ansichten | Vorher: in 3D fehlten sie immer (keine der fünf Weichen trifft dort zu) |
+| 11.2 | Regional-Reiter: Stadtgrenze/Regionsraster/Plot-Feingewebe ansehen, nur in 2D (3D ist hier weiterhin dokumentierte Schuld, siehe oben) | Alle drei zeichnen wie vorher in 2D; das Plot-Feingewebe zeigt jetzt auch tatsächlich Kanten (alter Argumentfehler war schon vor diesem Ticket behoben) | Regression durch die entfernte `overlay_settlements`-Zeile wäre ein NameError/AttributeError beim Öffnen des Reiters |
+| 11.3 | Fluss-Reiter: Ansicht "Flussnetz" wählen, zwischen 2D und 3D wechseln, dabei "Bäche (Mikro)" an-/abhaken | Flussnetz erscheint in BEIDEN Ansichten, Mikro-Häkchen wirkt in beiden gleich | Vorher: in 3D fehlten die Flüsse (nur eine laute Warnung, keine Anzeige) |
+| 11.4 | Fluss-Reiter: von "Flussnetz" auf "Höhe"/"Wassermenge" wechseln, danach wieder zurück | Flussnetz-Textur verschwindet beim Wegschalten in BEIDEN Ansichten (auch der gerade nicht sichtbaren) und kommt beim Zurückschalten wieder | Vorher wurde nur die gerade sichtbare Ansicht abgeräumt; wechselte man Reiter/Modus mehrfach, konnte im 3D eine alte Textur hängen bleiben |
 
 ---
 

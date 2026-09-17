@@ -480,7 +480,9 @@ vorbestehend und von dieser Aenderung nicht beruehrt.
 ### Weiter offen
 
 * `smoke_test_erosion_gpu_parity`: Export 38.5 (GPU) gegen 0.1 m (CPU),
-  unverstanden seit der relief-relativen Kapazitaet.
+  unverstanden seit der relief-relativen Kapazitaet. **Nachtrag 16.09.2026:**
+  war kein Rechenfehler, sondern ein zu grobes GPU-Meldeintervall; behoben,
+  seither gruen. Aktueller Stand in `docs/TESTBERICHT.md` Abschnitt 3.
 * Die Becken laufen weiterhin nicht bis zum Ueberlauf voll (Befund 1). Die
   Klemme verhindert, dass neue entstehen, sie loest die vorhandenen nicht auf.
 * Routing-Variante bricht im Nebelrode nach 25 Schritten ab - Ursache
@@ -1007,10 +1009,20 @@ sie ausdruecklich geaendert werden.
     2. Erosionsfilter    (der bisherige "ATEF-Filter", so heisst er ab jetzt)
     3. Echte Erosion     erst wenn 1 und 2 vollstaendig stimmen
 
-Schritt 3 wird NICHT angefasst, solange 1 und 2 nicht sitzen. `EROSION_AKTIV`
-bleibt False. Vor dem Wiedereinschalten soll ein **Auswahlfeld mit
+Schritt 3 wird NICHT angefasst, solange 1 und 2 nicht sitzen.
+
+> **Ueberholt, berichtigt 16.09.2026 (Ticket #28).** Hier stand: *"`EROSION_AKTIV`
+> bleibt False."* Das gilt nicht mehr - der Schalter steht seit dem 27.08.2026
+> auf `True` (`gui/config/value_default.py:1088`). Schritt 3 ist also bereits
+> eingeschaltet worden, ohne dass diese Reihenfolge abgearbeitet war, und vier
+> Erosionstests sind seither rot mit ungeklaerter Ursache (siehe
+> `docs/TESTBERICHT.md`, Abschnitt 3). Ob das zurueckgedreht oder die
+> Reihenfolge aufgegeben wird, ist eine offene Entscheidung.
+
+Vor dem Wiedereinschalten sollte ein **Auswahlfeld mit
 Regionsvorgaben** (Alpen, Skerrheim, ...) da sein, das die Regler setzt, mit
-einem Klick auf- und zuklappbar fuer das Feintuning.
+einem Klick auf- und zuklappbar fuer das Feintuning. Auch das ist nicht
+passiert.
 
 ### Festgelegt
 
@@ -1422,7 +1434,7 @@ Generator.
 
 | Befund | Outputs |
 |---|---|
-| erosion.hydraulic/* alle NUR NULL | 7 - ERWARTET, EROSION_AKTIV steht auf False (§8) |
+| erosion.hydraulic/* alle NUR NULL | 7 - damals ERWARTET, EROSION_AKTIV stand auf False (§8); seit 27.08.2026 `True`, siehe Nachtrag unten |
 | water.lake_detection/lake_map | KONSTANT auf GPU, OK auf CPU - **Paritaet verletzt** |
 | biome.climate_classification | KONSTANT auf GPU, OK auf CPU - **Paritaet verletzt** |
 | settlement.roadsites/roadsite_list | OK auf GPU, NUR NULL auf CPU - **Paritaet verletzt** |
@@ -1441,6 +1453,12 @@ Getrennt nachgemessen:
 * **Erosion-Schalter**: leer, weil EROSION_AKTIV auf False steht. Kein Fehler,
   sondern die Entscheidung aus §8. Faellt weg, sobald Schritt 3 des Fahrplans
   (§14) dran ist.
+
+  > **Nachtrag 16.09.2026 (Ticket #28).** Das war der Stand des damaligen
+  > Laufs. `EROSION_AKTIV` steht seit dem 27.08.2026 auf `True`. Leere
+  > Erosionsausgaben sind heute also **kein** erwarteter Befund mehr, sondern
+  > ein offener. Der Messwert oben bleibt stehen, weil er ein Protokoll ist;
+  > seine Deutung gilt nicht mehr.
 * **Slope und die Geology-Schalter**: die DATEN sind da. Nachgeprueft bis in
   den Domain-Speicher, aus dem die Anzeige liest: heightmap (128,128),
   slopemap (128,128,2), shadowmap (128,128) - alle vorhanden, assemble und

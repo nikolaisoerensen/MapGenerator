@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton, QButtonGroup, QLabel,
     QCheckBox)
 
-from gui.tabs.base_tab import BaseMapTab
+from gui.tabs.base_tab import BaseMapTab, Overlay
 
 
 # LIVE-VORSCHAU DES FLUSSNETZES (docs/AUFRAEUMPLAN.md 4.10)
@@ -401,46 +401,32 @@ class RiverTab(BaseMapTab):
                 if hoehe is None:
                     return
                 self._show_data(hoehe, "heightmap")
-                if generation is not None:
-                    ziel = self._anzeigeziel()
-                    if ziel is not None and hasattr(ziel, "overlay_river_generations"):
-                        ziel.overlay_river_generations(
-                            np.asarray(generation),
-                            zeige_mikro=bool(self.mikro_checkbox
-                                             and self.mikro_checkbox.isChecked()))
-                    else:
-                        # LAUT MELDEN STATT LAUTLOS NICHTS TUN.
-                        #
-                        # Diese hasattr-Weiche ist die Fehlerklasse aus
-                        # CLAUDE.md: `overlay_river_generations` gibt es nur
-                        # auf MapDisplay2D, in der 3D-Ansicht trifft sie nie
-                        # zu - und dann fehlen die Fluesse einfach, ohne
-                        # Meldung. Der Nutzer meldete am 2026-08-26
-                        # *"Baeche (Mikro) gibt es ja auch gar nicht"*;
-                        # gemessen liegen 3760 Mikro-Pixel im Raster, mehr
-                        # als Makro (2411). Es fehlte die ANZEIGE, nicht die
-                        # Rechnung.
-                        #
-                        # Die neue Leitansicht "Wassermenge" geht den
-                        # gewoehnlichen Skalarweg und ist davon nicht
-                        # betroffen.
-                        self.logger.warning(
-                            "Flussnetz-Overlay nicht moeglich: %s kennt "
-                            "overlay_river_generations nicht - in dieser "
-                            "Ansicht bleiben die Laeufe unsichtbar. "
-                            "Ansicht 'Wassermenge' benutzen.",
-                            type(ziel).__name__ if ziel else "kein Ziel")
+                # UEBER DAS OVERLAY-REGISTER (Ticket #11,
+                # docs/SPEC_OVERLAYS.md): frueher lief das per
+                # `ziel.overlay_river_generations(...)` NUR auf dem gerade
+                # sichtbaren Display - `overlay_river_generations` gibt es
+                # nur auf MapDisplay2D UND (seit 2026-08-24) auf
+                # MapDisplay3DWidget, aber der alte Code fragte per hasattr
+                # nur DAS AKTUELLE Ziel ab und liess die jeweils andere
+                # Ansicht komplett aus. In 3D fehlten die Fluesse deshalb
+                # unbemerkt (nur eine laute, aber wirkungslose Warnung).
+                # `_push_overlays()` bedient IMMER beide Anzeigen aus
+                # demselben Register-Eintrag "fluesse" (siehe
+                # BiomeTab.apply_overlays()) und behebt das damit wirklich,
+                # statt es nur zu protokollieren.
+                zeige_mikro = bool(self.mikro_checkbox and self.mikro_checkbox.isChecked())
+                self._push_overlays([
+                    Overlay("fluesse", sichtbar=generation is not None,
+                            daten=(generation, zeige_mikro) if generation is not None else None),
+                ])
             else:
                 # DAS FLUSSNETZ ABSCHALTEN, sonst liegt es ueber jeder
                 # anderen Ansicht dieses Reiters (Nutzerbefund 2026-08-24:
                 # *"wenn man auf Ordnung geht dann aendert sich nichts und
                 # wenn man wieder auf gelaende geht aendert sich auch
-                # nichts"*). Die 2D-Ansicht zeichnet bei jedem Wechsel
-                # ohnehin neu; im 3D bleibt eine einmal gesetzte Textur
-                # liegen, bis sie ausgeschaltet wird.
-                ziel = self._anzeigeziel()
-                if ziel is not None and hasattr(ziel, "clear_river_overlay"):
-                    ziel.clear_river_overlay()
+                # nichts"*). `_push_overlays()` raeumt jetzt BEIDE Anzeigen
+                # ab, nicht nur die gerade sichtbare (siehe Kommentar oben).
+                self._push_overlays([Overlay("fluesse", sichtbar=False)])
                 art = ("heightmap" if self.current_display_mode == "height"
                        else self.current_display_mode)
                 daten = self.data_lod_manager.get_terrain_data(art)
@@ -450,11 +436,6 @@ class RiverTab(BaseMapTab):
             self._statistik_auffrischen()
         except Exception as fehler:                      # pragma: no cover
             self.logger.error("Anzeige fehlgeschlagen: %s", fehler)
-
-    def _anzeigeziel(self):
-        anzeige = (self.get_current_display() if hasattr(self, "get_current_display")
-                   else getattr(self, "current_display", None))
-        return getattr(anzeige, "display", None) if anzeige is not None else None
 
     def _show_data(self, daten, art):
         """

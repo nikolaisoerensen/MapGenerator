@@ -422,7 +422,7 @@ Neun Befunde im Pipeline-Test, alle älter als die Weltkarte:
 
 | Befund | Art |
 |---|---|
-| `erosion.*` (7 Outputs) | **erwartet** — `EROSION_AKTIV = False` reicht Nullkarten durch |
+| `erosion.*` (7 Outputs) | **nicht mehr erwartet** — galt, solange `EROSION_AKTIV = False` war; seit 27.08.2026 steht der Schalter auf `True` (`gui/config/value_default.py:1088`), Nullkarten sind hier also ein offener Befund |
 | `settlement.city_boundary/city_cost_map` | `np.inf` als Marke für "unerreichbar", kein NaN |
 | `geology.intrusions/height_delta`, `settlement.plot_nodes/plots` | leer, Altlast |
 | `lake_map`, `climate_classification`, `evaporation_map`, `roadsite_list` | **Empfindlichkeit**, siehe unten |
