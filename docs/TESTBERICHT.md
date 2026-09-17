@@ -104,7 +104,7 @@ sondern eine Eigenschaft grober Testauflösungen. Notiert in
 | `erosion_quality` | Kanalnetz 45 px statt > 60, Ebenen 7,2 % statt 15–55 % | **ungeklärt** — frühere Erklärung ("Erosionskette abgeschaltet") war falsch, siehe unten |
 | `regionen_welt` | 4 Befunde, u. a. Macchia Hang 18,6 statt 14,5 | die Küsten-Archetypen verstimmen die Regionseichung — in CLAUDE.md beschrieben |
 | `pipeline_outputs` | 5 Befunde | seit 24.08. |
-| `settlement_placement` | 6 Befunde, u. a. 2 Städte statt 1 je Kultur | seit 24.08. |
+| `settlement_placement` | 6 Befunde, u. a. 2 Städte statt 1 je Kultur | seit 24.08. — neu bewertet und Assertion korrigiert, siehe Nachtrag Ticket #34 unten |
 | `weather_temperature_direktnormierung` | 3 Befunde, Skerrheim 7,86 statt 8,60 K | seit 24.08. |
 
 **`erosion_gpu_parity` stand bis zum 16.09.2026 ebenfalls in dieser
@@ -349,6 +349,96 @@ Ausgangsvermutung gefragt hatte.
 Reines Mess-Ticket (`bereich:wasser, ready-for-agent, test`), keine
 Korrektur am Code — `core/fluss_sinuositaet.py` ist eine neue,
 eigenständige Messfunktion, sie ändert an der Flusserzeugung selbst nichts.
+
+**Nachtrag 17.09.2026 (Ticket #34, Biomkarte in die Siedlungs-Eignungsrechnung
+eingehängt):** die Biomkarte (`biome.integrate_layers`, 15 Landschaftstypen
+wie Wüste, Gletscher, Grasland) floss bisher nirgends in die Berechnung ein,
+wie gut ein Ort für eine Siedlung geeignet ist — `TerrainSuitabilityAnalyzer`
+in `core/settlement_generator.py` kannte nur Wasser, Hangneigung, Höhenlage
+und Erreichbarkeit. Eine Wüste und eine Wiese mit sonst identischem Gelände
+bekamen dieselbe Eignung.
+
+Neu: ein Ackerland-Fruchtbarkeitswert je Biom (`_BIOME_FRUCHTBARKEIT`, 0,0 bei
+Wüste/Eiskappe/Sumpf/Küstendünen/Badlands/Tundra, 1,0 bei Grasland/Wiese
+u. ä.), der in `evaluate_farmland_radius()` den Ackerland-Teilfaktor
+gewichtet. Dieser fließt über `gewichte = {'wasser': 0.45, 'flach': 0.30 *
+terrain_factor, 'acker': 0.25 * terrain_factor}` (Zeilen 776 f. in
+`core/settlement_generator.py`) als gewichteter Mittelwert in die
+Gesamteignung ein — Ackerland macht damit bei Standard-`terrain_factor=1,0`
+ein Viertel der "Lage-Güte" aus, Wasser fast die Hälfte. Dazu die neue
+Kante `biome.integrate_layers` → `settlement.suitability` im
+Rechengraphen (`managers/calculator_graph.py`), damit die Biomkarte fertig
+ist, bevor die Eignung gerechnet wird, und eine laute Logzeile statt eines
+stillen Leerfelds, wenn die Biomkarte einmal fehlt.
+
+`tests/smoke_test_settlement_placement.py` neu bewertet (der Ticket-Text
+selbst sagte "hat heute sechs Befunde" voraus). Neu hinzugekommen: Prüfung
+6a (Reihenfolge im Rechengraphen über `sp._reihenfolge()`) und 6b (dieselbe
+Geländeform, zweimal gerechnet — einmal mit einer Wüste-Grasland-Biomkarte,
+einmal ohne — Ackerland-Eignung sinkt in der Wüstenhälfte, steigt in der
+Grasland-Hälfte, Gesamteignung ist nicht mehr identisch). Die fünf übrigen,
+bereits vorher bekannten Befunde ("2 Städte statt 1 je Kultur", hier
+kurzzeitig auf vier von fünf Seeds aufgetreten) erwiesen sich beim Lesen von
+`_rang_zuweisen()`/`_typen_zuweisen()` als genau der bereits seit dem
+24.08.2026 dokumentierte Fall in dieser Tabelle — die Marktstadt-Sonderregel
+("nur anheben, nie senken") darf laut eigenem Docstring eine zweite Stadt je
+Kultur erzeugen, die Test-Assertion verlangte fälschlich "genau eine". Auf
+"mindestens eine" korrigiert (das ist die tatsächliche Entwurfszusage);
+keine Änderung an der Rang-/Typ-Zuweisung selbst. Zusätzlich per `git
+stash`/`git stash pop` gegengeprüft: `tests/smoke_test_pipeline_outputs.py`
+zeigt unabhängig von dieser Änderung 6 statt der hier dokumentierten 5
+Befunde — vorbestehende Drift seit dem 24.08., keine Ticket-#34-Regression.
+Alle drei Testdateien danach grün (`smoke_test_settlement_placement.py`:
+"Alle Zusicherungen erfuellt"; `smoke_test_stadttypen.py`: 9/9 Prüfungen).
+
+Ist-Erhebung an der echten Pipeline (nicht am Mock), 128 px, 6 Seeds
+(20260804, 12345, 4242, 777, 99999, 55555), Vergleich isoliert per
+Affen-Patch auf `_BIOME_FRUCHTBARKEIT` (einmal echte Werte, einmal alle
+Biome auf 1,0 gesetzt — bei sonst identischem Code und identischer
+Reihenfolge, damit ausschließlich die neue Gewichtung variiert):
+
+| Seed | Ø |Änderung| Gesamteignung | Anteil Siedlungen in schlechten Biomen: mit Fruchtbarkeit | ohne (alle=1,0) |
+|---:|---:|---:|---:|
+| 20260804 | 0,0191 | 49 % | 29 % |
+| 12345 | 0,0230 | 39 % | 34 % |
+| 4242 | 0,0237 | 40 % | 33 % |
+| 777 | 0,0205 | 35 % | 46 % |
+| 99999 | 0,0202 | 43 % | 34 % |
+| 55555 | 0,0200 | 32 % | 32 % |
+| **Gesamt** | | **39,7 %** | **34,5 %** |
+
+Damit sind vier der fünf Abnahmekriterien des Tickets erfüllt: die Kante
+existiert und liegt an der richtigen Stelle im Graphen (6a), die
+Eignungswerte unterscheiden sich nachweislich und in der erwarteten Richtung
+von vorher (6b, plus die 0,02-Größenordnung oben), die laute Logzeile ist da,
+und der Test ist neu bewertet.
+
+**Das fünfte Kriterium — "Siedlungen erscheinen sichtbar seltener in
+ungeeigneten Biomen" — ist NICHT erfüllt.** Die Messung zeigt das Gegenteil:
+39,7 % der Siedlungen landen MIT der neuen Fruchtbarkeits-Gewichtung in
+schlechten Biomen, gegenüber 34,5 % OHNE. Das ist kein Rauschen einzelner
+Seeds (bei drei Seeds lag der Abstand noch bei 42,9 % gegen 31,9 %, bei
+sechs Seeds schrumpft er auf 5,2 Prozentpunkte, kehrt sich aber nicht um —
+vier von sechs Seeds zeigen weiterhin mehr statt weniger, nur Seed 777 zeigt
+die erwartete Richtung, Seed 55555 liegt gleichauf). Wahrscheinlichste
+Ursache: die mittlere Verschiebung der Gesamteignung durch die neue Kante
+liegt bei nur 0,02-0,024 auf einer 0..1-Skala — klein gegenüber der
+Streuung, die Wasser (Gewicht 0,45) und Ebener Grund (0,30) über die Karte
+hinweg erzeugen. Die Platzierung wird nach wie vor überwiegend von diesen
+beiden Faktoren entschieden; der Fruchtbarkeits-Abschlag reicht rechnerisch
+nicht aus, um in einem gegebenen Gebiet gegen einen Wasser- oder
+Ebenen-Vorteil aufzuwiegen. Diese drei Gewichte (0,45/0,30/0,25) sind
+Spielbalance, keine reine Bugkorrektur — eine Änderung daran würde alle
+bereits platzierten Siedlungstypen mit beeinflussen und liegt bewusst
+außerhalb dieses Tickets; sie bräuchte eine eigene Nutzerentscheidung, keine
+Nacht-Automatik.
+
+Damit ist die Kante gezogen, wirkt nachweislich (Falle 1 des Tickets
+vermieden) und in der richtigen Reihenfolge (Falle 2 vermieden) — aber der
+im Ticket erhoffte sichtbare Effekt auf die Siedlungsverteilung bleibt
+messbar aus. Für die nicht-technische Übersicht am Ende der Nacht heißt das:
+dieses Ticket erzeugt **keine** verlässlich sichtbare Verbesserung im
+laufenden Programm, trotz correcter technischer Umsetzung.
 
 ## 4. Was neu grün ist
 

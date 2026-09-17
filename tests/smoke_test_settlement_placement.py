@@ -11,11 +11,21 @@ Geprueft wird hier das NEUE Verhalten, nicht ob es "gut aussieht":
   1. Fuenf Faktoren wirken tatsaechlich unterschiedlich (Wassertyp-Gewichtung,
      Ackerland-Radius, Hoehen-DAEMPFUNG statt Wohlfuehlzone).
   2. Jede vorhandene Kultur bekommt 2 bis 5 Siedlungen.
-  3. Jede vorhandene Kultur hat GENAU eine Stadt (die Zusicherung des Entwurfs
-     ist "mindestens eine" - die Umsetzung hier liefert immer exakt eine).
+  3. Jede vorhandene Kultur hat MINDESTENS eine Stadt (die Zusicherung des
+     Entwurfs, siehe _rang_zuweisen()-Docstring: der beste Wert wird immer
+     'stadt'). Eine zweite kann per Marktstadt-Sonderregel dazukommen
+     (_typen_zuweisen(): "nur anheben, nie senken" hebt eine als Marktstadt
+     erkannte Siedlung notfalls direkt auf 'stadt') - das ist laut Docstring
+     dort ausdruecklich gewollt, keine Grenze auf genau 1.
   4. Haeuserzahl liegt im Bereich des zugewiesenen Rangs.
   5. Der Rang ist NICHT einfach der Eignungswert - das Rauschen aus §2 muss
      ueber mehrere Seeds sichtbar etwas verschieben, sonst waere es totes Code.
+  6. Ticket #34: die Biomkarte (biome.integrate_layers) steht VOR der
+     Eignungsrechnung (settlement.suitability) im Calculator-Graph bereit
+     (Reihenfolge, aus dem echten Graphen abgeleitet statt von Hand behauptet),
+     UND die Eignungswerte aendern sich nachweislich, wenn eine Biomkarte
+     hereinkommt - eine Kante ohne Wirkung waere kein Erfolg (docs/OFFENE_
+     PUNKTE.md-Falle aus Ticket #34).
 
 Faehrt die echte Pipeline (Terrain bis Settlements) bei kleiner Kartengroesse,
 mehrere Seeds - das ist teuer, deshalb bewusst nur 3 Seeds bei 96 px.
@@ -136,6 +146,57 @@ def main():
     if not np.all(np.diff(e_test) <= 1e-9):
         fehler.append("Hoehen-Eignung faellt nicht monoton: %s" % e_test.tolist())
 
+    # ---------- 6a: Reihenfolge im Calculator-Graph (Ticket #34) ----------
+    print("\n6a. Biomkarte steht vor der Eignungsrechnung bereit (Graph-Reihenfolge)")
+    reihenfolge = sp._reihenfolge()
+    if "biome.integrate_layers" not in reihenfolge or "settlement.suitability" not in reihenfolge:
+        fehler.append("Graph enthaelt biome.integrate_layers oder settlement.suitability nicht")
+    else:
+        idx_biom = reihenfolge.index("biome.integrate_layers")
+        idx_eignung = reihenfolge.index("settlement.suitability")
+        if not (idx_biom < idx_eignung):
+            fehler.append("Reihenfolge falsch: biome.integrate_layers (Position %d) muss VOR "
+                          "settlement.suitability (Position %d) laufen" % (idx_biom, idx_eignung))
+
+    # ---------- 6b: Biomkarte veraendert die Eignungswerte messbar ----------
+    print("6b. Biomkarte veraendert Ackerland-Eignung und Gesamteignung messbar")
+    # Zwei Haelften: links Wueste (Fruchtbarkeit 0.0), rechts Grasland
+    # (Fruchtbarkeit 1.0) - auf DERSELBEN Terrainstruktur wie oben, damit nur
+    # das Biom variiert, nicht die Form. Erwartung: Ackerland-Eignung sinkt in
+    # der Wuestenhaelfte gegenueber "ohne Biomkarte" (Faktor 1.0 ueberall) und
+    # steigt (oder bleibt gleich) in der Graslandhaelfte - verglichen wird NUR
+    # im jeweils AEUSSEREN Viertel (Spalten 0:n/4 bzw. 3n/4:n), nicht auf der
+    # ganzen Haelfte: evaluate_farmland_radius() mittelt per Boxfilter ueber
+    # farmland_radius_px=24 Pixel, der bei n=160 bis auf 24 Spalten an die
+    # Biomgrenze heranreicht - ein Haelftenmittel wuerde dort Wueste- und
+    # Graslandwerte vermischen und die Grasland-Seite faelschlich druecken.
+    biome_map = np.full((n, n), 6, dtype=np.int16)     # 6 = desert
+    biome_map[:, n // 2:] = 3                          # 3 = grassland
+    acker_mit_biom = analyzer.evaluate_farmland_radius(flach, hoehe, heightmap > 0,
+                                                        biome_map=biome_map)
+    if np.allclose(acker_mit_biom, acker, atol=1e-6):
+        fehler.append("Ackerland-Eignung mit Biomkarte ist IDENTISCH zu ohne Biomkarte - "
+                      "Kante ist gezogen, aber wirkungslos (Ticket-#34-Falle 1)")
+    wueste_tief = acker_mit_biom[:, :n // 4]
+    grasland_tief = acker_mit_biom[:, 3 * n // 4:]
+    wueste_ohne = acker[:, :n // 4]
+    grasland_ohne = acker[:, 3 * n // 4:]
+    if not (float(wueste_tief.mean()) <= float(wueste_ohne.mean()) + 1e-6):
+        fehler.append("Wuesten-Ackerland mit Biomkarte (%.4f) ist nicht kleiner/gleich "
+                      "ohne Biomkarte (%.4f)" % (wueste_tief.mean(), wueste_ohne.mean()))
+    if not (float(grasland_tief.mean()) >= float(grasland_ohne.mean()) - 1e-6):
+        fehler.append("Grasland-Ackerland mit Biomkarte (%.4f) ist nicht groesser/gleich "
+                      "ohne Biomkarte (%.4f)" % (grasland_tief.mean(), grasland_ohne.mean()))
+
+    kombiniert_mit_biom = analyzer.create_combined_suitability(
+        heightmap, slopemap, water_map, biome_map=biome_map)
+    if np.allclose(kombiniert_mit_biom, kombiniert, atol=1e-6):
+        fehler.append("Gesamteignung mit Biomkarte ist IDENTISCH zu ohne Biomkarte")
+    else:
+        diff = float(np.abs(kombiniert_mit_biom.astype(np.float64)
+                            - kombiniert.astype(np.float64)).mean())
+        print("   mittlere |Aenderung| der Gesamteignung durch Biomkarte: %.4f" % diff)
+
     # ---------- 2-5: echte Pipeline ----------
     print("\n2-5. Platzierung ueber %d Seeds bei %d px" % (len(SEEDS), SIZE))
     alle_kulturen = {}   # name -> Liste von (rang_wert_roh?, rang)
@@ -156,8 +217,8 @@ def main():
             if not (2 <= anzahl <= 5):
                 fehler.append("Seed %d, Kultur %s: %d Orte, erwartet 2-5"
                               % (seed, kultur, anzahl))
-            if len(staedte) != 1:
-                fehler.append("Seed %d, Kultur %s: %d Staedte, erwartet genau 1"
+            if len(staedte) < 1:
+                fehler.append("Seed %d, Kultur %s: %d Staedte, erwartet mindestens 1"
                               % (seed, kultur, len(staedte)))
             for s in gruppe:
                 lo, hi = {"dorf": (15, 25), "siedlung": (25, 35),

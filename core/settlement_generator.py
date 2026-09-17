@@ -572,6 +572,29 @@ ELEVATION_DAEMPFUNG_M = 600.0
 WASSERTYP_GEWICHT = {4: 1.0, 3: 1.0, 2: 0.8, 1: 0.5}
 KUeSTE_GEWICHT = 0.75
 
+# Fruchtbarkeit je Biom fuer den Ackerland-Faktor (Ticket #34, Entscheidung
+# #19.1) - Index 0-14 spiegelt BaseBiomeClassifier.biome_definitions
+# (core/biome_generator.py) 1:1 (gleiche Reihenfolge: ice_cap, tundra, taiga,
+# grassland, temperate_forest, mediterranean, desert, semi_arid,
+# tropical_rainforest, tropical_seasonal, savanna, montane_forest, swamp,
+# coastal_dunes, badlands), absichtlich hier dupliziert statt importiert -
+# identisches, bereits etabliertes Muster wie _BIOME_MOISTURE_CAPACITY in
+# core/water_generator.py, um core/settlement_generator.py nicht von
+# core/biome_generator.py abhaengig zu machen.
+#
+# 0.0 = fuer Ackerbau unbrauchbar, 1.0 = bestmoegliches Ackerland. Grassland
+# (Steppe/Praerie) ist die Referenz bei 1.0; Wueste/Eis/Ödland/Sumpf sind die
+# vom Ticket ausdruecklich genannten schlechten Standorte (nahe 0), Wald und
+# Savanne liegen dazwischen (nutzbar, aber nicht ohne Rodung/zusaetzlichen
+# Aufwand so ertragreich wie offenes Grasland).
+_BIOME_FRUCHTBARKEIT = np.array([
+    0.0, 0.05, 0.15, 1.0, 0.55, 0.85, 0.0, 0.2, 0.15, 0.6,
+    0.55, 0.2, 0.1, 0.1, 0.0,
+    # 0-14: ice_cap, tundra, taiga, grassland, temperate_forest, mediterranean,
+    #       desert, semi_arid, tropical_rainforest, tropical_seasonal, savanna,
+    #       montane_forest, swamp, coastal_dunes, badlands
+], dtype=np.float32)
+
 
 class TerrainSuitabilityAnalyzer:
     """
@@ -693,7 +716,8 @@ class TerrainSuitabilityAnalyzer:
         ueber_null = np.maximum(heightmap.astype(np.float64), 0.0)
         return (1.0 / (1.0 + (ueber_null / ELEVATION_DAEMPFUNG_M) ** 2)).astype(np.float32)
 
-    def evaluate_farmland_radius(self, flat_suit, elevation_suit, land_mask, progress_callback=None):
+    def evaluate_farmland_radius(self, flat_suit, elevation_suit, land_mask,
+                                  biome_map=None, progress_callback=None):
         """
         Ackerland im Umkreis: Anteil an flacher, tiefer Flaeche im Radius um
         jeden Punkt - bestimmt, WIEVIELE Menschen der Ort ernaehren kann,
@@ -703,6 +727,15 @@ class TerrainSuitabilityAnalyzer:
         Radien (wenige Pixel) ist der Unterschied zur Kreisscheibe gering,
         `uniform_filter` ist separierbar und braucht O(1) je Pixel statt
         O(Radius^2).
+
+        `biome_map` (Ticket #34): jeder flache, niedrige Kandidaten-Pixel wird
+        VOR dem Boxfilter mit seiner Biom-Fruchtbarkeit (_BIOME_FRUCHTBARKEIT)
+        gewichtet, statt nur binaer "flach genug ja/nein" zu zaehlen - eine
+        Wueste mit perfekter Hangneigung liefert damit weniger Ackerland-
+        Eignung als eine Wiese mit denselben Terrainwerten. Fehlt die
+        Biomkarte (None), bleibt das alte Verhalten erhalten (Gewicht 1.0
+        ueberall) - das Fehlen wird von der aufrufenden Stelle laut geloggt,
+        nicht hier still uebergangen.
         """
         if progress_callback:
             progress_callback("Terrain Analysis", 12, "Evaluating farmland radius...")
@@ -710,12 +743,17 @@ class TerrainSuitabilityAnalyzer:
         from scipy.ndimage import uniform_filter
 
         ackerland = (flat_suit >= 0.6) & (elevation_suit >= 0.4) & land_mask
-        anteil = uniform_filter(ackerland.astype(np.float64),
-                                size=2 * self.farmland_radius_px + 1, mode="nearest")
+        gewicht = ackerland.astype(np.float64)
+        if biome_map is not None:
+            idx = np.clip(np.asarray(biome_map).astype(np.intp), 0,
+                          len(_BIOME_FRUCHTBARKEIT) - 1)
+            gewicht = gewicht * _BIOME_FRUCHTBARKEIT[idx].astype(np.float64)
+        anteil = uniform_filter(gewicht, size=2 * self.farmland_radius_px + 1, mode="nearest")
         return anteil.astype(np.float32)
 
     def create_combined_suitability(self, heightmap, slopemap, water_map,
-                                    reachability_map=None, progress_callback=None):
+                                    reachability_map=None, biome_map=None,
+                                    progress_callback=None):
         """
         Fuenf Faktoren zur Standortguete. Wasser/Ebene/Ackerland gehen additiv
         gewichtet ein (Wasser am staerksten, die Begruendung siehe
@@ -723,13 +761,17 @@ class TerrainSuitabilityAnalyzer:
         multiplikativ auf das Ergebnis, nicht als weiterer additiver Term -
         weil sie im Entwurf ausdruecklich als daempfende Faktoren beschrieben
         sind, nicht als weitere Qualitaeten, die sich aufaddieren.
+
+        `biome_map` (Ticket #34) geht in den Ackerland-Faktor ein, siehe
+        evaluate_farmland_radius().
         """
         land_mask = heightmap > 0.0
         wasser_suit = self.calculate_water_proximity(water_map, heightmap, progress_callback)
         flach_suit = self.analyze_slope_suitability(slopemap, progress_callback)
         hoehe_suit = self.evaluate_elevation_fitness(heightmap, progress_callback)
         acker_suit = self.evaluate_farmland_radius(flach_suit, hoehe_suit, land_mask,
-                                                   progress_callback)
+                                                   biome_map=biome_map,
+                                                   progress_callback=progress_callback)
 
         gewichte = {'wasser': 0.45, 'flach': 0.30 * self.terrain_factor,
                    'acker': 0.25 * self.terrain_factor}
@@ -746,7 +788,7 @@ class TerrainSuitabilityAnalyzer:
         return combined.astype(np.float32)
 
     def stadttyp_eignungen(self, heightmap, slopemap, water_map,
-                            progress_callback=None):
+                            biome_map=None, progress_callback=None):
         """
         Eine Eignungskarte je Stadttyp (Nutzer-Vorgabe 2026-08-13,
         docs/OFFENE_PUNKTE.md 5.16) - Rueckgabe dict typ -> (H,W) float32 in
@@ -767,20 +809,21 @@ class TerrainSuitabilityAnalyzer:
         `hoehe_suit` ist eine EIGNUNG (hoch = gute, also maessige Hoehe), nicht
         die Hoehe selbst - fuer das Bergdorf wird sie deshalb invertiert.
 
-        FRUCHTBARKEIT OHNE BIOMKARTE: `biome_map` steht diesem Knoten nicht zur
-        Verfuegung (settlement.settlements haengt laut Calculator-Graph an
-        settlement.suitability und terrain.redistribution, nicht an biome.*).
-        Als Ersatz dient `acker_suit` (evaluate_farmland_radius), das genau
-        dafuer gedacht ist - flaches, nicht zu hoch gelegenes Umland. Eine
-        echte Biom-Abhaengigkeit waere eine neue Graph-Kante und ein eigener
-        Schritt.
+        FRUCHTBARKEIT MIT BIOMKARTE (Ticket #34, vorher offen): `biome_map`
+        kommt jetzt ueber die neue Graph-Kante settlement.suitability ->
+        biome.integrate_layers herein und geht in `acker_suit`
+        (evaluate_farmland_radius) ein - echte Biom-Fruchtbarkeit statt nur
+        "flaches, nicht zu hoch gelegenes Gelaende". Fehlt sie (None, z.B.
+        alter Nicht-Weltkarten-Pfad), faellt `evaluate_farmland_radius` auf
+        das alte rein terrain-basierte Verhalten zurueck.
         """
         land_mask = heightmap > 0.0
         wasser_suit = self.calculate_water_proximity(water_map, heightmap, progress_callback)
         flach_suit = self.analyze_slope_suitability(slopemap, progress_callback)
         hoehe_suit = self.evaluate_elevation_fitness(heightmap, progress_callback)
         acker_suit = self.evaluate_farmland_radius(flach_suit, hoehe_suit, land_mask,
-                                                   progress_callback)
+                                                   biome_map=biome_map,
+                                                   progress_callback=progress_callback)
 
         # BERGIGKEIT AUS DER ECHTEN HOEHE, RELATIV ZU DIESER KARTE - nicht aus
         # `hoehe_suit`. Der erste Anlauf nahm `1 - hoehe_suit`, was falsch war
@@ -4967,6 +5010,22 @@ class SettlementGenerator:
         if missing:
             raise ValueError(f"Settlement: fehlende Dependencies für LOD {lod_level}: {', '.join(missing)}")
 
+        # Biomkarte (Ticket #34, neue Graph-Kante settlement.suitability ->
+        # biome.integrate_layers): geht in TerrainSuitabilityAnalyzer.
+        # evaluate_farmland_radius() als Fruchtbarkeits-Gewicht ein. ANDERS
+        # als region_map/seegrad unten KEIN stilles Optional-Muster - fehlt
+        # sie, rechnet die Eignung ohne Biom-Einfluss weiter (siehe dortiger
+        # Fallback), aber das muss sichtbar im Log stehen statt ein leeres
+        # Feld stillschweigend zu akzeptieren (CLAUDE.md: "Jeder stille
+        # Rueckfall auf einen Ersatzpfad braucht eine laute Logzeile").
+        biome_map = self.data_lod_manager.get_calculator_output(
+            "biome.integrate_layers", "biome_map", lod_level)
+        if biome_map is None:
+            self.logger.warning(
+                "Settlement: biome_map (biome.integrate_layers) für LOD %d nicht "
+                "verfügbar - Siedlungs-Eignung rechnet OHNE Biom-Einfluss "
+                "(Fruchtbarkeit=1.0 überall, wie vor Ticket #34)", lod_level)
+
         self.scale_factor = heightmap.shape[0] / 128.0
         self.area_scale_factor = self.scale_factor ** 2
 
@@ -4986,7 +5045,7 @@ class SettlementGenerator:
             "terrain.redistribution", "seegrad", lod_level)
 
         return {"heightmap": heightmap, "slopemap": slopemap, "water_map": water_map,
-                "region_map": region_map, "seegrad": seegrad}
+                "region_map": region_map, "seegrad": seegrad, "biome_map": biome_map}
 
     def _calc_suitability(self, calculator_id: str, lod_level: int) -> None:
         """
@@ -5006,7 +5065,7 @@ class SettlementGenerator:
         inputs = self._get_prepared_settlement_inputs(lod_level)
         suitability_map = self.calculate_terrain_suitability(
             inputs["heightmap"], inputs["slopemap"], inputs["water_map"], lod_level,
-            region_map=inputs.get("region_map"))
+            region_map=inputs.get("region_map"), biome_map=inputs.get("biome_map"))
         self.data_lod_manager.set_calculator_output(
             calculator_id, lod_level, {"combined_suitability_map": suitability_map})
 
@@ -5035,7 +5094,7 @@ class SettlementGenerator:
                 self.terrain_factor_villages, inputs["heightmap"].shape[0])
             typ_eignungen = analyzer.stadttyp_eignungen(
                 inputs["heightmap"], inputs["slopemap"], inputs["water_map"],
-                self._update_progress)
+                biome_map=inputs.get("biome_map"), progress_callback=self._update_progress)
         except Exception as fehler:
             # LAUT melden statt still auf "alles sonstige" zurueckzufallen -
             # ohne diese Zeile waere ein Fehler hier von einer Karte ohne
@@ -5312,11 +5371,15 @@ class SettlementGenerator:
              "potential_field": plot_system.potential_field})
 
     def calculate_terrain_suitability(self, heightmap, slopemap, water_map, lod,
-                                       reachability_map=None, region_map=None):
+                                       reachability_map=None, region_map=None,
+                                       biome_map=None):
         """
         Fuenf-Faktor-Eignungsfeld (docs/SIEDLUNGEN_ENTWURF.md §2). `reachability_map`
         bleibt None fuer die erste Platzierungsrunde (Faktor neutral) - siehe
         TerrainSuitabilityAnalyzer.create_combined_suitability().
+
+        `biome_map` (Ticket #34) fliesst in den Ackerland-Faktor ein - siehe
+        TerrainSuitabilityAnalyzer.evaluate_farmland_radius().
 
         Multipliziert danach mit `_randfaktor()` (docs/OFFENE_PUNKTE.md 5.14) -
         eine weiche Absenkung nahe der Kastengrenze des 3x3-Ausschnittsgitters,
@@ -5325,7 +5388,7 @@ class SettlementGenerator:
         analyzer = TerrainSuitabilityAnalyzer(self.terrain_factor_villages, heightmap.shape[0])
         combined_suitability = analyzer.create_combined_suitability(
             heightmap, slopemap, water_map, reachability_map=reachability_map,
-            progress_callback=self._update_progress)
+            biome_map=biome_map, progress_callback=self._update_progress)
         randfaktor = self._randfaktor(heightmap.shape[0], region_map)
         if randfaktor is not None:
             combined_suitability = combined_suitability * randfaktor

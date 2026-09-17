@@ -362,8 +362,13 @@ _CALCULATOR_SPECS = [
     # water.manning_flow statt water.flow_network: Siedlungseignung bewertet
     # die Naehe zu tatsaechlichen Gewaesserflaechen, also die FINALE gemalte
     # Klassifikation - siehe water.manning_flow-Kommentar oben.
+    # biome.integrate_layers (Ticket #34): die Eignungsrechnung braucht die
+    # fertige biome_map, um Fruchtbarkeit je Biom zu bewerten (core/settlement_
+    # generator.py:_BIOME_FRUCHTBARKEIT) - vorher fehlte diese Kante komplett,
+    # Siedlungen wurden ohne Wissen ueber Wueste/Sumpf/Wiese platziert.
     CalculatorSpec("settlement.suitability", "settlement",
-                   ["terrain.redistribution", "erosion.slope", "water.manning_flow"],
+                   ["terrain.redistribution", "erosion.slope", "water.manning_flow",
+                    "biome.integrate_layers"],
                    ["combined_suitability_map"]),
     CalculatorSpec("settlement.settlements", "settlement",
                    ["settlement.suitability", "terrain.redistribution"], ["settlement_list"]),
