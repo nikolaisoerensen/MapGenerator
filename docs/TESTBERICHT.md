@@ -174,6 +174,87 @@ Nachsehen ein, eine falsche schliesst die Frage. Das gilt fuer die
 Erosionskette ebenso wie fuer eine laengst behobene GPU-Messung, die
 wochenlang als offen weitergefuehrt wurde.
 
+**Nachtrag 17.09.2026 (Ticket #32, Seenfläche neu gemessen):** die letzte
+belastbare Zahl stammte aus `docs/FLUESSE_UND_WASSER.md`, Block 3
+(24.08.2026, 384 px): "11 Binnenseen über 4 Pixel, und KEINER liegt im
+Skerrheim" — und Block 6 hielt für Morobora ausdrücklich fest: "Gibt es
+schon Seen im Wassersystem? ... ist UNGEPRÜFT." Das war eine reine Messung,
+keine Korrektur (`bereich:wasser, ready-for-agent, test`), also wurde nichts
+am Code geändert.
+
+Gemessen über die echte Pipeline (`tools/weather_lab.py:run_pipeline()`,
+echter Dispatcher, keine nachgebaute Reihenfolge), bei 256/512/1024 px, je 3
+Seeds (424242, 13, 20260917), **je Region getrennt** — die neun Regionen
+(Clonagh, Skerrheim, Morobora, Estrande, Nevadin, Nebelrode, Samarcia,
+Macchia, Thalassia) lassen sich direkt aus `region_map`
+(Ausgabe des Knotens `terrain.redistribution`) auslesen, weil
+`WELTKARTE_AKTIV = True` (Standarad seit der Neun-Regionen-Weltkarte) bei
+jedem Lauf ohnehin den vollen Kontinent aus `core/terrain_weltkarte.py`
+erzeugt und dabei die Regionszugehörigkeit je Pixel mitliefert:
+
+| Region | 256 px | 512 px | 1024 px | Mittel |
+|---|---:|---:|---:|---:|
+| Nevadin | 3,553 % | 1,188 % | 0,396 % | 1,712 % |
+| Morobora | 2,776 % | 0,600 % | 0,339 % | 1,238 % |
+| Nebelrode | 2,508 % | 0,805 % | 0,208 % | 1,173 % |
+| Estrande | 2,251 % | 0,689 % | 0,511 % | 1,150 % |
+| Skerrheim | 2,102 % | 0,779 % | 0,316 % | 1,066 % |
+| Macchia | 1,692 % | 0,914 % | 0,494 % | 1,033 % |
+| Clonagh | 1,999 % | 0,532 % | 0,237 % | 0,923 % |
+| Thalassia | 1,952 % | 0,428 % | 0,138 % | 0,839 % |
+| Samarcia | 1,167 % | 0,516 % | 0,308 % | 0,664 % |
+
+(Seenanteil = Seepixel / Landpixel je Region, gemittelt über die 3 Seeds.)
+
+**Der alte "0,0 %"-Befund gilt nicht mehr.** Skerrheim (historisch: null
+Seen) zeigt jetzt in allen 9 Läufen Seen (Mittel 1,066 %). Morobora
+(historisch: geeignetes Gelände, aber unbeobachtet, ob Seen ankommen) zeigt
+ebenfalls in allen 9 Läufen Seen, mit dem zweithöchsten Mittelwert aller
+Regionen (1,238 %) — die frühere offene Frage aus
+`docs/FLUESSE_UND_WASSER.md` Block 6 ("ob dort Morobora-Seen entstehen und
+ob sie im Bild ankommen, ist ungeprüft") ist damit beantwortet: ja, und es
+ist kein Anzeigeproblem, sondern in der Berechnung selbst so.
+
+Nur 2 von 81 gemessenen Region/Größe/Seed-Kombinationen zeigten überhaupt
+keinen See (Thalassia bei 1024 px/Seed 13, Samarcia bei 1024 px/Seed
+20260917) — beide Regionen haben an anderen Auflösungen/Seeds Seen, es ist
+also kein systematischer Ausfall.
+
+**Der gemessene Seenanteil fällt deutlich mit steigender Auflösung**
+(Mittel über alle Regionen: 256 px 2,222 %, 512 px 0,717 %, 1024 px
+0,327 %), obwohl die reale Kartenbreite bei allen drei Größen dieselbe
+21,3 km ist (`WELT_KM` in `core/terrain_weltkarte.py:49`) — nur die
+Pixelauflösung ändert sich. Naheliegendste Erklärung, nicht am Code
+verifiziert: bei niedriger Auflösung entstehen mehr winzige,
+ein-bis-wenige-Pixel-große geschlossene Senken, die Rauschartefakte sind und
+bei feinerer Auflösung verschwinden. Die 1024-px-Zahlen dürften die
+belastbarsten sein.
+
+Größte Einzelseen (aus dem separaten Gesamtlauf, korrekt mit `WELT_KM =
+21,3 km` statt der ursprünglich fälschlich angenommenen 15,0 km
+umgerechnet — Prozent- und Stückzahlwerte sind reine Pixelverhältnisse und
+von diesem Umrechnungsfehler nicht betroffen): größter gemessener See rund
+1,02 km², Median rund 0,01 km², bei 256 px am größten (mehr, aber kleinere
+Seen), bei 1024 px am kleinsten.
+
+Welche Änderung seit der alten Messung dafür infrage kommt: laut Ticket
+selbst "Seegliederung, Seegrad-Voronoi und Seewege" (siehe
+`docs/project_see_voronoi_seegliederung.md`), dazu vermutlich die
+Neun-Regionen-Weltkarte (`weltfeld()` in `core/terrain_weltkarte.py`) mit
+regionsspezifischen Küsten-Archetypen — beide seit der alten 384-px-Messung
+vom 24.08.2026 hinzugekommen. Welche der beiden Änderungen den Ausschlag
+gibt, lässt sich mit einer reinen Messung nicht trennen; das würde eine
+Vergleichsmessung auf dem alten Codestand erfordern, die außerhalb des
+30-Minuten-Rahmens dieses Tickets liegt.
+
+`core/water_generator.py:3103` (`HydrologySystemGenerator._meters_per_pixel()`)
+liest den Kartenmaßstab live über
+`self.data_lod_manager.get_map_distance_km()` — also denselben, von
+`WELTKARTE_AKTIV` bereits korrigierten Wert, den auch die Terrain-Erzeugung
+verwendet. Die App selbst ist damit maßstabskonsistent; der
+Umrechnungsfehler oben betraf ausschließlich das Wegwerf-Messskript dieses
+Tickets, keinen App-Code.
+
 ## 4. Was neu grün ist
 
 Acht Testdateien sind seit dem 24.08. dazugekommen, alle grün:
