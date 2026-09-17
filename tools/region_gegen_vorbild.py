@@ -119,6 +119,13 @@ def _kennzahlen(H, mpp, name, gebiet=None):
         "h_p25": float(np.percentile(h_norm, 25)),
         "h_p50": float(np.percentile(h_norm, 50)),
         "h_p75": float(np.percentile(h_norm, 75)),
+        # Ab hier ROHDATEN, nicht Kennzahlen - fuer
+        # tests/smoke_test_region_vorbild_aehnlichkeit.py (KS-Test auf der
+        # vollen Hoehenverteilung, Box-Counting auf der Kuestenlinie). Rein
+        # additiv, die CLI oben liest nur die benannten Kennzahlen und bleibt
+        # unveraendert.
+        "h_norm_werte": h_norm,
+        "land_maske": land,
     }
 
 
