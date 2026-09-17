@@ -36,7 +36,7 @@ das Nevadin ändern will, findet in der GUI keinen Griff dafür — er müsste
 Wunsch nach einem Regions-Dropdown, und der Wunsch ist architektonisch
 richtig: er schließt die Lücke an der Stelle, an der sie ist.
 
-**Schicht 3 — die Pipeline.** Ein Rechengraph aus ~39 Knoten
+**Schicht 3 — die Pipeline.** Ein Rechengraph aus 38 Knoten
 (`managers/calculator_graph.py`) treibt Terrain → Geologie → Wetter →
 Wasser → Biome → Siedlungen. Jeder Reiter hängt an einem Knoten.
 

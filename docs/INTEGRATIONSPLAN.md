@@ -388,7 +388,7 @@ nicht vermutet.
 
 ### Wie das festgestellt wurde
 
-Dieselbe Welt zweimal durch alle 39 Knoten: einmal wie sie ist, einmal mit
+Dieselbe Welt zweimal durch alle 38 Knoten: einmal wie sie ist, einmal mit
 `heightmap = max(heightmap, 0)`. Was sich zwischen beiden Läufen unterscheidet,
 liegt an den negativen Höhen; alles andere ist Altlast.
 
