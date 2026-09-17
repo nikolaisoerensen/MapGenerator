@@ -166,7 +166,19 @@ def _lage(wert):
 
 
 def _durchlauf(mit_gpu):
-    """Fahre alle Knoten und liefere {output_schluessel: (lage, form)}."""
+    """Fahre alle Knoten und liefere {output_schluessel: (lage, form)}.
+
+    Als drittes Element auch {knoten: {undeklarierte Keys}} - was
+    set_calculator_output() tatsaechlich gespeichert bekommen hat, aber in
+    CalculatorSpec.output_keys nicht steht. Gefunden bei Ticket #64: acht
+    erklaerte gegen achtzehn tatsaechliche Ausgaben bei terrain.redistribution,
+    dieselbe Luecke unerkannt bei sechs weiteren Knoten. output_keys ist keine
+    Attrappe - gui/widgets/pipeline_status_panel.py baut daraus sein Anzeige-
+    Etikett, managers/generation_orchestrator.py sein Prozess-Log, und dieser
+    Test selbst prueft nur die hier gelisteten Keys auf GPU/CPU-Paritaet. Eine
+    unvollstaendige Liste heisst also: Etikett, Log UND Paritaetspruefung
+    fehlen fuer genau die nicht gelisteten Felder.
+    """
     from managers.data_lod_manager import DataLODManager
     from managers.calculator_graph import CALCULATOR_GRAPH
 
@@ -187,35 +199,49 @@ def _durchlauf(mit_gpu):
         if hasattr(generator, "set_active_parameters"):
             generator.set_active_parameters(parameter)
 
+    undeklariert = {}
+    _original_set = DataLODManager.set_calculator_output
+
+    def _set_hook(self, calculator_id, lod_level, outputs):
+        deklariert = set(CALCULATOR_GRAPH[calculator_id].output_keys)
+        neu = {k for k, v in outputs.items() if v is not None} - deklariert
+        if neu:
+            undeklariert.setdefault(calculator_id, set()).update(neu)
+        return _original_set(self, calculator_id, lod_level, outputs)
+
     ergebnis = {}
     abbrueche = []
-    for knoten in _reihenfolge():
-        spec = CALCULATOR_GRAPH[knoten]
-        generator = generatoren.get(spec.generator)
-        methode = getattr(generator, "_calc_" + knoten.split(".", 1)[1], None)
-        if methode is None:
-            abbrueche.append("%s: keine Methode _calc_%s"
-                             % (knoten, knoten.split(".", 1)[1]))
-            continue
-        try:
-            methode(knoten, LOD)
-        except Exception as fehler:
-            abbrueche.append("%s: %s: %s"
-                             % (knoten, type(fehler).__name__,
-                                str(fehler).splitlines()[0][:90]))
-        for schluessel in spec.output_keys:
-            wert = manager.get_calculator_output(knoten, schluessel, LOD)
-            form = getattr(wert, "shape", None)
-            ergebnis["%s / %s" % (knoten, schluessel)] = (_lage(wert), form)
-    return ergebnis, abbrueche
+    DataLODManager.set_calculator_output = _set_hook
+    try:
+        for knoten in _reihenfolge():
+            spec = CALCULATOR_GRAPH[knoten]
+            generator = generatoren.get(spec.generator)
+            methode = getattr(generator, "_calc_" + knoten.split(".", 1)[1], None)
+            if methode is None:
+                abbrueche.append("%s: keine Methode _calc_%s"
+                                 % (knoten, knoten.split(".", 1)[1]))
+                continue
+            try:
+                methode(knoten, LOD)
+            except Exception as fehler:
+                abbrueche.append("%s: %s: %s"
+                                 % (knoten, type(fehler).__name__,
+                                    str(fehler).splitlines()[0][:90]))
+            for schluessel in spec.output_keys:
+                wert = manager.get_calculator_output(knoten, schluessel, LOD)
+                form = getattr(wert, "shape", None)
+                ergebnis["%s / %s" % (knoten, schluessel)] = (_lage(wert), form)
+    finally:
+        DataLODManager.set_calculator_output = _original_set
+    return ergebnis, abbrueche, undeklariert
 
 
 def lauf():
     _qt()
 
     print("Pipeline %d px, LOD %d, %.0f km\n" % (SIZE, LOD, KM))
-    gpu, gpu_abbrueche = _durchlauf(True)
-    cpu, cpu_abbrueche = _durchlauf(False)
+    gpu, gpu_abbrueche, gpu_undeklariert = _durchlauf(True)
+    cpu, cpu_abbrueche, cpu_undeklariert = _durchlauf(False)
 
     fehler = []
     zaehler = {}
@@ -257,6 +283,18 @@ def lauf():
         print("Outputs ohne Daten (Anzeige bleibt leer):")
         for s in unerwartet_null:
             print("   %s" % s)
+
+    undeklariert = {}
+    for quelle in (gpu_undeklariert, cpu_undeklariert):
+        for knoten, keys in quelle.items():
+            undeklariert.setdefault(knoten, set()).update(keys)
+    if undeklariert:
+        print()
+        print("Knoten liefern Outputs, die CalculatorSpec.output_keys nicht kennt:")
+        for knoten in sorted(undeklariert):
+            eintrag = "%s: %s" % (knoten, ", ".join(sorted(undeklariert[knoten])))
+            print("   %s" % eintrag)
+            fehler.append("undeklarierter Output bei " + eintrag)
 
     print()
     if fehler or unerwartet_null:

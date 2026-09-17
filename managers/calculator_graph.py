@@ -64,7 +64,11 @@ _CALCULATOR_SPECS = [
     # NUR bei aktiver Weltkarte belegt - im alten Pfad gibt es keine Regionen.
     CalculatorSpec("terrain.redistribution", "terrain", ["terrain.noise"],
                    ["heightmap", "ridge_map", "river_mask", "river_order",
-                    "river_generation", "region_map", "klima_map", "spielkarte"]),
+                    "river_generation", "river_water", "hinterland_height",
+                    "voronoi_map", "region_map", "klima_map", "seegrad",
+                    "ufer_region_a", "ufer_region_b", "see_eis",
+                    "kuesten_archetyp", "kuesten_staerke", "spielkarte",
+                    "wind_ziel_map"]),
     CalculatorSpec("terrain.slope", "terrain", ["terrain.redistribution"], ["slopemap"]),
     CalculatorSpec("terrain.shadow", "terrain", ["terrain.redistribution"], ["shadowmap"]),
 
@@ -134,14 +138,19 @@ _CALCULATOR_SPECS = [
     CalculatorSpec("weather.temperature", "weather",
                    ["terrain.redistribution", "terrain.shadow", "erosion.hydraulic",
                     "biome.preseed_hint"],
-                   ["temp_map"]),
+                   ["temp_map", "temp_map_layers", "temp_map_layers_monthly",
+                    "temp_map_monthly", "shadowmap_monthly"]),
     CalculatorSpec("weather.wind", "weather",
-                   ["terrain.redistribution", "weather.temperature", "terrain.shadow"], ["wind_map"]),
+                   ["terrain.redistribution", "weather.temperature", "terrain.shadow"],
+                   ["wind_map", "wind_map_layers", "wind_map_layers_monthly",
+                    "wind_map_monthly"]),
     CalculatorSpec("weather.humidity", "weather",
-                   ["terrain.redistribution", "weather.temperature", "weather.wind"], ["humid_map"]),
+                   ["terrain.redistribution", "weather.temperature", "weather.wind"],
+                   ["humid_map", "humid_map_layers", "humid_map_layers_monthly",
+                    "humid_map_monthly"]),
     CalculatorSpec("weather.precipitation", "weather",
                    ["weather.humidity", "weather.temperature", "weather.wind", "terrain.redistribution"],
-                   ["precip_map"]),
+                   ["precip_map", "precip_map_monthly"]),
 
     # --- Erosion (eigener Generator seit 2026-07-28) ---
     #
@@ -164,7 +173,9 @@ _CALCULATOR_SPECS = [
                    ["terrain.redistribution", "geology.hardness"],
                    ["erosion_map", "sedimentation_map",
                     "thermal_erosion_map", "thermal_deposition_map",
-                    "sediment_load_map", "water_depth_map", "flow_velocity_map"]),
+                    "sediment_load_map", "water_depth_map", "flow_velocity_map",
+                    "converged", "mass_balance", "simulation_resolution",
+                    "steps_taken"]),
 
     # Der Slope NACH der Erosion (2026-07-28).
     #
@@ -396,7 +407,8 @@ _CALCULATOR_SPECS = [
     CalculatorSpec("settlement.plot_nodes", "settlement",
                    ["settlement.civ_influence", "settlement.settlements", "settlement.city_boundary",
                     "terrain.redistribution"],
-                   ["plot_nodes", "plots", "plot_map", "plot_edges", "plot_node_positions"]),
+                   ["plot_nodes", "plots", "plot_map", "plot_edges", "plot_node_positions",
+                    "plot_cores", "potential_field", "wilderness_polygons"]),
 ]
 
 CALCULATOR_GRAPH: Dict[str, CalculatorSpec] = {spec.calculator_id: spec for spec in _CALCULATOR_SPECS}
