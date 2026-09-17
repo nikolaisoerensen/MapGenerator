@@ -92,6 +92,18 @@ EROSIONSREGLER = (
     ("erosion_octaves", "Rinnen-Oktaven", "OCTAVES"),
 )
 
+# Alle Rohfelder eines Regionskatalog-Eintrags, in Anzeigereihenfolge -
+# dieselben Namen wie _REGION_FELDER in core/daten/regionen_laden.py, nur
+# um "name" ergaenzt. Fuer den read-only Katalogblock im Statistik-Bereich
+# (Ticket #29): zeigt die TOML-Werte unveraendert, unabhaengig von den fuenf
+# REGIONSREGLER oben, die nur einen Ausschnitt davon bedienen.
+REGIONEN_FELDER = (
+    "name", "farbe", "volk", "bemerkung", "hoehe_m", "relief_m",
+    "formgroesse_m", "rauheit", "potenz", "wasser_soll", "flaeche_soll",
+    "kuestenform", "temp_mittel_m0", "temp_spanne", "niederschlag_mm",
+    "wind_mittel_ms", "hang_trockenheit", "talform",
+)
+
 
 class _Vorschauflaeche(QWidget):
     """Traegt die Vorschau und meldet jede Groessenaenderung."""
@@ -306,6 +318,25 @@ class RegionTab(QWidget):
         self.status.setWordWrap(True)
         self.status.setAlignment(Qt.AlignmentFlag.AlignTop)
         spalte.addWidget(self.status)
+
+        # ROHER KATALOGDATENSATZ (Ticket #29): zeigt genau die Werte, die
+        # jetzt aus core/daten/regionen_welt.toml kommen, statt aus
+        # literalem Code in core/terrain_weltkarte.py - read-only, keine
+        # Regler. Wer die TOML-Datei aendert und die Regionsauswahl neu
+        # trifft, sieht die neuen Zahlen hier ungerechnet.
+        katalog_kasten = QGroupBox("Regionskatalog (roh, aus regionen_welt.toml)")
+        katalog_spalte = QVBoxLayout(katalog_kasten)
+        self.katalog_anzeige = QLabel("")
+        self.katalog_anzeige.setWordWrap(True)
+        self.katalog_anzeige.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.katalog_anzeige.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        schrift = self.katalog_anzeige.font()
+        schrift.setFamily("Consolas")
+        self.katalog_anzeige.setFont(schrift)
+        katalog_spalte.addWidget(self.katalog_anzeige)
+        spalte.addWidget(katalog_kasten)
+
         spalte.addStretch(1)
         return seite
 
@@ -338,7 +369,24 @@ class RegionTab(QWidget):
                     self.regler[schluessel].setValue(float(wert))
         finally:
             self._sperre = False
+        self.katalog_anzeige.setText(self._katalogtext(name, katalog))
         self._neu_zeichnen()
+
+    @staticmethod
+    def _katalogtext(name: str, katalog: Dict[str, Any]) -> str:
+        """Alle Rohfelder der Region plus ihre drei Kuestenarchetypen, so
+        wie sie in core/daten/regionen_welt.toml stehen."""
+        zeilen = [f"{feld}: {katalog.get(feld)}" for feld in REGIONEN_FELDER
+                  if feld in katalog]
+        zeilen.append("")
+        zeilen.append("Kuestenarchetypen:")
+        for archetyp in rw.KUESTEN_ARCHETYPEN.get(name, ()):
+            zeilen.append(
+                "  {name} - hoehe_faktor {hoehe_faktor}, winkel_grad "
+                "{winkel_grad}, kantig {kantig}, strand_anteil "
+                "{strand_anteil}, max_anteil {max_anteil}, reichweite_km "
+                "{reichweite_km}".format(**archetyp))
+        return "\n".join(zeilen)
 
     def _zuruecksetzen(self):
         self.ueberschreibungen.pop(self._regionsname(), None)

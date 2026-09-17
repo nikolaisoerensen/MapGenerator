@@ -1,0 +1,615 @@
+# Path: core/daten/regionen_welt.toml
+#
+# DIE NEUN REGIONSPARAMETERSAETZE - Zeilen Nord -> Sued, Spalten West -> Ost.
+#
+# Bis 2026-09-17 standen diese Werte als Modulkonstanten (REGIONEN,
+# KUESTEN_ARCHETYPEN, NIEDERSCHLAG_ZIEL, KLIMA_ZIEL) in
+# core/terrain_weltkarte.py - nicht diffbar, nicht von Tests lesbar, nicht
+# ohne Codeaenderung zu verstellen (docs/OFFENE_PUNKTE.md #29). Geladen wird
+# diese Datei von core/daten/regionen_laden.py; core/terrain_weltkarte.py
+# haengt seine Modulkonstanten weiter unter denselben Namen ein
+# (REGIONEN, alle_regionen(), KUESTEN_ARCHETYPEN, NIEDERSCHLAG_ZIEL,
+# KLIMA_ZIEL), damit kein anderes Modul etwas vom Umzug merkt.
+#
+# WERTNEUTRALER UMZUG: kein einziger Wert wurde beim Verschieben veraendert.
+# NIEDERSCHLAG_ZIEL und KLIMA_ZIEL standen im Code als eigene Dicts, waren
+# aber fuer alle neun Regionen bit-identisch mit den Feldern
+# niederschlag_mm/temp_mittel_m0/temp_spanne hier - sie werden jetzt aus
+# genau diesen Feldern abgeleitet (siehe regionen_laden.py), statt von Hand
+# zweimal gepflegt zu werden.
+#
+# TOML statt JSON, weil TOML Kommentare kennt: die Kalibriergeschichte
+# unten (Daten, Zitate, Messwerte) ist Teil des Projektwissens und muss
+# neben den Werten stehen bleiben, nicht in einer zweiten Datei. Das Projekt
+# benutzt TOML bereits an anderer Stelle (nachtbetrieb/sperrliste.toml,
+# gelesen ueber die Python-Standardbibliothek tomllib) - keine neue
+# Abhaengigkeit noetig.
+#
+# ==============================================================================
+# ALLGEMEINE KALIBRIERGESCHICHTE (galt fuer REGIONEN als Ganzes)
+# ==============================================================================
+#
+# HOEHEN SIND AUF 4 KM UMGERECHNET, NICHT ABGESCHRIEBEN. Echte Alpen haben
+# 2500 m Relief auf 10 km; dieselbe Zahl auf 4 km waere eine Wand mit 60 Grad
+# Durchschnittshang. Uebernommen ist das VERHAELTNIS von Relief zu Breite.
+#
+#   hoehe_m       MITTLERE Hoehe der Region, negativ = ueberwiegend Wasser
+#   relief_m      Hoehenspanne um diese Mitte, also hoehe_m +/- relief_m/2
+#   formgroesse_m Groesse der groessten Gelaendeform (Massiv, Ruecken, Becken)
+#   rauheit       wie stark die feinen Oktaven mitreden (0.4 glatt .. 0.75 rau)
+#   potenz        <1 hebt an (Hochflaeche), >1 drueckt herunter (Ebene + Gipfel)
+#
+# HOEHE IST DIE MITTE, NICHT DER TIEFSTE PUNKT. Zuerst stand hier die
+# Grundflaeche, ueber der sich das Relief erhebt. Das war unbrauchbar: das
+# normierte Relief hat nur std 0.140 (unabhaengige Oktaven mitteln sich
+# heraus), t ueberstrich nur 0.21 bis 0.76 - die Grundflaeche wurde NIE
+# erreicht, und jede Kuestenregion blieb zu 100 % trocken. Mit der Mitte als
+# Bezug ist der Wasseranteil dagegen unmittelbar einstellbar.
+#
+# HOEHEN NEU GEEICHT AM 2026-08-06, nach der Nord-Sued-Korrektur. Die alten
+# Werte waren gegen einen Kontinent eingestellt, der auf dem Kopf stand
+# (siehe voronoi_regionen). Nach der Umkehr sitzt jede Region auf einem
+# anderen Stueck der unregelmaessigen Form, und der Nordlappen traegt mehr
+# Wasser als der Suedlappen - das Clonagh sprang von 6 auf 26 Prozent.
+#
+# Geeicht wurde NUR `hoehe_m`, gemittelt ueber FUENF Seeds, damit die Werte
+# nicht auf eine einzelne Kontinentform passen. `relief_m` blieb bewusst
+# unberuehrt: der gemessene Hang ist zu einem grossen Teil gar nicht der
+# eigene. Ein als Morobora gefuehrtes Pixel traegt im Mittel 33 % FREMDES
+# Gewicht und damit 372 m Relief statt der eingetragenen 138 (Estrande
+# +181 %). Bei hoher Reinheit (Gewicht > 0.95) trifft die Morobora ihren
+# Sollhang exakt - 3.4 gegen 3.0. Das Relief auf die Mischung zu eichen
+# haette es auf 30 m gedrueckt: eine Region ohne Charakter, nur damit eine
+# Zahl stimmt, die etwas anderes misst.
+#
+# ZWEI SEEDS WAREN ZU WENIG (nachkorrigiert am 2026-08-06). Der erste
+# Durchgang stellte Skerrheim auf 196.6 m; ueber fuenf Seeds gemessen waren
+# das 10 Prozentpunkte zu wenig Wasser, richtig sind 113.1 m. Die Streuung
+# EINER Region ueber Seeds betraegt bis zu 37 Prozentpunkte Wasseranteil und
+# 11 Grad Hang - sie sitzt je nach Kontinentform auf einem anderen Stueck
+# Land und hat andere Nachbarn. Weniger als vier Seeds eichen auf eine Form,
+# nicht auf die Regel.
+#
+# DREI KULTURNAMEN GEAENDERT AM 2026-08-06 (docs/KULTUREN_UND_ORTE.md):
+#
+#   Nevadin        "-"      -> Alemannen  hatte gar keine Kultur und bekam
+#                                           damit keine Siedlungen
+#   Nebelrode      Franken  -> Sachsen     war doppelt mit der Estrande belegt
+#   Thalassia      Phoenizier -> Byzantiner  die phoenizischen Stadtstaaten
+#                                           enden rund 1500 Jahre vor dem
+#                                           Zeitschnitt
+#
+# `volk` ist ein SCHLUESSEL, kein Schmuck: der Siedlungsgenerator gruppiert
+# danach (2-5 Orte je Kultur, Zusammenhang innerhalb einer Kultur erzwungen)
+# und waehlt danach die Landmark- und Roadsite-Arten aus. Zwei Regionen mit
+# demselben `volk` waeren eine Kultur mit doppelter Flaeche.
+#
+# `farbe` faerbt die Region im Terrain- und im Regional-Reiter. NEUN
+# UNTERSCHEIDBARE FARBEN, UND KEIN GELB: Gelb ist fuer das
+# 3x3-Ausschnittsgitter reserviert, das im selben Bild liegt. Kein reines
+# Blau, weil das Meer blau ist.
+#
+# DIE ZIELWERTE - das, was auf der Karte HERAUSKOMMEN soll. `temp_mittel_m0`
+# und `temp_spanne` sind NICHT die gemessenen Kartenwerte, sondern gegen die
+# Regionsmischung vorkompensierte Eingabewerte: ein Pixel, das als Samarcia
+# gefuehrt wird, traegt rund 40 % fremdes Gewicht und wird von den
+# kuehleren Nachbarn heruntergezogen - gemessen -2.2 K, die Griechischen
+# Inseln -1.8 K. Damit die Klimatabelle eine FESTLEGUNG bleibt und nicht nur
+# eine Hoffnung, wurden die Eingabewerte so geeicht, dass die GEMESSENEN
+# Werte auf der Karte landen (3 Seeds, 7 Runden).
+# tests/smoke_test_regionen_welt.py prueft die gemessenen Werte gegen diese
+# hier.
+#
+# NACHGEEICHT AM 2026-08-07 nach Einfuehrung von KLIMA_SCHAERFE. Mit der
+# schaerferen Klimamischung faellt die Verduennung kleiner aus, und die
+# Kompensation entsprechend: Fjordlands Jahresspanne stand vorher auf 5.2
+# und jetzt auf 10.4 bei einem Ziel von 13.0.
+#
+# Der Jahresniederschlag (niederschlag_mm) ist NICHT vorkompensiert - er
+# steht so, wie er auf der Karte herauskommen soll. Das Wettersystem
+# normiert das fertige Niederschlagsfeld direkt darauf (siehe
+# weather_generator._je_region_auf_mittel), womit jede Region ihren Wert per
+# Konstruktion trifft.
+#
+# Abgeleitet aus Bezugsorten, die der Nutzer vorgegeben hat: Cork, Bergen,
+# Wologda, La Rochelle, Chur, Bamberg, Madrid, Rom, Iraklio. Die
+# Rueckrechnung auf Meereshoehe (temp_mittel_m0) benutzt 0.6 K je 100 m;
+# Herleitung in docs/BIOME_MATRIX.md. WARUM MEERESHOEHE UND NICHT
+# REGIONSHOEHE: `hoehe_m` ist ein GEEICHTER Wert, der schon zweimal
+# nachgezogen wurde - waere das Klima darauf bezogen, waere es
+# stillschweigend mitgewandert.
+#
+# SPREIZUNG (fest, gilt fuer alle Regionen, kein Regionsfeld): normiertes
+# Relief -> [0,1] mit Faktor 1.5. Gemessen hat das normierte Relief
+# std 0.140; mit 1.5 liegen rund +/- 2.4 Standardabweichungen in [0,1].
+#
+# FLAECHENEICHUNG (flaeche_soll), eingeregelt am 2026-08-24 mit
+# tools/flaeche_eichen.py. Steuert, wieviel GRUNDflaeche eine Region
+# bekommt - noetig, weil Grundflaeche und NUTZWERT nicht linear
+# zusammenhaengen (Skerrheim verliert rund ein Drittel ans Wasser und dann
+# die Haelfte des Rests an zu steile Haenge, die Griechischen Inseln zwei
+# Drittel ans Wasser). ES IST EIN NULLSUMMENSPIEL - die Werte verteilen den
+# Kontinent um, sie vergroessern ihn nicht. Die ZIELWERTE selbst stehen
+# NICHT hier, sondern in tests/smoke_test_regionen_fairness.py.
+#
+# `talform` (Nutzervorgabe 2026-08-24: *"ja flusstypen sollte es geben,
+# nach region. zB alpen eher V. Skerrheim U und im Atlantik irgendwas
+# dazwischen zB."*) ist der Exponent der Querschnittskurve in
+# taeler_eingraben(): `profil = (1 - exp(-abstand/breite)) ** talform`.
+# klein (0.8-1.1) V-Tal, mittel (1.3-1.5) dazwischen, gross (2.0-2.6) U-Tal.
+# Rueckfall bei fehlendem Feld war frueher 1.3 fuer alle - seit diesem
+# Umzug gibt es keinen stillen Rueckfall mehr, siehe
+# tests/smoke_test_regionen_datei_vollstaendig.py.
+#
+# `hang_trockenheit` (Nutzervorgabe 2026-08-24: *"Skerrheim, voronoi mit
+# viel suedhang ist etwas trockener als fjordland nordhang, dann Samarcia
+# suedhang total trocken, nordhang etwas feuchter."*) ist der Anteil, um
+# den ein voller Suedhang trockener wird als die Ebene - ein voller
+# Nordhang wird um denselben Betrag feuchter. DIE MODULATION IST RELATIV,
+# nicht absolut.
+#
+# 2026-08-07 ZWEI FLAECHENANPASSUNGEN AN DER WELTGROESSE (nicht an
+# einzelnen Regionswerten, WELT_KM/KONTINENT_KM in terrain_weltkarte.py):
+# Atlantikkueste (Estrande) +40 % Flaechenanteil auf Nutzerwunsch, und
+# Macchia/Thalassia/Estrande zuvor bereits per Faktor 1.5/1.5/1.25
+# gegenueber den uebrigen angehoben, weil sie 40/65/45 % ihrer Flaeche ans
+# Wasser verlieren.
+
+[regionen.Clonagh]
+zeile = 0
+spalte = 0
+farbe = "#8ab661"
+volk = "Kelten"
+bemerkung = "sanfte Wellen, breite Sohlen, dichtes Bachnetz"
+hoehe_m = 165.3
+relief_m = 79.5
+formgroesse_m = 1600.0
+rauheit = 0.52
+potenz = 1.0
+wasser_soll = 0.0
+flaeche_soll = 1.11
+kuestenform = 1.45
+temp_mittel_m0 = 10.9
+temp_spanne = 9.5
+niederschlag_mm = 1200.0
+wind_mittel_ms = 4.5
+hang_trockenheit = 0.15
+talform = 1.3
+
+[regionen.Skerrheim]
+zeile = 0
+spalte = 1
+farbe = "#5fa8a0"
+volk = "Wikinger"
+bemerkung = "EIN Hauptfjord, Hochflaeche, steile Waende"
+hoehe_m = -52.0
+relief_m = 484.9
+formgroesse_m = 1400.0
+rauheit = 0.45
+potenz = 0.55
+wasser_soll = 20.0
+flaeche_soll = 1.09
+kuestenform = 1.90
+temp_mittel_m0 = 8.6
+temp_spanne = 13.0
+niederschlag_mm = 2250.0
+wind_mittel_ms = 3.0
+hang_trockenheit = 0.1
+talform = 2.6
+
+[regionen.Morobora]
+zeile = 0
+spalte = 2
+farbe = "#3f6b4a"
+volk = "Slawen"
+bemerkung = "flaches Hochland, weite Mulden, traege Maeander"
+hoehe_m = 293.6
+relief_m = 118.1
+formgroesse_m = 3000.0
+rauheit = 0.42
+potenz = 0.9
+wasser_soll = 0.0
+flaeche_soll = 1.00
+kuestenform = 0.45
+temp_mittel_m0 = 3.8
+temp_spanne = 29.0
+niederschlag_mm = 600.0
+wind_mittel_ms = 3.2
+hang_trockenheit = 0.2
+talform = 2.0
+
+[regionen.Estrande]
+zeile = 1
+spalte = 0
+farbe = "#9b5fb5"
+volk = "Franken"
+bemerkung = "Kuestenebene mit Aestuar, Kliff im Norden"
+hoehe_m = -80.9
+relief_m = 147.1
+formgroesse_m = 2400.0
+rauheit = 0.50
+potenz = 1.3
+wasser_soll = 45.0
+flaeche_soll = 1.44
+kuestenform = 1.00
+temp_mittel_m0 = 13.6
+temp_spanne = 14.0
+niederschlag_mm = 780.0
+wind_mittel_ms = 4.5
+hang_trockenheit = 0.12
+talform = 1.5
+
+[regionen.Nevadin]
+zeile = 1
+spalte = 1
+farbe = "#b5aca0"
+volk = "Alemannen"
+bemerkung = "Trogtaeler, scharfe Grate, grosse Massive"
+hoehe_m = 1000.0
+relief_m = 1050.0
+formgroesse_m = 3800.0
+rauheit = 0.68
+potenz = 1.5
+wasser_soll = 0.0
+flaeche_soll = 1.21
+kuestenform = 1.00
+temp_mittel_m0 = 12.8
+temp_spanne = 18.5
+niederschlag_mm = 850.0
+wind_mittel_ms = 2.2
+hang_trockenheit = 0.3
+talform = 0.8
+
+[regionen.Nebelrode]
+zeile = 1
+spalte = 2
+farbe = "#8a5a33"
+volk = "Sachsen"
+bemerkung = "dichte dendritische Zertalung"
+hoehe_m = 350.0
+relief_m = 134.7
+formgroesse_m = 1400.0
+rauheit = 0.62
+potenz = 1.0
+wasser_soll = 0.0
+flaeche_soll = 1.09
+kuestenform = 0.45
+temp_mittel_m0 = 11.2
+temp_spanne = 18.5
+niederschlag_mm = 640.0
+wind_mittel_ms = 3.0
+hang_trockenheit = 0.2
+talform = 1.3
+
+[regionen.Samarcia]
+zeile = 2
+spalte = 0
+farbe = "#d9a05b"
+volk = "Andalusier"
+bemerkung = "Trockentaeler, weite Flaechen, wenig Netz"
+hoehe_m = 230.0
+relief_m = 109.4
+formgroesse_m = 2600.0
+rauheit = 0.48
+potenz = 1.4
+wasser_soll = 0.0
+flaeche_soll = 0.92
+kuestenform = 1.10
+temp_mittel_m0 = 20.0
+temp_spanne = 19.0
+niederschlag_mm = 430.0
+wind_mittel_ms = 3.0
+hang_trockenheit = 0.45
+talform = 1.1
+
+[regionen.Macchia]
+zeile = 2
+spalte = 1
+farbe = "#d1603d"
+volk = "Italiener"
+bemerkung = "Kuestengebirge direkt am Meer, kurze steile Laeufe"
+hoehe_m = 0.6
+relief_m = 312.9
+formgroesse_m = 1800.0
+rauheit = 0.60
+potenz = 1.2
+wasser_soll = 40.0
+flaeche_soll = 1.39
+kuestenform = 1.00
+temp_mittel_m0 = 16.9
+temp_spanne = 17.5
+niederschlag_mm = 800.0
+wind_mittel_ms = 3.5
+hang_trockenheit = 0.35
+talform = 0.9
+
+[regionen.Thalassia]
+zeile = 2
+spalte = 2
+farbe = "#a8447e"
+volk = "Byzantiner"
+bemerkung = "Archipel, viel Wasser, kleine steile Inseln"
+hoehe_m = -67.8
+relief_m = 403.6
+formgroesse_m = 1100.0
+rauheit = 0.58
+potenz = 1.1
+wasser_soll = 65.0
+flaeche_soll = 1.22
+kuestenform = 1.00
+temp_mittel_m0 = 19.7
+temp_spanne = 14.0
+niederschlag_mm = 480.0
+wind_mittel_ms = 4.5
+hang_trockenheit = 0.3
+talform = 0.9
+
+# ==============================================================================
+# KUESTENARCHETYPEN - drei an realen Kuesten orientierte Auspraegungen je
+# Region, die laengs der Kuestenlinie deterministisch wechseln
+# (core.terrain_weltkarte._kuesten_umformen()). Laeuft NACH kuestenform()
+# (die regionsweite Grundform bleibt unveraendert bestehen) und VOR der
+# Seegrad-Tiefenzuweisung.
+#
+#   hoehe_faktor    skaliert KUESTENHOEHE_M (450 m, globale Konstante)
+#   winkel_grad     Zielwinkel der Klippenfront (nie 90 - "eher 80 Grad
+#                   statt 90" war die ausdrueckliche Nutzervorgabe)
+#   kantig          bricht die glatte Anstiegskurve in Facetten auf
+#                   (Fjord-/Schaerencharakter statt einer glatten Wand -
+#                   Norwegen/Albanien gegen Irland/Portugal)
+#   strand_anteil   Anteil INNERHALB der eigenen Zone, der als
+#                   Strand-Luecke ausgespart wird (nie eine durchgehende
+#                   Klippenwand)
+#   max_anteil      Obergrenze am gesamten Kuestenumfang der Region -
+#                   garantiert per Quote, nicht nur wahrscheinlich
+#   reichweite_km   wie weit der Archetyp laengs der Kueste reicht
+#
+# Thalassia/Santorini-Kliff: hoehe_faktor 2026-08-13 von 1.7 auf 1.15
+# gesenkt (Nutzer-Vorgabe: "das ist viel zu extrem an der stelle") - 1.7
+# ergibt 765 m Zielhoehe, deutlich ueber jeder anderen Klippe der Tabelle.
+# 1.15 ergibt rund 520 m - immer noch die hoechste Steilkueste der
+# Samarcia/Griechische-Inseln-Gruppe, aber ohne Ausreisser.
+# ==============================================================================
+
+[[kuesten_archetypen.Clonagh]]
+name = "Moher-Klippen"
+hoehe_faktor = 1.4
+winkel_grad = 82
+kantig = false
+strand_anteil = 0.10
+max_anteil = 0.25
+reichweite_km = 0.60
+
+[[kuesten_archetypen.Clonagh]]
+name = "West-Cork-Buchten"
+hoehe_faktor = 0.8
+winkel_grad = 65
+kantig = false
+strand_anteil = 0.35
+max_anteil = 0.40
+reichweite_km = 0.40
+
+[[kuesten_archetypen.Clonagh]]
+name = "Luce-Bay-Straende"
+hoehe_faktor = 0.4
+winkel_grad = 45
+kantig = false
+strand_anteil = 0.55
+max_anteil = 0.35
+reichweite_km = 0.22
+
+[[kuesten_archetypen.Skerrheim]]
+name = "Fjordwand"
+hoehe_faktor = 1.8
+winkel_grad = 78
+kantig = true
+strand_anteil = 0.05
+max_anteil = 0.30
+reichweite_km = 0.70
+
+[[kuesten_archetypen.Skerrheim]]
+name = "Schaerenkueste"
+hoehe_faktor = 0.5
+winkel_grad = 55
+kantig = true
+strand_anteil = 0.30
+max_anteil = 0.40
+reichweite_km = 0.30
+
+[[kuesten_archetypen.Skerrheim]]
+name = "Fjordbucht"
+hoehe_faktor = 0.3
+winkel_grad = 40
+kantig = false
+strand_anteil = 0.60
+max_anteil = 0.30
+reichweite_km = 0.20
+
+[[kuesten_archetypen.Morobora]]
+name = "Kola-Steilkueste"
+hoehe_faktor = 1.1
+winkel_grad = 70
+kantig = true
+strand_anteil = 0.15
+max_anteil = 0.30
+reichweite_km = 0.45
+
+[[kuesten_archetypen.Morobora]]
+name = "Weissmeer-Flachkueste"
+hoehe_faktor = 0.25
+winkel_grad = 30
+kantig = false
+strand_anteil = 0.65
+max_anteil = 0.40
+reichweite_km = 0.15
+
+[[kuesten_archetypen.Morobora]]
+name = "Labrador-Buchten"
+hoehe_faktor = 0.7
+winkel_grad = 55
+kantig = false
+strand_anteil = 0.35
+max_anteil = 0.30
+reichweite_km = 0.35
+
+[[kuesten_archetypen.Estrande]]
+name = "Bretagne-Klippen"
+hoehe_faktor = 0.9
+winkel_grad = 72
+kantig = false
+strand_anteil = 0.20
+max_anteil = 0.25
+reichweite_km = 0.42
+
+[[kuesten_archetypen.Estrande]]
+name = "Vendee-Straende"
+hoehe_faktor = 0.3
+winkel_grad = 35
+kantig = false
+strand_anteil = 0.70
+max_anteil = 0.45
+reichweite_km = 0.18
+
+[[kuesten_archetypen.Estrande]]
+name = "Ile-de-Re-Watt"
+hoehe_faktor = 0.35
+winkel_grad = 30
+kantig = false
+strand_anteil = 0.60
+max_anteil = 0.30
+reichweite_km = 0.20
+
+[[kuesten_archetypen.Nevadin]]
+name = "Kotor-Steilfjord"
+hoehe_faktor = 1.7
+winkel_grad = 80
+kantig = false
+strand_anteil = 0.05
+max_anteil = 0.25
+reichweite_km = 0.68
+
+[[kuesten_archetypen.Nevadin]]
+name = "Dalmatien-Klippen"
+hoehe_faktor = 1.2
+winkel_grad = 75
+kantig = false
+strand_anteil = 0.20
+max_anteil = 0.40
+reichweite_km = 0.50
+
+[[kuesten_archetypen.Nevadin]]
+name = "Alpine-Flussmuendung"
+hoehe_faktor = 0.4
+winkel_grad = 40
+kantig = false
+strand_anteil = 0.55
+max_anteil = 0.35
+reichweite_km = 0.24
+
+[[kuesten_archetypen.Nebelrode]]
+name = "Ruegen-Kreidekueste"
+hoehe_faktor = 0.85
+winkel_grad = 70
+kantig = false
+strand_anteil = 0.25
+max_anteil = 0.25
+reichweite_km = 0.40
+
+[[kuesten_archetypen.Nebelrode]]
+name = "Ostsee-Flachkueste"
+hoehe_faktor = 0.3
+winkel_grad = 30
+kantig = false
+strand_anteil = 0.65
+max_anteil = 0.50
+reichweite_km = 0.18
+
+[[kuesten_archetypen.Nebelrode]]
+name = "Foerdenkueste"
+hoehe_faktor = 0.35
+winkel_grad = 35
+kantig = false
+strand_anteil = 0.60
+max_anteil = 0.25
+reichweite_km = 0.22
+
+[[kuesten_archetypen.Samarcia]]
+name = "Algarve-Klippen"
+hoehe_faktor = 1.3
+winkel_grad = 80
+kantig = false
+strand_anteil = 0.15
+max_anteil = 0.30
+reichweite_km = 0.58
+
+[[kuesten_archetypen.Samarcia]]
+name = "Costa-Brava-Buchten"
+hoehe_faktor = 0.9
+winkel_grad = 68
+kantig = true
+strand_anteil = 0.35
+max_anteil = 0.35
+reichweite_km = 0.42
+
+[[kuesten_archetypen.Samarcia]]
+name = "San-Sebastian-Bucht"
+hoehe_faktor = 0.5
+winkel_grad = 40
+kantig = false
+strand_anteil = 0.55
+max_anteil = 0.35
+reichweite_km = 0.28
+
+[[kuesten_archetypen.Macchia]]
+name = "Amalfi-Steilkueste"
+hoehe_faktor = 1.6
+winkel_grad = 82
+kantig = false
+strand_anteil = 0.10
+max_anteil = 0.30
+reichweite_km = 0.65
+
+[[kuesten_archetypen.Macchia]]
+name = "Cinque-Terre-Buchten"
+hoehe_faktor = 1.0
+winkel_grad = 70
+kantig = false
+strand_anteil = 0.30
+max_anteil = 0.35
+reichweite_km = 0.45
+
+[[kuesten_archetypen.Macchia]]
+name = "Toskana-Straende"
+hoehe_faktor = 0.4
+winkel_grad = 35
+kantig = false
+strand_anteil = 0.60
+max_anteil = 0.35
+reichweite_km = 0.24
+
+[[kuesten_archetypen.Thalassia]]
+name = "Santorini-Kliff"
+hoehe_faktor = 1.15
+winkel_grad = 84
+kantig = false
+strand_anteil = 0.05
+max_anteil = 0.25
+reichweite_km = 0.68
+
+[[kuesten_archetypen.Thalassia]]
+name = "Kreta-Buchten"
+hoehe_faktor = 0.8
+winkel_grad = 65
+kantig = false
+strand_anteil = 0.35
+max_anteil = 0.40
+reichweite_km = 0.38
+
+[[kuesten_archetypen.Thalassia]]
+name = "Kykladen-Strand"
+hoehe_faktor = 0.45
+winkel_grad = 40
+kantig = false
+strand_anteil = 0.55
+max_anteil = 0.35
+reichweite_km = 0.25
