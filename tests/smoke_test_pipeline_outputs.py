@@ -1,7 +1,7 @@
 """
 Path: tests/smoke_test_pipeline_outputs.py
 
-Faehrt die GESAMTE Pipeline - alle 39 Knoten des CALCULATOR_GRAPH, alle sieben
+Faehrt die GESAMTE Pipeline - alle 38 Knoten des CALCULATOR_GRAPH, alle sieben
 Generatoren - und prueft jeden einzelnen deklarierten Output.
 
 WARUM ES DIESEN TEST GIBT. Am 2026-07-30 meldete der Nutzer, dass viele
