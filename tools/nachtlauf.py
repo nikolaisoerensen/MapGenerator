@@ -5,7 +5,7 @@ Die Bedienung des Nachtbetriebs. Ein Befehl je Handgriff.
 
     python tools/nachtlauf.py starten
     python tools/nachtlauf.py sperre-pruefen [main..HEAD]
-    python tools/nachtlauf.py abschliessen 57 "Sperrliste anlegen" --tests "gruen - tests/smoke_test_nachtbetrieb.py"
+    python tools/nachtlauf.py abschliessen 57 "Sperrliste anlegen" --dateien nachtbetrieb/sperrliste.toml tests/smoke_test_nachtbetrieb.py --tests "gruen - tests/smoke_test_nachtbetrieb.py"
     python tools/nachtlauf.py stand
     python tools/nachtlauf.py zuruecknehmen 57
 
@@ -93,13 +93,14 @@ def _sperre_pruefen(args):
 def _abschliessen(args):
     try:
         kurz, notiz = branch.ticket_abschliessen(
-            args.nummer, args.titel,
+            args.nummer, args.titel, args.dateien,
             beschreibung=args.beschreibung or "",
             tests=args.tests or "")
     except branch.NachtlaufFehler as fehler:
         print(str(fehler))
         return 1
-    print("Commit %s fuer #%d angelegt." % (kurz, args.nummer))
+    print("Commit %s fuer #%d angelegt (%d Datei(en))."
+          % (kurz, args.nummer, len(args.dateien)))
     if notiz != "Keine gesperrte Datei beruehrt.":
         print(notiz)
     return 0
@@ -141,6 +142,10 @@ def baue_parser():
     a = unter.add_parser("abschliessen", help="ein Ticket, ein Commit")
     a.add_argument("nummer", type=int)
     a.add_argument("titel")
+    a.add_argument("--dateien", nargs="+", required=True,
+                   help="genau die Dateien dieses Tickets (git-add-Pfade), "
+                        "z.B. gui/x.py tests/smoke_test_x.py - kein "
+                        "'git add -A' mehr, siehe branch.py")
     a.add_argument("--beschreibung", default="")
     a.add_argument("--tests", default="",
                    help='z.B. "gruen - tests/smoke_test_nachtbetrieb.py"')

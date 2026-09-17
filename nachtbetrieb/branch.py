@@ -104,12 +104,30 @@ def _commit_text(nummer, titel, beschreibung, tests):
     return "\n".join(zeilen) + "\n"
 
 
-def ticket_abschliessen(nummer, titel, beschreibung="", tests="", repo=None):
-    """Ein Ticket, ein Commit. Prueft vorher die Sperrliste.
+def ticket_abschliessen(nummer, titel, dateien, beschreibung="", tests="",
+                        repo=None):
+    """Ein Ticket, ein Commit - fuer genau die uebergebenen Dateien.
+
+    `dateien` sind die Pfade, die zu diesem Ticket gehoeren (wie an
+    "git add" uebergeben, relativ zum Repo-Root). Nur sie werden gestaged
+    und committet.
+
+    Vorher stand hier ein uneingeschraenktes "git add -A". Das zog JEDE
+    uncommittete Datei im Arbeitsverzeichnis in den Ticket-Commit hinein -
+    auch voellig unabhaengige Handarbeit im selben Checkout, die zufaellig
+    gerade herumlag. Gefunden 2026-09-17, als ein Ticket-Commit fremde
+    Scratch-Dateien mitgerissen haette, waeren sie nicht von Hand
+    committet worden. Deshalb jetzt: die Dateien werden benannt, nicht
+    erraten.
 
     Weigert sich auf main - "Kein Nachtlauf schreibt auf main" ist keine
     Absichtserklaerung, sondern wird hier durchgesetzt.
     """
+    if not dateien:
+        raise NachtlaufFehler(
+            "ticket_abschliessen() braucht die Liste der Dateien dieses "
+            "Tickets. Ohne sie waere es wieder ein 'git add -A' durch die "
+            "Hintertuer.")
     if not ist_nachtbranch(repo=repo):
         raise NachtlaufFehler(
             "Aktueller Branch ist %s, kein Nachtbranch. Ein Nachtlauf schreibt "
@@ -118,14 +136,15 @@ def ticket_abschliessen(nummer, titel, beschreibung="", tests="", repo=None):
     darf, notiz = sperre.pruefe_arbeitsstand(repo=repo)
     if not darf:
         raise NachtlaufFehler(notiz)
-    if not _git("status", "--porcelain", repo=repo):
+    if not _git("status", "--porcelain", "--", *dateien, repo=repo):
         raise NachtlaufFehler(
-            "Nichts zu committen. Ein Ticket ohne Aenderung wird nicht "
-            "abgeschlossen, sonst behauptet die Historie Arbeit, die es nicht "
-            "gibt.")
-    _git("add", "-A", repo=repo)
+            "Nichts zu committen unter den angegebenen Dateien (%s). Ein "
+            "Ticket ohne Aenderung wird nicht abgeschlossen, sonst "
+            "behauptet die Historie Arbeit, die es nicht gibt."
+            % ", ".join(dateien))
+    _git("add", "--", *dateien, repo=repo)
     _git("commit", "-m", _commit_text(nummer, titel, beschreibung, tests),
-         repo=repo)
+         "--", *dateien, repo=repo)
     return _git("rev-parse", "--short", "HEAD", repo=repo), notiz
 
 
