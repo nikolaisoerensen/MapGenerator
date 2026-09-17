@@ -255,6 +255,101 @@ verwendet. Die App selbst ist damit maßstabskonsistent; der
 Umrechnungsfehler oben betraf ausschließlich das Wegwerf-Messskript dieses
 Tickets, keinen App-Code.
 
+**Nachtrag 17.09.2026 (Ticket #33, Sinuosität als Kennzahl für Mäander):**
+Mäander sind in `docs/SPEZIFIKATION.md` als Ziel formuliert ("Sinuosität der
+Hauptläufe > 1,2"), aber nie gemessen worden — ein Eindruck, keine Zahl.
+Sinuosität = Lauflänge eines Flusses geteilt durch die Luftlinie zwischen
+Anfang und Ende; 1,0 heißt schnurgerade, ab etwa 1,5 gilt ein Lauf als
+mäandrierend.
+
+Neu gebaut: `core/fluss_sinuositaet.py` (`sinuositaet_je_fluss()`). Der Baum
+aus Knoten und Elternzeigern, den `core/terrain_weltfluesse.py:flussnetz()`
+intern für den echten Flusslauf aufbaut, wird von der Pipeline nicht nach
+außen gereicht — nur vier Rasterkarten (`river_mask`, `river_order`,
+`river_generation`, `river_water`) erreichen den Knoten
+`terrain.redistribution`. Die Messung muss also aus dem Raster
+zurückrechnen: je Ordnungsstufe (Strahler-Zahl, steigt nur an, wenn zwei
+gleich große Läufe zusammenfließen) werden 8-zusammenhängende
+Rasterkomponenten gebildet, darin per Doppel-BFS die zwei am weitesten
+auseinanderliegenden Pixel gesucht und der kürzeste Pfad dazwischen
+zurückverfolgt. Diese Notlösung ließe sich schließen, sobald ein künftiges
+Ticket (Kandidat: "Flussnetz als Linienzüge exportieren") den echten Baum
+mit ausgibt — bis dahin ist das Raster-Verfahren die einzige Quelle.
+Getestet in `tests/smoke_test_fluss_sinuositaet.py`: ein gerader Lauf ergibt
+exakt 1,0 (waagrecht und diagonal), ein von Hand gebauter Zickzack (Dreieckswelle,
+Periode 4, Amplitude 2) exakt √2 ≈ 1,41421356; dazu Prüfungen, dass ein
+Ordnungswechsel zwei Läufe sauber trennt und dass 2-3-Pixel-Rasterreste an
+einer Mündung nicht mitgezählt werden. Alle 6 Testgruppen (15 Einzelprüfungen)
+grün.
+
+Ist-Erhebung an der echten Pipeline (nicht an einem Mock), 512 px und 1024 px,
+je drei Seeds (424242, 13, 20260917) — 6843 gemessene Flussläufe:
+
+| Kennzahl | Wert |
+|---|---:|
+| n (alle Läufe) | 6843 |
+| Sinuosität, Mittel | 1,4763 |
+| Sinuosität, Median | 1,1272 |
+
+Nach Flussordnung (Strahler-Zahl) — je höher die Ordnung, desto größer der
+Fluss:
+
+| Ordnung | n | Mittel | Median |
+|---:|---:|---:|---:|
+| 1 (Quellbäche) | 5402 | 1,4665 | 1,0855 |
+| 2 | 1118 | 1,4773 | 1,2107 |
+| 3 | 256 | 1,5473 | 1,3398 |
+| 4 | 51 | 1,9073 | 1,7204 |
+| 5 | 15 | 2,2506 | 2,0279 |
+| 6 | 1 | 1,7033 | 1,7033 |
+
+Der Zusammenhang ist klar und plausibel: je größer der Fluss, desto stärker
+mäandriert er im Mittel. Das SPEZIFIKATION.md-Ziel (">1,2") ist ausdrücklich
+für "Hauptläufe" formuliert, nicht für jeden Quellbach — beschränkt auf
+Ordnung ≥3 (323 Läufe): Median 1,4265, 68,4 % der einzelnen Läufe liegen über
+1,2. **Das Ziel ist für Hauptläufe erreicht.** Der niedrige Gesamt-Median
+(1,13) kommt daher, dass 79 % aller erkannten Läufe Ordnung-1-Quellbäche
+sind, die kurz und fast gerade beginnen — kein Fehlbefund, sondern die
+erwartete Form einer Flussordnungsverteilung.
+
+Vierte Abnahmebedingung, "mäandriert Flachland stärker als Gebirge?" — dazu
+wurden "Flachland" und "Gebirge" NICHT aus dem Namen einer Region geraten,
+sondern aus derselben Pipeline gemessen: mittlere Hangneigung (Betrag des
+Höhengradienten über Landpixel) je der neun Weltregionen, aus genau dem Lauf,
+aus dem auch die Flüsse stammen. Eine erste, über alle Ordnungen gepoolte
+Korrelation zwischen mittlerer Regions-Sinuosität und Hangneigung ergab
+r=0,53 (mittelstark positiv) — auf den ersten Blick "Gebirge mäandriert
+mehr", das Gegenteil der Ausgangsvermutung. Das ist aber ein Scheinbefund:
+Regionen unterscheiden sich auch darin, wie viele hochordnige (=stärker
+mäandrierende) Flüsse sie enthalten, und diese Mischung verfälscht den
+gepoolten Vergleich. Kontrolliert auf Ordnung 1 (der dominierende Fall, 5402
+von 6843 Läufen, Flussgröße damit konstant gehalten): r=0,11 — praktisch kein
+Zusammenhang mehr, und die Mediane liegen zwischen 1,08 (Morobora) und 1,12
+(Nevadin) nahezu gleichauf, obwohl die Hangneigung von 0,27 m/m (Samarcia)
+bis 0,74 m/m (Nevadin) reicht:
+
+| Region | Hangneigung (m/m) | Sinuosität Ordnung 1, Median | n |
+|---|---:|---:|---:|
+| Samarcia | 0,269 | 1,0823 | 600 |
+| Estrande | 0,274 | 1,0890 | 632 |
+| Morobora | 0,283 | 1,0824 | 620 |
+| Clonagh | 0,297 | 1,0823 | 651 |
+| Thalassia | 0,351 | 1,0823 | 364 |
+| Macchia | 0,395 | 1,0823 | 676 |
+| Skerrheim | 0,403 | 1,0860 | 481 |
+| Nebelrode | 0,427 | 1,1071 | 659 |
+| Nevadin | 0,744 | 1,1183 | 719 |
+
+**Antwort: bei gleicher Flussgröße mäandriert Flachland NICHT erkennbar
+stärker als Gebirge.** Die anfängliche gepoolte Korrelation war ein
+Ordnungsmix-Artefakt, keine echte Geländewirkung — "erst messen, dann nicht
+vorher geraten" (Ticket-Wortlaut) hat hier genau das verhindert, wonach die
+Ausgangsvermutung gefragt hatte.
+
+Reines Mess-Ticket (`bereich:wasser, ready-for-agent, test`), keine
+Korrektur am Code — `core/fluss_sinuositaet.py` ist eine neue,
+eigenständige Messfunktion, sie ändert an der Flusserzeugung selbst nichts.
+
 ## 4. Was neu grün ist
 
 Acht Testdateien sind seit dem 24.08. dazugekommen, alle grün:
