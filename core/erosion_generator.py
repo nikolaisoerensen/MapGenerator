@@ -621,6 +621,25 @@ class HydraulicFieldSimulator:
             if gpu_result is not None:
                 return self._collect_results(
                     state, heightmap, gpu_result["steps_taken"], gpu_result["converged"])
+            if size > self.MAX_CPU_RESOLUTION:
+                # Ticket #30: der obige Guard (Zeile ~606) greift nur, wenn zu
+                # Laufbeginn GAR KEIN GPU-Dispatch registriert war. Scheitert
+                # die GPU stattdessen ERST WAEHREND des Laufs (Treiberfehler,
+                # 30s-Timeout in GPUWorker.submit), lieferte _simulate_gpu()
+                # bisher nur eine WARNING und der Code fiel ungeprueft in die
+                # CPU-Schleife unten durch - bei 1024 px gemessen ~2h fuer
+                # max_steps=8000 (78x langsamer als die GPU, siehe Messung
+                # Ticket #30), also genau der "stille Haenger", vor dem
+                # MAX_CPU_RESOLUTION eigentlich schuetzen soll. Deshalb hier
+                # derselbe laute Fehler statt eines stillen Rueckfalls.
+                raise ValueError(
+                    f"HydraulicFieldSimulator: GPU-Erosion ist bei {size}x{size} "
+                    f"waehrend des Laufs fehlgeschlagen (siehe Log), und der CPU-Pfad "
+                    f"verweigert oberhalb {self.MAX_CPU_RESOLUTION}x{self.MAX_CPU_RESOLUTION} "
+                    f"den Dienst - ein Lauf wuerde Stunden statt Sekunden dauern "
+                    f"(siehe MAX_CPU_RESOLUTION). Kein stiller Ruecksprung auf einen "
+                    f"unbrauchbar langsamen Pfad."
+                )
         max_steps = cfg["max_steps"]
         interval = self.CONVERGENCE_CHECK_INTERVAL
         reference = state["terrain"].copy()

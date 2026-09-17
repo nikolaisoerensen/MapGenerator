@@ -134,8 +134,37 @@ Zahl nicht: die Tabelle listete zu jenem Zeitpunkt drei Erosionsbefunde
 (`erosion_field`, `erosion_gpu_parity`, `erosion_quality`), keine vier - und
 `erosion_gpu_parity` war, wie oben beschrieben, ohnehin bereits behoben.
 
-Der Satz hat real etwas angerichtet: solange er dort stand, sah jeder Leser
-gewollte Fehlschläge statt ungeklärter, und niemand fasste sie an.
+**Nachtrag 17.09.2026 (Ticket #30, im Anschluss an die obige Klärung):** die
+Parität war zwar behoben, aber die eigentliche Frage — lohnt sich Parität
+überhaupt, wenn der CPU-Pfad im Betrieb nie läuft — war noch offen. Gemessen
+bei 1024 px, 21 m/px, headless über `GPUWorker` (echte GPU, kein
+`QT_QPA_PLATFORM=offscreen`):
+
+| Pfad | Ergebnis |
+|---|---|
+| GPU, voller Lauf bis Konvergenz | 14,1 s, 1250 Schritte |
+| CPU, hochgerechnet auf dieselben 1250 Schritte (25 echte Schritte gemessen, 878 ms/Schritt) | 1097 s (18,3 min) |
+| CPU, hochgerechnet auf `max_steps = 8000` | 7023 s (1,95 h) |
+
+Faktor 78 bis 500 langsamer, je nachdem gegen welche Schrittzahl man
+vergleicht — in jedem Fall Größenordnungen, nicht Prozente. Der CPU-Pfad ist
+für reale Kartengrößen (512 px aufwärts) damit nicht praxistauglich; genau
+deshalb existiert `MAX_CPU_RESOLUTION = 256` in
+[`core/erosion_generator.py`](../core/erosion_generator.py) bereits seit
+Längerem als harte Grenze.
+
+Diese Grenze hatte aber eine Lücke: sie prüfte nur, ob zu Laufbeginn gar kein
+GPU-Dispatch registriert war. Scheiterte die GPU stattdessen erst WÄHREND
+eines laufenden Abschnitts (Treiberfehler, 30-s-Timeout in
+`GPUWorker.submit`), fiel der Code bisher ungeprüft in die volle CPU-Schleife
+— bei 1024 px also bis zu knapp zwei Stunden, ein stiller Hänger statt eines
+Fehlers. Behoben in Ticket #30: derselbe laute `ValueError` wie beim
+Start-Guard greift jetzt auch nach einem gescheiterten GPU-Abschnitt, wenn
+die Auflösung über `MAX_CPU_RESOLUTION` liegt. Unterhalb der Grenze (z. B.
+die 64-px-Testkarten in `smoke_test_erosion_gpu_parity.py`) bleibt der
+CPU-Rückfall unverändert erlaubt — dort ist er schnell genug, um eine
+legitime Notlösung zu sein, nicht ein stiller Fehler.
+
 `erosion_field` hat eine eigene, vom Schalter unabhaengige Erklaerung; der
 tatsaechliche Grund fuer `erosion_quality` bleibt **ungeklaert** - das ist
 eine offene Aufgabe, kein erledigter oder bewusster Zustand.
