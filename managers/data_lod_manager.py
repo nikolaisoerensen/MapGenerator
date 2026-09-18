@@ -3349,6 +3349,18 @@ class DataLODManager(QObject):
                 self.set_terrain_data_lod(schluessel, wert, lod_level, parameters)
                 data_keys.append(schluessel)
 
+        # river_lines: der Flussnetz-Graph als Linienzugliste, eine Liste
+        # von Dicts statt eines np.ndarray - set_terrain_data_lod()
+        # wuerde das ueber _validate_lod_input() ablehnen. Gleicher Weg wie
+        # bei den nicht-array-foermigen Settlement-Ausgaben (roads, plots, ...
+        # siehe set_settlement_data_complete_lod): _set_data_lod() mit
+        # require_array=False.
+        fluss_linien = getattr(terrain_data, "river_lines", None)
+        if fluss_linien:
+            self._set_data_lod("terrain", self._terrain_data, "river_lines", fluss_linien,
+                               lod_level, parameters, require_array=False)
+            data_keys.append("river_lines")
+
         # Cache und Metadaten
         self._update_cache_timestamp("terrain", lod_level, "complete", parameters)
         self._current_lods["terrain"] = max(self._current_lods["terrain"], lod_level)

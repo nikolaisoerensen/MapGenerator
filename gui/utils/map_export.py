@@ -227,7 +227,7 @@ def vektordaten(data_lod_manager, meter_pro_pixel):
     dlm = data_lod_manager
     daten = {"einheit": "meter", "meter_pro_pixel": round(meter_pro_pixel, 4),
              "wege": [], "seewege": [], "grundstuecksgrenzen": [],
-             "orte": [], "fehlt": []}
+             "orte": [], "fluesse": [], "fehlt": []}
     if dlm is None:
         daten["fehlt"].append("kein DataLODManager uebergeben")
         return daten
@@ -274,21 +274,25 @@ def vektordaten(data_lod_manager, meter_pro_pixel):
                                   * meter_pro_pixel, 2),
             })
 
-    # FLUESSE FEHLEN, UND ZWAR AUS EINEM BESTIMMTEN GRUND.
-    #
-    # `core/terrain_weltfluesse.flussnetz()` baut sehr wohl einen Knotengraphen
-    # (`punkte`, `eltern`, `reihenfolge`, Strahler-Ordnung) - aber
-    # `core/terrain_generator.py` behaelt daraus nur die RASTER `river_mask`
-    # und `river_order` (dort Zeile 1707) und wirft den Graphen weg. Aus einem
-    # Raster wieder Linienzuege zu machen (Skelettieren, Graph verfolgen,
-    # Ausduennen) waere Arbeit mit eigenen Fehlerquellen fuer etwas, das
-    # vorher schon vorlag.
-    #
-    # Der richtige Weg ist, den Graphen aufzuheben. Das ist ein Eingriff in
-    # die Ausgaben des Terrain-Generators und gehoert nicht in den Exporteur.
-    daten["fehlt"].append(
-        "fluesse (Knotengraph wird in core/terrain_generator.py:1707 "
-        "verworfen, es bleiben nur river_mask/river_order als Raster)")
+    # Flussnetz als Linienzuege: TerrainData.river_lines, gefuellt in
+    # TerrainGenerator._weltfluesse() aus demselben Knotengraphen, der auch
+    # river_mask/river_order rastert - hier nur noch Pixel -> Meter wie bei
+    # "wege" oben, plus die mitgelieferte Strahler-Ordnung und (wo vorhanden)
+    # eine aus der Wassermenge abgeleitete Breite.
+    linien = _hole("terrain", "river_lines")
+    if not linien:
+        daten["fehlt"].append("fluesse (kein Flussnetz generiert)")
+    else:
+        for linie in linien:
+            punkte = _pfad_in_meter(linie.get("punkte", []), meter_pro_pixel)
+            if len(punkte) < 2:
+                continue
+            eintrag = {"punkte": punkte, "ordnung": int(linie.get("ordnung", 0))}
+            breite_px = linie.get("breite_px")
+            if breite_px is not None:
+                eintrag["breite_m"] = round(float(breite_px) * meter_pro_pixel, 2)
+            daten["fluesse"].append(eintrag)
+
     return daten
 
 
@@ -566,6 +570,7 @@ def export_all_layers(data_lod_manager, parameter_manager, output_root, filename
             "seewege": len(vektor["seewege"]),
             "grundstuecksgrenzen": len(vektor["grundstuecksgrenzen"]),
             "orte": len(vektor["orte"]),
+            "fluesse": len(vektor["fluesse"]),
             "fehlt": vektor["fehlt"],
         }
     except Exception as e:                              # noqa: BLE001

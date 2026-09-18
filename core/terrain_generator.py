@@ -92,6 +92,12 @@ class TerrainData:
         self.river_order: Optional[np.ndarray] = None
         self.river_generation: Optional[np.ndarray] = None
         self.river_water: Optional[np.ndarray] = None
+        # Flussnetz als Linienzuege: eine Liste von Dicts
+        # {"punkte": [[x,y],...] in Pixeln, "ordnung": Strahler-Ordnung,
+        # "breite_px": Anzeigebreite}, siehe TerrainGenerator._weltfluesse().
+        # KEIN np.ndarray, deshalb nicht ueber set_terrain_data_lod() (siehe
+        # data_lod_manager.set_terrain_data_complete_lod).
+        self.river_lines: Optional[list] = None
         self.region_map: Optional[np.ndarray] = None
         # (3, H, W): Jahresmittel, Jahresspanne, Niederschlag - siehe
         # _weltkarte_heightmap. Weich ueber die Regionsgrenzen gemischt.
@@ -1572,6 +1578,7 @@ class BaseTerrainGenerator:
         # Pfad (WELTKARTE_AKTIV = False) gibt es sie nicht, und ein fehlendes
         # Flussnetz darf den Zusammenbau nicht scheitern lassen.
         for schluessel in ("river_mask", "river_order", "river_generation", "river_water",
+                           "river_lines",
                            "hinterland_height", "voronoi_map",
                            "region_map", "klima_map", "seegrad",
                            "ufer_region_a", "ufer_region_b", "see_eis",
@@ -1864,6 +1871,7 @@ class BaseTerrainGenerator:
         fluss_ordnung = np.zeros((size, size), dtype=np.float32)
         fluss_generation = np.zeros((size, size), dtype=np.float32)
         fluss_wasser = np.zeros((size, size), dtype=np.float32)
+        fluss_linien = []
 
         if not fluesse_an:
             self.logger.info("Flussnetz und Taeler UEBERSPRUNGEN "
@@ -1871,7 +1879,7 @@ class BaseTerrainGenerator:
         elif getattr(vd, "WELTFLUESSE_AKTIV", False):
             with _s(schritte, "weltfluesse", "Flussnetz und Taeler"):
                 (heightmap, fluss_maske, fluss_ordnung, fluss_generation,
-                 fluss_wasser) = self._weltfluesse(
+                 fluss_wasser, fluss_linien) = self._weltfluesse(
                      heightmap, felder, size, seed)
 
         # ridge_map ist ein Anzeige-Output des Erosionsfilters. Solange der bei
@@ -1921,6 +1929,12 @@ class BaseTerrainGenerator:
             # an dieser Stelle berechnet wurde, in Niederschlag mal Flaeche.
             # Ersetzt die Rot/Gruen-Faerbung nach Generation als Leitansicht.
             "river_water": fluss_wasser,
+            # Derselbe Flussgraph, aber als Linienzuege statt als Raster:
+            # eine Liste von Dicts {"punkte", "ordnung", "breite_px"} in
+            # Pixelkoordinaten, siehe _weltfluesse(). Der Knotengraph wird
+            # sonst nach der Rasterung verworfen - aus dem Raster laesst
+            # sich eine scharfe Flusslinie nur noch erraten.
+            "river_lines": fluss_linien,
             # DIE HOEHENFAKTOR-ANSICHT (Nutzerwunsch 2026-08-26:
             # *"kannst du mir die voronoiansicht als erstes bauen? ich
             # will den hoehenfaktor sehen koennen (3d und 2D)"*).
@@ -2007,12 +2021,17 @@ class BaseTerrainGenerator:
         """
         Flussnetz in drei Rechenstufen, dann die Taeler eingraben.
 
-        Rueckgabe: (heightmap mit Taelern, maske, ordnung, generation).
+        Rueckgabe: (heightmap mit Taelern, maske, ordnung, generation, wasser,
+        linien).
 
         NUR UEBER WASSER GEZEICHNET. Die Laeufe reichen konstruktionsbedingt bis
         MUENDUNGSTIEFE_M (-50 m), damit ein Fluss sichtbar ins Meer muendet und
         die Muendungsrichtung stimmt. Alles unterhalb von 0 m wird in Maske und
-        Ordnung weggelassen - dort ist Meer, kein Fluss.
+        Ordnung weggelassen - dort ist Meer, kein Fluss. `linien` traegt
+        denselben Ausschluss: sie sind je zusammenhaengendem
+        Ueberwasser-Stueck einer Netzkante ein Dict, nicht je Kante - eine
+        Kante, deren Spline zwischendurch unter 0 m faellt, wird an der Stelle
+        getrennt statt eine Linie durchs Meer zu ziehen.
         """
         from core.terrain_weltfluesse import (flussnetz, taeler_eingraben,
                                               MUENDUNGSTIEFE_M, ERBE_KOSTEN)
@@ -2053,7 +2072,7 @@ class BaseTerrainGenerator:
             region_map=felder.get("regionen"))
         if netz is None:
             leer = np.zeros((size, size), dtype=np.float32)
-            return heightmap, leer, leer.copy(), leer.copy(), leer.copy()
+            return heightmap, leer, leer.copy(), leer.copy(), leer.copy(), []
 
         geschnitten = taeler_eingraben(
             heightmap, netz, felder,
@@ -2098,16 +2117,51 @@ class BaseTerrainGenerator:
         # laege dann neben seinem Tal.
         from core.terrain_weltfluesse import hauptkinder, kantenpunkte
         kinder = hauptkinder(eltern, netz["flaeche"])
+        # LINIENZUEGE FUER DEN VEKTOREXPORT.
+        #
+        # Der Knotengraph (punkte/eltern/reihenfolge) wurde bisher nur zum
+        # Fuellen der Raster oben verwendet und danach verworfen - fuer den
+        # Vektorexport blieb dann nur das Raster selbst, aus dem sich eine
+        # scharfe Linie nur noch erraten laesst. Hier wird DIESELBE Spline
+        # (kantenpunkte(), s.o. "DIESELBE SPLINE WIE BEIM EINSCHNEIDEN")
+        # zusaetzlich als Punktliste gesammelt, mit demselben
+        # Ueberwasser-Filter wie die Maske. `breite_px` ist keine erfundene
+        # Groesse, sondern derselbe log10(Wassermenge)-Radius, der weiter
+        # unten schon die Anzeigebreite bestimmt.
+        linien = []
         for i in range(len(punkte)):
             e = eltern[i]
             if e < 0:
                 continue
             schritte = max(int(np.linalg.norm(punkte[i] - punkte[e]) * 2.0), 2)
+            menge = float(netz["flaeche"][i])
+            radius_px = FLUSS_BREITE_GRUND_PX + FLUSS_BREITE_JE_DEKADE_PX * np.log10(
+                1.0 + max(menge, 0.0))
+            # Kein Default-Parameter-Trick fuer eine Abschluss-Closure hier:
+            # `segment` wird unten per Seeunterbrechung neu zugewiesen, ein
+            # bei Definition eingefrorenes Closure-Argument wuerde danach auf
+            # die alte, schon abgeschlossene Liste zeigen statt auf die neue.
+            # Deshalb inline an beiden Stellen (Seeunterbrechung, Kantenende).
+            segment = []
+
             for p in kantenpunkte(punkte, eltern, kinder, e, i, schritte):
                 y = int(np.clip(round(p[0]), 0, size - 1))
                 x = int(np.clip(round(p[1]), 0, size - 1))
                 if geschnitten[y, x] <= 0.0:
+                    # Meer statt Fluss - Linie hier trennen (siehe
+                    # Docstring), nicht einfach ueberspringen.
+                    if len(segment) >= 2:
+                        linien.append({
+                            "punkte": [list(pt) for pt in segment],
+                            "ordnung": int(strahler[i]),
+                            "breite_px": float(2.0 * radius_px),
+                        })
+                    segment = []
                     continue
+                # Punkt/Pixel-Reihenfolge [y, x] -> Linien-Punkt [x, y], damit
+                # dieselbe Konvention wie bei "wege"/"seewege" gilt
+                # (gui/utils/map_export._pfad_in_meter erwartet [x, y]).
+                segment.append((float(p[1]), float(p[0])))
                 maske[y, x] = 1.0
                 ordnung[y, x] = max(ordnung[y, x], float(strahler[i]))
                 generation[y, x] = max(generation[y, x],
@@ -2128,20 +2182,26 @@ class BaseTerrainGenerator:
                 # Logarithmisch, weil die Wassermenge es auch ist: gemessen
                 # 0.38 bis 725 je Knoten (Median 1.33). Linear waere der
                 # Hauptstrom 500-mal breiter als ein Bach.
-                menge = float(netz["flaeche"][i])
-                r = FLUSS_BREITE_GRUND_PX + FLUSS_BREITE_JE_DEKADE_PX * np.log10(
-                    1.0 + max(menge, 0.0))
-                rad = int(r)
+                #
+                # (menge/radius_px oben je Kante EINMAL berechnet, nicht je
+                # Punkt - derselbe Wert wie hier vorher je Punkt neu bestimmt.)
+                rad = int(radius_px)
                 if rad <= 0:
                     wasser[y, x] = max(wasser[y, x], menge)
                 else:
                     y0, y1 = max(0, y - rad), min(size, y + rad + 1)
                     x0, x1 = max(0, x - rad), min(size, x + rad + 1)
                     yy, xx = np.ogrid[y0:y1, x0:x1]
-                    scheibe = (yy - y) ** 2 + (xx - x) ** 2 <= r * r
+                    scheibe = (yy - y) ** 2 + (xx - x) ** 2 <= radius_px * radius_px
                     ziel = wasser[y0:y1, x0:x1]
                     np.maximum(ziel, np.where(scheibe, menge, 0.0), out=ziel)
-        return geschnitten, maske, ordnung, generation, wasser
+            if len(segment) >= 2:
+                linien.append({
+                    "punkte": [list(pt) for pt in segment],
+                    "ordnung": int(strahler[i]),
+                    "breite_px": float(2.0 * radius_px),
+                })
+        return geschnitten, maske, ordnung, generation, wasser, linien
 
     def _apply_river_network(self, P: np.ndarray, amplitude: float):
         """
