@@ -268,8 +268,21 @@ class CanvasSettings:
             # Daten da waren. Logarithmisch mit 0.5 m als Untergrenze (darunter
             # ist es Rauschen) und 300 m als Obergrenze bildet den gemessenen
             # Bereich ueber alle Laufzeiten ab.
-            "erosion_map": ("Reds", 0.5, 300.0, "log"),
-            "sedimentation_map": ("Oranges", 0.5, 300.0, "log"),
+            #
+            # KORRIGIERT 2026-09-18 (Ticket #74, Befund aus #49): die 0.5 m
+            # Untergrenze war selbst zu hoch angesetzt. Gemessen ueber
+            # tests/smoke_test_erosion_field.py (64 px, 2000 Schritte,
+            # Regen 2.0) liegt das 95. Perzentil der Nutzdaten bei
+            # erosion_map 0.22 m und sedimentation_map 0.32 m - BEIDE unter
+            # dem alten vmin von 0.5. Die Karte zeigte deshalb praktisch nur
+            # die Hintergrundfarbe (dieselbe Fehlerklasse wie oben, nur an
+            # der Untergrenze statt der Obergrenze). Neues vmin 0.05 m liegt
+            # eine Groessenordnung unter dem kleineren der beiden Werte, ohne
+            # das schon bekannte Rauschen unter 0.5 m als eigene Farbstufe
+            # aufzuloesen - vmax 300 m bleibt unveraendert, deckt weiterhin
+            # auch die grossen Laufzeiten oben in der Tabelle ab.
+            "erosion_map": ("Reds", 0.05, 300.0, "log"),
+            "sedimentation_map": ("Oranges", 0.05, 300.0, "log"),
             # Signierte Netto-Hoehenaenderung - die Karte, an der eine
             # unplausible Spitze sofort auffaellt. Divergierende Skala um 0,
             # deshalb linear (eine Log-Skala kann keine Vorzeichen). Der
