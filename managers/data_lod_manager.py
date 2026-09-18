@@ -3918,7 +3918,8 @@ class DataLODManager(QObject):
         # Kommentar und [[project-settlement-physics-lab-parity]]).
         for key in ("settlement_list", "landmark_list", "roadsite_list", "roads", "sea_roads", "plots",
                     "plot_nodes", "landmark_roads", "plot_edges",
-                    "plot_cores", "wilderness_polygons", "plot_node_positions"):
+                    "plot_cores", "wilderness_polygons", "plot_node_positions",
+                    "city_boundary_polygons"):
             value = getattr(settlement_data, key, None)
             if value:
                 self._set_data_lod("settlement", self._settlement_data, key, value, lod_level,

@@ -159,6 +159,11 @@ class SettlementData:
         self.plot_cores = []  # List[PlotNode] - node_type in {standard_plot_node, wilderness_core, city_core}
         self.wilderness_polygons = []  # List[(N,2) array] - Aussenkontur-Punkte je Wildnisgebiet
         self.plot_node_positions = []  # List[(x_norm, y_norm)] - PlotNode-Positionen, normiert auf [0,1]
+        # Dict[location_id, List[List[(x,y)]]] - Kontur der Stadtgrenze je
+        # Siedlung, eine Punktliste je Flecken (eine Stadt kann z.B. an einem
+        # Fluss in mehrere getrennte Flecken zerfallen), siehe Ticket #72 und
+        # docs/SIEDLUNGEN_ENTWURF.md §6.1.
+        self.city_boundary_polygons = {}
 
         # Interne Daten
         self.combined_suitability_map = None  # Terrain-Suitability für Settlement-Platzierung
@@ -4912,6 +4917,8 @@ class SettlementGenerator:
         settlement_list = self.data_lod_manager.get_calculator_output(
             "settlement.settlements", "settlement_list", lod_level)
         city_mask = self.data_lod_manager.get_calculator_output("settlement.city_boundary", "city_mask", lod_level)
+        city_boundary_polygons = self.data_lod_manager.get_calculator_output(
+            "settlement.city_boundary", "city_boundary_polygons", lod_level)
         voronoi_cell_map = self.data_lod_manager.get_calculator_output(
             "settlement.landscape_voronoi", "voronoi_cell_map", lod_level)
         street_mask = self.data_lod_manager.get_calculator_output("settlement.city_blocks", "street_mask", lod_level)
@@ -4950,6 +4957,7 @@ class SettlementGenerator:
         settlement_data.combined_suitability_map = combined_suitability_map
         settlement_data.settlement_list = settlement_list
         settlement_data.city_mask = city_mask
+        settlement_data.city_boundary_polygons = city_boundary_polygons if city_boundary_polygons is not None else {}
         settlement_data.voronoi_cell_map = voronoi_cell_map
         settlement_data.street_mask = street_mask
         settlement_data.house_parcel_map = house_parcel_map
@@ -5202,11 +5210,11 @@ class SettlementGenerator:
         # eine vollstaendige PlotPhysicsSystem-Instanz zu bauen (die braucht
         # Physik-Parameter, die an dieser Stelle der Pipeline noch gar nicht
         # feststehen) - dieselbe map_size-Quadrat-Skalierung wie dort (siehe
-        # PlotPhysicsSystem.__init__, area_scale_factor), auf die
-        # unskalierte Klassen-Konstante angewandt.
-        map_size = city_mask.shape[0]
-        area_scale_factor = (map_size / 128.0) ** 2
-        min_area = PlotPhysicsSystem.CITY_MIN_AREA * area_scale_factor
+        # PlotPhysicsSystem.__init__, area_scale_factor). self.area_scale_factor
+        # ist bereits durch _get_prepared_settlement_inputs() oben aus derselben
+        # heightmap-Groesse gesetzt (dort Zeile ~5075) - keine zweite, separat
+        # gepflegte Berechnung derselben Formel noetig.
+        min_area = PlotPhysicsSystem.CITY_MIN_AREA * self.area_scale_factor
         settlement_ids = [s.location_id for s in settlement_list]
         polygons_by_id = _extract_city_boundary_polygons(city_mask, settlement_ids, min_area)
         city_boundary_polygons = {

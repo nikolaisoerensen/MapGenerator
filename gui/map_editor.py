@@ -1408,13 +1408,11 @@ class MapEditorWindow(QMainWindow):
         # Methode fuer 2D UND 3D (siehe STEHENDE REGEL in CLAUDE.md), kein
         # Sonderfall fuer den Lade-Weg noetig. _clear_and_reset_all_generators()
         # hat den Display-Cache bereits geleert, der Dirty-Check erkennt die
-        # neuen Daten also zuverlaessig als Aenderung.
-        for tab_instance in self.tabs.values():
-            if hasattr(tab_instance, 'update_display_mode'):
-                try:
-                    tab_instance.update_display_mode()
-                except Exception as e:
-                    self.logger.debug(f"Display refresh after world load failed for a tab: {e}")
+        # neuen Daten also zuverlaessig als Aenderung. Derselbe Refresh wie
+        # ueber F5 (_refresh_all_displays) - kein zweiter Pfad, der bei einer
+        # kuenftigen Aenderung (z.B. neuer Tab-Typ) separat gepflegt werden
+        # muesste.
+        self._refresh_all_displays()
 
         self.active_generations.clear()
         self.tab_generation_status.clear()
