@@ -10,16 +10,25 @@ Erosion-Schalter, fast alle Water-Schalter. Kein Test haette das gefunden - die
 vorhandenen pruefen je einen Generator, und die Anzeige liest Outputs, die
 dabei gar nicht entstehen.
 
-Geprueft wird je Output eine von vier Lagen:
+Geprueft wird je Output eine von sechs Lagen:
 
-    FEHLT       der Knoten hat ihn nie geschrieben
-    NUR NULL    vorhanden, aber ueberall exakt 0 - die Anzeige bleibt leer
-    KONSTANT    vorhanden, aber ueberall derselbe Wert
-    OK          enthaelt echte Werte
+    FEHLT             der Knoten hat ihn nie geschrieben
+    NUR NULL          vorhanden, aber ueberall exakt 0 - die Anzeige bleibt leer
+    KONSTANT          vorhanden, aber ueberall derselbe Wert
+    NICHT-ENDLICH     enthaelt NaN oder Inf
+    NAN DOKUMENTIERT  enthaelt NaN, aber als Sentinel dokumentiert (s.u.)
+    OK                enthaelt echte Werte
 
 "NUR NULL" ist nicht automatisch ein Fehler: erosion.* liefert absichtlich
 Nullkarten, solange EROSION_AKTIV auf False steht (§8). Der Test nennt das
 deshalb getrennt.
+
+"NICHT-ENDLICH" ist ebenfalls nicht automatisch ein Fehler (Ticket #71):
+terrain.redistribution / hinterland_height enthaelt vorsaetzlich NaN als
+"nicht zutreffend"-Markierung fuer See- und alpine Landesinnere-Pixel (siehe
+NAN_SENTINEL_ERLAUBT unten). Nur DIESER namentlich gelistete Output wird zu
+"NAN DOKUMENTIERT" umgedeutet - jedes andere NICHT-ENDLICH bleibt ein echter
+Befund.
 
 ZWEI DURCHGAENGE, das ist der zweite Zweck:
 
@@ -68,6 +77,23 @@ SIZE = 128
 LOD = 3
 KM = 15.0
 SEED = 20260730
+
+# Outputs mit einem DOKUMENTIERTEN NaN-Sentinel: hier ist NaN eine bewusste
+# "nicht zutreffend"-Markierung fuer die GUI, kein Rechenfehler. Aktuell nur
+# terrain.redistribution / hinterland_height - core/terrain_weltkarte.py,
+# Funktion kuestengebiete(), legt `hoehen_karte` ausdruecklich mit
+# np.full(H.shape, np.nan, ...) an und ueberschreibt nur Landflaechen mit
+# zugeordnetem Kuestengebiet; Seeflaechen und das alpine Nevadin-Landesinnere
+# (jenseits ALPEN_SAAT_REICHWEITE) bleiben absichtlich NaN (Ticket #71).
+#
+# NAMENTLICH auf einzelne "Knoten / Schluessel"-Eintraege beschraenkt - siehe
+# CLAUDE.md: "Jeder stille Rueckfall auf einen Ersatzpfad braucht eine laute
+# Logzeile". Eine pauschale "NaN ist ok"-Regel waere genau so ein stiller
+# Ruecfall und wuerde einen echten NaN-Bug in einem ANDEREN Feld lautlos
+# durchwinken. Wer hier etwas eintraegt, muss die Fundstelle wie oben nennen.
+NAN_SENTINEL_ERLAUBT = {
+    "terrain.redistribution / hinterland_height",
+}
 
 
 def _parameter():
@@ -230,7 +256,17 @@ def _durchlauf(mit_gpu):
             for schluessel in spec.output_keys:
                 wert = manager.get_calculator_output(knoten, schluessel, LOD)
                 form = getattr(wert, "shape", None)
-                ergebnis["%s / %s" % (knoten, schluessel)] = (_lage(wert), form)
+                voller_schluessel = "%s / %s" % (knoten, schluessel)
+                lage = _lage(wert)
+                # Nur EXAKT dieser Uebergang wird umgedeutet: ein Feld, das nach
+                # _lage() NICHT-ENDLICH waere (also NaN enthaelt), aber laut
+                # NAN_SENTINEL_ERLAUBT namentlich ein dokumentiertes Sentinel ist.
+                # Jede andere Lage (FEHLT, NUR NULL, KONSTANT, OK) bleibt
+                # unveraendert - die Ausnahme macht das Feld nicht pauschal
+                # unpruefbar, sie erklaert nur genau diesen einen Befund.
+                if lage == "NICHT-ENDLICH" and voller_schluessel in NAN_SENTINEL_ERLAUBT:
+                    lage = "NAN DOKUMENTIERT"
+                ergebnis[voller_schluessel] = (lage, form)
     finally:
         DataLODManager.set_calculator_output = _original_set
     return ergebnis, abbrueche, undeklariert
@@ -262,7 +298,8 @@ def lauf():
 
     print()
     print("Zusammenfassung ueber %d Outputs:" % len(gpu))
-    for lage in ("OK", "NUR NULL", "KONSTANT", "FEHLT", "NICHT-ENDLICH"):
+    for lage in ("OK", "NUR NULL", "KONSTANT", "NAN DOKUMENTIERT", "FEHLT",
+                 "NICHT-ENDLICH"):
         if zaehler.get(lage):
             print("   %-14s %d" % (lage, zaehler[lage]))
 
