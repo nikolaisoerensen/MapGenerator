@@ -29,15 +29,17 @@ Architecture:
 
 from PyQt6.QtWidgets import QMainWindow, QApplication, QTabWidget, QTabBar, QStackedWidget, QMenu, QLabel, \
     QComboBox, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QFileDialog, QSplitter, \
-    QRadioButton, QButtonGroup
+    QRadioButton, QButtonGroup, QInputDialog
 from PyQt6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PyQt6.QtCore import QTimer, Qt, pyqtSlot
 import logging
+import os
 from typing import Optional
 
 from gui.config.gui_default import WindowSettings, EditorConstants
 from managers.data_lod_manager import DataLODManager
 from managers.generation_orchestrator import GenerationOrchestrator, GeneratorType
+from core.welt_io import welt_backen, welt_laden, WeltBackenFehler, WeltLadenFehler
 from managers.navigation_manager import NavigationManager
 from gui.widgets.widgets import ParameterSlider
 from managers.parameter_manager import ParameterManager
@@ -1421,44 +1423,162 @@ class MapEditorWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to create new world: {str(e)}")
 
     def _open_world(self):
-        """Open saved world data"""
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "Open World", "",
-            "JSON Files (*.json);;All Files (*)"
-        )
+        """
+        Laedt eine zuvor mit welt_backen() geschriebene Welt (Ticket #40).
 
-        if filename:
-            try:
-                # TODO: Implement world loading
-                QMessageBox.information(self, "Open World", "World loading will be implemented in future version")
-                self.logger.info(f"World open requested: {filename}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to open world: {str(e)}")
+        Eine Welt ist laut core/welt_io.py ein ganzer ORDNER (welt_manifest.json
+        + zustand/ + godot/ + vorschau/), kein einzelner Dateiname - deshalb
+        Ordnerauswahl statt Dateiauswahl, anders als der bisherige Attrappen-
+        Dialog mit JSON-Dateifilter.
+
+        Der Ordner wird VOR dem eigentlichen welt_laden() knapp auf ein
+        vorhandenes welt_manifest.json geprueft. Grund: welt_laden() selbst
+        schreibt Kategorie fuer Kategorie in data_lod_manager und wuerde bei
+        einem Fehler in einer spaeteren Kategorie den zuvor schon geleerten
+        Zustand nicht zuruecksetzen - ein falsch gewaehlter Ordner (Tippfehler,
+        kein Welt-Ordner) soll deshalb NICHT erst den aktuellen Arbeitsstand
+        wegwerfen, bevor der Fehler bemerkt wird.
+        """
+        ordner = QFileDialog.getExistingDirectory(
+            self, "Welt oeffnen - Ordner waehlen", "",
+            QFileDialog.Option.ShowDirsOnly
+        )
+        if not ordner:
+            return
+
+        manifest_pfad = os.path.join(ordner, "welt_manifest.json")
+        if not os.path.isfile(manifest_pfad):
+            QMessageBox.critical(
+                self, "Welt oeffnen fehlgeschlagen",
+                f"'{ordner}' enthaelt kein welt_manifest.json - das ist "
+                f"kein mit 'Welt speichern' erzeugter Welt-Ordner."
+            )
+            return
+
+        try:
+            # Alten Zustand + Orchestrator-LOD-Fortschritt wegwerfen, BEVOR
+            # die geladene Welt geschrieben wird - sonst mischen sich Reste
+            # der vorherigen Sitzung (z.B. eine Kategorie, die die geladene
+            # Welt gar nicht enthaelt) mit den frisch geladenen Daten. Siehe
+            # _clear_and_reset_all_generators()-Docstring.
+            self._clear_and_reset_all_generators()
+            welt_laden(ordner, self.data_lod_manager, self.parameter_manager)
+        except WeltLadenFehler as e:
+            QMessageBox.critical(self, "Welt oeffnen fehlgeschlagen", str(e))
+            self.logger.error(f"World load failed: {e}")
+            return
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Welt oeffnen fehlgeschlagen", f"Unerwarteter Fehler: {e}")
+            self.logger.error(f"World load failed unexpectedly: {e}")
+            return
+
+        # Geladenen Zustand SICHTBAR machen: jeder Tab holt sich seine Daten
+        # ueber update_display_mode() aus dem DataLODManager zurueck - dieselbe
+        # Methode fuer 2D UND 3D (siehe STEHENDE REGEL in CLAUDE.md), kein
+        # Sonderfall fuer den Lade-Weg noetig. _clear_and_reset_all_generators()
+        # hat den Display-Cache bereits geleert, der Dirty-Check erkennt die
+        # neuen Daten also zuverlaessig als Aenderung.
+        for tab_instance in self.tabs.values():
+            if hasattr(tab_instance, 'update_display_mode'):
+                try:
+                    tab_instance.update_display_mode()
+                except Exception as e:
+                    self.logger.debug(f"Display refresh after world load failed for a tab: {e}")
+
+        self.active_generations.clear()
+        self.tab_generation_status.clear()
+
+        self.status_indicator.set_success("Welt geladen")
+        self.logger.info(f"World loaded from: {ordner}")
+        QMessageBox.information(
+            self, "Welt geoeffnet", f"Welt erfolgreich geladen aus:\n{ordner}")
 
     def _save_world(self):
-        """Save current world data"""
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Save World", "world.json",
-            "JSON Files (*.json);;All Files (*)"
-        )
+        """
+        Speichert die aktuelle Welt nach welt_backen() (Ticket #40).
 
-        if filename:
-            try:
-                # TODO: Implement world saving
-                QMessageBox.information(self, "Save World", "World saving will be implemented in future version")
-                self.logger.info(f"World save requested: {filename}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to save world: {str(e)}")
+        Zielordner statt Zieldateiname: welt_backen() schreibt einen ganzen
+        Ordner (welt_manifest.json, zustand/, godot/, vorschau/ - siehe
+        core/welt_io.py-Moduldocstring), keine einzelne Datei. Der native
+        Ordnerdialog erlaubt es dem Nutzer, darin auch einen neuen Ordner
+        anzulegen.
+        """
+        ordner = QFileDialog.getExistingDirectory(
+            self, "Welt speichern - Zielordner waehlen", "",
+            QFileDialog.Option.ShowDirsOnly
+        )
+        if not ordner:
+            return
+
+        try:
+            welt_backen(ordner, self.data_lod_manager, self.parameter_manager)
+        except WeltBackenFehler as e:
+            QMessageBox.critical(self, "Welt speichern fehlgeschlagen", str(e))
+            self.logger.error(f"World save failed: {e}")
+            return
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Welt speichern fehlgeschlagen", f"Unerwarteter Fehler: {e}")
+            self.logger.error(f"World save failed unexpectedly: {e}")
+            return
+
+        self.status_indicator.set_success("Welt gespeichert")
+        self.logger.info(f"World saved to: {ordner}")
+        QMessageBox.information(
+            self, "Welt gespeichert", f"Welt erfolgreich gespeichert nach:\n{ordner}")
 
     def _export_world(self):
-        """Export complete world data"""
+        """
+        Exportiert die Welt als Godot/Terrain3D-Layer (Ticket #40).
+
+        Verdrahtet auf denselben export_all_layers()-Pfad (gui/utils/
+        map_export.py), den sowohl welt_backen() fuer seinen godot/-
+        Unterordner als auch OverviewTab.export_layers_to_disk() bereits
+        benutzen - siehe core/welt_io.py-Moduldocstring: es soll KEINEN
+        zweiten, eigenen Export-Pfad geben. Ordner + Dateinamen-Praefix
+        werden hier abgefragt, weil ein Menuepunkt (anders als der
+        dauerhafte Reiter in Overview) keinen eigenen Platz fuer ein
+        Formularfeld hat.
+        """
+        ordner = QFileDialog.getExistingDirectory(
+            self, "Welt exportieren - Zielordner waehlen", "",
+            QFileDialog.Option.ShowDirsOnly
+        )
+        if not ordner:
+            return
+
+        vorschlag = "Mapseed_xxxxxx"
         try:
-            # TODO: Implement comprehensive world export
-            QMessageBox.information(self, "Export World",
-                                    "Comprehensive world export will be implemented in future version")
-            self.logger.info("World export requested")
+            if self.parameter_manager:
+                seed = self.parameter_manager.get_tab_parameters("terrain").get("map_seed")
+                if seed is not None:
+                    vorschlag = f"Mapseed_{seed}"
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to export world: {str(e)}")
+            self.logger.debug(f"Dateinamen-Vorschlag fuer Export nicht ermittelbar: {e}")
+
+        filename_prefix, ok = QInputDialog.getText(
+            self, "Welt exportieren", "Name des Export-Unterordners:", text=vorschlag)
+        if not ok or not filename_prefix.strip():
+            return
+
+        try:
+            from gui.utils.map_export import export_all_layers
+            success, message, output_dir = export_all_layers(
+                self.data_lod_manager, self.parameter_manager, ordner, filename_prefix.strip())
+        except Exception as e:
+            QMessageBox.critical(self, "Export fehlgeschlagen", f"Unerwarteter Fehler: {e}")
+            self.logger.error(f"World export failed unexpectedly: {e}")
+            return
+
+        if success:
+            self.status_indicator.set_success("Welt exportiert")
+            self.logger.info(f"World exported to: {output_dir}")
+            QMessageBox.information(
+                self, "Export abgeschlossen", f"{message}\n\nZiel: {output_dir}")
+        else:
+            self.logger.warning(f"World export incomplete: {message}")
+            QMessageBox.warning(self, "Export unvollstaendig", message)
 
     def _export_current_png(self):
         """Export current tab view as PNG"""
