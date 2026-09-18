@@ -3,6 +3,7 @@
 > **TEILWEISE VERALTET (geprüft 2026-08-12).** Zwei Aussagen dieses Dokuments
 > stimmen nicht mehr, und beide betreffen genau das, wofür man es aufschlägt:
 >
+> <!-- PRUEFBAR: ausdruck=len(managers.calculator_graph.CALCULATOR_GRAPH) erwartet=38 -->
 > * **Es sind heute 38 Knoten, nicht 29** (`managers/calculator_graph.py`:
 >   terrain 4, geology 8, weather 4, water 5, erosion 2, biome 6, settlement 9).
 >   Dazwischen liegen der Erosions-Ausbau, der Siedlungsumbau und der Wegfall
@@ -76,8 +77,10 @@ die Grundlage für einen künftigen Umbau auf echte Calculator-/LOD-Synchronisat
 | 39 | Landmark-Anbindung | `settlement_generator.py:calculate_landmark_roads` | `landmark_list`(33), `roads`(30), `slopemap`(3) | `landmark_roads` | Settlement |
 
 (29 tatsächliche Calculator + der kaputte Rückkopplungsschritt #22 = 30 Zeilen in der Tabelle,
-plus 5 neue Settlement-Knoten #35-#39 aus dem Settlement-Rework = 39 aktive Calculators in
-`managers/calculator_graph.py`.)
+plus 5 neue Settlement-Knoten #35-#39 aus dem Settlement-Rework = rechnerisch 39 - seit der
+Entfernung von `settlement.outer_roads` (OFFENE_PUNKTE 5.11) aber
+<!-- PRUEFBAR: ausdruck=len(managers.calculator_graph.CALCULATOR_GRAPH) erwartet=38 -->
+tatsächlich 38 aktive Calculators in `managers/calculator_graph.py`.)
 
 **Settlement-Rework (Ticket #4 in docs/backlog.md), Stand 2026-07-09:** #35 (Stadtgrenze),
 #36 (innerstädtische Blöcke) und #37 (Landschafts-Voronoi) hängen nur von `settlement_list`(29)
