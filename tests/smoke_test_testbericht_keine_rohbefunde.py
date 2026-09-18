@@ -45,8 +45,14 @@ KOMMAZAHL_MUSTER = re.compile(r"\d+,\d+")
 
 
 def _abschnitt_3_tabelle(text: str) -> list[str]:
-    """Liefert die rohen Tabellenzeilen (Header + Trenner + Daten) von
-    Abschnitt 3, bis zur naechsten '## '-Ueberschrift."""
+    """Liefert die rohen Tabellenzeilen (Header + Trenner + Daten) der EINEN
+    Ticket-Tabelle am Anfang von Abschnitt 3 - nicht alle Tabellen des
+    gesamten Abschnitts. Abschnitt 3 traegt unterhalb dieser Tabelle weitere,
+    eigenstaendige Nachtrag-Tabellen mit echten Messwerten (von frueheren
+    Tickets wie #30/#32/#33/#34 eingefuegt) - die sollen hier ausdruecklich
+    NICHT geprueft werden, nur die Ticket-Verweis-Tabelle direkt am Anfang.
+    Darum endet die Suche an der ersten Zeile ohne '|' NACH Tabellenbeginn,
+    nicht erst an der naechsten '## '-Ueberschrift."""
     zeilen = text.splitlines()
     start = None
     for i, zeile in enumerate(zeilen):
@@ -64,11 +70,21 @@ def _abschnitt_3_tabelle(text: str) -> list[str]:
             ende = i
             break
 
-    tabellenzeilen = [z for z in zeilen[start:ende] if z.strip().startswith("|")]
-    if not tabellenzeilen:
+    tabellenbeginn = None
+    for i in range(start + 1, ende):
+        if zeilen[i].strip().startswith("|"):
+            tabellenbeginn = i
+            break
+    if tabellenbeginn is None:
         raise AssertionError(
             "Abschnitt 3 enthaelt keine Markdown-Tabelle mehr - "
             "wurde sie versehentlich geloescht statt umgeschrieben?")
+
+    tabellenzeilen = []
+    for i in range(tabellenbeginn, ende):
+        if not zeilen[i].strip().startswith("|"):
+            break
+        tabellenzeilen.append(zeilen[i])
     return tabellenzeilen
 
 
