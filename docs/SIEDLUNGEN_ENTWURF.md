@@ -152,3 +152,82 @@ abgelegene Stellen. Sie duerfen ausdruecklich weitab jedes Weges liegen.
 Erreichbarkeit (Faktor 5 in Abschnitt 2) haengt am Netz, das Netz an den Orten.
 Aufgeloest wird das in **einem** Rueckschritt: nach Schritt 7 werden die Raenge
 einmal nachkorrigiert, ohne die Orte zu verschieben. Kein zweiter Durchlauf.
+
+
+## 6. Die Siedlungsnaht — was das Spiel abholt
+
+**Ticket #35, Stand 2026-09-18.** Die Siedlungsschicht ist die aufwendigste
+des Editors (Eignungsfeld, Wegenetz, Grundstuecke, Strassenverkehr —
+Abschnitte 1–5). Bisher war nirgends festgeschrieben, was das SPIEL davon
+tatsaechlich braucht. Das ist jetzt entschieden: es gibt eine feste
+Feldliste, und alles, was nicht darin steht, ist Innenleben des Editors und
+darf sich aendern, ohne das Spiel zu brechen.
+
+> *Naht: die eine Stelle, an der das Spiel Siedlungsdaten abholt — mit genau
+> diesen Feldern und nicht mehr. Dieselbe Idee wie in
+> `docs/NACHTBETRIEB.md` §8 fuer `sperre.pruefe()`.*
+
+### 6.1 Die sechs Felder
+
+| # | Feld | Typ / Einheit | Traeger heute | Status |
+|---|---|---|---|---|
+| 1 | Kontur der Stadtgrenze | Polygon je Siedlung: Liste von (x,y)-Punkten in Pixelkoordinaten des aktuellen LOD-Rasters | `settlement.city_boundary` liefert bisher nur `city_mask` (Rastermaske: (H,W) int, Siedlungs-ID pro Pixel, -1 = ausserhalb jeder Stadt) | **fehlt als Naht-Feld** — siehe 6.2 |
+| 2 | Anschlusspunkte der Wege | Liste von (x,y)-Punkten je Siedlung: dort, wo eine Strecke aus `settlement.pathfinding` (`roads`/`sea_roads`) die Stadtgrenze schneidet | nirgends berechnet | **fehlt** — siehe 6.2 |
+| 3 | Stadtgroesse | int, Einheit "Anzahl Haeuser" (15–50, siehe §1) | `settlement.settlements` → `settlement_list[i].house_count` | geliefert |
+| 4 | Stadttyp | str, einer aus `"bergdorf" \| "marktstadt" \| "agrarstadt" \| "sonstige"` | `settlement.settlements` → `settlement_list[i].settlement_type` | geliefert |
+| 5 | Rang | str, einer aus `"dorf" \| "siedlung" \| "stadt"` | `settlement.settlements` → `settlement_list[i].rank` | geliefert |
+| 6 | Kultur | str, Name aus `core.terrain_weltkarte` REGIONEN (`volk`-Feld, z.B. "Kelten") | `settlement.settlements` → `settlement_list[i].culture` | geliefert |
+
+Schluesselfeld fuer alle sechs (nicht Teil der urspruenglichen Liste aus dem
+Ticket, aber noetig, um Kontur/Anschlusspunkte spaeter eindeutig einer
+Siedlung zuzuordnen): `settlement_list[i].location_id` (int, kartenweit
+eindeutig) — existiert schon und wird von 6.2 nur wiederverwendet, nicht neu
+erfunden.
+
+### 6.2 Was fehlt, als eigene Tickets
+
+**#72 — Kontur als Polygon.** `settlement.city_boundary` muss zusaetzlich zu
+`city_mask` ein `city_boundary_polygons: Dict[int, List[(x,y)]]` liefern (ein
+Polygon je Siedlung, Schluessel = `location_id`). Der Baustein dafuer
+existiert bereits, nur an der falschen Stelle:
+`PlotPhysicsSystem._build_city_boundary_polygons()`
+(core/settlement_generator.py) macht per Marching-Squares genau das — Kontur
+von `city_mask == settlement_id` als Shapely-Polygon —, aber nur intern fuer
+das Grundstuecks-System, nicht als Ausgabe des Calculator-Knotens. #72 muss
+diese Extraktion (oder eine leichtgewichtigere eigene Kopie davon) in
+`_calc_city_boundary()` einhaengen.
+
+**#73 — Anschlusspunkte der Wege.** Sobald #72 die Polygon-Kontur liefert,
+kann jede Strecke aus `roads`/`sea_roads` gegen das Polygon der jeweiligen
+Zielsiedlung geschnitten werden (der Punkt, an dem die Strecke die Kontur
+durchstoesst). Ohne #72 gibt es keine Kontur zum Schneiden — #73 ist deshalb
+"Blocked by #72".
+
+### 6.3 Was ausdruecklich NICHT zur Naht gehoert
+
+Das Spiel erzeugt aus den sechs Feldern oben sein eigenes Innenleben. Der
+Editor liefert dafuer die Zutaten, nicht das fertige Ergebnis:
+
+- **Parzellen** (`plot_map`, `house_parcel_map`, `plots`) — die
+  Grundstuecksteilung entsteht im Spiel aus Stadtgroesse und Kontur.
+- **Strassennetz INNERHALB der Stadt** (`street_mask`, `plot_nodes`,
+  `plot_edges`) — nur das Netz ZWISCHEN Staedten (Abschnitt 4) gehoert zur
+  Naht, nicht die inneren Gassen.
+- **Haeuserformen** — kommt im heutigen Code gar nicht vor; ausdruecklich
+  Aufgabe des Spiels.
+- **Gewerbe** — ebenfalls nicht Teil des heutigen Codes; das Spiel leitet es
+  aus Stadttyp/Rang/Kultur ab.
+
+Aenderungen an diesen vier Punkten (z.B. ein neues Parzellen-Layout, ein
+anderer Strassenverkehrs-Algorithmus) duerfen sich frei aendern, ohne dass
+sich irgendetwas auf der Spiel-Seite anpassen muss — genau das ist der Zweck
+einer Naht.
+
+### 6.4 Wer das prueft
+
+`tests/smoke_test_siedlungsnaht_felder.py` faehrt die echte Pipeline bis
+`settlement.city_boundary`/`settlement.pathfinding` und zaehlt die sechs
+Felder nach: die vier gelieferten pruefen GRUEN, die zwei fehlenden schlagen
+ABSICHTLICH und NAMENTLICH fehl (kein Crash, sondern "dieses Feld fehlt noch,
+Ticket #72/#73") — solange, bis diese beiden Tickets geschlossen sind. Danach
+werden die zwei Platzhalter-Fehlschlaege durch echte Pruefungen ersetzt.
