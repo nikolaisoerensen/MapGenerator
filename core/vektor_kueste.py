@@ -66,8 +66,7 @@ from scipy.spatial import cKDTree
 
 from core.terrain_weltkarte import (KUESTEN_ARCHETYPEN, KUESTENHOEHE_M,
                                     KUESTEN_LOKALER_EINFLUSS,
-                                    MAX_KLIPPENWINKEL_GRAD, WELT_KM,
-                                    alle_regionen)
+                                    WELT_KM, alle_regionen)
 
 
 # Abstand der Saatpunkte auf der Kuestenlinie, in METERN. Bestimmt, wie
@@ -92,14 +91,11 @@ MESH_MINDEST_SKALA_M = 8.0
 # in denen ein Archetyp mehr Hoehe verlangt, als die Landmasse traegt.
 ZIEL_JE_HINTERLAND = 1.0
 
-# Wieviel eine Kueste ihr Hinterland ueberhoeht, je Einheit `hoehe_faktor`
-# des Archetyps. 0.25 heisst: die steilste Klippe (hoehe_faktor 1.3) liegt
-# rund 33 % ueber dem Plateau dahinter, eine Flachkueste praktisch darauf.
-UEBERHOEHUNG_JE_HOEHENFAKTOR = 0.25
-
-# Mindesthoehe der Kuestenformung, damit eine Kueste auch dort sichtbar ist,
-# wo das Hinterland selbst fast auf Meereshoehe liegt.
-KUESTEN_SOCKEL_M = 12.0
+# HIER STANDEN BIS 2026-09-18 `UEBERHOEHUNG_JE_HOEHENFAKTOR` (0.25) und
+# `KUESTEN_SOCKEL_M` (12 m). Beide waren Summanden der alten Zielhoehe
+# `hinterland * ueberhoehung + SOCKEL`, die es nicht mehr gibt - die Hoehe
+# steht seit dem Wechsel auf Meterprofile direkt in
+# `MESS_PROFIL_M_JE_ARCHETYP`.
 
 # Wieviele Kuestenabschnitte an einem Ort hoechstens mitmischen. Zwei reichen
 # fast ueberall (die zwei Seiten einer Landzunge), drei an Ecken und an
@@ -183,13 +179,6 @@ SAAT_BUDGET_KORREKTUR = {
 
 MIN_STATIONEN_JE_KONTUR = 16
 
-# Ueber wieviele Nachbarstationen die gemessene Hinterlandhoehe geglaettet
-# wird. Ungeglaettet schwankte sie zwischen benachbarten Stationen um bis zu
-# 85 m auf 400 m Kueste (= 200 m/km); an echten Kuesten wurden 20 m/km
-# gemessen (19 km Doolin-Moher), also Faktor 10 zu viel. Die Ursache ist das
-# Gelaenderauschen im Messring, nicht eine echte Formaenderung.
-HINTERLAND_GLAETTUNG = 5
-
 # Breite der Uebergangszone zwischen zwei Kuestentypen, in Metern. Sie ist
 # der Regler fuer "schnell, aber nicht zu schnell": innerhalb eines Segments
 # ist der Typ REIN, nur hier ueberblenden zwei Typen ineinander.
@@ -232,33 +221,14 @@ MIN_SEGMENT_M = 3.0 * UEBERGANG_M
 # seltenen Typ keine Luecke mehr, in die er passt.
 SAAT_KOHAERENZ_STATIONEN = 3.5
 
-# Bis zu welchem Anteil der Reichweite die Kuestenformung VOLL gilt, bevor
-# sie zum Basisgelaende auslaeuft.
+# HIER STAND BIS 2026-09-18 `MIN_ANTEIL_KATALOG` (1/3) - der Katalogboden
+# unter der Zielhoehe.
 #
-# GEMESSENER GRUND: vorher fiel die Staerke ab der Wasserlinie quadratisch
-# (bei 20 % der Reichweite schon auf 0.64). Das Profil selbst hat Moher-Form
-# - 90 % der Hoehe nach u=0.083, gemessen an der echten Kueste 0.128 - aber
-# die Blendung gab direkt hinter der Wand ans Basisgelaende ab. Im
-# Querschnitt kam dadurch eine Glockenkurve heraus statt "steil, dann
-# flach": 90 % der Hoehe erst bei u=0.846, also Faktor 7 zu spaet.
-#
-# Mit einem Plateau haelt das Profil ueber den groessten Teil seiner
-# Reichweite und laeuft erst am Rand aus.
-PLATEAU_ANTEIL = 0.6
-
-# Untergrenze der Zielhoehe als Anteil des Katalogwerts.
-#
-# Nutzer-Vorgabe 2026-08-19: *"die cliffs of moher sollten schon eher bei
-# min. 1/3 der echten hoehe liegen und bis zur echten Hoehe gehen wenn es das
-# hinterland zulaesst, vielleicht auch mehr"*.
-#
-# Vorher bestimmte allein das gemessene Hinterland die Zielhoehe. Das war der
-# richtige Weg gegen den Ringgraben, hat die Klippe aber auf 7-16 m Amplitude
-# zusammenschrumpfen lassen - bei dieser Groesse kann das Profil im
-# Gesamtbild gar nicht sichtbar werden, egal wie richtig seine Form ist. Der
-# Katalogwert wirkt jetzt als BODEN, das Hinterland kann darueber hinaus
-# heben.
-MIN_ANTEIL_KATALOG = 1.0 / 3.0
+# Die Nutzer-Vorgabe 2026-08-19 dahinter (*"die cliffs of moher sollten
+# schon eher bei min. 1/3 der echten hoehe liegen"*) ist NICHT hinfaellig,
+# sie wird nur anders erfuellt: das gemessene Meterprofil der
+# Moher-Klippen ist die echte Hoehe, kein Anteil davon. Der Boden war
+# noetig, solange das Hinterland die Hoehe bestimmte.
 
 # Wie schnell jedes Groessenband des Rauschgelaendes hinter der Kueste
 # einblendet - Exponent auf (1 - Kuestenstaerke), von GROB nach FEIN.
@@ -271,121 +241,25 @@ MIN_ANTEIL_KATALOG = 1.0 / 3.0
 BAND_EXPONENTEN = (2.5, 1.6, 0.9, 0.45)
 
 # ------------------------------------------------------------------ #
-# WIE STARK DAS HINTERLAND DIE KUESTENHOEHE BESTIMMT
-# (Nutzervorgabe 2026-08-24)
+# HIER STANDEN BIS 2026-09-18 `UEBER_FLACH`, `UEBER_STEIL` UND
+# `PLATEAU_FLACH` - die Regler der Hinterlandkopplung von 2026-08-24.
 #
-#   *"ein strandgebiet soll nicht so stark an noise angepasst werden wie
-#   klippen ... bei hoehe 0 im profil keine anhebung, und das erst mit
-#   wachsender hoehe auf den jetzigen wert steigen. also flache kueste
-#   bleibt flach, hohe kueste ist hoehenvariabel"*
+# ENTFERNT, WEIL SIE NIEMAND MEHR LAS. Die Zielhoehe entsteht seit dem
+# Wechsel auf gemessene Meterprofile nicht mehr aus
+# `hinterland * ueberhoehung + SOCKEL`, sondern direkt aus
+# `MESS_PROFIL_M_JE_ARCHETYP`; damit hat der Regler, der diese Kopplung
+# daempfte, keinen Angriffspunkt mehr. `PLATEAU_FLACH` stand ohnehin auf
+# demselben Wert wie `PLATEAU_ANTEIL` und war schon vorher wirkungslos.
 #
-# DAS PROBLEM, GEMESSEN (smoke_test_kuestenprofiltreue, 2026-08-24):
-# die Weissmeer-Flachkueste hat einen Katalogwert von 15 m und kam auf
-# 175 m heraus. Die Zielhoehe entsteht als
+# DIE MESSUNGEN GEHEN NICHT VERLOREN: die Spannentabellen (1.05-1.25
+# gewaehlt) und die Plateau-Messreihe stehen unveraendert in der
+# Git-Historie dieser Datei und in docs/SITZUNGSLOG.md zum 2026-08-24.
 #
-#     ziel = max(hinterland * ueberhoehung + SOCKEL,
-#                MIN_ANTEIL_KATALOG * katalog)
-#
-# und der erste Term gewinnt fast immer: bei 150 m Rohgelaende hinter der
-# Kueste sind das 150 * 1.06 + 12 = 171 m - genau der gemessene Wert. Das
-# HINTERLAND, also das rohe Rauschgelaende, bestimmt die Kuestenhoehe
-# praktisch allein, und der Archetyp hat kaum noch Einfluss. Deshalb
-# treffen Klippen ihre Vorlage gut (sie sind ohnehin hoch) und Straende
-# schlecht (sie werden zu Klippen hochgezogen).
-#
-# DER EINGRIFF: die Hinterlandkopplung an den Katalogwert binden. Ein
-# Archetyp mit Katalogwert 0 folgt dem Hinterland gar nicht mehr und
-# bleibt bei seiner eigenen Hoehe; mit wachsendem Katalogwert steigt die
-# Kopplung auf 1, also auf das bisherige Verhalten. Genau die vom Nutzer
-# beschriebene Kennlinie.
-#
-# WAS SICH NICHT AENDERT: der Katalogboden (`MIN_ANTEIL_KATALOG`), die
-# Profilform, die Reichweite und die Kuestenlinie. Nur der Betrag, um den
-# das Hinterland die Zielhoehe anhebt, haengt jetzt am Archetyp.
-#
-# WORAN "FLACH" ERKANNT WIRD - nicht am Katalogwert.
-#
-# Der erste Anlauf koppelte an `katalog_m`, die Klippenhoehe des
-# Archetyps. GEMESSEN WAR DAS FALSCH: der Katalogwert ist je REGION
-# tabelliert, nicht je Archetyp, und trennt Strand und Klippe deshalb
-# nicht. Die Kola-STEILKUESTE steht bei 30 m (die Morobora hat insgesamt
-# niedrige Kuesten), der Kykladen-STRAND bei 69 m. Eine Schwelle auf
-# diesen Wert daempfte ausgerechnet die niedrigen Klippen mit: die
-# schlechteste Klippenform stieg von RMS 0.138 auf 0.214 (Schwelle 80 m)
-# bzw. 0.442 (Schwelle 170 m).
-#
-# `ueberhoehung` trennt dagegen sauber, und zwar aus einem sachlichen
-# Grund: sie sagt GENAU, wie stark der Archetyp das Hinterland ueberhoeht
-# - also exakt die Groesse, um die es hier geht.
-#
-#   Straende   1.06 - 1.11  (Weissmeer 1.06, Vendee 1.07, Toskana 1.10,
-#                            Luce Bay 1.10, Kykladen 1.11)
-#   Klippen    1.23 - 1.45  (Bretagne 1.23, Kola 1.27, Santorini 1.29,
-#                            Algarve 1.32, Moher 1.35, Amalfi 1.40,
-#                            Fjordwand 1.45)
-#
-# Unterhalb von UEBER_FLACH folgt die Kueste dem Hinterland gar nicht
-# mehr, oberhalb von UEBER_STEIL wie bisher voll.
-# GEMESSEN am 2026-08-24 ueber fuenf Spannen (Formtreue-RMS,
-# smoke_test_kuestenprofiltreue, 20 Gruppen):
-#
-#   Spanne        Gesamt   Strand   Klippe   schlechteste Klippe
-#   aus            0.121    0.317    0.059    0.138
-#   1.05 - 1.30    0.129    0.147    0.067    0.138
-#   1.05 - 1.25    0.107    0.114    0.055    0.141   <- gewaehlt
-#   1.08 - 1.30    0.107    0.102    0.066    0.179
-#   1.05 - 1.45    0.122    0.101    0.077    0.355
-#   1.00 - 1.30    0.101    0.157    0.067    0.133
-#
-# 1.05-1.25 macht die Strandform fast dreimal so treu und laesst die
-# Klippen dabei unangetastet - ihr Median wird sogar minimal besser. Die
-# weiteren Spannen holen bei den Straenden noch etwas heraus, bezahlen es
-# aber mit der schlechtesten Klippe (0.179 bzw. 0.355).
-UEBER_FLACH = 1.05
-UEBER_STEIL = 1.25
-
-# WO DIE ANGLEICHUNG ANS HINTERLAND STATTFINDET (Nutzervorgabe 2026-08-24,
-# Praezisierung):
-#
-#   *"das ist richtig dass die zielhoehen stimmen muessen, das profil
-#   dazwischen muss erstmal stimmen, aber bei flachen straenden soll dann
-#   hinten heraus die angleichung passieren und die abweichung vom profil
-#   dann stattfinden"*
-#
-# Also DREI Zusicherungen, nicht zwei: an der Wasserlinie exakt das
-# Profil, dazwischen die richtige Zielhoehe UND die richtige Form - und
-# die Abweichung vom Profil erst hinten heraus, konzentriert am Ende der
-# Reichweite.
-#
-# `PLATEAU_ANTEIL` legt fest, bis zu welchem Anteil der Reichweite die
-# Kueste mit voller Staerke gilt; danach blendet sie ueber den Rest aus.
-# Bei 0.6 verteilt sich die Angleichung ueber die letzten 40 % - fuer eine
-# Klippe richtig, denn dort geht die Form ohnehin in den Hang ueber. Fuer
-# einen Strand ist es zu frueh: sein Profil ist flach, und die
-# Ueberblendung mit dem Rauschgelaende ueberlagert genau den Teil, der
-# stimmen soll.
-#
-# `PLATEAU_FLACH` ist der Wert fuer die flachste Kueste. Dazwischen wird
-# mit derselben `kopplung` aus der Ueberhoehung gemischt, die auch die
-# Hinterlandanhebung steuert - EIN Mass fuer "wie flach ist diese Kueste",
-# nicht zwei.
-#
-# STEHT AUF 0.6, ALSO GLEICH `PLATEAU_ANTEIL`, ALSO WIRKUNGSLOS.
-# GEMESSEN am 2026-08-24 (Formtreue-RMS der Straende):
-#
-#   PLATEAU_FLACH   Strand-RMS   Klippen-RMS   schlechteste Klippe
-#   0.60 (aus)         0.114        0.055           0.141
-#   0.75               0.117        0.055           0.148
-#   0.85               0.145        0.057           0.151
-#   0.92               0.168        0.057           0.149
-#
-# Ein laengeres Plateau macht die Strandform MESSBAR SCHLECHTER, nicht
-# besser. VERMUTUNG (nicht geprueft): die Vorbildprofile laufen weich aus,
-# und ein hartes Plateau mit anschliessendem steilen Abfall trifft diese
-# Form schlechter als der weiche Uebergang ab 60 %. Der Regler bleibt
-# stehen, damit die Messung nachvollziehbar ist und eine andere Umsetzung
-# derselben Absicht hier ansetzen kann.
-PLATEAU_FLACH = 0.6
+# WO DIE HOEHE HEUTE HERKOMMT: `MESS_PROFIL_M_JE_ARCHETYP` ueber die
+# Segmenttabelle, gedeckelt durch die Landmasse in `_hoehe_block()`; das
+# Hinterlandniveau je Kuestengebiet aus `GEMESSENE_HINTERLANDHOEHE` in
+# `core/terrain_weltkarte.kuestengebiete()`.
+# ------------------------------------------------------------------ #
 
 # GEMESSENE Klippenhoehen je Region, (p10, p90) der Gipfelhoehen entlang der
 # jeweiligen Vorbildkueste, in Metern.
@@ -715,39 +589,17 @@ def _gemessene_hinterlandhoehen():
             for name, werte in MESS_PROFIL_M_JE_ARCHETYP.items()}
 
 
-MESS_ARCHETYP_MASSE = {
-    "Algarve-Klippen": (96.0, 59.0),
-    "Alpine-Flussmuendung": (376.0, 19.0),
-    "Amalfi-Steilkueste": (198.0, 165.0),
-    "Bretagne-Klippen": (172.0, 112.0),
-    "Cinque-Terre-Buchten": (287.0, 109.0),
-    "Costa-Brava-Buchten": (119.0, 55.0),
-    "Dalmatien-Klippen": (392.0, 22.0),
-    "Fjordbucht": (349.0, 46.0),
-    "Fjordwand": (529.0, 553.0),
-    "Foerdenkueste": (216.0, 81.0),
-    "Ile-de-Re-Watt": (376.0, 50.0),
-    "Kola-Steilkueste": (110.0, 19.0),
-    "Kotor-Steilfjord": (405.0, 46.0),
-    "Kreta-Buchten": (258.0, 135.0),
-    "Kykladen-Strand": (225.0, 58.0),
-    "Labrador-Buchten": (256.0, 14.0),
-    # Wert unveraendert beim Wechsel der Vorbildkueste 2026-08-25: diese
-    # Tabelle kommt NICHT aus der Kachel des Archetyps, sondern aus dem
-    # Streckensplit seiner REGION (Schnitte nach Steilheit sortiert, in
-    # Drittel geteilt) - siehe tools/archetyp_masse_messen.py.
-    "Luce-Bay-Straende": (176.0, 17.0),
-    "Moher-Klippen": (127.0, 144.0),
-    "Ostsee-Flachkueste": (167.0, 78.0),
-    "Ruegen-Kreidekueste": (145.0, 83.0),
-    "San-Sebastian-Bucht": (198.0, 49.0),
-    "Santorini-Kliff": (323.0, 213.0),
-    "Schaerenkueste": (500.0, 204.0),
-    "Toskana-Straende": (278.0, 47.0),
-    "Vendee-Straende": (323.0, 114.0),
-    "Weissmeer-Flachkueste": (145.0, 17.0),
-    "West-Cork-Buchten": (163.0, 109.0),
-}
+# HIER STAND BIS 2026-09-18 `MESS_ARCHETYP_MASSE` - je Archetyp ein Paar
+# (Reichweite in m, Hoehe in m) aus dem Streckensplit seiner Vorbildregion.
+#
+# ENTFERNT, WEIL SIE NIEMAND LAS. Reichweite UND Hoehe kommen seit dem
+# Wechsel auf gemessene Meterprofile aus `MESS_PROFIL_M_JE_ARCHETYP` -
+# eine einzige Tabelle, nicht zweitgetippt.
+#
+# `tools/archetyp_masse_messen.py` erzeugt die Tabelle weiterhin. Wer sie
+# wieder einfuegt, braucht zuerst einen Leser dafuer; eine zweite Tabelle
+# ueber dieselbe Messung waere eine zweite Wahrheit (SPEZIFIKATION 4.5).
+# Die Zahlen stehen unveraendert in der Git-Historie dieser Datei.
 
 
 MESS_FORM_JE_ARCHETYP = {
@@ -1257,57 +1109,50 @@ def _gemessene_formen():
     return tabelle
 
 
-def _gemessene_reichweiten():
-    """
-    Archetypname -> Reichweite in Metern, aus der Messung skaliert.
-
-    Der gemessene Wert ist EIN Wert je Region (Medianprofil ueber alle
-    Stationen der Vorbildkueste), die Archetypen einer Region haben aber
-    verschiedene Reichweiten. Deshalb wird die Katalogstaffelung erhalten und
-    nur ihr MEDIAN auf den gemessenen Wert gezogen - die Abstufung Klippe /
-    Bucht / Strand bleibt, die Groessenordnung stimmt.
-    """
-    tabelle = {}
-    for _z, _s, r in alle_regionen():
-        archetypen = KUESTEN_ARCHETYPEN.get(r["name"])
-        gemessen = MESS_REICHWEITE_M.get(r["name"])
-        if not archetypen or not gemessen:
-            continue
-        katalog = np.array([t["reichweite_km"] * 1000.0 for t in archetypen])
-        faktor = gemessen / max(float(np.median(katalog)), 1e-9)
-        for t, k in zip(archetypen, katalog):
-            tabelle[t["name"]] = float(k * faktor)
-    return tabelle
+# HIER STANDEN BIS 2026-09-18 `_gemessene_reichweiten()` und
+# `_gemessene_hoehen()` samt `GEMESSENE_REICHWEITE` und `GEMESSENE_HOEHE`.
+# Sie zogen die Katalogstaffelung einer Region auf den gemessenen Median.
+# Gelesen wurden sie nur von den Segmentfeldern `reichweite_m` und
+# `katalog_m`, die es nicht mehr gibt.
+#
+# Die ROHTABELLEN `MESS_REICHWEITE_M` und `MESSWERTE_JE_REGION` bleiben
+# stehen: `tests/smoke_test_kuestenprofiltreue.py` prueft, dass jede Region
+# darin vorkommt. Im Programm selbst hat zur Zeit keine der beiden einen
+# Leser - dasselbe gilt fuer `MESS_FORM_JE_ARCHETYP` unten.
 
 
-def _gemessene_hoehen():
-    """
-    Archetypname -> gemessene Zielhoehe in Metern.
-
-    Die Archetypen einer Region behalten ihre RANGFOLGE aus dem Katalog
-    (Klippe hoeher als Bucht hoeher als Strand), aber die absolute Skala
-    kommt aus der Messung. So bleibt die gestalterische Abstufung erhalten
-    und die Groessenordnung stimmt.
-    """
-    tabelle = {}
-    for _z, _s, r in alle_regionen():
-        archetypen = KUESTEN_ARCHETYPEN.get(r["name"])
-        spanne = MESSWERTE_JE_REGION.get(r["name"])
-        if not archetypen or not spanne:
-            continue
-        faktoren = [t["hoehe_faktor"] for t in archetypen]
-        lo, hi = min(faktoren), max(faktoren)
-        for t in archetypen:
-            anteil = ((t["hoehe_faktor"] - lo) / (hi - lo)) if hi > lo else 0.5
-            tabelle[t["name"]] = spanne[0] + anteil * (spanne[1] - spanne[0])
-    return tabelle
-
-
-GEMESSENE_HOEHE = _gemessene_hoehen()
-GEMESSENE_REICHWEITE = _gemessene_reichweiten()
 GEMESSENE_FORM = _gemessene_formen()
 GEMESSENES_PROFIL_M = _gemessene_profile_m()
 GEMESSENE_HINTERLANDHOEHE = _gemessene_hinterlandhoehen()
+
+
+def _profil_oder_abbruch(name):
+    """
+    Das gemessene Meterprofil eines Archetyps - oder ein harter Abbruch.
+
+    KEIN RUECKFALL. Bis 2026-09-18 bekam ein Archetyp ohne gemessenes
+    Profil eine Ersatzkurve aus Zielhoehe und Winkel. Das ist der
+    Fehlertyp, den CLAUDE.md als "stiller Rueckfall" beschreibt: das
+    Programm liefert ein plausibles Ergebnis und ist damit von Erfolg
+    nicht zu unterscheiden. Die Kueste saehe einfach anders aus als das
+    Vorbild, und niemand wuesste, warum.
+
+    Ein fehlendes Profil ist auch keine Betriebslage, sondern ein
+    Eintragungsfehler: es entsteht genau dann, wenn jemand einen neuen
+    Archetyp in `KUESTEN_ARCHETYPEN` eintraegt und ihn in
+    `MESS_PROFIL_M_JE_ARCHETYP` vergisst. Dann soll das Programm stehen
+    bleiben und sagen, welcher Name fehlt.
+
+    Gemessen wird ein neues Profil mit `tools/kuestenlaengsschnitt.py`.
+    """
+    profil = GEMESSENES_PROFIL_M.get(name)
+    if profil is None:
+        raise KeyError(
+            f"Kuesten-Archetyp {name!r} hat kein gemessenes Meterprofil. "
+            f"Eintrag in MESS_PROFIL_M_JE_ARCHETYP (core/vektor_kueste.py) "
+            f"fehlt - neu messen mit tools/kuestenlaengsschnitt.py. "
+            f"Vorhanden sind {len(GEMESSENES_PROFIL_M)} Archetypen.")
+    return profil
 
 
 def _bogen_glaetten(werte, kontur, bogen, sigma_stationen):
@@ -1384,77 +1229,6 @@ class VektorKueste:
         self._segment_tabelle_bauen()
         self._tiefenfeld_bauen()
         self._baender_bauen()
-
-    def _hinterland_je_station(self):
-        """
-        Die Gelaendehoehe, auf die eine Station zulaeuft - gemessen im
-        Basisgelaende, nicht aus dem Katalog.
-
-        GEMESSENER GRUND (Inseltest 2026-08-19): mit der Katalog-Zielhoehe
-        hebt das Profil das Gelaende bei 300 m Kuestenabstand auf 128 m,
-        bei 600 m endet die Reichweite und uebergibt an ein Basisgelaende
-        mit 29 m - ein Absturz von 99 m als Ringgraben rings um jede Insel.
-        Dieselbe Erscheinung mit und ohne Zackenkueste, es ist also kein
-        Formartefakt, sondern ein Bruch zwischen Katalog und Gelaende.
-
-        Die Wirklichkeit sagt dasselbe: Moher ist 147 m hoch, WEIL das
-        Plateau dahinter 147 m hoch ist - beides ist dieselbe Zahl, kein
-        Zufall. Die Hoehe kommt vom Gelaende, der Archetyp bestimmt nur, wie
-        schnell und ueber welche Strecke man sie erreicht.
-
-        Gemessen wird der Median des Basisgelaendes in einem Ring um die
-        Station: Kuestenabstand zwischen 0.7 und 1.4 Reichweiten, hoechstens
-        1.5 Reichweiten Luftlinie entfernt. Median statt Mittel, damit ein
-        einzelner Gipfel im Ausschnitt die Kueste nicht hochzieht.
-        """
-        n = len(self.saat_xy)
-        if n == 0:
-            return np.zeros(0)
-
-        land = self.H_basis > 0.0
-        if not land.any():
-            return np.zeros(n)
-        abstand_m = ndimage.distance_transform_edt(land) * self.mpp
-
-        # Landpixel ausgeduennt - fuer einen Median genuegt jedes zweite in
-        # jeder Richtung, und es macht die Nachbarschaftssuche bezahlbar.
-        schritt = max(1, int(round(60.0 / self.mpp)))
-        ys, xs = np.nonzero(land[::schritt, ::schritt])
-        ys, xs = ys * schritt, xs * schritt
-        if len(ys) < 4:
-            return np.zeros(n)
-        proben_xy = np.column_stack([xs, ys]).astype(np.float64)
-        proben_d = abstand_m[ys, xs]
-        proben_h = self.H_basis[ys, xs]
-        baum = cKDTree(proben_xy)
-
-        ergebnis = np.zeros(n)
-        for k in range(n):
-            reichweite_px = self.saat_reichweite_m[k] / self.mpp
-            nachbarn = baum.query_ball_point(self.saat_xy[k], 1.5 * reichweite_px)
-            if not nachbarn:
-                continue
-            idx = np.asarray(nachbarn)
-            d_dort = proben_d[idx]
-            im_ring = ((d_dort >= 0.7 * self.saat_reichweite_m[k])
-                       & (d_dort <= 1.4 * self.saat_reichweite_m[k]))
-            if im_ring.sum() >= 3:
-                ergebnis[k] = float(np.median(proben_h[idx[im_ring]]))
-            else:
-                # KEIN RING VORHANDEN - die Landmasse ist schmaler als die
-                # Reichweite des Archetyps (jede kleine Insel).
-                #
-                # Vorher stand hier `max(...)`, also der hoechste Punkt in
-                # Reichweite. Das ist eine Extremwertstatistik und schwankt
-                # entsprechend: auf der 150-m-Insel sprang die Zielhoehe
-                # zwischen Nachbarstationen um 64 m. Jetzt der Median des
-                # TIEFSTEN VIERTELS (dem Landesinneren am naechsten) - eine
-                # robuste Lage statt eines Ausreissers.
-                d_dort_alle = proben_d[idx]
-                schwelle = np.quantile(d_dort_alle, 0.75)
-                tief = d_dort_alle >= schwelle
-                ergebnis[k] = float(np.median(proben_h[idx[tief]]))
-        return ergebnis
 
     def _segmente_bauen(self):
         """
@@ -1548,21 +1322,20 @@ class VektorKueste:
                 self.segmente.append({
                     "kontur": int(nummer), "a": float(a_m), "b": float(b_m),
                     "laenge_m": laenge_m, "name": typ["name"],
-                    "tanwinkel": max(np.tan(np.radians(
-                        min(typ["winkel_grad"], MAX_KLIPPENWINKEL_GRAD))), 0.05),
-                    # GEMESSEN statt Katalog - siehe MESS_REICHWEITE_M.
-                    "reichweite_m": GEMESSENE_REICHWEITE.get(
-                        typ["name"], typ["reichweite_km"] * 1000.0),
-                    "ueberhoehung": 1.0 + UEBERHOEHUNG_JE_HOEHENFAKTOR
-                                    * typ["hoehe_faktor"],
-                    # GEMESSEN statt Katalog - siehe MESSWERTE_JE_REGION.
-                    "katalog_m": GEMESSENE_HOEHE.get(
-                        typ["name"], KUESTENHOEHE_M * typ["hoehe_faktor"]),
+                    # HIER STANDEN BIS 2026-09-18 `tanwinkel`,
+                    # `reichweite_m`, `ueberhoehung` und `katalog_m` - die
+                    # Bausteine der alten Zielhoehenrechnung
+                    # `hinterland * ueberhoehung + SOCKEL`, gestreckt auf
+                    # `reichweite_m`. Sie wurden ueber die Segmenttabelle
+                    # gemittelt und in `_hoehe_block()` nur noch vom
+                    # Rueckfallzweig gelesen, den es nicht mehr gibt.
                     "form": GEMESSENE_FORM.get(typ["name"]),
                     # Das gemessene Profil in METERN - siehe
                     # MESS_PROFIL_M_JE_ARCHETYP. Ersetzt die Kombination
                     # aus normierter Form, Zielhoehe und Reichweite.
-                    "profil_m": GEMESSENES_PROFIL_M.get(typ["name"]),
+                    # HARTER ABBRUCH statt Ersatzkurve, wenn es fehlt -
+                    # siehe `_profil_oder_abbruch()`.
+                    "profil_m": _profil_oder_abbruch(typ["name"]),
                     # Strahltiefe je Segment, aus der Steilheit des
                     # Archetyps - siehe PROFIL_VOLL_FLACH_M.
                     "voll_m": _zone_p1(typ["name"]),
@@ -1691,9 +1464,28 @@ class VektorKueste:
         self._tabelle = {}
         formen = [s["form"] for s in self.segmente if s.get("form") is not None]
         n_form = len(formen[0]) if formen else 0
-        profile_m = [s["profil_m"] for s in self.segmente
-                     if s.get("profil_m") is not None]
-        n_profil = len(profile_m[0]) if profile_m else 0
+        # ALLE ODER KEINS - Teilabdeckung ist hier besonders heimtueckisch.
+        #
+        # Die Fenster aller Segmente werden aufsummiert und am Ende durch
+        # die Fenstersumme geteilt. Ein Segment OHNE Profil wuerde in den
+        # Zaehler nichts einbringen, in den Nenner aber sein volles
+        # Fenster - das Profil seiner Nachbarn wuerde also nicht fehlen,
+        # sondern GEDAEMPFT, und zwar genau im Uebergangsbereich. Das ist
+        # von einem flacheren Kuestentyp nicht zu unterscheiden.
+        #
+        # Seit 2026-09-18 kann das nicht mehr vorkommen (jedes Segment
+        # bekommt sein Profil ueber `_profil_oder_abbruch()`). Die Pruefung
+        # bleibt, weil `_segmente_schliessen()` Segmente zusammenfasst und
+        # dabei kuenftig einen Schluessel verlieren koennte.
+        ohne_profil = sorted({s["name"] for s in self.segmente
+                              if s.get("profil_m") is None})
+        if ohne_profil:
+            raise KeyError(
+                "Kuestensegmente ohne gemessenes Meterprofil: "
+                + ", ".join(ohne_profil)
+                + " - Teilabdeckung daempft die Profile der Nachbarn still. "
+                  "Siehe MESS_PROFIL_M_JE_ARCHETYP in core/vektor_kueste.py.")
+        n_profil = len(self.segmente[0]["profil_m"]) if self.segmente else 0
         halb = 0.5 * UEBERGANG_M
 
         for nummer in {s["kontur"] for s in self.segmente}:
@@ -1710,10 +1502,6 @@ class VektorKueste:
             s_gitter = np.linspace(0.0, laenge, n)
 
             summe = np.zeros(n)
-            tanw = np.zeros(n)
-            reich = np.zeros(n)
-            ueber = np.zeros(n)
-            katalog = np.zeros(n)
             form = np.zeros((n, n_form)) if n_form else None
             profil_m = np.zeros((n, n_profil)) if n_profil else None
             voll = np.zeros(n)
@@ -1747,21 +1535,15 @@ class VektorKueste:
                 bestes = np.where(nimm, global_index[j_seg], bestes)
                 bestes_w = np.where(nimm, fenster, bestes_w)
                 summe += fenster
-                tanw += fenster * seg["tanwinkel"]
-                reich += fenster * seg["reichweite_m"]
-                ueber += fenster * seg["ueberhoehung"]
-                katalog += fenster * seg["katalog_m"]
                 voll += fenster * seg.get("voll_m", PROFIL_VOLL_M)
                 uebergang += fenster * seg.get("uebergang_m", UEBERGANG_LAND_M)
                 if form is not None and seg.get("form") is not None:
                     form += fenster[:, None] * seg["form"][None, :]
-                if profil_m is not None and seg.get("profil_m") is not None:
+                if profil_m is not None:
                     profil_m += fenster[:, None] * seg["profil_m"][None, :]
 
             sicher = np.maximum(summe, 1e-9)
             leer = summe <= 1e-9
-            tanw, reich = tanw / sicher, reich / sicher
-            ueber, katalog = ueber / sicher, katalog / sicher
             voll, uebergang = voll / sicher, uebergang / sicher
 
             # VARIANZ ENTLANG DER KUESTE - siehe ZONEN_VARIANZ_M.
@@ -1808,47 +1590,42 @@ class VektorKueste:
             if profil_m is not None:
                 profil_m = profil_m / sicher[:, None]
             if leer.any():
-                tanw[leer], reich[leer] = 1.0, 200.0
-                ueber[leer], katalog[leer] = 1.0, 100.0
                 voll[leer] = PROFIL_VOLL_M
                 uebergang[leer] = UEBERGANG_LAND_M
                 if form is not None:
                     form[leer] = np.linspace(0.0, 1.0, form.shape[1])
                 if profil_m is not None:
                     profil_m[leer] = 0.0
-            self._tabelle[int(nummer)] = (s_gitter, tanw, reich, ueber,
-                                          katalog, form, laenge, bestes,
+            self._tabelle[int(nummer)] = (s_gitter, form, laenge, bestes,
                                           profil_m, voll, uebergang)
 
     def _segment_felder(self, kontur_q, bogen_q):
         """
         Nachschlagen in der Tabelle - siehe _segment_tabelle_bauen().
 
-        Rueckgabe (tanw, reich, ueber, katalog, form, profil_m, voll,
-        uebergang). `profil_m` ist das gemessene Hoehenprofil in METERN an
-        PROFIL_STELLEN_M, je Abfragepunkt zwischen den Segmenten gemischt;
-        `voll`/`uebergang` sind die Zonentiefen dieses Kuestenabschnitts.
+        Rueckgabe (form, profil_m, voll, uebergang). `profil_m` ist das
+        gemessene Hoehenprofil in METERN an PROFIL_STELLEN_M, je
+        Abfragepunkt zwischen den Segmenten gemischt; `voll`/`uebergang`
+        sind die Zonentiefen dieses Kuestenabschnitts.
         """
         n = len(bogen_q)
         s_q = bogen_q * self.mpp
-        tanw = np.ones(n)
-        reich = np.full(n, 200.0)
-        ueber = np.ones(n)
-        katalog = np.full(n, 100.0)
         voll = np.full(n, PROFIL_VOLL_M)
         uebergang = np.full(n, UEBERGANG_LAND_M)
         form = None
         profil_m = None
+        # WELCHE ABFRAGEPUNKTE UEBERHAUPT EINE TABELLE GEFUNDEN HABEN.
+        # Ohne das behielte ein Punkt auf einer Kontur ohne Segmente still
+        # die Vorgabewerte oben - Profilhoehe 0, also flache Kueste, nicht
+        # von einem Strand zu unterscheiden.
+        gedeckt = np.zeros(n, dtype=bool)
         for nummer, eintrag in self._tabelle.items():
             treffer = kontur_q == nummer
             if not treffer.any():
                 continue
-            gitter, t_, r_, u_, k_, f_, laenge, _bestes, p_, v_, ue_ = eintrag
+            gedeckt |= treffer
+            gitter, f_, laenge, _bestes, p_, v_, ue_ = eintrag
             lage = np.mod(s_q[treffer], laenge) if laenge else s_q[treffer]
-            tanw[treffer] = np.interp(lage, gitter, t_)
-            reich[treffer] = np.interp(lage, gitter, r_)
-            ueber[treffer] = np.interp(lage, gitter, u_)
-            katalog[treffer] = np.interp(lage, gitter, k_)
             voll[treffer] = np.interp(lage, gitter, v_)
             uebergang[treffer] = np.interp(lage, gitter, ue_)
             if p_ is not None:
@@ -1879,110 +1656,16 @@ class VektorKueste:
                 bruch = (pos - unten)[:, None]
                 form[treffer] = (f_[unten] * (1.0 - bruch)
                                  + f_[unten + 1] * bruch)
-        return tanw, reich, ueber, katalog, form, profil_m, voll, uebergang
-
-    def _segment_felder_direkt(self, kontur_q, bogen_q):
-        """
-        Typabhaengige Profilwerte an beliebigen Bogenpositionen.
-
-        Je Segment ein Fenster, das im Inneren 1 ist und ueber
-        UEBERGANG_M auf 0 abfaellt - um eine halbe Uebergangsbreite ueber
-        die Segmentgrenze hinaus verlaengert, damit sich die Fenster
-        benachbarter Segmente genau an der Grenze zur Haelfte ueberlappen.
-        Dort ergibt die gewichtete Mischung 50:50, im Segmentinneren 100:0.
-
-        Smoothstep statt linear: eine lineare Rampe hat an beiden Enden der
-        Uebergangszone einen Knick in der Ableitung, und der ist als Kante
-        laengs der Kueste sichtbar.
-        """
-        n = len(bogen_q)
-        bogen_m = bogen_q * self.mpp
-        summe = np.zeros(n)
-        tanw = np.zeros(n)
-        reich = np.zeros(n)
-        ueber = np.zeros(n)
-        katalog = np.zeros(n)
-        # `or ()` geht hier nicht - ein numpy-Array hat keinen Wahrheitswert.
-        formen = [s["form"] for s in self.segmente if s.get("form") is not None]
-        n_form = len(formen[0]) if formen else 0
-        form = np.zeros((n, n_form)) if n_form else None
-        halb = 0.5 * UEBERGANG_M
-
-        for seg in self.segmente:
-            auf_kontur = kontur_q == seg["kontur"]
-            if not auf_kontur.any():
-                continue
-            s = bogen_m
-            fenster = np.zeros(n)
-            # Zyklisch: auch die um +-Laenge verschobenen Lagen pruefen.
-            versaetze = [0.0]
-            if seg["laenge_m"]:
-                versaetze += [seg["laenge_m"], -seg["laenge_m"]]
-            for v in versaetze:
-                w = (self._smoothstep((s + v - seg["a"] + halb) / UEBERGANG_M)
-                     * self._smoothstep((seg["b"] - (s + v) + halb) / UEBERGANG_M))
-                fenster = np.maximum(fenster, w)
-            fenster = np.where(auf_kontur, fenster, 0.0)
-            summe += fenster
-            tanw += fenster * seg["tanwinkel"]
-            reich += fenster * seg["reichweite_m"]
-            ueber += fenster * seg["ueberhoehung"]
-            katalog += fenster * seg["katalog_m"]
-            if form is not None and seg.get("form") is not None:
-                form += fenster[:, None] * seg["form"][None, :]
-
-        sicher = np.maximum(summe, 1e-9)
-        leer = summe <= 1e-9
-        tanw, reich = tanw / sicher, reich / sicher
-        ueber, katalog = ueber / sicher, katalog / sicher
-        if form is not None:
-            form = form / sicher[:, None]
-        # Punkte ohne jedes Segment (Kontur ohne Stationen): Vorgabewerte.
-        # Sollte seit _segmente_schliessen() nicht mehr vorkommen - gemessen
-        # war das frueher 9.6 % der Kontur, und die Vorgabewerte erschienen
-        # dort als Spitzen auf Hoehen, die kein Archetyp hat.
-        if leer.any():
-            tanw[leer] = 1.0
-            reich[leer] = 200.0
-            ueber[leer] = 1.0
-            katalog[leer] = 100.0
-            if form is not None:
-                form[leer] = np.linspace(0.0, 1.0, form.shape[1])
-        return tanw, reich, ueber, katalog, form
-
-    def _glaetten_laengs(self, werte):
-        """
-        Gleitendes Mittel ueber Nachbarstationen DERSELBEN Kontur, zyklisch.
-
-        GEMESSENER GRUND: die rohe Hinterlandmessung schwankte zwischen
-        benachbarten Stationen um bis zu 85 m auf 400 m Kueste, also
-        200 m/km. An echten Kuesten wurden 20 m/km gemessen (19 km
-        Doolin-Moher, Median) - Faktor 10 zu viel. Die Ursache ist das
-        Gelaenderauschen im Messring, nicht eine echte Formaenderung der
-        Kueste; ungeglaettet wandert diese Zufallszahl direkt in die
-        Zielhoehe und laesst die Klippe laengs zappeln.
-        """
-        if len(werte) == 0 or HINTERLAND_GLAETTUNG < 2:
-            return werte
-        ergebnis = werte.copy()
-        for nummer in np.unique(self.saat_kontur):
-            idx = np.flatnonzero(self.saat_kontur == nummer)
-            if len(idx) < 3:
-                continue
-            idx = idx[np.argsort(self.saat_bogen[idx])]
-            reihe = werte[idx]
-            k = min(HINTERLAND_GLAETTUNG, len(reihe))
-            geschlossen = self.kontur_laenge.get(int(nummer)) is not None
-            if geschlossen:
-                # Zyklisch: die Reihe umlaufend verlaengern, dann falten.
-                lang = np.concatenate([reihe[-k:], reihe, reihe[:k]])
-                gefaltet = np.convolve(lang, np.ones(k) / k, mode="same")
-                ergebnis[idx] = gefaltet[k:k + len(reihe)]
-            else:
-                ergebnis[idx] = np.convolve(
-                    np.pad(reihe, k, mode="edge"), np.ones(k) / k,
-                    mode="same")[k:k + len(reihe)]
-        return ergebnis
+        if not gedeckt.all():
+            fehlend = sorted(set(np.asarray(kontur_q)[~gedeckt].tolist()))
+            raise RuntimeError(
+                f"{int((~gedeckt).sum())} Abfragepunkte liegen an Konturen "
+                f"ohne Kuestensegment (Konturnummern {fehlend[:10]}). Ihre "
+                f"Hoehe waere still 0 geworden. Entweder hat die "
+                f"Saatpunktverteilung diese Kontur uebersprungen, oder die "
+                f"Konturnummerierung von Linie und Segmenten laeuft "
+                f"auseinander.")
+        return form, profil_m, voll, uebergang
 
     def _baender_bauen(self):
         """
@@ -2117,7 +1800,7 @@ class VektorKueste:
             treffer = gew_kontur[:, 0] == nummer
             if not treffer.any():
                 continue
-            gitter, _t, _r, _u, _k, _f, laenge, tab_bestes, _p, _v, _ue = eintrag
+            gitter, _f, laenge, tab_bestes, _p, _v, _ue = eintrag
             # NICHT `lage` nennen - so heisst weiter oben das Dict
             # Archetypname -> (Regionsindex, lokaler Index), und es wird
             # unten noch gebraucht.
@@ -2317,8 +2000,7 @@ class VektorKueste:
 
     def _saaten_bauen(self):
         """
-        Saatpunkte auf der Linie, je einer mit Archetyp und lokaler
-        Referenzhoehe.
+        Saatpunkte auf der Linie, je einer mit einem Archetyp.
 
         Zuteilungsregel wie in `_kuesten_umformen()`: je Region der
         anspruchsvollste Archetyp zuerst, Quote strikt aus `max_anteil`
@@ -2327,7 +2009,6 @@ class VektorKueste:
         """
         self.saat_xy = np.zeros((0, 2), dtype=np.float64)
         self.saat_archetyp = []
-        self.saat_lokal_hoehe = np.zeros(0, dtype=np.float64)
         self.saat_baum = None
         if self.linien_baum is None:
             return
@@ -2409,7 +2090,7 @@ class VektorKueste:
             float(np.mean(self.H_basis[max(0, y - 2):y + 3, max(0, x - 2):x + 3]))
             for y, x in zip(yi, xi)])
 
-        alle_xy, alle_typ, alle_lokal = [], [], []
+        alle_xy, alle_typ = [], []
         alle_kontur, alle_bogen = [], []
         for i, (_z, _s, r) in enumerate(alle_regionen()):
             archetypen = KUESTEN_ARCHETYPEN.get(r["name"])
@@ -2542,7 +2223,6 @@ class VektorKueste:
             for k in range(n):
                 alle_xy.append(kandidaten[treffer[k]])
                 alle_typ.append(zuordnung[k])
-                alle_lokal.append(lokal[treffer[k]])
                 alle_kontur.append(kandidaten_kontur[treffer[k]])
                 alle_bogen.append(kandidaten_bogen[treffer[k]])
 
@@ -2550,42 +2230,34 @@ class VektorKueste:
             return
         self.saat_xy = np.asarray(alle_xy, dtype=np.float64)
         self.saat_archetyp = alle_typ
-        self.saat_lokal_hoehe = np.asarray(alle_lokal, dtype=np.float64)
         self.saat_baum = cKDTree(self.saat_xy)
         self.saat_kontur = np.asarray(alle_kontur, dtype=np.int32)
         self.saat_bogen = np.asarray(alle_bogen, dtype=np.float64)
 
-        # Profilgroessen je Saatpunkt vorrechnen - sie haengen nur vom
-        # Saatpunkt ab, nicht vom abgefragten Ort. Spart bei jeder Abfrage
-        # eine Schleife ueber die Archetypen.
-        self.saat_tanwinkel = np.array([
-            max(np.tan(np.radians(min(t["winkel_grad"], MAX_KLIPPENWINKEL_GRAD))), 0.05)
-            for t in alle_typ])
-        self.saat_reichweite_m = np.array([
-            t["reichweite_km"] * 1000.0 for t in alle_typ])
-
-        # DIE ZIELHOEHE KOMMT AUS DEM GELAENDE, NICHT AUS DEM KATALOG.
+        # HIER STANDEN BIS 2026-09-18 PROFILGROESSEN JE SAATPUNKT
+        # (`saat_tanwinkel`, `saat_reichweite_m`, `saat_hinterland`,
+        # `saat_zielhoehe`) samt der Hinterlandmessung, die sie speiste.
         #
-        # Der Katalogwert (`hoehe_faktor`) sagt nur noch, wieviel eine Kueste
-        # ihr Hinterland UEBERHOEHT - er setzt keine absolute Hoehe mehr.
-        # Begruendung und Messung siehe _hinterland_je_station(): mit einer
-        # absoluten Zielhoehe entsteht rings um jede Insel ein Ringgraben,
-        # weil das Profil auf Katalogniveau hebt und am Reichweitenrand an
-        # ein viel niedrigeres Basisgelaende uebergibt.
+        # ENTFERNT, WEIL SIE NIEMAND MEHR LAS. Seit die Typwerte in die
+        # Segmente und die Hoehe in `MESS_PROFIL_M_JE_ARCHETYP` gewandert
+        # sind, wurden die Arrays nur noch geschrieben. `hoehe()` fasste sie
+        # nicht mehr an - ihr einziger Leser war die ebenfalls unerreichbare
+        # `_hoehe_alt_einzelkueste()`.
         #
-        # `ueberhoehung` ist bewusst klein: eine Klippenkante liegt etwas
-        # ueber dem Plateau dahinter, aber nicht um ein Vielfaches. Der
-        # Sockel haelt eine flache Kueste sichtbar, wo das Hinterland selbst
-        # fast auf Null liegt.
-        hinterland = self._glaetten_laengs(self._hinterland_je_station())
-        self.saat_hinterland = hinterland
-        ueberhoehung = np.array([
-            1.0 + UEBERHOEHUNG_JE_HOEHENFAKTOR * t["hoehe_faktor"]
-            for t in alle_typ])
-        katalog = np.array([KUESTENHOEHE_M * t["hoehe_faktor"] for t in alle_typ])
-        self.saat_zielhoehe = np.minimum(
-            np.maximum(hinterland, 0.0) * ueberhoehung + KUESTEN_SOCKEL_M,
-            katalog)
+        # Das war nicht folgenlos: `tools/inseltest.py` beschrieb sie ZWEIMAL
+        # in der Annahme, damit den Archetyp zu erzwingen, und zeigte beide
+        # Male Bilder, die etwas anderes zeigten als ihre Ueberschrift sagte.
+        # Ein write-only-Feld ist von einem wirksamen nicht zu unterscheiden.
+        #
+        # WO DIE HOEHE HEUTE HERKOMMT: `MESS_PROFIL_M_JE_ARCHETYP` (gemessene
+        # Meterprofile je Archetyp) ueber die Segmenttabelle, gedeckelt durch
+        # die Landmasse in `_hoehe_block()`; das Hinterlandniveau je
+        # Kuestengebiet aus `GEMESSENE_HINTERLANDHOEHE` in
+        # `core/terrain_weltkarte.kuestengebiete()`.
+        #
+        # Die Messbegruendung der geloeschten Hinterlandmessung (Ringgraben um
+        # jede Insel, Moher 147 m weil das Plateau 147 m hoch ist) steht in
+        # docs/SITZUNGSLOG.md und in der Git-Historie.
 
     # ------------------------------------------------------------------ #
 
@@ -2603,57 +2275,6 @@ class VektorKueste:
         oben = H[y0, x0] * (1 - fx) + H[y0, x1] * fx
         unten = H[y1, x0] * (1 - fx) + H[y1, x1] * fx
         return oben * (1 - fy) + unten * fy
-
-    def _entlang_interpolieren(self, kontur_q, bogen_q, werte_je_station):
-        """
-        Mischt einen Stationswert linear zwischen den beiden Nachbarstationen
-        DERSELBEN Kontur, nach Bogenposition.
-
-        Je Kontur getrennt, weil zwei verschiedene Konturen (Festland und
-        eine vorgelagerte Insel) an derselben Bogenposition voellig
-        Verschiedenes bedeuten - waere die Interpolation kontur-uebergreifend,
-        bekaeme die Insel die Klippe des Festlands.
-        """
-        ergebnis = np.empty(len(kontur_q), dtype=np.float64)
-        for nummer in np.unique(kontur_q):
-            treffer = kontur_q == nummer
-            stationen = np.flatnonzero(self.saat_kontur == nummer)
-            if len(stationen) == 0:
-                # Kontur ohne eigene Station (zu kurz, oder ihre Region hat
-                # keine Archetypen): naechstgelegene Station ueberhaupt.
-                _a, idx = self.saat_baum.query(self.linienpunkte[
-                    np.flatnonzero(self.linien_kontur == nummer)[:1]])
-                ergebnis[treffer] = werte_je_station[idx[0]]
-                continue
-            if len(stationen) == 1:
-                ergebnis[treffer] = werte_je_station[stationen[0]]
-                continue
-            ordnung = np.argsort(self.saat_bogen[stationen])
-            stationen = stationen[ordnung]
-            bogen = self.saat_bogen[stationen]
-            werte = werte_je_station[stationen]
-
-            # ZYKLISCH UMLAUFEN BEI GESCHLOSSENER KONTUR.
-            #
-            # `np.interp` klemmt ausserhalb des Stuetzstellenbereichs auf den
-            # Randwert. Auf einer Insel heisst das: hinter der letzten Station
-            # bleibt der Wert konstant, und an der willkuerlichen Startstelle
-            # der Kontur springt er auf den ersten Wert zurueck. Gemessen an
-            # einer 3-km-Insel: 336 m Kueste ohne Interpolation und 23.2 m
-            # Sprung an der Naht - bei einer kleinen Insel mit fuenf
-            # Stationen betrifft das ein Fuenftel des Umfangs.
-            #
-            # Behoben, indem die letzte Station VOR den Anfang und die erste
-            # HINTER das Ende gespiegelt wird. Danach ist der Umlauf
-            # geschlossen und es gibt keine ausgezeichnete Startstelle mehr.
-            laenge = self.kontur_laenge.get(int(nummer))
-            if laenge is not None and len(bogen) >= 2:
-                bogen = np.concatenate([[bogen[-1] - laenge], bogen,
-                                        [bogen[0] + laenge]])
-                werte = np.concatenate([[werte[-1]], werte, [werte[0]]])
-
-            ergebnis[treffer] = np.interp(bogen_q[treffer], bogen, werte)
-        return ergebnis
 
     def _auf_strecken(self, punkte, idx):
         """
@@ -3030,10 +2651,14 @@ class VektorKueste:
             # Wuerde man beides gleich behandeln, waere entweder der Typ
             # ueberall gemischt (Nutzereinwand) oder die Gelaendehoehe
             # spraenge an jeder Segmentgrenze.
-            (tanw_i, reich_i, ueber_i, katalog_i, form_i,
-             profil_m_i, voll_i, ueberg_i) = self._segment_felder(
+            # `_form_i` - die normierte Formkurve (0..1 ueber die
+            # Reichweite) - wird hier NICHT gelesen. Das gemessene
+            # Meterprofil hat sie abgeloest. Sie bleibt vorerst stehen,
+            # weil `tests/smoke_test_kuestenprofiltreue.py` die Tabelle
+            # `MESS_FORM_JE_ARCHETYP` auf Vollstaendigkeit prueft; ob beides
+            # ganz entfallen kann, ist eine eigene Entscheidung.
+            (_form_i, profil_m_i, voll_i, ueberg_i) = self._segment_felder(
                 gew_kontur[:, platz], gew_bogen[:, platz])
-            tanw_i = np.maximum(tanw_i, 0.05)
 
             d_land_i = np.maximum(d_i, 0.0)
 
@@ -3066,31 +2691,22 @@ class VektorKueste:
             # Was damit entfaellt: `ziel_i` aus Hinterland mal Ueberhoehung,
             # der Katalogboden und die Streckung auf `reich_i`. Die Hoehe
             # steht im Profil.
-            if profil_m_i is not None:
-                schritt_m = (PROFIL_STELLEN_M[1] - PROFIL_STELLEN_M[0]
-                             if len(PROFIL_STELLEN_M) > 1 else 50.0)
-                lage_p = np.clip(d_land_i / schritt_m, 0.0,
-                                 profil_m_i.shape[1] - 1.001)
-                u_p = np.floor(lage_p).astype(np.int32)
-                br_p = lage_p - u_p
-                zeilen = np.arange(len(d_land_i))
-                profil_i = (profil_m_i[zeilen, u_p] * (1.0 - br_p)
-                            + profil_m_i[zeilen, u_p + 1] * br_p)
-            else:
-                # RUECKFALL mit lauter Kennung - ein Archetyp ohne
-                # gemessenes Profil darf nicht stillschweigend eine
-                # Ersatzkurve bekommen (CLAUDE.md).
-                if not getattr(self, "_profil_fehlt_gemeldet", False):
-                    _LOGGER.warning(
-                        "Kuestenabschnitt ohne gemessenes Meterprofil - "
-                        "Ersatzkurve aus Zielhoehe und Winkel. Pruefen: "
-                        "MESS_PROFIL_M_JE_ARCHETYP in core/vektor_kueste.py")
-                    self._profil_fehlt_gemeldet = True
-                ziel_i = np.maximum(np.maximum(hinter_i, 0.0) * ueber_i
-                                    + KUESTEN_SOCKEL_M,
-                                    MIN_ANTEIL_KATALOG * katalog_i)
-                skala_i = np.maximum(mindest_skala_m, ziel_i / tanw_i)
-                profil_i = ziel_i * (1.0 - np.exp(-d_land_i / skala_i))
+            # KEIN RUECKFALL MEHR (2026-09-18): bis dahin stand hier ein
+            # zweiter Weg zur Hoehe - eine Ersatzkurve aus Zielhoehe,
+            # Ueberhoehung und Winkel, falls `profil_m_i` fehlt. Das Fehlen
+            # wird jetzt schon beim Bau der Segmente hart abgebrochen
+            # (`_profil_oder_abbruch()`), damit es nur EINEN Weg zur Hoehe
+            # gibt. Ein zweiter, selten begangener Weg ist nicht geprueft
+            # und faellt erst auf, wenn die Karte komisch aussieht.
+            schritt_m = (PROFIL_STELLEN_M[1] - PROFIL_STELLEN_M[0]
+                         if len(PROFIL_STELLEN_M) > 1 else 50.0)
+            lage_p = np.clip(d_land_i / schritt_m, 0.0,
+                             profil_m_i.shape[1] - 1.001)
+            u_p = np.floor(lage_p).astype(np.int32)
+            br_p = lage_p - u_p
+            zeilen = np.arange(len(d_land_i))
+            profil_i = (profil_m_i[zeilen, u_p] * (1.0 - br_p)
+                        + profil_m_i[zeilen, u_p + 1] * br_p)
 
             # HOEHENDECKEL AUS DER LANDMASSE. Eine 150-m-Insel kann keine
             # Fjordwand von 466 m tragen - das gemessene Profil kennt die
@@ -3223,100 +2839,6 @@ class VektorKueste:
                         np.maximum(basis * (1.0 - staerke)
                                    + profil * staerke, untergrenze),
                         basis)
-
-    def _hoehe_alt_einzelkueste(self, x, y, mindest_skala_m, basis, punkte,
-                                ist_land):
-        """Die frühere Fassung mit nur der naechsten Kueste - Vergleichsstand."""
-
-        # PROFILWERTE ENTLANG DER KONTUR INTERPOLIERT, nicht vom naechsten
-        # Saatpunkt zugeteilt (Nutzer-Vorgabe 2026-08-17: *"das muss doch
-        # nicht pro pixel sein, sondern kann entlang der kontur alle x m
-        # passieren ... daraus kann doch ein vektorfeld erzeugt werden"*).
-        #
-        # WARUM DAS BESSER IST ALS DIE NAECHSTER-SAATPUNKT-ZUTEILUNG: die
-        # Zuteilung ist eine Voronoi-Aufteilung, und an jeder Zellgrenze
-        # springt der Archetyp hart um. Die heutige Rasterfassung
-        # (`_kuesten_umformen`) muss diese Naht deshalb mit einem
-        # Gauss-Filter verwischen - ein Nachbearbeitungsschritt, der nur
-        # existiert, um einen Sprung zu verstecken, den es gar nicht geben
-        # muesste. Mit der Interpolation entlang der Bogenlaenge entsteht der
-        # Sprung erst gar nicht: zwischen zwei Stationen laufen Zielhoehe,
-        # Winkel und Reichweite linear ineinander ueber.
-        #
-        # Der Weg dahin: naechster LINIENpunkt (nicht Saatpunkt) liefert
-        # Kontur-Nummer und Bogenposition; dort wird zwischen den beiden
-        # umliegenden Stationen DERSELBEN Kontur gemischt.
-        _abst_l, naechster_l = self.linien_baum.query(punkte)
-        kontur_q = self.linien_kontur[naechster_l]
-        bogen_q = self.linien_bogen[naechster_l]
-
-        ziel = self._entlang_interpolieren(kontur_q, bogen_q, self.saat_zielhoehe)
-        tanw = self._entlang_interpolieren(kontur_q, bogen_q, self.saat_tanwinkel)
-        reichweite = self._entlang_interpolieren(kontur_q, bogen_q,
-                                                 self.saat_reichweite_m)
-        ziel = ziel.reshape(x.shape)
-        tanw = np.maximum(tanw.reshape(x.shape), 0.05)
-        reichweite = reichweite.reshape(x.shape)
-
-        skala = np.maximum(mindest_skala_m, ziel / tanw)
-
-        # ZUR INSELMITTE SCHLIESSEN (docs/KUESTENMODELL.md §4).
-        #
-        # Nutzer-Vorgabe: *"dann muss die kueste in der tiefe auch nicht
-        # gestaucht werden bei kleinen inseln, sondern eine glaettung zur
-        # inselmitte hin erzwungen werden"*. Also NICHT die Kurve auf die
-        # Inselgroesse stauchen (das gaebe eine Miniaturlandschaft), sondern
-        # ihre STEIGUNG zur Medialachse hin auf null zwingen.
-        #
-        # Dafuer wird der Abstand durch d_eff = d_max * f(d/d_max) ersetzt mit
-        #
-        #     f(t) = t - t^2/2
-        #
-        # f(0)=0 und f'(0)=1: an der Wasserlinie aendert sich NICHTS, die
-        # Klippe bleibt so steil wie bestellt. f'(1)=0: auf der Medialachse
-        # verschwindet die Steigung, es entsteht eine Kuppe statt einer
-        # Spitze. Monoton auf [0,1], weil f' = 1-t >= 0.
-        #
-        # ERSTER ANLAUF WAR FALSCH HERUM und ist am Inseltest aufgefallen:
-        # `f(t) = t + t^2 - t^3` erfuellt dieselben Randbedingungen, liegt
-        # aber UEBER der Diagonalen. Das Profil wurde dadurch weiter aussen
-        # ausgewertet und die Inseln wurden noch hoeher (500-m-Insel 271 ->
-        # 282 m) statt flacher. Die sattigende Form (f(1)=0.5, also halber
-        # Weg) ist die richtige.
-        #
-        # Auf dem Festland tut das nichts: dort ist d_max gemessen 2750 m und
-        # die Reichweite hoechstens 700 m, also t < 0.25 im ganzen Band.
-        d_land = np.maximum(d_m, 0.0)
-        if self.schliessen:
-            xi = np.clip(np.round(x).astype(np.int32), 0, self.size - 1)
-            yi = np.clip(np.round(y).astype(np.int32), 0, self.size - 1)
-            d_max = self.d_max_karte[yi, xi]
-            t = np.clip(d_land / np.maximum(d_max, 1e-6), 0.0, 1.0)
-            d_land = d_max * (t - 0.5 * t * t)
-
-            # ZIELHOEHE AN DAS VERFUEGBARE HINTERLAND KOPPELN
-            # (docs/KUESTENMODELL.md §3, "Tiefenklasse").
-            #
-            # Das Schliessen allein behebt nur die SPITZE, nicht die absurde
-            # HOEHE: eine 500-m-Insel bekam eine Moher-Klippe mit 630 m
-            # Zielhoehe, obwohl ihr groesster Kuestenabstand 233 m betraegt.
-            # Ein Archetyp kann nicht hoeher werden, als sein Hinterland
-            # traegt. Faktor 1.0 ist bewusst grosszuegig - an echten Inseln
-            # gemessen liegt das Verhaeltnis Gipfel zu Kuestenabstand
-            # zwischen 0.08 (Aran) und 0.83 (Capri), der Deckel greift also
-            # erst bei klar unmoeglichen Faellen.
-            ziel = np.minimum(ziel, ZIEL_JE_HINTERLAND * d_max)
-            skala = np.maximum(mindest_skala_m, ziel / tanw)
-
-        profil = ziel * (1.0 - np.exp(-d_land / skala))
-
-        # Blendstaerke: an der Linie voll, zum Bandrand hin auf 0. Quadratisch
-        # wie in 3.10 ("kraeftig an der Wasserlinie, dann zuegig verblassend").
-        staerke = np.clip(1.0 - d_m / np.maximum(reichweite, 1e-9), 0.0, 1.0) ** 2
-
-        # NUR LAND FORMEN - die Meerestiefe kommt aus dem Seegrad-Prozess
-        # (3.13, `_seetiefe_aus_archetyp`), nicht von hier.
-        return np.where(ist_land, basis * (1.0 - staerke) + profil * staerke, basis)
 
 
 # ====================================================================== #
