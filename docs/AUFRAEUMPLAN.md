@@ -205,6 +205,34 @@ Alpenspitzen** (4.3). Erst 3. reparieren, dann messen, wie viel Gröbe
 überhaupt noch nötig ist — sonst wird eine Auflösung gesenkt, um einen
 Geländefehler zu verstecken.
 
+**BEHOBEN 2026-09-18 (Ticket #62).** Die Vorbedingung aus 4.3 war laengst
+erfuellt (`FEINHEIT_TEILER`, 2026-08-25). Gemessen (headless, Agg-Backend,
+reale `GeologySystemGenerator`-Daten, 30 Wiederholungen je Groesse):
+Zeichnen+Rasterisieren einer Querschnittzeile kostete bei 1024 px 188 ms, bei
+512 px 115-165 ms, ganz ueberwiegend in matplotlib `PolyCollection.draw` -
+das skaliert linear mit der Punktzahl je Schicht-Polygon, die Slice-Extraktion
+selbst ist mit 0.002 ms vernachlaessigbar. Das bestaetigt: es wird tatsaechlich
+feiner GEZEICHNET als sichtbar ist - nicht feiner gerechnet, `layer_boundaries`
+und `terrain_height` bleiben normale Datenprodukte, an denen `layer_id_map`/
+`rock_map` haengen, und wurden NICHT angefasst.
+
+Umgesetzt in `gui/widgets/map_display_2d.py::_render_geology_cross_section()`:
+die fuer genau diesen Plot entnommene Stichprobe (Koordinate, Schichtgrenzen,
+Terrainlinie, Intrusionsdistanz) wird auf `QUERSCHNITT_MAX_PUNKTE = 512`
+Punkte ausgeduennt, per exaktem Rasterindex (`np.linspace(...).round()`,
+kein Interpolieren) - dieselben Werte an denselben Stichprobenpunkten wie
+vorher, nur seltener. Bei 1024 px sinkt die Zeichenzeit dadurch von 188 ms auf
+123 ms (-35 %); darunter (256/128 Punkte: 93/81 ms) sinkt vor allem noch der
+matplotlib-Fixkostenanteil, waehrend das Risiko waechst, schmale Verwerfungen
+zu verlieren - 512 statt der vorgeschlagenen 128 (Faktor 8) ist der
+Kompromiss. Bei map_size ≤ 512 ist die Aenderung ein reiner No-Op (keine
+Regression fuer die haeufigeren kleineren Kartengroessen).
+
+Geprueft: `tests/smoke_test_display_2d.py` (30/30 Darstellungen zeichnen
+weiterhin etwas, darunter der Geologie-Querschnitt) sowie eine gesonderte
+Bitgenauigkeits-Pruefung der Ausduennungslogik (512 von 1024 Punkten erhalten,
+Rand nicht abgeschnitten, alle erhaltenen Werte bitgleich zum Original).
+
 ### 4.7 ~~Erosion reaktivieren~~ — gestrichen (Ticket #63, veraltet)
 
 Dieser Punkt ist veraltet: die Erosion läuft längst, `EROSION_AKTIV = True`
@@ -735,5 +763,5 @@ möchte das du mit dem zuletzt beschriebenen anfängst."*
 | **1** | **Flussnetz live (4.10)** | klein | Regler stehen, nur der Vorschau-Pfad fehlt |
 | 4 | Erosionsfilter-Beschriftungen, `detail` streichen (4.5) | klein | Messung liegt vor; Schlüssel NICHT umbenennen (ATEF-Quelle) |
 | 5 | Terrain-Reiter mit Regionsauswahl (4.2) | **groß** | Entscheidung liegt vor: Anpassung gilt nur für die aktuelle Karte, Katalog bleibt Vorgabe |
-| 6 | Geologie-Querschnitt (4.6) | mittel | Erst nach den Alpenspitzen, sonst versteckt es den Fehler |
+| — | Geologie-Querschnitt (4.6) | mittel | **ERLEDIGT 2026-09-18** (Ticket #62) — Zeichnen auf 512 Punkte ausgeduennt, 1024 px: 188 ms → 123 ms (-35 %) |
 | — | ~~Erosion reaktivieren (4.7)~~ | — | **ENTFAELLT** — 4.7 gestrichen (veraltet, Erosion laeuft laengst); der GPU/CPU-Befund `erosion_gpu_parity` ist ebenfalls kein offener Testbefund mehr (16.09.2026 gruen gemessen, siehe `docs/TESTBERICHT.md` Abschnitt 3) |

@@ -14,6 +14,21 @@ from gui.widgets.overlay_rasterizer import (
 )
 
 
+# Geologie-Querschnitt (Ticket #62, docs/AUFRAEUMPLAN.md 4.6): eine Profillinie
+# ist eine ANSICHT, kein Datenprodukt, an dem etwas haengt - layer_boundaries/
+# terrain_height selbst bleiben unangetastet in voller Aufloesung, nur die
+# gezeichnete Linie wird gekappt. Gemessen (headless, Agg-Backend, dieselbe
+# fill_between-Zeichenroutine): bei map_size 1024 kostet ein Redraw 188 ms,
+# der ganz ueberwiegende Teil davon (~102 ms von ~104 ms Draw-Zeit laut
+# cProfile) in matplotlib.collections - skaliert linear mit der Punktzahl je
+# Schicht-Polygon. Reduktion auf 512 Punkte (Stichprobe an echten, nicht
+# interpolierten Rasterindizes) senkt das auf 123 ms (-35 %); darunter (256/128
+# Punkte: 93/81 ms) sinkt vor allem noch der matplotlib-Fixkostenanteil
+# (Legende, Achsen-Ticks), waehrend das Risiko steigt, schmale Verwerfungen im
+# Profil zu verlieren - 512 ist der Kompromiss.
+QUERSCHNITT_MAX_PUNKTE = 512
+
+
 def _validate_input_data(data):
     """
     Funktionsweise: Überprüft ob die eingehenden Daten für die Darstellung geeignet sind
@@ -583,6 +598,24 @@ class MapDisplay2D(QWidget):
             intrusion_slice = intrusion_distance_map[:, col] if intrusion_distance_map is not None else None
             coord = np.arange(height)
             x_label = f"Y (col X={col})"
+
+        # Gröber zeichnen als gerechnet (Ticket #62): die Linie braucht nicht
+        # mehr Stützpunkte, als eine Profilansicht auf dem Bildschirm zeigen
+        # kann - layer_boundaries/terrain_height/intrusion_distance_map selbst
+        # sind Datenprodukte, an denen die Geologie-Weiterrechnung hängt (u.a.
+        # layer_id_map/rock_map), und bleiben unverändert; nur die für DIESEN
+        # Plot entnommene Stichprobe wird ausgedünnt. Stichprobe an echten
+        # Rasterindizes (kein Interpolieren) - dieselben Werte an denselben
+        # Punkten wie vorher, nur seltener.
+        n_punkte = coord.shape[0]
+        if n_punkte > QUERSCHNITT_MAX_PUNKTE:
+            idx = np.linspace(0, n_punkte - 1, QUERSCHNITT_MAX_PUNKTE).round().astype(np.int64)
+            idx = np.unique(idx)
+            coord = coord[idx]
+            boundaries_slice = boundaries_slice[:, idx]
+            terrain_slice = terrain_slice[idx]
+            if intrusion_slice is not None:
+                intrusion_slice = intrusion_slice[idx]
 
         # Profil statt Raster-Bild - erzwungene Bild-Seitenverhältnis-Gleichheit
         # aus dem normalen 2D-Kartenmodus wäre hier irreführend (siehe
