@@ -158,6 +158,102 @@ ist NICHT durch dieselbe Sperre abgedeckt; als offener Punkt
 `docs/OFFENE_PUNKTE.md` 10.7 vermerkt, absichtlich nicht in dieser Sitzung
 behoben. Volle Herleitung in `docs/SITZUNGSLOG.md`, Eintrag 2026-09-18.
 
+**Nachtrag 18.09.2026 (Ticket #32, Seenfläche neu gemessen):** die letzte
+belastbare Zahl stammte aus `docs/FLUESSE_UND_WASSER.md`, Block 3
+(24.08.2026, 384 px): "11 Binnenseen über 4 Pixel, und KEINER liegt im
+Skerrheim" — Block 6 hielt für Morobora ausdrücklich fest, ob dort Seen
+ankommen sei "UNGEPRÜFT". Das ist eine reine Messung, keine Korrektur, also
+wurde nichts am Verhalten des Generators geändert.
+
+*Hinweis zur Vorarbeit:* dasselbe Ticket wurde bereits am 17.09.2026 in
+einer Nachtschicht auf einem anderen, bisher nicht in `main` gemergten
+Branch bearbeitet (Commit `333d026`, Ergebnis auch als Kommentar auf
+Issue #32 gepostet). Diese Sitzung kannte davon zunächst nichts, hat die
+Messung unabhängig neu aufgesetzt und kam auf praktisch identische Zahlen
+(siehe Tabelle unten) — das bestätigt die Methode gegenseitig, macht die
+Vorarbeit aber nicht überflüssig: jene Fassung hat kein Messskript
+hinterlassen (nur den Text in `docs/TESTBERICHT.md` geändert), diese Fassung
+legt `tests/smoke_test_seenflaeche_messung.py` an, damit die Messung ohne
+manuelles Nachbauen wiederholbar ist.
+
+**Zwei falsche Fährten, bevor die Methode stand** (beide im Skript-Docstring
+festgehalten, damit sie nicht nochmal jemand begeht): das Feld `seegrad`
+(`terrain.redistribution`) ist eine Abstand-von-Land-Ringstufe über ALLES
+Wasser einschließlich Ozean, keine binnensee-spezifische Markierung -
+`(seegrad > 0) & (heightmap > 0)` ist rechnerisch immer leer und liefert
+IMMER 0,0 %, unabhängig vom Kartenzustand. Die Kontinent-Silhouette vor der
+Küstenverformung gegen die fertige Höhenkarte zu halten zählt auch
+zurückgewichene Küste (Buchten, Fjorde) mit und ergab unplausible 30-48 %
+"Seefläche". Die tatsächlich zuständige Instanz ist der eigene
+Calculator-Knoten `water.lake_detection`
+(`core/water_generator.py:LakeDetectionSystem.detect_lakes()`,
+Prioritäts-Flutung bis zum Überlaufpunkt, nach Volumen gefiltert), dessen
+`lake_map` (-1/keine, ≥0/See-ID) dieselbe Definition benutzt, die auch
+`water._classify_water_bodies()` im echten Betrieb verwendet
+(`is_lake = lake_map >= 0`).
+
+Gemessen über die echte Pipeline (`tools/weather_lab.py:run_pipeline()`,
+echter CalculatorDispatcher), bei 256/512/1024 px, je 3 Seeds (424242, 13,
+20260917 - dieselben wie in der Vorarbeit, zur Vergleichbarkeit), **je
+Region getrennt** über `region_map` (`terrain.redistribution`,
+`WELTKARTE_AKTIV=True` liefert bei jedem Lauf die volle
+Neun-Regionen-Weltkarte). Seenanteil = Seepixel (`lake_map >= 0`) je
+Landpixel (`heightmap > 0`), gemittelt über die 3 Seeds:
+
+| Region | 256 px | 512 px | 1024 px | Mittel |
+|---|---:|---:|---:|---:|
+| Nevadin | 3,553 % | 1,191 % | 0,396 % | 1,713 % |
+| Estrande | 2,277 % | 2,121 % | 0,517 % | 1,638 % |
+| Morobora | 2,822 % | 0,600 % | 0,339 % | 1,253 % |
+| Nebelrode | 2,508 % | 0,805 % | 0,208 % | 1,173 % |
+| Skerrheim | 2,094 % | 1,018 % | 0,317 % | 1,143 % |
+| Macchia | 1,748 % | 0,907 % | 0,509 % | 1,055 % |
+| Clonagh | 2,069 % | 0,551 % | 0,237 % | 0,952 % |
+| Thalassia | 1,953 % | 0,571 % | 0,138 % | 0,887 % |
+| Samarcia | 1,167 % | 0,512 % | 0,308 % | 0,662 % |
+
+Mittel über alle Regionen je Größe: 256 px 2,243 %, 512 px 0,919 %, 1024 px
+0,330 %.
+
+**Der alte "0,0 %"-Befund gilt nicht mehr, in keiner der 81 gemessenen
+Region/Größe/Seed-Kombinationen fällt er zusammen.** Skerrheim (historisch:
+null Seen) zeigt jetzt durchgehend Seen (Mittel 1,143 %). Morobora
+(historisch unbeobachtet) ebenfalls durchgehend, mit überdurchschnittlichem
+Mittel (1,253 %) - die offene Frage aus `docs/FLUESSE_UND_WASSER.md` Block 6
+ist damit beantwortet: ja, Morobora bekommt Seen, und es ist kein
+Anzeigeproblem, sondern in der Berechnung selbst so.
+
+Nur 2 von 81 Kombinationen zeigten gar keinen See (Thalassia bei 1024 px/Seed
+13, Samarcia bei 1024 px/Seed 20260917) - beide Regionen haben an anderen
+Auflösungen/Seeds Seen, kein systematischer Ausfall für eine Region.
+
+**Der gemessene Seenanteil fällt deutlich mit steigender Auflösung** (256 px
+→ 512 px → 1024 px: 2,243 % → 0,919 % → 0,330 %), obwohl die reale
+Kartenbreite bei allen drei Größen dieselbe 21,3 km bleibt (`WELT_KM` in
+`core/terrain_weltkarte.py:47`). Naheliegendste Erklärung, nicht am Code
+verifiziert: bei niedriger Auflösung bilden sich mehr winzige, ein- bis
+wenige-Pixel-große geschlossene Senken, die eher Rauschartefakte als echte
+Landschaftsformen sind und bei feinerer Auflösung verschwinden - die
+1024-px-Zahlen dürften die belastbarsten sein. Größter gemessener Einzelsee
+rund 1,02 km² (256 px, Seed 424242), Median über alle gefundenen Seen rund
+0,01 km² bei 256 px sinkend auf rund 0,003-0,004 km² bei 1024 px (mehr, aber
+kleinere Seen bei niedriger Auflösung).
+
+Welche Änderung seit der alten 384-px-Messung vom 24.08.2026 dafür infrage
+kommt: laut Ticket selbst "Seegliederung, Seegrad-Voronoi und Seewege"
+(`docs/project_see_voronoi_seegliederung.md`), dazu die
+Neun-Regionen-Weltkarte mit regionsspezifischen Küsten-Archetypen
+(`weltfeld()` in `core/terrain_weltkarte.py`) - beide seither hinzugekommen.
+Welche der beiden den Ausschlag gibt, lässt sich mit einer reinen Messung
+nicht trennen; das bräuchte eine Vergleichsmessung auf dem alten Codestand,
+was außerhalb des Rahmens dieses Tickets liegt.
+
+Reproduzierbarkeitshinweis: diese Zahlen wurden unabhängig von der
+Vorarbeit (333d026, 17.09.) neu erhoben und weichen von deren Tabelle nur im
+Nachkommastellenbereich ab (z. B. Nevadin 256 px hier 3,553 % dort ebenfalls
+3,553 %, Morobora 256 px hier 2,822 % dort 2,776 %) - die beiden
+unabhängigen Läufe bestätigen sich gegenseitig methodisch.
+
 ## 4. Was neu grün ist
 
 Acht Testdateien sind seit dem 24.08. dazugekommen, alle grün:
