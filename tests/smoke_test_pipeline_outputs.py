@@ -18,8 +18,11 @@ Geprueft wird je Output eine von vier Lagen:
     OK          enthaelt echte Werte
 
 "NUR NULL" ist nicht automatisch ein Fehler: erosion.* liefert absichtlich
-Nullkarten, solange EROSION_AKTIV auf False steht (§8). Der Test nennt das
-deshalb getrennt.
+Nullkarten, solange EROSION_AKTIV auf False steht (§8). Dasselbe gilt fuer
+geology.intrusions/height_delta - die Nullkarte ist dort Absicht, nicht
+Ausfall (Nutzer-Vorgabe "Stoerungen greifen nicht in das Terrain ein",
+siehe core/geology_generator.py Modul-Docstring Zeilen 15-25 und
+_calc_intrusions() Zeilen 1222-1239). Der Test nennt das deshalb getrennt.
 
 ZWEI DURCHGAENGE, das ist der zweite Zweck:
 
@@ -248,10 +251,14 @@ def lauf():
                 print("   %s" % eintrag)
                 fehler.append("%s-Durchlauf: %s" % (name, eintrag))
 
-    # NUR NULL ist bei erosion.* erwartet, solange der Hauptschalter aus ist.
+    # NUR NULL ist bei erosion.* erwartet, solange der Hauptschalter aus ist,
+    # und bei geology.intrusions/height_delta immer (Ticket #79: die
+    # Nullkarte ist dort Absicht, kein Ausfall).
+    ERWARTET_NULL = "geology.intrusions / height_delta"
     unerwartet_null = [s for s, (l, _) in gpu.items()
                        if l in ("FEHLT", "NICHT-ENDLICH")
-                       or (l == "NUR NULL" and not s.startswith("erosion."))]
+                       or (l == "NUR NULL" and not s.startswith("erosion.")
+                           and s != ERWARTET_NULL)]
     if unerwartet_null:
         print()
         print("Outputs ohne Daten (Anzeige bleibt leer):")
