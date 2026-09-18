@@ -529,6 +529,54 @@ def run_dependency_tree_matches_graph():
     return ok
 
 
+def run_settlement_suitability_sees_biome():
+    """
+    Ticket #34 (2026-09-18): settlement.suitability muss die fertige Biomkarte
+    SEHEN, bevor es seine Eignungskarte baut - sonst bewertet die
+    Siedlungs-Eignung Wueste, Sumpf und Wiese identisch (siehe
+    core/settlement_generator.py, TerrainSuitabilityAnalyzer.
+    create_combined_suitability/BIOM_EIGNUNG).
+
+    run_dependency_tree_matches_graph() oben prueft nur, dass der GENERATOR
+    'settlement' irgendwie von 'biome' abhaengt - das war schon VOR diesem
+    Ticket wahr, weil settlement.pathfinding seit 2026-07-28 an
+    biome.integrate_layers haengt. Diese Pruefung hier ist deshalb eine
+    eigene, weil sie genau den KNOTEN settlement.suitability trifft, nicht
+    nur irgendeinen Knoten desselben Generators.
+    """
+    ok = check(
+        "settlement.suitability haengt im Graph von biome.integrate_layers ab",
+        "biome.integrate_layers" in CALCULATOR_GRAPH["settlement.suitability"].depends_on)
+    if not ok:
+        return False
+
+    # Reihenfolge ueber den ECHTEN Dispatcher, nicht nur ueber die Kantenliste
+    # - dasselbe Muster wie run_execution_order_and_rain_decoupling() oben.
+    dispatcher = CalculatorDispatcher({cid: (lambda ctx: None) for cid in CALCULATOR_GRAPH})
+    for generator in {spec.generator for spec in CALCULATOR_GRAPH.values()}:
+        dispatcher.request(generator, 3)
+
+    erste_runde = {}
+    for round_n in range(1, 12):
+        while True:
+            ready = dispatcher.get_ready_nodes(round_n)
+            if not ready:
+                break
+            for cid in ready:
+                erste_runde.setdefault(cid, round_n)
+                dispatcher.mark_completed(cid, round_n)
+
+    ok &= check("die Pipeline laeuft mit der neuen Kante vollstaendig durch",
+                dispatcher.is_fully_done())
+    ok &= check("settlement.suitability wird nie vor biome.integrate_layers bereit "
+                "(Runde {} gegen {})".format(
+                    erste_runde.get("settlement.suitability"),
+                    erste_runde.get("biome.integrate_layers")),
+                erste_runde.get("settlement.suitability", 0)
+                >= erste_runde.get("biome.integrate_layers", 0))
+    return ok
+
+
 def run_terrain_forming_generators_refresh_all_tabs():
     """
     Jeder Generator, dessen Ergebnis in die KOMBINIERTE Heightmap einfliesst,
@@ -856,6 +904,7 @@ if __name__ == "__main__":
         "slope_is_recomputed_after_erosion": run_slope_is_recomputed_after_erosion(),
         "the_two_slopemaps_actually_differ": run_the_two_slopemaps_actually_differ(),
         "dependency_tree_matches_graph": run_dependency_tree_matches_graph(),
+        "settlement_suitability_sees_biome": run_settlement_suitability_sees_biome(),
         "terrain_forming_generators_refresh_all_tabs":
             run_terrain_forming_generators_refresh_all_tabs(),
         "reset_restores_identical_result": run_reset_restores_identical_result(),

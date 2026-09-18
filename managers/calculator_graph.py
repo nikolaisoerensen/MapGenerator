@@ -351,8 +351,18 @@ _CALCULATOR_SPECS = [
     # water.manning_flow statt water.flow_network: Siedlungseignung bewertet
     # die Naehe zu tatsaechlichen Gewaesserflaechen, also die FINALE gemalte
     # Klassifikation - siehe water.manning_flow-Kommentar oben.
+    #
+    # biome.integrate_layers ergaenzt 2026-09-18 (Ticket #34): die Eignung
+    # bewertete Wueste, Sumpf und Wiese bisher IDENTISCH, weil ihr einziger
+    # Eingang die fertige Biomkarte gar nicht kannte
+    # (core/settlement_generator.py, TerrainSuitabilityAnalyzer.
+    # create_combined_suitability). Ohne diese Kante durfte Settlement in
+    # derselben Runde wie Biome laufen und haette je nach Thread-Timing eine
+    # unfertige oder leere biome_map gesehen, wie schon einmal bei
+    # settlement.pathfinding (siehe dessen Kommentar oben).
     CalculatorSpec("settlement.suitability", "settlement",
-                   ["terrain.redistribution", "erosion.slope", "water.manning_flow"],
+                   ["terrain.redistribution", "erosion.slope", "water.manning_flow",
+                    "biome.integrate_layers"],
                    ["combined_suitability_map"]),
     CalculatorSpec("settlement.settlements", "settlement",
                    ["settlement.suitability", "terrain.redistribution"], ["settlement_list"]),
