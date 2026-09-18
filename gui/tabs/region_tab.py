@@ -81,13 +81,13 @@ REGIONSREGLER = (
 
 # Die Erosionsfilterregler, nach GEMESSENER Wirkung ausgewaehlt (mittlere
 # Hoehenaenderung ueber den vollen Reglerweg, 2026-08-26):
-#   GULLY_SIZE_M 47.04 m, GULLY_WEIGHT 4.27 m, STRENGTH 3.44 m,
-#   OCTAVES 1.17 m, RIDGE_ROUNDING 0.45 m, CREASE_ROUNDING 0.42 m
-# `DETAIL` (0.18 m) fehlt bewusst - ueber seinen ganzen Bereich im Bild
-# nicht unterscheidbar.
+#   GULLY_SIZE_M 47.04 m, GULLY_VS_SHARPNESS 4.27 m, STRENGTH 3.44 m,
+#   OCTAVES 1.17 m, RIDGE_ROUNDING 0.45 m, VALLEY_ROUNDING 0.42 m
+# `GULLY_REACH` (0.18 m, vormals `DETAIL`, Ticket #61) fehlt bewusst - ueber
+# seinen ganzen Bereich im Bild nicht unterscheidbar.
 EROSIONSREGLER = (
     ("erosion_scale", "Rinnengroesse", "GULLY_SIZE_M"),
-    ("erosion_gully_weight", "Rinnen gegen Kanten", "GULLY_WEIGHT"),
+    ("erosion_gully_weight", "Rinnen gegen Kanten", "GULLY_VS_SHARPNESS"),
     ("erosion_strength", "Erosionsstaerke", "STRENGTH"),
     ("erosion_octaves", "Rinnen-Oktaven", "OCTAVES"),
 )

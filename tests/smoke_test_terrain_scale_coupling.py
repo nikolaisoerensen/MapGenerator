@@ -144,11 +144,23 @@ def baue(map_size, map_distance_km, filter_overrides=None):
     parameters["map_size"] = int(map_size)
     parameters["map_distance_km"] = float(map_distance_km)
     parameters["map_seed"] = SEED
-    for name in ("STRENGTH", "SCALE", "DETAIL", "GULLY_WEIGHT",
-                 "RIDGE_ROUNDING", "CREASE_ROUNDING", "OCTAVES"):
-        if hasattr(EROSION_FILTER, name):
-            parameters["erosion_filter_" + name.lower()] = \
-                getattr(EROSION_FILTER, name)["default"]
+    # Ticket #61: Attributname und Parameterschluessel sind seit der
+    # Umbenennung NICHT mehr durch .lower() ineinander umrechenbar (z.B.
+    # GULLY_REACH -> "erosion_filter_detail", der ATEF-Quellenname bleibt als
+    # Schluessel bestehen). Deshalb hier explizit statt abgeleitet. "SCALE"
+    # gab es auf EROSION_FILTER nie - das hasattr-Auslassen war historisch
+    # bereits immer False und bleibt es.
+    for attr_name, schluessel_suffix in (
+            ("STRENGTH", "strength"),
+            ("SCALE", "scale"),
+            ("GULLY_REACH", "detail"),
+            ("GULLY_VS_SHARPNESS", "gully_weight"),
+            ("RIDGE_ROUNDING", "ridge_rounding"),
+            ("VALLEY_ROUNDING", "crease_rounding"),
+            ("OCTAVES", "octaves")):
+        if hasattr(EROSION_FILTER, attr_name):
+            parameters["erosion_filter_" + schluessel_suffix] = \
+                getattr(EROSION_FILTER, attr_name)["default"]
     if hasattr(EROSION_FILTER, "GULLY_SIZE_M"):
         parameters["erosion_filter_gully_size_m"] = \
             EROSION_FILTER.GULLY_SIZE_M["default"]
