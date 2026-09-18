@@ -171,7 +171,7 @@ Plot-Knoten) und darf sich jederzeit aendern, ohne das Spiel zu brechen.
 | Stadtgroesse | `int`, 15-50 (Haeuserzahl je Rang, siehe `RANG_HAEUSER`) | Anzahl Haeuser | `Location.house_count` | **geliefert** |
 | Stadttyp | `str`, einer von `'bergdorf'` / `'marktstadt'` / `'agrarstadt'` / `'sonstige'` | Aufzaehlung (`STADTTYPEN`, Zeile 1181) | `Location.settlement_type` | **geliefert** |
 | Kontur der Stadtgrenze | Polygon: Liste von (x, y)-Punkten je Siedlung | Karten-Pixel der aktuellen Aufloesung | `_build_city_boundary_polygons()` (Zeile 2781) — nur **intern**, speist ausschliesslich die Plot-Knoten-Verteilung; der Calculator-Knoten `settlement.city_boundary` gibt nur Raster (`city_mask`, `city_cost_map`) aus, kein Polygon | **fehlt** |
-| Anschlusspunkte der Wege | Liste von (x, y)-Punkten je Siedlung — wo ein Weg die Stadtgrenze schneidet | Karten-Pixel der aktuellen Aufloesung | nirgends — diese Berechnung existiert im Code nicht (Suche nach `anschluss`/`entry_point`/`gate_point`/`road_entry` ohne Treffer) | **fehlt** |
+| Anschlusspunkte der Wege | `dict {settlement_id: [(x, y), ...]}` — wo ein Weg die Stadtgrenze schneidet | Karten-Pixel der aktuellen Aufloesung | Calculator-Knoten `settlement.pathfinding`, Output-Key `road_entry_points` (`_calc_pathfinding()`, siehe `_stadtgrenzen_polygone_aus_maske()`/`_wege_anschlusspunkte()` in `core/settlement_generator.py`, Zeile ~2304) — schneidet die geroutete `roads`-Liste (Abschnitt 4) gegen eine aus `city_mask` (Knoten `settlement.city_boundary`) gebaute Stadtgrenzen-Kontur | **geliefert** (Ticket #73) |
 
 Zum Feld `Stadtgroesse`: `Location` fuehrt zusaetzlich `radius` (`float`,
 Karten-Pixel, `(3 + Haeuseranteil*2) * scale_factor` — siehe
@@ -199,20 +199,22 @@ informationen, wie stadtgroesse, stadttyp usw. die parzelle gezeichnet."*
 
 ### 6.3 Fehlende Felder — eigene Tickets
 
-Zwei der sechs Felder fehlen heute vollstaendig als externe Ausgabe. Beide
-sind als eigene Tickets notiert (siehe dort fuer Umfang und Abnahme):
+Eines der sechs Felder fehlt noch als externe Ausgabe:
 
 - Kontur der Stadtgrenze als Polygon exportieren (baut auf dem bereits
-  vorhandenen internen `_build_city_boundary_polygons()` auf)
-- Anschlusspunkte der Wege an der Stadtgrenze berechnen (neue Berechnung,
-  existiert bisher nirgends)
+  vorhandenen internen `_build_city_boundary_polygons()` auf) — Ticket #72
+
+Anschlusspunkte der Wege an der Stadtgrenze sind seit Ticket #73 geliefert
+(siehe 6.1) — der zweite Punkt dieser Liste ist damit erledigt.
 
 ### 6.4 Test
 
 `tests/smoke_test_siedlungsnaht_felder.py` prueft, dass jede Siedlung im
-`settlement_list`-Ausgabefeld genau die vier heute schon gelieferten
-Naht-Felder (Kultur, Rang, Stadtgroesse, Stadttyp) traegt und mit den
-dokumentierten Typen/Wertebereichen uebereinstimmt. Er dokumentiert
-zusaetzlich ausdruecklich (nicht als Fehlschlag, sondern als benannte
-Erwartung), dass Kontur und Anschlusspunkte heute fehlen — sobald die
-beiden Folge-Tickets sie liefern, muss dieser Test um sie erweitert werden.
+`settlement_list`-Ausgabefeld die vier `Location`-Naht-Felder (Kultur, Rang,
+Stadtgroesse, Stadttyp) traegt und mit den dokumentierten Typen/
+Wertebereichen uebereinstimmt, UND dass `settlement.pathfinding`s
+`road_entry_points`-Ausgabe je Siedlung eine Liste von (x, y)-Zahlenpaaren
+innerhalb des Kartenrasters liefert. Er dokumentiert weiterhin ausdruecklich
+(nicht als Fehlschlag, sondern als benannte Erwartung), dass die Kontur der
+Stadtgrenze heute fehlt — sobald Ticket #72 sie liefert, muss dieser Test
+darum erweitert werden.

@@ -376,8 +376,16 @@ _CALCULATOR_SPECS = [
                    # Orchestrators aus diesem Graph ABGELEITET wurde statt von
                    # Hand gepflegt: die Handtabelle fuehrte biome bei
                    # settlement, der Graph nicht. Die Handtabelle hatte recht.
-                   ["settlement.settlements", "erosion.slope",
-                    "biome.integrate_layers"], ["roads", "sea_roads"]),
+                   #
+                   # settlement.city_boundary ergaenzt (Ticket #73, Anschluss-
+                   # punkte der Wege an der Stadtgrenze, docs/SIEDLUNGEN_ENTWURF.md
+                   # §6.1): _calc_pathfinding schneidet die geroutete `roads`-
+                   # Liste gegen city_mask, braucht city_mask also als
+                   # deklarierte Eingabe statt sie ungefragt vom Data-LOD-
+                   # Manager zu holen - siehe die Lehre zu biome_map oben, die
+                   # sich hier fast wortgleich wiederholt haette.
+                   ["settlement.settlements", "settlement.city_boundary", "erosion.slope",
+                    "biome.integrate_layers"], ["roads", "sea_roads", "road_entry_points"]),
     # settlement.outer_roads ENTFERNT (2026-08-10, OFFENE_PUNKTE 5.11): verband
     # Siedlungen mit dem KARTENRAND - eine Insel/Region hat kein sinnvolles
     # "Draussen". docs/SIEDLUNGEN_ENTWURF.md kennt diese Anbindung nicht.
