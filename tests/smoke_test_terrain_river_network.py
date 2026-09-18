@@ -68,10 +68,20 @@ def _bauen(size=256, netz_aktiv=True, overrides=None):
                        "LACUNARITY", "REDISTRIBUTE_POWER")}
         parameters.update({"map_size": size, "map_distance_km": KM,
                            "map_seed": SEED})
-        for name in ("STRENGTH", "GULLY_SIZE_M", "DETAIL", "GULLY_WEIGHT",
-                     "RIDGE_ROUNDING", "CREASE_ROUNDING", "OCTAVES"):
-            parameters["erosion_filter_" + name.lower()] = \
-                getattr(EROSION_FILTER, name)["default"]
+        # Ticket #61: Attributname und Parameterschluessel sind seit der
+        # Umbenennung NICHT mehr durch .lower() ineinander umrechenbar (z.B.
+        # GULLY_REACH -> "erosion_filter_detail", der ATEF-Quellenname bleibt
+        # als Schluessel bestehen). Deshalb hier explizit statt abgeleitet.
+        for attr_name, schluessel_suffix in (
+                ("STRENGTH", "strength"),
+                ("GULLY_SIZE_M", "gully_size_m"),
+                ("GULLY_REACH", "detail"),
+                ("GULLY_VS_SHARPNESS", "gully_weight"),
+                ("RIDGE_ROUNDING", "ridge_rounding"),
+                ("VALLEY_ROUNDING", "crease_rounding"),
+                ("OCTAVES", "octaves")):
+            parameters["erosion_filter_" + schluessel_suffix] = \
+                getattr(EROSION_FILTER, attr_name)["default"]
         for name, key in (("SPACING_M", "river_spacing_m"),
                           ("INCISION_SHARE", "river_incision_share"),
                           ("PLATEAU_FLATTEN", "river_plateau_flatten"),

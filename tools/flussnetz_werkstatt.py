@@ -236,10 +236,20 @@ def gelaende(seed, size=SIZE, km=KM):
              ("AMPLITUDE", "OCTAVES", "FEATURE_SIZE_M", "PERSISTENCE",
               "LACUNARITY", "REDISTRIBUTE_POWER")}
         p.update({"map_size": size, "map_distance_km": km, "map_seed": seed})
-        for name in ("STRENGTH", "GULLY_SIZE_M", "DETAIL", "GULLY_WEIGHT",
-                     "RIDGE_ROUNDING", "CREASE_ROUNDING", "OCTAVES"):
-            p["erosion_filter_" + name.lower()] = \
-                getattr(vd.EROSION_FILTER, name)["default"]
+        # Ticket #61: Attributname und Parameterschluessel sind seit der
+        # Umbenennung NICHT mehr durch .lower() ineinander umrechenbar (z.B.
+        # GULLY_REACH -> "erosion_filter_detail", der ATEF-Quellenname bleibt
+        # als Schluessel bestehen). Deshalb hier explizit statt abgeleitet.
+        for attr_name, schluessel_suffix in (
+                ("STRENGTH", "strength"),
+                ("GULLY_SIZE_M", "gully_size_m"),
+                ("GULLY_REACH", "detail"),
+                ("GULLY_VS_SHARPNESS", "gully_weight"),
+                ("RIDGE_ROUNDING", "ridge_rounding"),
+                ("VALLEY_ROUNDING", "crease_rounding"),
+                ("OCTAVES", "octaves")):
+            p["erosion_filter_" + schluessel_suffix] = \
+                getattr(vd.EROSION_FILTER, attr_name)["default"]
         lod = int(round(np.log2(max(size, 32) / 32.0))) + 1
         g = BaseTerrainGenerator(data_lod_manager=m)
         g.set_active_parameters(p)

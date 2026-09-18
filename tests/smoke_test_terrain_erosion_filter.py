@@ -75,10 +75,20 @@ def _heightmap(parameter_overrides=None, filter_aktiv=True):
         parameters["map_size"] = SIZE
         parameters["map_seed"] = 20260730
         # Die Regler so, wie der Tab sie liefert (Praefix erosion_filter_).
-        for name in ("STRENGTH", "GULLY_SIZE_M", "DETAIL", "GULLY_WEIGHT",
-                     "RIDGE_ROUNDING", "CREASE_ROUNDING", "OCTAVES"):
-            parameters["erosion_filter_" + name.lower()] = \
-                getattr(EROSION_FILTER, name)["default"]
+        # Ticket #61: Attributname und Parameterschluessel sind seit der
+        # Umbenennung NICHT mehr durch .lower() ineinander umrechenbar (z.B.
+        # GULLY_REACH -> "erosion_filter_detail", der ATEF-Quellenname bleibt
+        # als Schluessel bestehen). Deshalb hier explizit statt abgeleitet.
+        for attr_name, schluessel_suffix in (
+                ("STRENGTH", "strength"),
+                ("GULLY_SIZE_M", "gully_size_m"),
+                ("GULLY_REACH", "detail"),
+                ("GULLY_VS_SHARPNESS", "gully_weight"),
+                ("RIDGE_ROUNDING", "ridge_rounding"),
+                ("VALLEY_ROUNDING", "crease_rounding"),
+                ("OCTAVES", "octaves")):
+            parameters["erosion_filter_" + schluessel_suffix] = \
+                getattr(EROSION_FILTER, attr_name)["default"]
         parameters.update(parameter_overrides or {})
 
         generator = BaseTerrainGenerator(data_lod_manager=manager)
@@ -153,10 +163,10 @@ def lauf():
     proben = (
         ("erosion_filter_strength", EROSION_FILTER.STRENGTH["max"]),
         ("erosion_filter_gully_size_m", EROSION_FILTER.GULLY_SIZE_M["max"]),
-        ("erosion_filter_detail", EROSION_FILTER.DETAIL["min"]),
-        ("erosion_filter_gully_weight", EROSION_FILTER.GULLY_WEIGHT["max"]),
+        ("erosion_filter_detail", EROSION_FILTER.GULLY_REACH["min"]),
+        ("erosion_filter_gully_weight", EROSION_FILTER.GULLY_VS_SHARPNESS["max"]),
         ("erosion_filter_ridge_rounding", EROSION_FILTER.RIDGE_ROUNDING["max"]),
-        ("erosion_filter_crease_rounding", EROSION_FILTER.CREASE_ROUNDING["max"]),
+        ("erosion_filter_crease_rounding", EROSION_FILTER.VALLEY_ROUNDING["max"]),
         ("erosion_filter_octaves", EROSION_FILTER.OCTAVES["min"]),
     )
     for name, wert in proben:

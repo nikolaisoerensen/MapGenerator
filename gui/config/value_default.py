@@ -1000,13 +1000,22 @@ class EROSION_FILTER:
                         "weniger Pixel werden automatisch angehoben, weil sie "
                         "sonst nicht darstellbar waeren."
     }
-    DETAIL = {
+    # Ticket #61 (2026-09-18): der Reglername war nach dem VERFAHREN benannt
+    # (ATEF-intern "detail"), nicht nach der WIRKUNG. `GULLY_REACH` sagt, was
+    # man sieht: wie weit die Rinne die Flanke hinablaeuft. Der Parameter-
+    # schluessel bleibt bewusst "erosion_filter_detail" (siehe
+    # docs/AUFRAEUMPLAN.md, Abschnitt "Der Anspruch: ATEF von Rune Johansen")
+    # - das ist der Name der ATEF-Quelle und wird NICHT angefasst.
+    GULLY_REACH = {
         "min": 0.3, "max": 3.5, "default": 1.5, "step": 0.1,
         "description": "Wie weit die feinen Rinnen von den Steilhaengen auf "
                         "flacheres Gelaende hinauslaufen. Kleine Werte halten "
                         "sie auf den steilen Flanken."
     }
-    GULLY_WEIGHT = {
+    # Ticket #61: vorher GULLY_WEIGHT - der Name verriet nicht, WOGEGEN
+    # gewichtet wird. Parameterschluessel bleibt "erosion_filter_gully_weight"
+    # (ATEF-Quelle, siehe oben).
+    GULLY_VS_SHARPNESS = {
         "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.05,
         "description": "Rinnen gegen Kantenschaerfe. Bei 0 entstehen kaum "
                         "Rinnen, dafuer werden Gipfel und Talsohlen "
@@ -1018,7 +1027,11 @@ class EROSION_FILTER:
         "description": "Rundung der Kaemme. 0 ergibt scharfe Grate, hohe "
                         "Werte abgerundete Ruecken."
     }
-    CREASE_ROUNDING = {
+    # Ticket #61: vorher CREASE_ROUNDING - "Crease" ist der ATEF-interne
+    # Fachbegriff (Falte/Knick), "Talsohle" ist, was man im Bild sieht.
+    # Parameterschluessel bleibt "erosion_filter_crease_rounding" (ATEF-Quelle,
+    # siehe oben).
+    VALLEY_ROUNDING = {
         "min": 0.0, "max": 1.0, "default": 0.0, "step": 0.05,
         "description": "Rundung der Talsohlen. 0 ergibt scharf eingeschnittene "
                         "Kerben, hohe Werte weiche Mulden."

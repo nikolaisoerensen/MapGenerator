@@ -160,7 +160,7 @@ Generationen-Einfärbung entfällt oder wird ein Häkchen. Gleichzeitig zu
 klären: *"Baeche (Mikro) gibt es ja auch gar nicht"* — die Stufe existiert
 im Menü, aber nicht im Ergebnis.
 
-### 4.5 Erosionsfilter verständlich benennen
+### 4.5 Erosionsfilter verständlich benennen — **ERLEDIGT 2026-09-18 (Ticket #61)**
 
 **Die Messung dafür liegt seit 2026-08-26 vor** (mittlere Höhenänderung über
 den vollen Reglerweg): GULLY_SIZE_M 47.04 m, GULLY_WEIGHT 4.27 m,
@@ -174,6 +174,26 @@ Sieben Regler, alle funktional, aber die Namen erklären sich nicht
 (`CREASE_ROUNDING`, `RIDGE_ROUNDING`, `GULLY_WEIGHT`). Ziel: **fünf Regler
 mit Namen, die sagen, was man sieht.** Zusammenfassen, wo zwei Regler
 dasselbe Bild in zwei Richtungen drehen.
+
+**Umgesetzt wurde die Umbenennung, NICHT das Zusammenlegen** (das Streichen
+von `DETAIL`/Zusammenfassen der Rundungen bleibt offen, ist eine eigene
+Entscheidung mit sichtbarer Wirkung auf die GUI, kein reines Umbenennen).
+Ticket #61 hat die drei irreführenden `EROSION_FILTER`-Klassenattribute in
+`gui/config/value_default.py` nach Wirkung umbenannt:
+
+| Alt | Neu |
+|---|---|
+| `DETAIL` | `GULLY_REACH` |
+| `GULLY_WEIGHT` | `GULLY_VS_SHARPNESS` |
+| `CREASE_ROUNDING` | `VALLEY_ROUNDING` |
+
+`STRENGTH`, `GULLY_SIZE_M`, `RIDGE_ROUNDING`, `OCTAVES` blieben unveraendert
+(bereits wirkungsbeschreibend). Die Parameterschluessel (`erosion_filter_detail`
+usw.) und die ATEF-Quellennamen im Shader (`EROSION_DETAIL` usw. in
+`shaders/terrain/ATEF_Buffer_A.comp`) blieben unangetastet - siehe Abschnitt
+"Der Anspruch: ATEF von Rune Johansen" oben, das war bereits vorher
+beschlossen. Reines Python-Refactoring, Erosionsergebnis bit-exakt gleich
+(gemessen per `numpy.array_equal`).
 
 ### 4.6 Geologie-Querschnitt gröber rechnen
 

@@ -135,13 +135,13 @@ class TerrainTab(BaseMapTab):
             ("erosion_filter_strength", "Erosion Strength", EROSION_FILTER.STRENGTH),
             ("erosion_filter_gully_size_m", "Gully Size (m)",
              EROSION_FILTER.GULLY_SIZE_M),
-            ("erosion_filter_detail", "Gully Reach", EROSION_FILTER.DETAIL),
+            ("erosion_filter_detail", "Gully Reach", EROSION_FILTER.GULLY_REACH),
             ("erosion_filter_gully_weight", "Gullies vs Sharpness",
-             EROSION_FILTER.GULLY_WEIGHT),
+             EROSION_FILTER.GULLY_VS_SHARPNESS),
             ("erosion_filter_ridge_rounding", "Ridge Rounding",
              EROSION_FILTER.RIDGE_ROUNDING),
             ("erosion_filter_crease_rounding", "Valley Rounding",
-             EROSION_FILTER.CREASE_ROUNDING),
+             EROSION_FILTER.VALLEY_ROUNDING),
             ("erosion_filter_octaves", "Gully Octaves", EROSION_FILTER.OCTAVES),
         ]
 
