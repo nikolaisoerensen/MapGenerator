@@ -178,7 +178,7 @@ smoke_test_region_tab.py             11.3s
 smoke_test_regionsfeld.py             1.8s
 smoke_test_regionsregler_wirken.py    7.1s
 smoke_test_reiter_vertrag.py          5.0s
-smoke_test_stufen_schalter.py         (in erosion_hauptschalter aufgegangen)
+smoke_test_stufen_schalter.py         3.8s
 ```
 
 `smoke_test_reiter_vertrag.py` ist der Wächter für den Fehler vom 26.08.,
