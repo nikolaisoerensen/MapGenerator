@@ -3971,6 +3971,90 @@ class DataLODManager(QObject):
         """Legacy-Methode"""
         return self.get_settlement_data_lod(data_key)
 
+    # Kategorie-Name -> zugehöriges internes Speicher-Dict. Dieselben sieben
+    # Kategorien wie in self._current_lods (Ticket #38: welt_backen/welt_laden
+    # brauchen einen vollständigen, selbstbeschreibenden Schnappschuss statt
+    # einer von Hand gepflegten Feldliste, die bei jedem neuen Data-Key extra
+    # nachgezogen werden müsste).
+    _KATEGORIE_SPEICHER = {
+        "terrain": "_terrain_data", "geology": "_geology_data",
+        "settlement": "_settlement_data", "weather": "_weather_data",
+        "erosion": "_erosion_data", "water": "_water_data", "biome": "_biome_data",
+    }
+
+    def get_all_data(self, category: str) -> Dict[str, Any]:
+        """
+        Funktionsweise: Verallgemeinert die Alle-Keys-Sonderbehandlung, die
+        get_terrain_data(None) bisher exklusiv für "terrain" anbot, auf alle
+        sieben Generator-Kategorien (siehe _KATEGORIE_SPEICHER) - inklusive
+        "erosion", das bisher GAR KEINEN No-Arg-Zugriff hatte.
+        Aufgabe: Einzige Stelle, die einen vollständigen Snapshot einer
+        Kategorie beim jeweils aktuellen (höchsten gespeicherten) LOD liefert -
+        Grundlage für core/welt_io.py (Ticket #38, welt_backen/welt_laden).
+        Ohne diese Methode müsste jeder Aufrufer die Data-Keys jeder Kategorie
+        von Hand auflisten; das wäre genau der stille Ersatzpfad-Fehler, vor
+        dem CLAUDE.md warnt, sobald ein Generator einen neuen Key ergänzt und
+        die Liste anderswo nicht mitgepflegt wird.
+        Parameter: category - einer der sieben Schlüssel aus _KATEGORIE_SPEICHER
+        Return: dict {data_key: data} aller unter dem aktuellen LOD dieser
+        Kategorie abgelegten Produkte (leeres dict, wenn noch nichts generiert
+        wurde). Wirft ValueError bei unbekannter Kategorie - kein stilles
+        leeres dict, das mit "nichts generiert" verwechselbar wäre.
+        """
+        speicher_attr = self._KATEGORIE_SPEICHER.get(category)
+        if speicher_attr is None:
+            raise ValueError(
+                f"Unbekannte Daten-Kategorie '{category}', erwartet eine von "
+                f"{sorted(self._KATEGORIE_SPEICHER)}")
+
+        store = getattr(self, speicher_attr)
+        current_lod = self._current_lods.get(category, 0)
+        if current_lod < 1:
+            return {}
+
+        prefix = f"lod_{current_lod}_"
+        return {key[len(prefix):]: data for key, data in store.items()
+                if key.startswith(prefix)}
+
+    def set_all_data(self, category: str, data: Dict[str, Any], lod_level: int = 1,
+                      parameters: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Funktionsweise: Schreibseitiges Gegenstück zu get_all_data() - legt einen
+        kompletten Kategorie-Snapshot (wie ihn get_all_data() liefert) unter einem
+        LOD-Level ab, einen Key nach dem anderen über den bestehenden
+        _set_data_lod()-Pfad (also mit derselben Validierung wie jeder reguläre
+        Generator-Setter).
+        Aufgabe: Grundlage für core/welt_io.py welt_laden() (Ticket #38). Diese
+        Methode selbst bleibt beim bestehenden Vertrag von _set_data_lod(): ein
+        einzelner ungültiger Key wird geloggt und übersprungen, nicht als
+        Exception geworfen (das würde 40+ bestehende Aufrufer dieses Vertrags
+        an anderer Stelle überraschen). Die für welt_laden() geforderte LAUTE
+        Fehlermeldung bei fehlenden Feldern gehört deshalb in den Aufrufer:
+        welt_laden() ruft nach set_all_data() get_all_data() erneut auf und
+        vergleicht die Key-Menge - fehlt dort ein Key, der in der Manifest-Liste
+        stand, wirft ERST DAS eine WeltLadenFehler. Kein stiller Ersatzpfad
+        (siehe Ticket #54 zur Begründung dieser Aufteilung).
+        Parameter:
+            category   - einer der sieben Schlüssel aus _KATEGORIE_SPEICHER
+            data       - dict {data_key: wert}, wie von get_all_data() geliefert
+            lod_level  - Ziel-LOD-Level (Default 1 - ein geladener Snapshot ist
+                         immer "das aktuell einzige LOD" aus Sicht von welt_laden)
+            parameters - Cache-Metadaten für _set_data_lod(); leeres dict, wenn
+                         nicht mitgegeben
+        """
+        speicher_attr = self._KATEGORIE_SPEICHER.get(category)
+        if speicher_attr is None:
+            raise ValueError(
+                f"Unbekannte Daten-Kategorie '{category}', erwartet eine von "
+                f"{sorted(self._KATEGORIE_SPEICHER)}")
+
+        store = getattr(self, speicher_attr)
+        params = parameters if parameters is not None else {}
+        for data_key, value in data.items():
+            require_array = isinstance(value, np.ndarray)
+            self._set_data_lod(category, store, data_key, value, lod_level, params,
+                                require_array=require_array)
+
     def check_dependencies(self, generator_type: str, required_dependencies: list) -> tuple:
         """
         Funktionsweise: Prüft Verfügbarkeit aller Required Dependencies eines Generators

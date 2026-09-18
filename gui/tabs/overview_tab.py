@@ -539,23 +539,11 @@ class OverviewTab(BaseMapTab):
             return False
 
     def export_single_map_png(self, map_data: np.ndarray, map_name: str, output_dir: str, dpi: int):
-        """Exportiert einzelne Map als PNG"""
-        import matplotlib.pyplot as plt
-
-        plt.figure(figsize=(12, 12))
-
-        if len(map_data.shape) == 3:  # RGB Map
-            plt.imshow(map_data)
-        else:  # 2D Map
-            plt.imshow(map_data, cmap='viridis')
-            plt.colorbar(label=map_name.replace('_', ' ').title())
-
-        plt.title(f"{map_name.replace('_', ' ').title()}")
-        plt.axis('off')
-
-        output_path = os.path.join(output_dir, f"{map_name}.png")
-        plt.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0.1)
-        plt.close()
+        """Duenner Wrapper - Logik liegt in gui/utils/map_export.py (Ticket #38:
+        von core/welt_io.py ohne Qt-GUI wiederverwendbar, siehe dortige
+        Begruendung)."""
+        from gui.utils.map_export import export_single_map_png as _impl
+        _impl(map_data, map_name, output_dir, dpi)
 
     def export_complete_json(self, available_data: Dict[str, Dict[str, Any]],
                              all_parameters: Dict[str, Any], options: dict) -> bool:
@@ -665,37 +653,15 @@ class OverviewTab(BaseMapTab):
             return False
 
     def export_material_file(self, mtl_file: str):
-        """Erstellt Material-File für OBJ-Export"""
-        with open(mtl_file, 'w') as f:
-            f.write("# Material File for Generated World\n")
-            f.write("newmtl world_material\n")
-            f.write("Ka 0.2 0.2 0.2\n")  # Ambient
-            f.write("Kd 0.8 0.8 0.8\n")  # Diffuse
-            f.write("Ks 0.1 0.1 0.1\n")  # Specular
-            f.write("Ns 10.0\n")  # Shininess
+        """Duenner Wrapper - siehe export_single_map_png() oben."""
+        from gui.utils.map_export import export_material_file as _impl
+        _impl(mtl_file)
 
     def export_world_statistics_txt(self, stats: Dict[str, Any], output_file: str):
-        """Exportiert World-Statistics als Text-File"""
-        with open(output_file, 'w') as f:
-            f.write("WORLD GENERATION STATISTICS\n")
-            f.write("=" * 50 + "\n\n")
+        """Duenner Wrapper - siehe export_single_map_png() oben."""
+        from gui.utils.map_export import export_world_statistics_txt as _impl
+        _impl(stats, output_file)
 
-            for category, category_stats in stats.items():
-                if not category_stats:
-                    continue
-
-                f.write(f"{category.upper()}\n")
-                f.write("-" * 20 + "\n")
-
-                for key, value in category_stats.items():
-                    if isinstance(value, tuple):
-                        f.write(f"{key}: {value[0]:.2f} - {value[1]:.2f}\n")
-                    elif isinstance(value, float):
-                        f.write(f"{key}: {value:.3f}\n")
-                    else:
-                        f.write(f"{key}: {value}\n")
-
-                f.write("\n")
 
 class WorldStatisticsWidget(QGroupBox):
     """
