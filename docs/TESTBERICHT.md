@@ -21,9 +21,9 @@ fachliche Begründung je Befund steht in `docs/SITZUNGSLOG.md`.
 * **Ein Fehlschlag war ein FEHLER IM TEST, nicht im Code** —
   `archetyp_verteilung` maß die Auflösung seiner eigenen Testkarte.
   Geklärt durch zwei Enden gegeneinander, behoben.
-* **Sieben Fehlschläge sind bekannt und standen schon im Bericht vom
-  24.08.** — die drei Erosionsbefunde, `regionen_welt`, `pipeline_outputs`,
-  `settlement_placement`, `weather_temperature_direktnormierung`.
+* **Sieben Testdateien sind weiterhin rot**, mit insgesamt zwölf
+  einzeln verfolgten Befunden, seit Ticket #49 je mit eigenem Ticket
+  und Frist (#74-#85, siehe Abschnitt 3) statt einer Rohbefund-Liste.
 * **Kein einziger Absturz.** Alle Fehlschläge sind Zusicherungen, die eine
   Kennzahl gegen einen Zielwert halten.
 
@@ -98,14 +98,34 @@ sondern eine Eigenschaft grober Testauflösungen. Notiert in
 
 ## 3. Bekannt und unverändert
 
-| Test | Befund | Stand |
+**Diese Tabelle führt keine Rohbefunde mehr, sondern nur noch
+Ticket-Nummern.** Bis 16.09.2026 stand hier je Testdatei eine Zeile mit
+Ist-Werten direkt im Fließtext — das wurde mit Ticket #49 aufgegeben,
+weil eine Rohbefund-Tabelle ohne Frist nur wächst statt sich zu
+schließen. Jeder Befund hat jetzt ein eigenes Ticket mit Ist-Wert,
+Soll-Wert, erstem Auftreten und Frist; `tests/smoke_test_testbericht_keine_rohbefunde.py`
+verhindert, dass hier wieder eine Zahl statt eines Verweises landet.
+
+| Test | Befund | Ticket |
 |---|---|---|
-| `erosion_field` | Farbskala `[0.5, 300]`, typischer Wert 0,22 | Farbskalenproblem, kein Rechenproblem — seit 24.08. |
-| `erosion_quality` | Kanalnetz 45 px statt > 60, Ebenen 7,2 % statt 15–55 % | **ungeklärt** — frühere Erklärung ("Erosionskette abgeschaltet") war falsch, siehe unten |
-| `regionen_welt` | 4 Befunde, u. a. Macchia Hang 18,6 statt 14,5 | die Küsten-Archetypen verstimmen die Regionseichung — in CLAUDE.md beschrieben |
-| `pipeline_outputs` | 5 Befunde | seit 24.08. |
-| `settlement_placement` | 6 Befunde, u. a. 2 Städte statt 1 je Kultur | seit 24.08. — neu bewertet und Assertion korrigiert, siehe Nachtrag Ticket #34 unten |
-| `weather_temperature_direktnormierung` | 3 Befunde, Skerrheim 7,86 statt 8,60 K | seit 24.08. |
+| `erosion_field` | Farbskala zeigt den typischen Wert nicht | #74 |
+| `erosion_quality` | Kanalnetz/Ebenen/Schwelle/Schrittzahl verfehlen Zielwerte (ungeklärt) | #75 |
+| `regionen_welt` | Macchia/Thalassia-Eichung durch Küstenpass verstimmt | #76 |
+| `regionen_welt` | Regionsgrenzen deutlich steiler als das Innere | #77 |
+| `regionen_welt` | Landschaft nicht auflösungsinvariant (512 vs. 1024 px) | #78 |
+| `pipeline_outputs` | `hinterland_height` NaN-Sentinel (Testartefakt) | #71 |
+| `pipeline_outputs` | `height_delta` fälschlich als Fehler gemeldet (ist absichtlich immer 0) | #79 |
+| `pipeline_outputs` | `sea_roads` liefert keine Daten | #80 |
+| `pipeline_outputs` | `landmark_list` liefert keine Daten | #81 |
+| `pipeline_outputs` | `plots` liefert keine Daten | #82 |
+| `pipeline_outputs` | `landmark_roads` liefert keine Daten | #83 |
+| `settlement_placement` | Marktstadt-Randkorrektur erzeugt 2 „stadt“ statt 1 je Kultur | #84 |
+| `weather_temperature_direktnormierung` | Jahresmittel einzelner Region/Seed-Paare verfehlt Toleranz | #85 |
+
+`erosion_gpu_parity` steht nicht mehr in dieser Tabelle — kein offenes
+Ticket, siehe die Richtigstellung direkt darunter: der Befund war schon
+vor dieser Aufschlüsselung gelöst, der Bericht hatte es nur nicht
+nachgezogen.
 
 **`erosion_gpu_parity` stand bis zum 16.09.2026 ebenfalls in dieser
 Tabelle**, mit "Export 38,5 gegen 0,1 m auf der CPU, echter Paritätsbruch,
