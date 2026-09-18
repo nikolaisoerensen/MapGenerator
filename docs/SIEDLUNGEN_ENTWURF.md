@@ -170,7 +170,7 @@ Plot-Knoten) und darf sich jederzeit aendern, ohne das Spiel zu brechen.
 | Rang | `str`, einer von `'dorf'` / `'siedlung'` / `'stadt'` | Aufzaehlung (`RANG_HAEUSER`, Zeile 257) | `Location.rank` | **geliefert** |
 | Stadtgroesse | `int`, 15-50 (Haeuserzahl je Rang, siehe `RANG_HAEUSER`) | Anzahl Haeuser | `Location.house_count` | **geliefert** |
 | Stadttyp | `str`, einer von `'bergdorf'` / `'marktstadt'` / `'agrarstadt'` / `'sonstige'` | Aufzaehlung (`STADTTYPEN`, Zeile 1181) | `Location.settlement_type` | **geliefert** |
-| Kontur der Stadtgrenze | Polygon: Liste von (x, y)-Punkten je Siedlung | Karten-Pixel der aktuellen Aufloesung | `_build_city_boundary_polygons()` (Zeile 2781) — nur **intern**, speist ausschliesslich die Plot-Knoten-Verteilung; der Calculator-Knoten `settlement.city_boundary` gibt nur Raster (`city_mask`, `city_cost_map`) aus, kein Polygon | **fehlt** |
+| Kontur der Stadtgrenze | `city_boundary_polygons`: dict `Location.location_id -> Liste[Polygon]`, jedes Polygon eine Liste von (x, y)-Punkten (meist ein Polygon je Siedlung, mehrere nur bei getrennten Rasterinseln) | Karten-Pixel der aktuellen Aufloesung | Calculator-Knoten `settlement.city_boundary` (`_calc_city_boundary()`, `core/settlement_generator.py`), Algorithmus in `_polygonize_settlement_mask()` (Modulebene, gemeinsam mit dem weiterhin internen `_build_city_boundary_polygons()` fuer die Plot-Knoten-Verteilung) | **geliefert** (Ticket #72) |
 | Anschlusspunkte der Wege | Liste von (x, y)-Punkten je Siedlung — wo ein Weg die Stadtgrenze schneidet | Karten-Pixel der aktuellen Aufloesung | nirgends — diese Berechnung existiert im Code nicht (Suche nach `anschluss`/`entry_point`/`gate_point`/`road_entry` ohne Treffer) | **fehlt** |
 
 Zum Feld `Stadtgroesse`: `Location` fuehrt zusaetzlich `radius` (`float`,
@@ -179,8 +179,8 @@ Karten-Pixel, `(3 + Haeuseranteil*2) * scale_factor` — siehe
 heightmap.shape[0] / 128.0` die 128px-Referenzgroesse auf die tatsaechliche
 Kartenaufloesung skaliert). `radius` ist eine interne Rundungshilfe fuer die
 Plot-Node-Verteilung und deckt sich nicht mit der Kontur aus Feld 5 — sobald
-die Kontur exportiert wird (Ticket TBD), ersetzt sie `radius` als
-Groessenangabe fuer das Spiel; bis dahin ist `house_count` das massgebliche
+das Spiel auf die seit Ticket #72 exportierte Kontur umstellt, ersetzt sie
+`radius` als Groessenangabe; bis dahin ist `house_count` das massgebliche
 Naht-Feld fuer "Stadtgroesse", `radius` bleibt Editor-intern.
 
 ### 6.2 Was ausdruecklich NICHT zur Naht gehoert
@@ -199,20 +199,21 @@ informationen, wie stadtgroesse, stadttyp usw. die parzelle gezeichnet."*
 
 ### 6.3 Fehlende Felder — eigene Tickets
 
-Zwei der sechs Felder fehlen heute vollstaendig als externe Ausgabe. Beide
-sind als eigene Tickets notiert (siehe dort fuer Umfang und Abnahme):
+Von den zwei Feldern, die zunaechst vollstaendig als externe Ausgabe
+fehlten, liefert der Editor die Kontur der Stadtgrenze seit Ticket #72
+(siehe Zeile 173). Offen bleibt:
 
-- Kontur der Stadtgrenze als Polygon exportieren (baut auf dem bereits
-  vorhandenen internen `_build_city_boundary_polygons()` auf)
 - Anschlusspunkte der Wege an der Stadtgrenze berechnen (neue Berechnung,
-  existiert bisher nirgends)
+  existiert bisher nirgends; eigenes Ticket #73)
 
 ### 6.4 Test
 
 `tests/smoke_test_siedlungsnaht_felder.py` prueft, dass jede Siedlung im
-`settlement_list`-Ausgabefeld genau die vier heute schon gelieferten
-Naht-Felder (Kultur, Rang, Stadtgroesse, Stadttyp) traegt und mit den
-dokumentierten Typen/Wertebereichen uebereinstimmt. Er dokumentiert
-zusaetzlich ausdruecklich (nicht als Fehlschlag, sondern als benannte
-Erwartung), dass Kontur und Anschlusspunkte heute fehlen — sobald die
-beiden Folge-Tickets sie liefern, muss dieser Test um sie erweitert werden.
+`settlement_list`-Ausgabefeld die vier dort gelieferten Naht-Felder
+(Kultur, Rang, Stadtgroesse, Stadttyp) traegt, UND dass
+`city_boundary_polygons` (Ausgabe von `settlement.city_boundary`, seit
+Ticket #72) je Siedlung mindestens ein gueltiges Polygon aus (x, y)-Punkten
+in Karten-Pixel-Koordinaten liefert. Er dokumentiert weiterhin ausdruecklich
+(nicht als Fehlschlag, sondern als benannte Erwartung), dass die
+Anschlusspunkte der Wege heute fehlen — sobald Ticket #73 sie liefert, muss
+dieser Test darum erweitert werden.
