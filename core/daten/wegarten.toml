@@ -1,0 +1,62 @@
+# Path: core/daten/wegarten.toml
+#
+# Wegarten und ihre Kostenfaktoren fuer core/settlement_generator.py
+# (calculate_road_network(), Ticket #41). Geladen ueber
+# core/daten/wegarten_laden.py - dasselbe Muster wie core/daten/regionen_welt.toml
+# (Ticket #29): Zahlen raus aus dem Code, in eine versionierte Datei, ueber
+# die Python-Standardbibliothek tomllib gelesen, keine neue Abhaengigkeit.
+#
+# GRUNDIDEE. Ein Weg ist nicht binaer "existiert / existiert nicht". Jeder
+# gebaute Wegabschnitt sammelt eine Nutzungszahl - wie oft eine weitere Route
+# genau diesen Abschnitt mitbenutzt hat, siehe `nutzung` in
+# calculate_road_network(). Ab einer Nutzungsschwelle (`schwelle_nutzung`)
+# gilt der Abschnitt als die naechsthoehere Wegart, und jede hoehere Wegart
+# ist billiger zu befahren (`kostenfaktor`, multipliziert auf das
+# Grundkostenfeld aus bau_kostenfeld() - 1.0 = ebener Grund ohne Weg). Genau
+# darin steckt die RUECKKOPPLUNG: Benutzung baut aus, Ausbau zieht mehr
+# Benutzung an, weil A* den billigeren Umweg ueber die bessere Strecke der
+# teureren Direktverbindung vorzieht.
+#
+# REIHENFOLGE UND KALIBRIERUNG. `schwelle_nutzung` steigt strikt von Eintrag
+# zu Eintrag, `kostenfaktor` faellt strikt (core/daten/wegarten_laden.py
+# erzwingt das beim Laden) - sonst waere Ausbau kein Vorteil und die
+# Rueckkopplung liefe nicht an. Die konkreten Zahlen sind gegen
+# tests/smoke_test_wegarten_kalibrierung.py eingemessen: 3 Kartengroessen
+# (256/512/1024 px) x 3 Seeds, Kennzahlen Gesamtlaenge / Anteil je Wegart /
+# mittlerer Umwegfaktor / Knotenzahl muessen dort in einem festen Band
+# bleiben - das ist der Nachweis, dass die Rueckkopplung nicht ausufert
+# (immer mehr Verkehr auf immer weniger Wegen, bis das Netz zum Stern
+# entartet) und nicht einschlaeft (jeder Weg bleibt Trampelpfad, weil die
+# Staffelung zu flach ist).
+#
+# `karrenweg.kostenfaktor` = 0.45 loest die vorherige einzelne Konstante
+# WEGERABATT = 0.4 ab (core/settlement_generator.py) - bewusst nahe am alten
+# Wert, damit die mittlere Stufe sich in etwa wie der bisherige, bereits
+# eingemessene Rabatt verhaelt und nur die Staffelung darum herum neu ist.
+#
+# ERWEITERBAR FUER #42 (Bruecken/Uferwege): jede [[wegart]]-Tabelle darf
+# beliebige weitere Schluessel tragen (z.B. `ufer_bonus`, `bruecke_erlaubt`)
+# oder es kann ein ganz neuer Eintrag (z.B. id = "bruecke") dazukommen - der
+# Lader in wegarten_laden.py uebernimmt unbekannte Schluessel unveraendert in
+# Wegart.zusatz, ohne dass die hier bekannten Felder sich verschieben.
+
+[[wegart]]
+id = "trampelpfad"
+name = "Trampelpfad"
+reihenfolge = 1
+schwelle_nutzung = 1
+kostenfaktor = 0.75
+
+[[wegart]]
+id = "karrenweg"
+name = "Karrenweg"
+reihenfolge = 2
+schwelle_nutzung = 3
+kostenfaktor = 0.45
+
+[[wegart]]
+id = "strasse"
+name = "Gepflasterte Strasse"
+reihenfolge = 3
+schwelle_nutzung = 7
+kostenfaktor = 0.2

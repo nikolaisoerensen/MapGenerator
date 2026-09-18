@@ -5895,15 +5895,16 @@ class SettlementGenerator:
 
           1. KOSTENFELD (§4.1) - einmal, ueber bau_kostenfeld(). Wasser in drei
              Stufen, Hangkosten quadratisch, ein bestehender Weg verbilligt
-             sich selbst (WEGERABATT) - "Wege buendeln sich zu Hauptstrecken".
+             sich selbst gestaffelt nach Wegart (core/daten/wegarten.toml,
+             Ticket #41) - "Wege buendeln sich zu Hauptstrecken".
           2. GABRIEL-GRAPH (§4.2) - welche Ortspaare ueberhaupt Kandidaten
              sind: A-B nur, wenn im Kreis ueber ihrer Verbindungsstrecke kein
              dritter Ort liegt. Kein Stern, keine Vollverknuepfung.
           3. BEREITSCHAFTSTEST (§4.3) je Kandidat, absteigend nach
              Bereitschaft abgearbeitet (die eifrigsten Verbindungen zuerst -
              sie werden ohnehin fast immer gebaut und damit zur Haupttrasse,
-             auf die sich schwaechere Kandidaten per Wegerabatt aufbuendeln
-             koennen):
+             auf die sich schwaechere Kandidaten per Wegarten-Staffelung
+             aufbuendeln koennen):
 
                 Bereitschaft = Rang(A) * Rang(B) * (gleiche Kultur ? 1.0 : 0.45)
                 Wegkosten    = Pfadkosten-Summe / Luftlinienabstand
@@ -5955,16 +5956,26 @@ class SettlementGenerator:
                                  ("bedarfsausbau", 10.0)])
         self._a_stern_zaehler = [0, 0.0]
 
+        from core.daten.wegarten_laden import lade_wegarten, wegart_faktor_feld
+        wegarten = lade_wegarten()
+
         with _s(_ts, "kostenfeld", "Kostenfeld"):
             basis_kostenfeld = bau_kostenfeld(heightmap, slopemap, self.road_slope_to_distance_ratio)
-        weg_maske = np.zeros(basis_kostenfeld.shape, dtype=bool)
+        # `nutzung` ersetzt die alte boolesche weg_maske durch eine Zaehlung:
+        # wie oft ein Pixel bereits von einer Route mitbenutzt wurde. Erst
+        # daraus ergibt sich ueber wegart_faktor_feld() die gestaffelte
+        # Wegart (Trampelpfad/Karrenweg/Strasse, core/daten/wegarten.toml) -
+        # die eigentliche Rueckkopplung des Tickets #41: mehr Benutzung
+        # schaltet eine billigere Wegart frei, die wiederum mehr Routen
+        # anzieht.
+        nutzung = np.zeros(basis_kostenfeld.shape, dtype=np.float64)
 
         def route(a, b):
-            """(Pfad, Pfadkosten) fuer ein Ortspaar - nutzt den aktuellen Wegerabatt."""
+            """(Pfad, Pfadkosten) fuer ein Ortspaar - nutzt die aktuelle Wegarten-Staffelung."""
             import time as _t
             _t0 = _t.perf_counter()
-            feld = (np.where(weg_maske, basis_kostenfeld * WEGERABATT, basis_kostenfeld)
-                   if np.any(weg_maske) else basis_kostenfeld)
+            feld = (basis_kostenfeld * wegart_faktor_feld(nutzung, wegarten)
+                   if np.any(nutzung > 0) else basis_kostenfeld)
             pathfinder = PathfindingSystem(feld, slopemap.shape[0],
                                            edge_distance_map=edge_distance_map)
             pfad, erreicht = pathfinder.find_least_resistance_path(
@@ -5980,16 +5991,17 @@ class SettlementGenerator:
 
         def merke(pf, pfad):
             """Einen bereits gerouteten Pfad tatsaechlich bauen: glaetten,
-            in die Wegemaske eintragen (kuenftige Routen guenstiger machen),
-            der Ausgabeliste hinzufuegen. Nimmt Pfad/Pathfinder ENTGEGEN statt
-            selbst neu zu routen - der Aufrufer hat sie fuer die
-            Bereitschaftspruefung ohnehin schon berechnet."""
+            in das Nutzungsfeld eintragen (kuenftige Routen guenstiger machen,
+            siehe wegart_faktor_feld()), der Ausgabeliste hinzufuegen. Nimmt
+            Pfad/Pathfinder ENTGEGEN statt selbst neu zu routen - der
+            Aufrufer hat sie fuer die Bereitschaftspruefung ohnehin schon
+            berechnet."""
             geglaettet = pf.apply_spline_smoothing(
                 pfad, smoothing_factor=3, progress_callback=self._update_progress)
             for x, y in pfad:
                 xi, yi = int(round(x)), int(round(y))
-                if 0 <= yi < weg_maske.shape[0] and 0 <= xi < weg_maske.shape[1]:
-                    weg_maske[yi, xi] = True
+                if 0 <= yi < nutzung.shape[0] and 0 <= xi < nutzung.shape[1]:
+                    nutzung[yi, xi] += 1.0
             roads.append(geglaettet)
             return geglaettet
 
@@ -6207,6 +6219,15 @@ class SettlementGenerator:
             "      %-38s %8.3fs  %d Laeufe, %.1f ms je Lauf",
             "[davon A*-Routen]", dauer, anzahl,
             1000.0 * dauer / max(anzahl, 1))
+
+        # Nutzungsfeld und Wegarten-Tabelle nicht nur lokal verbrauchen,
+        # sondern als Instanzattribute stehen lassen - core/wegnetz_kennzahlen.py
+        # liest sie fuer die Kennzahlen (Ticket #41), und Ticket #42
+        # (Bruecken/Uferwege) kann hier ansetzen, ohne die Rueckgabe von
+        # calculate_road_network() (2-Tupel, von bestehenden Aufrufern und
+        # tests/smoke_test_settlement_roads.py vorausgesetzt) zu aendern.
+        self.letztes_nutzungsfeld = nutzung
+        self.wegarten = wegarten
 
         return roads, sea_roads
 
