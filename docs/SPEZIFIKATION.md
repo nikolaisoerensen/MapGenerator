@@ -1421,7 +1421,8 @@ enger.
 
 ## §20 Pipeline-Test ueber alle Outputs, 2026-07-30
 
-`tests/smoke_test_pipeline_outputs.py`. Faehrt alle 39 Knoten des
+<!-- PRUEFBAR: ausdruck=len(managers.calculator_graph.CALCULATOR_GRAPH) erwartet=38 -->
+`tests/smoke_test_pipeline_outputs.py`. Faehrt alle 38 Knoten des
 CALCULATOR_GRAPH in topologischer Reihenfolge (aus dem Graphen abgeleitet, §4.5)
 und prueft jeden der 73 deklarierten Outputs auf FEHLT / NUR NULL / KONSTANT /
 NICHT-ENDLICH / OK. Zwei Durchgaenge: mit ShaderManager (GPU) und ohne (CPU).

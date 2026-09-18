@@ -172,7 +172,7 @@ Alles in `docs/` wurde am 2026-08-12 gesichtet.
 | `KLIMA_UND_SEE.md` | gültig, besonders §0 — Kopf sagte fälschlich „zur Abstimmung" |
 | `KULTUREN_UND_ORTE.md`, `SIEDLUNGEN_ENTWURF.md` | gültig, umgesetzt |
 | `INTEGRATIONSPLAN.md` | **Weltmaße veraltet** (21.3 km statt 15 km), Warnkasten gesetzt |
-| `generation_pipeline_dependencies.md` | **Knotenzahl veraltet** (38 statt 29), Datenflüsse gültig, Warnkasten gesetzt |
+| `generation_pipeline_dependencies.md` | **Knotenzahl veraltet** (<!-- PRUEFBAR: ausdruck=len(managers.calculator_graph.CALCULATOR_GRAPH) erwartet=38 -->38 statt 29), Datenflüsse gültig, Warnkasten gesetzt |
 | `backlog.md` | Archiv; 3 offene Punkte nach 7.9–7.11 gerettet |
 | `archiv/` | historisch, gilt nicht mehr — eigenes README |
 

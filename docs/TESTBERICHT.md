@@ -127,6 +127,7 @@ Hier stand bis zum 16.09.2026 das Gegenteil: sie seien kein Zufall, weil die
 Erosionskette bewusst abgeschaltet sei. Das war **doppelt falsch** (Ticket
 #28 und #63 haben das unabhaengig voneinander gefunden und behoben): erstens
 laeuft die Erosion seit dem 27.08.2026 im Betrieb mit -
+<!-- PRUEFBAR: pfad=gui/config/value_default.py:1088 attribut=EROSION_AKTIV erwartet=True -->
 `EROSION_AKTIV = True` steht in
 [`gui/config/value_default.py:1088`](../gui/config/value_default.py#L1088)
 und ist die einzig gueltige Aussage zum Schalter. Zweitens stimmte schon die
@@ -280,3 +281,40 @@ fertige Reiterleiste durch, nicht nur die Importe.
 `layer_2d_3d_parity` prüft die Registrierung und die Farbtafel — also
 genau die Buchhaltung, die diesmal den Fehler fand. Ob das Bild danach
 richtig aussieht, prüft nach wie vor niemand außer dir.
+
+## 6. Harte Behauptungen werden jetzt maschinell geprüft (Ticket #53)
+
+Der Erosionsschalter-Fehler oben (Abschnitt 3: monatelang stand hier
+"Erosionskette abgeschaltet", während `EROSION_AKTIV = True` galt) und ein
+zweiter, gleichartiger Fund beim Knotenzähler des Calculator-Graphen
+(mehrere Dokumente nannten 39 Knoten, andere 38 — nachgezählt über
+`len(managers.calculator_graph.CALCULATOR_GRAPH)` ist die richtige Zahl
+**38**, siehe `docs/generation_pipeline_dependencies.md`) haben denselben
+Grund: eine Zahl oder ein Schalterzustand wird ins Dokument geschrieben und
+veraltet dann leise, weil nichts sie gegen den Code hält.
+
+**Format `PRUEFBAR`.** Eine harte, maschinell nachprüfbare Behauptung (Zahl,
+Dateiname, Schalterzustand, Anzahl — keine Einschätzung) wird unmittelbar
+davor mit einem HTML-Kommentar ausgezeichnet, der beim Rendern unsichtbar
+bleibt:
+
+```
+<!-- PRUEFBAR-BEISPIEL: pfad=gui/config/value_default.py:1088 attribut=EROSION_AKTIV erwartet=True -->
+<!-- PRUEFBAR-BEISPIEL: ausdruck=len(managers.calculator_graph.CALCULATOR_GRAPH) erwartet=38 -->
+```
+
+(Hier bewusst `PRUEFBAR-BEISPIEL` statt `PRUEFBAR` geschrieben — sonst würde
+der Scanner diese beiden Illustrationszeilen selbst als echte Behauptungen
+einlesen, nur weil sie in einem Codeblock stehen. Der Scanner unterscheidet
+nicht zwischen Fließtext und Codeblock, nur zwischen dem exakten Wortlaut
+`PRUEFBAR:` und allem anderen. Eine ECHTE Markierung beginnt immer exakt mit
+`<!-- PRUEFBAR:`.)
+
+Die erste Form liest ein Attribut aus einem Python-Modul (`pfad=`, optional
+mit `:Zeile` nur zur Orientierung), die zweite wertet einen Ausdruck aus
+einer festen Allowlist aus (kein freies `eval()`). Volle Spezifikation und
+die Allowlist stehen im Docstring von
+`tests/smoke_test_dokumentbehauptungen.py` — der Test findet jede so
+ausgezeichnete Behauptung unter `docs/**/*.md`, prüft sie gegen den
+laufenden Code und schlägt mit Soll/Ist fehl, sobald beides auseinanderläuft
+— auch dann, wenn die Codestelle selbst verschwunden ist.
