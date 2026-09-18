@@ -750,14 +750,6 @@ class OverviewTab(BaseMapTab):
         """Dünner Wrapper - siehe Modulfunktion calculate_comprehensive_world_statistics() oben."""
         return calculate_comprehensive_world_statistics(available_data, self._memory_usage_mb())
 
-    def calculate_shannon_diversity(self, biome_map: np.ndarray) -> float:
-        """Dünner Wrapper - siehe Modulfunktion calculate_shannon_diversity() oben."""
-        return calculate_shannon_diversity(biome_map)
-
-    def calculate_world_complexity_score(self, stats: Dict[str, Any]) -> float:
-        """Dünner Wrapper - siehe Modulfunktion calculate_world_complexity_score() oben."""
-        return calculate_world_complexity_score(stats)
-
     @pyqtSlot(str, dict)
     @pyqtSlot(str, str)
     def export_layers_to_disk(self, filename_prefix: str, output_root: str):
@@ -826,10 +818,6 @@ class OverviewTab(BaseMapTab):
         """Dünner Wrapper - siehe Modulfunktion export_png_collection() oben."""
         return export_png_collection(available_data, options, self._memory_usage_mb())
 
-    def export_single_map_png(self, map_data: np.ndarray, map_name: str, output_dir: str, dpi: int):
-        """Dünner Wrapper - siehe Modulfunktion export_single_map_png() oben."""
-        return export_single_map_png(map_data, map_name, output_dir, dpi)
-
     def export_complete_json(self, available_data: Dict[str, Dict[str, Any]],
                              all_parameters: Dict[str, Any], options: dict) -> bool:
         """Dünner Wrapper - siehe Modulfunktion export_complete_json() oben."""
@@ -838,14 +826,6 @@ class OverviewTab(BaseMapTab):
     def export_3d_world(self, available_data: Dict[str, Dict[str, Any]], options: dict) -> bool:
         """Dünner Wrapper - siehe Modulfunktion export_3d_world() oben."""
         return export_3d_world(available_data, options)
-
-    def export_material_file(self, mtl_file: str):
-        """Dünner Wrapper - siehe Modulfunktion export_material_file() oben."""
-        return export_material_file(mtl_file)
-
-    def export_world_statistics_txt(self, stats: Dict[str, Any], output_file: str):
-        """Dünner Wrapper - siehe Modulfunktion export_world_statistics_txt() oben."""
-        return export_world_statistics_txt(stats, output_file)
 
 class WorldStatisticsWidget(QGroupBox):
     """
