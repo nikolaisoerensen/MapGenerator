@@ -374,7 +374,7 @@ _CALCULATOR_SPECS = [
                    ["settlement.suitability", "terrain.redistribution"], ["settlement_list"]),
     CalculatorSpec("settlement.city_boundary", "settlement",
                    ["settlement.settlements", "terrain.redistribution", "erosion.slope"],
-                   ["city_mask", "city_cost_map"]),
+                   ["city_mask", "city_cost_map", "city_boundary_polygons"]),
     # settlement.city_blocks/settlement.landscape_voronoi (CityBlockSystem/
     # LandscapeVoronoiSystem) entfernt - vollständig durch settlement.plot_nodes
     # (PlotPhysicsSystem) ersetzt, siehe [[project-settlement-plot-physics-rebuild]].
