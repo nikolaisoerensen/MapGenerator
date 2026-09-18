@@ -13,8 +13,24 @@ Multi-Panel/Composite-Ansicht rief ausschließlich Methoden auf
 `self.map_display` auf, das in dieser Klasse nirgends zugewiesen wird -
 vollständig toter Code seit jeher, siehe docs/SITZUNGSLOG.md und
 docs/SPEC_OVERLAYS.md (Out of Scope).
+
+Modul-Ebene statt nur Instanzmethoden (Ticket #38, "welt_backen und
+welt_laden als Naht"): die sechs früheren Export-Methoden sowie ihre
+Hilfsfunktionen (Vollständigkeits-Check, Statistik-Berechnung,
+Parameter-Sammlung) sind hier zusätzlich als freie Funktionen mit
+expliziten Parametern statt `self` vorhanden. `gui/utils/welt_format.py`
+(welt_backen()/welt_laden()) benutzt genau diese Funktionen als Bausteine,
+statt ihre Logik zu duplizieren - das entspricht Abnahmekriterium
+"Die Exportfunktionen aus overview_tab.py werden benutzt, nicht dupliziert."
+Die OverviewTab-Methoden gleichen Namens sind dünne Wrapper, die self.*
+in die passenden Parameter übersetzen; ihr Aufruf der gleichnamigen
+Modulfunktion (bare name, kein self.) löst dank Pythons Namensauflösung
+(lokal -> umschließend -> Modul-global -> Builtin; die Klasse selbst wird
+dabei NICHT konsultiert) zuverlässig auf die Modulfunktion auf, nicht auf
+sich selbst.
 """
 
+import dataclasses
 import os
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
@@ -28,6 +44,523 @@ from gui.widgets.widgets import (
     BaseButton,
     StatusIndicator
 )
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# DIE FELDLISTE EINER WELT (Ticket #38, Abnahmekriterium "Die Feldliste
+# dessen, was eine Welt ausmacht, ist dokumentiert" - ausführlich in
+# docs/WELT_FORMAT.md)
+# =============================================================================
+#
+# Quelle der Wahrheit für Kategorie-Zugehörigkeit ist
+# managers/data_lod_manager.py (DATA_KEY_TO_TAB_MAPPING/TAB_DEPENDENCY_MATRIX),
+# nicht die frühere Handschrift hier: die alte Handschrift führte
+# "erosion_map"/"sedimentation_map" unter "water" - dort liefert
+# get_water_data() für diese beiden Schlüssel aber immer None, weil sie seit
+# dem Erosion-Generator-Umzug (2026-07-28) unter "erosion" liegen
+# (data_lod_manager.py Zeile ~307). Die Kategorie "erosion" fehlte deshalb in
+# collect_all_available_data() bislang komplett, obwohl data_lod_manager
+# unter get_erosion_data() längst eine passende Naht dafür hat - eine Welt
+# ohne Erosionsdaten wäre für eine "bildpunktgenau"-Rundreise unvollständig,
+# denn erosion_map/sedimentation_map/thermal_*-Karten verändern die
+# Geländeform (siehe get_terrain_data_combined()). Ergänzt als Teil dieser
+# Feldliste, nicht als separater Bugfix-Auftrag.
+WELT_DATEN_SCHLUESSEL = {
+    "terrain": ["heightmap", "slopemap", "shadowmap"],
+    "geology": ["rock_map", "hardness_map"],
+    "settlement": ["settlement_list", "landmark_list", "roadsite_list", "plot_map", "civ_map",
+                   "roads", "sea_roads", "plot_edges"],
+    "weather": ["wind_map", "temp_map", "precip_map", "humid_map"],
+    "erosion": ["erosion_map", "sedimentation_map", "thermal_erosion_map",
+                "thermal_deposition_map", "sediment_load_map", "water_depth_map",
+                "flow_velocity_map"],
+    "water": ["water_map", "flow_map", "flow_speed", "cross_section", "soil_moist_map",
+              "rock_map_updated", "evaporation_map", "ocean_outflow", "water_biomes_map"],
+    "biome": ["biome_map", "biome_map_super", "super_biome_mask"],
+}
+
+# Für die GUI-Vollständigkeitsanzeige (WorldCompletenessWidget) - bewusst
+# NICHT von welt_laden() als Pflichtfeld-Liste verwendet: diese Anzeige ist
+# eine Ampel für den Nutzer ("ist die Welt fertig generiert?"), keine
+# Garantie über den Dateiinhalt. welt_laden() prüft stattdessen gegen das,
+# was welt_backen() tatsächlich geschrieben UND deklariert hat (siehe
+# gui/utils/welt_format.py) - alles andere würde jede reale, nur teilweise
+# generierte Welt als "kaputt" melden.
+REQUIRED_WORLD_DATA = {
+    "terrain": ["heightmap", "slopemap", "shadowmap"],
+    "geology": ["rock_map", "hardness_map"],
+    "settlement": ["settlement_list", "civ_map"],
+    "weather": ["temp_map", "precip_map"],
+    "erosion": ["erosion_map", "sedimentation_map", "sediment_load_map"],
+    "water": ["water_map", "soil_moist_map", "water_biomes_map"],
+    "biome": ["biome_map"]
+}
+
+# Reihenfolge der Generatoren in Parameter-Summary und -Export - entspricht
+# der Pipeline-Reihenfolge, nicht der alphabetischen.
+GENERATOR_ORDER = ("terrain", "geology", "erosion", "weather", "water",
+                   "biome", "settlement")
+
+
+def collect_all_available_data(data_lod_manager) -> Dict[str, Dict[str, Any]]:
+    """
+    Funktionsweise: Sammelt alle verfügbaren Daten von allen Generatoren
+    Parameter: data_lod_manager (DataLODManager)
+    Return: Nested dict mit allen verfügbaren Daten, ein Eintrag pro
+        Kategorie aus WELT_DATEN_SCHLUESSEL (leeres dict, wenn eine Kategorie
+        noch keine Daten hat)
+    """
+    available_data = {kategorie: {} for kategorie in WELT_DATEN_SCHLUESSEL}
+
+    for kategorie, schluessel_liste in WELT_DATEN_SCHLUESSEL.items():
+        getter = getattr(data_lod_manager, f"get_{kategorie}_data", None)
+        if getter is None:
+            continue
+        for schluessel in schluessel_liste:
+            data = getter(schluessel)
+            if data is not None:
+                available_data[kategorie][schluessel] = data
+
+    return available_data
+
+
+def analyze_data_completeness(available_data: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Funktionsweise: Analysiert Vollständigkeit der verfügbaren Daten
+    Parameter: available_data (nested dict)
+    Return: Completeness-Status dict
+    """
+    completeness_status = {
+        "is_complete": True,
+        "generator_status": {},
+        "missing_data": {},
+        "completion_percentage": 0.0
+    }
+
+    total_required = 0
+    total_available = 0
+
+    for generator, required_keys in REQUIRED_WORLD_DATA.items():
+        available_keys = list(available_data.get(generator, {}).keys())
+        missing_keys = [key for key in required_keys if key not in available_keys]
+
+        generator_complete = len(missing_keys) == 0
+        completeness_status["generator_status"][generator] = generator_complete
+
+        if missing_keys:
+            completeness_status["missing_data"][generator] = missing_keys
+            completeness_status["is_complete"] = False
+
+        total_required += len(required_keys)
+        total_available += len(required_keys) - len(missing_keys)
+
+    completeness_status["completion_percentage"] = (total_available / total_required) * 100
+
+    return completeness_status
+
+
+def calculate_shannon_diversity(biome_map: np.ndarray) -> float:
+    """Shannon-Diversity Index für Biom-Verteilung"""
+    unique, counts = np.unique(biome_map, return_counts=True)
+    proportions = counts / counts.sum()
+    return -np.sum(proportions * np.log(proportions + 1e-10))
+
+
+def calculate_world_complexity_score(stats: Dict[str, Any]) -> float:
+    """
+    Funktionsweise: Berechnet World-Complexity Score basierend auf Statistiken
+    Parameter: stats (dict)
+    Return: Complexity Score (0-100)
+    """
+    complexity_score = 0.0
+
+    # Terrain Complexity (0-20 Punkte)
+    if "terrain" in stats:
+        elevation_std = stats["terrain"].get("elevation_std", 0)
+        complexity_score += min(20, elevation_std / 50 * 20)  # Normiert auf Std-Dev
+
+    # Biome Diversity (0-20 Punkte)
+    if "biomes" in stats:
+        biome_count = stats["biomes"].get("biome_count", 0)
+        diversity = stats["biomes"].get("biome_diversity", 0)
+        complexity_score += min(20, biome_count * 2 + diversity * 5)
+
+    # Hydrology Complexity (0-20 Punkte)
+    if "hydrology" in stats:
+        water_coverage = stats["hydrology"].get("water_coverage_pct", 0)
+        complexity_score += min(20, water_coverage / 50 * 20)
+
+    # Civilization Complexity (0-20 Punkte)
+    if "civilization" in stats:
+        settlement_count = stats["civilization"].get("settlement_count", 0)
+        civ_area = stats["civilization"].get("civilized_area_pct", 0)
+        complexity_score += min(20, settlement_count * 2 + civ_area / 50 * 10)
+
+    # Climate Complexity (0-20 Punkte)
+    if "climate" in stats:
+        temp_range = stats["climate"].get("temperature_range", (0, 0))
+        temp_variation = temp_range[1] - temp_range[0]
+        total_precip = stats["climate"].get("total_precipitation", 0)
+        complexity_score += min(20, temp_variation / 60 * 10 + min(total_precip / 1000, 1) * 10)
+
+    return min(100, complexity_score)
+
+
+def calculate_comprehensive_world_statistics(available_data: Dict[str, Dict[str, Any]],
+                                             memory_usage_mb: float = 0.0) -> Dict[str, Any]:
+    """
+    Funktionsweise: Berechnet umfassende Statistiken über die gesamte Welt
+    Parameter: available_data (nested dict), memory_usage_mb (Summe aus
+        data_lod_manager.get_memory_usage().values() - als Zahl statt als
+        Manager übergeben, damit diese Funktion ohne Qt-Objekt aufrufbar ist)
+    Return: Comprehensive statistics dict
+    """
+    stats = {
+        "terrain": {},
+        "geology": {},
+        "climate": {},
+        "hydrology": {},
+        "civilization": {},
+        "biomes": {},
+        "overall": {}
+    }
+
+    # Terrain Statistics
+    if "heightmap" in available_data["terrain"]:
+        heightmap = available_data["terrain"]["heightmap"]
+        stats["terrain"] = {
+            "elevation_range": (np.min(heightmap), np.max(heightmap)),
+            "elevation_mean": np.mean(heightmap),
+            "elevation_std": np.std(heightmap),
+            "map_size": heightmap.shape[0]
+        }
+
+    # Geology Statistics
+    if "rock_map" in available_data["geology"]:
+        rock_map = available_data["geology"]["rock_map"]
+        total_pixels = rock_map.shape[0] * rock_map.shape[1]
+
+        stats["geology"] = {
+            "sedimentary_pct": np.sum(rock_map[:, :, 0]) / (total_pixels * 255) * 100,
+            "igneous_pct": np.sum(rock_map[:, :, 1]) / (total_pixels * 255) * 100,
+            "metamorphic_pct": np.sum(rock_map[:, :, 2]) / (total_pixels * 255) * 100
+        }
+
+    # Climate Statistics
+    if "temp_map" in available_data["weather"] and "precip_map" in available_data["weather"]:
+        temp_map = available_data["weather"]["temp_map"]
+        precip_map = available_data["weather"]["precip_map"]
+
+        stats["climate"] = {
+            "temperature_range": (np.min(temp_map), np.max(temp_map)),
+            "temperature_mean": np.mean(temp_map),
+            "total_precipitation": np.sum(precip_map),
+            "precipitation_mean": np.mean(precip_map)
+        }
+
+    # Hydrology Statistics
+    if "water_map" in available_data["water"]:
+        water_map = available_data["water"]["water_map"]
+        total_pixels = water_map.shape[0] * water_map.shape[1]
+
+        stats["hydrology"] = {
+            "water_coverage_pct": np.sum(water_map > 0.01) / total_pixels * 100,
+            "avg_water_depth": np.mean(water_map[water_map > 0.01]),
+            "ocean_outflow": available_data["water"].get("ocean_outflow", 0)
+        }
+
+    # Civilization Statistics
+    if "civ_map" in available_data["settlement"]:
+        civ_map = available_data["settlement"]["civ_map"]
+        total_pixels = civ_map.shape[0] * civ_map.shape[1]
+
+        stats["civilization"] = {
+            "civilized_area_pct": np.sum(civ_map > 0.2) / total_pixels * 100,
+            "settlement_count": len(available_data["settlement"].get("settlement_list", [])),
+            "landmark_count": len(available_data["settlement"].get("landmark_list", [])),
+            "avg_civilization_influence": np.mean(civ_map[civ_map > 0])
+        }
+
+    # Biome Statistics
+    if "biome_map" in available_data["biome"]:
+        biome_map = available_data["biome"]["biome_map"]
+        unique_biomes, counts = np.unique(biome_map, return_counts=True)
+
+        stats["biomes"] = {
+            "biome_count": len(unique_biomes),
+            "biome_diversity": calculate_shannon_diversity(biome_map),
+            "dominant_biome": unique_biomes[np.argmax(counts)]
+        }
+
+    # Overall Statistics
+    stats["overall"] = {
+        "data_completeness": analyze_data_completeness(available_data)["completion_percentage"],
+        "memory_usage_mb": memory_usage_mb,
+        "generation_time": "Not tracked",  # Würde normalerweise getrackt werden
+        "world_complexity_score": calculate_world_complexity_score(stats)
+    }
+
+    return stats
+
+
+def export_single_map_png(map_data: np.ndarray, map_name: str, output_dir: str, dpi: int):
+    """Exportiert einzelne Map als PNG"""
+    import matplotlib.pyplot as plt
+
+    plt.figure(figsize=(12, 12))
+
+    if len(map_data.shape) == 3:  # RGB Map
+        plt.imshow(map_data)
+    else:  # 2D Map
+        plt.imshow(map_data, cmap='viridis')
+        plt.colorbar(label=map_name.replace('_', ' ').title())
+
+    plt.title(f"{map_name.replace('_', ' ').title()}")
+    plt.axis('off')
+
+    output_path = os.path.join(output_dir, f"{map_name}.png")
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0.1)
+    plt.close()
+
+
+def export_png_collection(available_data: Dict[str, Dict[str, Any]], options: dict,
+                          memory_usage_mb: float = 0.0) -> bool:
+    """
+    Funktionsweise: Exportiert umfassende PNG-Collection aller Maps
+    Parameter: available_data, options, memory_usage_mb (siehe
+        calculate_comprehensive_world_statistics())
+    Return: Success (bool)
+    """
+    import os as _os
+
+    export_dir = options.get("export_directory", ".")
+    dpi = options.get("dpi", 300)
+
+    try:
+        # Hauptverzeichnis erstellen
+        _os.makedirs(export_dir, exist_ok=True)
+
+        # Individual Maps pro Generator exportieren
+        for generator, maps in available_data.items():
+            if not maps:  # Skip empty generators
+                continue
+
+            generator_dir = _os.path.join(export_dir, generator)
+            _os.makedirs(generator_dir, exist_ok=True)
+
+            for map_name, map_data in maps.items():
+                if isinstance(map_data, np.ndarray):
+                    export_single_map_png(map_data, map_name, generator_dir, dpi)
+
+        # World Statistics als Text-File
+        stats = calculate_comprehensive_world_statistics(available_data, memory_usage_mb)
+        export_world_statistics_txt(stats, _os.path.join(export_dir, "world_statistics.txt"))
+
+        return True
+
+    except Exception as e:
+        logger.error(f"PNG export failed: {e}")
+        return False
+
+
+def _json_default(objekt):
+    """
+    default=-Handler für json.dump in export_complete_json() (und, darüber
+    wiederverwendet, in welt_backen()).
+
+    Ohne diesen Handler wirft json.dump TypeError auf allem, was keine
+    eingebaute JSON-Entsprechung hat - insbesondere den Location-Dataclass-
+    Instanzen in settlement_list/landmark_list/roadsite_list (siehe
+    core/settlement_generator.py). Fehler #1 vor Ticket #38: export_complete_json
+    konnte nie erfolgreich durchlaufen, sobald Siedlungsdaten vorlagen - blieb
+    unbemerkt, weil das world_data_complete-Gate den Aufruf ohnehin nie
+    freigab (siehe check_world_completeness()).
+    """
+    if isinstance(objekt, np.ndarray):
+        return {"data": objekt.tolist(), "shape": list(objekt.shape), "dtype": str(objekt.dtype)}
+    if isinstance(objekt, np.generic):
+        return objekt.item()
+    if dataclasses.is_dataclass(objekt) and not isinstance(objekt, type):
+        return dataclasses.asdict(objekt)
+    if isinstance(objekt, (set, frozenset)):
+        return sorted(objekt)
+    return str(objekt)
+
+
+def export_complete_json(available_data: Dict[str, Dict[str, Any]],
+                         all_parameters: Dict[str, Any], options: dict,
+                         memory_usage_mb: float = 0.0) -> bool:
+    """
+    Funktionsweise: Exportiert komplette Welt als JSON mit allen Daten
+    Parameter: available_data, all_parameters, options, memory_usage_mb
+        (siehe calculate_comprehensive_world_statistics())
+    Return: Success (bool)
+
+    Zwei Fehler von vor Ticket #38 sind hier behoben, weil erst dieses
+    Ticket den Pfad überhaupt zum Laufen brachte (siehe _json_default()-
+    Docstring für Fehler #1):
+    Fehler #2 - der alte `else: str(map_data)`-Zweig verwandelte z.B.
+    `ocean_outflow` (ein float) in einen JSON-String und machte damit eine
+    verlustfreie Rundreise unmöglich. Jetzt läuft alles außer np.ndarray
+    unverändert durch `default=_json_default`, das nur eingreift, wo json.dump
+    sonst scheitern würde.
+    """
+    import json
+
+    export_file = options.get("export_file", "complete_world.json")
+
+    try:
+        # JSON-kompatible Datenstruktur erstellen
+        export_data = {
+            "metadata": {
+                "export_format": "complete_world_json",
+                "export_timestamp": str(QDateTime.currentDateTime().toString()),
+                "map_generator_version": "1.0",
+                "data_completeness": analyze_data_completeness(available_data)
+            },
+            "parameters": all_parameters,
+            "world_data": {},
+            "statistics": calculate_comprehensive_world_statistics(available_data, memory_usage_mb)
+        }
+
+        # Alle Maps in JSON-taugliche Form bringen. np.ndarray braucht
+        # shape/dtype-Metadaten für eine verlustfreie Rekonstruktion (siehe
+        # gui/utils/welt_format.py); alles andere geht unverändert durch -
+        # _json_default() fängt ab, was json.dump sonst nicht kennt.
+        for generator, maps in available_data.items():
+            export_data["world_data"][generator] = {}
+            for map_name, map_data in maps.items():
+                if isinstance(map_data, np.ndarray):
+                    export_data["world_data"][generator][map_name] = {
+                        "data": map_data.tolist(),
+                        "shape": list(map_data.shape),
+                        "dtype": str(map_data.dtype)
+                    }
+                else:
+                    export_data["world_data"][generator][map_name] = map_data
+
+        # JSON schreiben
+        with open(export_file, 'w', encoding="utf-8") as f:
+            json.dump(export_data, f, indent=2, separators=(',', ': '), default=_json_default)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"JSON export failed: {e}")
+        return False
+
+
+def export_3d_world(available_data: Dict[str, Dict[str, Any]], options: dict) -> bool:
+    """
+    Funktionsweise: Exportiert 3D-Welt als OBJ mit Texturen
+    Parameter: available_data, options
+    Return: Success (bool)
+    """
+    export_file = options.get("export_file", "world_3d.obj")
+
+    try:
+        heightmap = available_data["terrain"].get("heightmap")
+        if heightmap is None:
+            raise ValueError("Heightmap required for 3D export")
+
+        # Vereinfachte OBJ-Export Implementation
+        with open(export_file, 'w') as f:
+            f.write("# Generated World 3D Model\n")
+            f.write("# Created by Map Generator\n\n")
+
+            # Vertices mit Höhen-Information
+            height, width = heightmap.shape
+            for y in range(height):
+                for x in range(width):
+                    z = heightmap[y, x]
+                    f.write(f"v {x} {z} {y}\n")
+
+            # Texture Coordinates (falls Biome-Map verfügbar)
+            if "biome_map" in available_data["biome"]:
+                for y in range(height):
+                    for x in range(width):
+                        u = x / (width - 1)
+                        v = y / (height - 1)
+                        f.write(f"vt {u} {v}\n")
+
+            # Faces (Triangles) für Terrain-Mesh
+            for y in range(height - 1):
+                for x in range(width - 1):
+                    # Indices (1-based für OBJ)
+                    v1 = y * width + x + 1
+                    v2 = y * width + (x + 1) + 1
+                    v3 = (y + 1) * width + x + 1
+                    v4 = (y + 1) * width + (x + 1) + 1
+
+                    # Zwei Triangles pro Quad
+                    f.write(f"f {v1} {v2} {v3}\n")
+                    f.write(f"f {v2} {v4} {v3}\n")
+
+        # Material-File für Texturen erstellen (falls Biome-Map vorhanden)
+        if "biome_map" in available_data["biome"]:
+            mtl_file = export_file.replace('.obj', '.mtl')
+            export_material_file(mtl_file)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"3D export failed: {e}")
+        return False
+
+
+def export_material_file(mtl_file: str):
+    """Erstellt Material-File für OBJ-Export"""
+    with open(mtl_file, 'w') as f:
+        f.write("# Material File for Generated World\n")
+        f.write("newmtl world_material\n")
+        f.write("Ka 0.2 0.2 0.2\n")  # Ambient
+        f.write("Kd 0.8 0.8 0.8\n")  # Diffuse
+        f.write("Ks 0.1 0.1 0.1\n")  # Specular
+        f.write("Ns 10.0\n")  # Shininess
+
+
+def export_world_statistics_txt(stats: Dict[str, Any], output_file: str):
+    """Exportiert World-Statistics als Text-File"""
+    with open(output_file, 'w') as f:
+        f.write("WORLD GENERATION STATISTICS\n")
+        f.write("=" * 50 + "\n\n")
+
+        for category, category_stats in stats.items():
+            if not category_stats:
+                continue
+
+            f.write(f"{category.upper()}\n")
+            f.write("-" * 20 + "\n")
+
+            for key, value in category_stats.items():
+                if isinstance(value, tuple):
+                    f.write(f"{key}: {value[0]:.2f} - {value[1]:.2f}\n")
+                elif isinstance(value, float):
+                    f.write(f"{key}: {value:.3f}\n")
+                else:
+                    f.write(f"{key}: {value}\n")
+
+            f.write("\n")
+
+
+def get_all_parameters(parameter_manager) -> Dict[str, Any]:
+    """
+    Funktionsweise: Sammelt die tatsächlich eingestellten Parameter aller
+    Generator-Tabs über den ParameterManager.
+    Parameter: parameter_manager (ParameterManager) - darf None sein
+    Return: dict generator -> parameter-dict (leeres dict pro Generator,
+        dessen Tab noch nicht registriert ist, oder wenn parameter_manager
+        None ist)
+    """
+    if not parameter_manager:
+        return {generator: {} for generator in GENERATOR_ORDER}
+
+    return {
+        generator: dict(parameter_manager.get_tab_parameters(generator) or {})
+        for generator in GENERATOR_ORDER
+    }
 
 
 class OverviewTab(BaseMapTab):
@@ -186,106 +719,21 @@ class OverviewTab(BaseMapTab):
             self.parameter_summary.update_all_parameters()
 
     def collect_all_available_data(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Funktionsweise: Sammelt alle verfügbaren Daten von allen Generatoren
-        Return: Nested dict mit allen verfügbaren Daten
-        """
-        available_data = {
-            "terrain": {},
-            "geology": {},
-            "settlement": {},
-            "weather": {},
-            "erosion": {},
-            "water": {},
-            "biome": {}
-        }
-
-        # Terrain Data
-        for key in ["heightmap", "slopemap", "shadowmap"]:
-            data = self.data_lod_manager.get_terrain_data(key)
-            if data is not None:
-                available_data["terrain"][key] = data
-
-        # Geology Data
-        for key in ["rock_map", "hardness_map"]:
-            data = self.data_lod_manager.get_geology_data(key)
-            if data is not None:
-                available_data["geology"][key] = data
-
-        # Settlement Data
-        for key in ["settlement_list", "landmark_list", "roadsite_list", "plot_map", "civ_map"]:
-            data = self.data_lod_manager.get_settlement_data(key)
-            if data is not None:
-                available_data["settlement"][key] = data
-
-        # Weather Data
-        for key in ["wind_map", "temp_map", "precip_map", "humid_map"]:
-            data = self.data_lod_manager.get_weather_data(key)
-            if data is not None:
-                available_data["weather"][key] = data
-
-        # Water Data
-        water_keys = ["water_map", "flow_map", "flow_speed", "cross_section", "soil_moist_map",
-                      "erosion_map", "sedimentation_map", "rock_map_updated", "evaporation_map",
-                      "ocean_outflow", "water_biomes_map"]
-        for key in water_keys:
-            data = self.data_lod_manager.get_water_data(key)
-            if data is not None:
-                available_data["water"][key] = data
-
-        # Biome Data
-        for key in ["biome_map", "biome_map_super", "super_biome_mask"]:
-            data = self.data_lod_manager.get_biome_data(key)
-            if data is not None:
-                available_data["biome"][key] = data
-
-        return available_data
+        """Dünner Wrapper - siehe Modulfunktion collect_all_available_data() oben."""
+        return collect_all_available_data(self.data_lod_manager)
 
     def analyze_data_completeness(self, available_data: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Funktionsweise: Analysiert Vollständigkeit der verfügbaren Daten
-        Parameter: available_data (nested dict)
-        Return: Completeness-Status dict
-        """
-        # Required Data für komplette Welt
-        required_data = {
-            "terrain": ["heightmap", "slopemap", "shadowmap"],
-            "geology": ["rock_map", "hardness_map"],
-            "settlement": ["settlement_list", "civ_map"],
-            "weather": ["temp_map", "precip_map"],
-            "erosion": ["erosion_map", "sedimentation_map", "sediment_load_map"],
-            "water": ["water_map", "soil_moist_map", "water_biomes_map"],
-            "biome": ["biome_map"]
-        }
+        """Dünner Wrapper - siehe Modulfunktion analyze_data_completeness() oben."""
+        return analyze_data_completeness(available_data)
 
-        completeness_status = {
-            "is_complete": True,
-            "generator_status": {},
-            "missing_data": {},
-            "completion_percentage": 0.0
-        }
-
-        total_required = 0
-        total_available = 0
-
-        for generator, required_keys in required_data.items():
-            available_keys = list(available_data[generator].keys())
-            missing_keys = [key for key in required_keys if key not in available_keys]
-
-            generator_complete = len(missing_keys) == 0
-            completeness_status["generator_status"][generator] = generator_complete
-
-            if missing_keys:
-                completeness_status["missing_data"][generator] = missing_keys
-                completeness_status["is_complete"] = False
-
-            total_required += len(required_keys)
-            total_available += len(required_keys) - len(missing_keys)
-
-        # Completion Percentage berechnen
-        completeness_status["completion_percentage"] = (total_available / total_required) * 100
-
-        return completeness_status
+    def _memory_usage_mb(self) -> float:
+        """Summe über data_lod_manager.get_memory_usage().values() - eigene
+        Methode, weil mehrere Wrapper unten sie brauchen."""
+        try:
+            return sum(self.data_lod_manager.get_memory_usage().values())
+        except Exception as e:
+            self.logger.debug(f"Speicherverbrauch nicht ermittelbar: {e}")
+            return 0.0
 
     def update_complete_world_statistics(self, available_data: Dict[str, Dict[str, Any]]):
         """
@@ -299,142 +747,16 @@ class OverviewTab(BaseMapTab):
         self.world_statistics.update_comprehensive_statistics(world_stats)
 
     def calculate_comprehensive_world_statistics(self, available_data: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Funktionsweise: Berechnet umfassende Statistiken über die gesamte Welt
-        Parameter: available_data (nested dict)
-        Return: Comprehensive statistics dict
-        """
-        stats = {
-            "terrain": {},
-            "geology": {},
-            "climate": {},
-            "hydrology": {},
-            "civilization": {},
-            "biomes": {},
-            "overall": {}
-        }
-
-        # Terrain Statistics
-        if "heightmap" in available_data["terrain"]:
-            heightmap = available_data["terrain"]["heightmap"]
-            stats["terrain"] = {
-                "elevation_range": (np.min(heightmap), np.max(heightmap)),
-                "elevation_mean": np.mean(heightmap),
-                "elevation_std": np.std(heightmap),
-                "map_size": heightmap.shape[0]
-            }
-
-        # Geology Statistics
-        if "rock_map" in available_data["geology"]:
-            rock_map = available_data["geology"]["rock_map"]
-            total_pixels = rock_map.shape[0] * rock_map.shape[1]
-
-            stats["geology"] = {
-                "sedimentary_pct": np.sum(rock_map[:, :, 0]) / (total_pixels * 255) * 100,
-                "igneous_pct": np.sum(rock_map[:, :, 1]) / (total_pixels * 255) * 100,
-                "metamorphic_pct": np.sum(rock_map[:, :, 2]) / (total_pixels * 255) * 100
-            }
-
-        # Climate Statistics
-        if "temp_map" in available_data["weather"] and "precip_map" in available_data["weather"]:
-            temp_map = available_data["weather"]["temp_map"]
-            precip_map = available_data["weather"]["precip_map"]
-
-            stats["climate"] = {
-                "temperature_range": (np.min(temp_map), np.max(temp_map)),
-                "temperature_mean": np.mean(temp_map),
-                "total_precipitation": np.sum(precip_map),
-                "precipitation_mean": np.mean(precip_map)
-            }
-
-        # Hydrology Statistics
-        if "water_map" in available_data["water"]:
-            water_map = available_data["water"]["water_map"]
-            total_pixels = water_map.shape[0] * water_map.shape[1]
-
-            stats["hydrology"] = {
-                "water_coverage_pct": np.sum(water_map > 0.01) / total_pixels * 100,
-                "avg_water_depth": np.mean(water_map[water_map > 0.01]),
-                "ocean_outflow": available_data["water"].get("ocean_outflow", 0)
-            }
-
-        # Civilization Statistics
-        if "civ_map" in available_data["settlement"]:
-            civ_map = available_data["settlement"]["civ_map"]
-            total_pixels = civ_map.shape[0] * civ_map.shape[1]
-
-            stats["civilization"] = {
-                "civilized_area_pct": np.sum(civ_map > 0.2) / total_pixels * 100,
-                "settlement_count": len(available_data["settlement"].get("settlement_list", [])),
-                "landmark_count": len(available_data["settlement"].get("landmark_list", [])),
-                "avg_civilization_influence": np.mean(civ_map[civ_map > 0])
-            }
-
-        # Biome Statistics
-        if "biome_map" in available_data["biome"]:
-            biome_map = available_data["biome"]["biome_map"]
-            unique_biomes, counts = np.unique(biome_map, return_counts=True)
-
-            stats["biomes"] = {
-                "biome_count": len(unique_biomes),
-                "biome_diversity": self.calculate_shannon_diversity(biome_map),
-                "dominant_biome": unique_biomes[np.argmax(counts)]
-            }
-
-        # Overall Statistics
-        stats["overall"] = {
-            "data_completeness": self.analyze_data_completeness(available_data)["completion_percentage"],
-            "memory_usage_mb": sum(self.data_lod_manager.get_memory_usage().values()),
-            "generation_time": "Not tracked",  # Würde normalerweise getrackt werden
-            "world_complexity_score": self.calculate_world_complexity_score(stats)
-        }
-
-        return stats
+        """Dünner Wrapper - siehe Modulfunktion calculate_comprehensive_world_statistics() oben."""
+        return calculate_comprehensive_world_statistics(available_data, self._memory_usage_mb())
 
     def calculate_shannon_diversity(self, biome_map: np.ndarray) -> float:
-        """Shannon-Diversity Index für Biom-Verteilung"""
-        unique, counts = np.unique(biome_map, return_counts=True)
-        proportions = counts / counts.sum()
-        return -np.sum(proportions * np.log(proportions + 1e-10))
+        """Dünner Wrapper - siehe Modulfunktion calculate_shannon_diversity() oben."""
+        return calculate_shannon_diversity(biome_map)
 
     def calculate_world_complexity_score(self, stats: Dict[str, Any]) -> float:
-        """
-        Funktionsweise: Berechnet World-Complexity Score basierend auf Statistiken
-        Parameter: stats (dict)
-        Return: Complexity Score (0-100)
-        """
-        complexity_score = 0.0
-
-        # Terrain Complexity (0-20 Punkte)
-        if "terrain" in stats:
-            elevation_std = stats["terrain"].get("elevation_std", 0)
-            complexity_score += min(20, elevation_std / 50 * 20)  # Normiert auf Std-Dev
-
-        # Biome Diversity (0-20 Punkte)
-        if "biomes" in stats:
-            biome_count = stats["biomes"].get("biome_count", 0)
-            diversity = stats["biomes"].get("biome_diversity", 0)
-            complexity_score += min(20, biome_count * 2 + diversity * 5)
-
-        # Hydrology Complexity (0-20 Punkte)
-        if "hydrology" in stats:
-            water_coverage = stats["hydrology"].get("water_coverage_pct", 0)
-            complexity_score += min(20, water_coverage / 50 * 20)
-
-        # Civilization Complexity (0-20 Punkte)
-        if "civilization" in stats:
-            settlement_count = stats["civilization"].get("settlement_count", 0)
-            civ_area = stats["civilization"].get("civilized_area_pct", 0)
-            complexity_score += min(20, settlement_count * 2 + civ_area / 50 * 10)
-
-        # Climate Complexity (0-20 Punkte)
-        if "climate" in stats:
-            temp_range = stats["climate"].get("temperature_range", (0, 0))
-            temp_variation = temp_range[1] - temp_range[0]
-            total_precip = stats["climate"].get("total_precipitation", 0)
-            complexity_score += min(20, temp_variation / 60 * 10 + min(total_precip / 1000, 1) * 10)
-
-        return min(100, complexity_score)
+        """Dünner Wrapper - siehe Modulfunktion calculate_world_complexity_score() oben."""
+        return calculate_world_complexity_score(stats)
 
     @pyqtSlot(str, dict)
     @pyqtSlot(str, str)
@@ -501,201 +823,29 @@ class OverviewTab(BaseMapTab):
             self.export_in_progress = False
 
     def export_png_collection(self, available_data: Dict[str, Dict[str, Any]], options: dict) -> bool:
-        """
-        Funktionsweise: Exportiert umfassende PNG-Collection aller Maps
-        Parameter: available_data, options
-        Return: Success (bool)
-        """
-        import os
-        from matplotlib import pyplot as plt
-
-        export_dir = options.get("export_directory", ".")
-        dpi = options.get("dpi", 300)
-
-        try:
-            # Hauptverzeichnis erstellen
-            os.makedirs(export_dir, exist_ok=True)
-
-            # Individual Maps pro Generator exportieren
-            for generator, maps in available_data.items():
-                if not maps:  # Skip empty generators
-                    continue
-
-                generator_dir = os.path.join(export_dir, generator)
-                os.makedirs(generator_dir, exist_ok=True)
-
-                for map_name, map_data in maps.items():
-                    if isinstance(map_data, np.ndarray):
-                        self.export_single_map_png(map_data, map_name, generator_dir, dpi)
-
-            # World Statistics als Text-File
-            stats = self.calculate_comprehensive_world_statistics(available_data)
-            self.export_world_statistics_txt(stats, os.path.join(export_dir, "world_statistics.txt"))
-
-            return True
-
-        except Exception as e:
-            self.logger.error(f"PNG export failed: {e}")
-            return False
+        """Dünner Wrapper - siehe Modulfunktion export_png_collection() oben."""
+        return export_png_collection(available_data, options, self._memory_usage_mb())
 
     def export_single_map_png(self, map_data: np.ndarray, map_name: str, output_dir: str, dpi: int):
-        """Exportiert einzelne Map als PNG"""
-        import matplotlib.pyplot as plt
-
-        plt.figure(figsize=(12, 12))
-
-        if len(map_data.shape) == 3:  # RGB Map
-            plt.imshow(map_data)
-        else:  # 2D Map
-            plt.imshow(map_data, cmap='viridis')
-            plt.colorbar(label=map_name.replace('_', ' ').title())
-
-        plt.title(f"{map_name.replace('_', ' ').title()}")
-        plt.axis('off')
-
-        output_path = os.path.join(output_dir, f"{map_name}.png")
-        plt.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0.1)
-        plt.close()
+        """Dünner Wrapper - siehe Modulfunktion export_single_map_png() oben."""
+        return export_single_map_png(map_data, map_name, output_dir, dpi)
 
     def export_complete_json(self, available_data: Dict[str, Dict[str, Any]],
                              all_parameters: Dict[str, Any], options: dict) -> bool:
-        """
-        Funktionsweise: Exportiert komplette Welt als JSON mit allen Daten
-        Parameter: available_data, all_parameters, options
-        Return: Success (bool)
-        """
-        import json
-
-        export_file = options.get("export_file", "complete_world.json")
-
-        try:
-            # JSON-kompatible Datenstruktur erstellen
-            export_data = {
-                "metadata": {
-                    "export_format": "complete_world_json",
-                    "export_timestamp": str(QDateTime.currentDateTime().toString()),
-                    "map_generator_version": "1.0",
-                    "data_completeness": self.analyze_data_completeness(available_data)
-                },
-                "parameters": all_parameters,
-                "world_data": {},
-                "statistics": self.calculate_comprehensive_world_statistics(available_data)
-            }
-
-            # Alle Maps zu Listen konvertieren für JSON
-            for generator, maps in available_data.items():
-                export_data["world_data"][generator] = {}
-                for map_name, map_data in maps.items():
-                    if isinstance(map_data, np.ndarray):
-                        export_data["world_data"][generator][map_name] = {
-                            "data": map_data.tolist(),
-                            "shape": map_data.shape,
-                            "dtype": str(map_data.dtype)
-                        }
-                    elif isinstance(map_data, list):
-                        export_data["world_data"][generator][map_name] = map_data
-                    else:
-                        export_data["world_data"][generator][map_name] = str(map_data)
-
-            # JSON schreiben
-            with open(export_file, 'w') as f:
-                json.dump(export_data, f, indent=2, separators=(',', ': '))
-
-            return True
-
-        except Exception as e:
-            self.logger.error(f"JSON export failed: {e}")
-            return False
+        """Dünner Wrapper - siehe Modulfunktion export_complete_json() oben."""
+        return export_complete_json(available_data, all_parameters, options, self._memory_usage_mb())
 
     def export_3d_world(self, available_data: Dict[str, Dict[str, Any]], options: dict) -> bool:
-        """
-        Funktionsweise: Exportiert 3D-Welt als OBJ mit Texturen
-        Parameter: available_data, options
-        Return: Success (bool)
-        """
-        export_file = options.get("export_file", "world_3d.obj")
-
-        try:
-            heightmap = available_data["terrain"].get("heightmap")
-            if heightmap is None:
-                raise ValueError("Heightmap required for 3D export")
-
-            # Vereinfachte OBJ-Export Implementation
-            with open(export_file, 'w') as f:
-                f.write("# Generated World 3D Model\n")
-                f.write("# Created by Map Generator\n\n")
-
-                # Vertices mit Höhen-Information
-                height, width = heightmap.shape
-                for y in range(height):
-                    for x in range(width):
-                        z = heightmap[y, x]
-                        f.write(f"v {x} {z} {y}\n")
-
-                # Texture Coordinates (falls Biome-Map verfügbar)
-                if "biome_map" in available_data["biome"]:
-                    for y in range(height):
-                        for x in range(width):
-                            u = x / (width - 1)
-                            v = y / (height - 1)
-                            f.write(f"vt {u} {v}\n")
-
-                # Faces (Triangles) für Terrain-Mesh
-                for y in range(height - 1):
-                    for x in range(width - 1):
-                        # Indices (1-based für OBJ)
-                        v1 = y * width + x + 1
-                        v2 = y * width + (x + 1) + 1
-                        v3 = (y + 1) * width + x + 1
-                        v4 = (y + 1) * width + (x + 1) + 1
-
-                        # Zwei Triangles pro Quad
-                        f.write(f"f {v1} {v2} {v3}\n")
-                        f.write(f"f {v2} {v4} {v3}\n")
-
-            # Material-File für Texturen erstellen (falls Biome-Map vorhanden)
-            if "biome_map" in available_data["biome"]:
-                mtl_file = export_file.replace('.obj', '.mtl')
-                self.export_material_file(mtl_file)
-
-            return True
-
-        except Exception as e:
-            self.logger.error(f"3D export failed: {e}")
-            return False
+        """Dünner Wrapper - siehe Modulfunktion export_3d_world() oben."""
+        return export_3d_world(available_data, options)
 
     def export_material_file(self, mtl_file: str):
-        """Erstellt Material-File für OBJ-Export"""
-        with open(mtl_file, 'w') as f:
-            f.write("# Material File for Generated World\n")
-            f.write("newmtl world_material\n")
-            f.write("Ka 0.2 0.2 0.2\n")  # Ambient
-            f.write("Kd 0.8 0.8 0.8\n")  # Diffuse
-            f.write("Ks 0.1 0.1 0.1\n")  # Specular
-            f.write("Ns 10.0\n")  # Shininess
+        """Dünner Wrapper - siehe Modulfunktion export_material_file() oben."""
+        return export_material_file(mtl_file)
 
     def export_world_statistics_txt(self, stats: Dict[str, Any], output_file: str):
-        """Exportiert World-Statistics als Text-File"""
-        with open(output_file, 'w') as f:
-            f.write("WORLD GENERATION STATISTICS\n")
-            f.write("=" * 50 + "\n\n")
-
-            for category, category_stats in stats.items():
-                if not category_stats:
-                    continue
-
-                f.write(f"{category.upper()}\n")
-                f.write("-" * 20 + "\n")
-
-                for key, value in category_stats.items():
-                    if isinstance(value, tuple):
-                        f.write(f"{key}: {value[0]:.2f} - {value[1]:.2f}\n")
-                    elif isinstance(value, float):
-                        f.write(f"{key}: {value:.3f}\n")
-                    else:
-                        f.write(f"{key}: {value}\n")
-
-                f.write("\n")
+        """Dünner Wrapper - siehe Modulfunktion export_world_statistics_txt() oben."""
+        return export_world_statistics_txt(stats, output_file)
 
 class WorldStatisticsWidget(QGroupBox):
     """
@@ -1079,32 +1229,9 @@ class ParameterSummaryWidget(QGroupBox):
 
         self.parameter_text.setPlainText("\n".join(lines))
 
-    # Reihenfolge der Generatoren in Summary und Export - entspricht der
-    # Pipeline-Reihenfolge, nicht der alphabetischen.
-    _GENERATOR_ORDER = ("terrain", "geology", "erosion", "weather", "water",
-                        "biome", "settlement")
-
     def get_all_parameters(self) -> Dict[str, Any]:
-        """
-        Funktionsweise: Sammelt die tatsächlich eingestellten Parameter aller
-        Generator-Tabs über den ParameterManager.
-        Return: dict generator -> parameter-dict (leeres dict pro Generator,
-            dessen Tab noch nicht registriert ist)
-
-        Bis 2026-07-27 gaben diese Methode und update_all_parameters()
-        hartkodierte Platzhalter zurück - der Parameter-Export schrieb dadurch
-        eine Datei mit sechs leeren Objekten, und die Summary zeigte
-        Parameter-Namen, die es teilweise gar nicht mehr gab (z.B.
-        `manning_coefficient`, seit dem Pipe-Modell-Umbau ohne Wirkung und
-        inzwischen ganz entfernt).
-        """
-        if not self.parameter_manager:
-            return {generator: {} for generator in self._GENERATOR_ORDER}
-
-        return {
-            generator: dict(self.parameter_manager.get_tab_parameters(generator) or {})
-            for generator in self._GENERATOR_ORDER
-        }
+        """Dünner Wrapper - siehe Modulfunktion get_all_parameters() oben."""
+        return get_all_parameters(self.parameter_manager)
 
     @pyqtSlot()
     def export_parameters(self):
