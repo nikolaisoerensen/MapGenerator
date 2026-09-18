@@ -171,7 +171,7 @@ darf sich aendern, ohne das Spiel zu brechen.
 
 | # | Feld | Typ / Einheit | Traeger heute | Status |
 |---|---|---|---|---|
-| 1 | Kontur der Stadtgrenze | Polygon je Siedlung: Liste von (x,y)-Punkten in Pixelkoordinaten des aktuellen LOD-Rasters | `settlement.city_boundary` liefert bisher nur `city_mask` (Rastermaske: (H,W) int, Siedlungs-ID pro Pixel, -1 = ausserhalb jeder Stadt) | **fehlt als Naht-Feld** — siehe 6.2 |
+| 1 | Kontur der Stadtgrenze | Polygon je Siedlung: Liste von (x,y)-Punkten in Pixelkoordinaten des aktuellen LOD-Rasters | `settlement.city_boundary` → `city_boundary_polygons` (Dict `location_id` → Liste von Punktlisten, je Punktliste ein Polygon-Stueck — eine Stadt kann in mehrere getrennte Flecken zerfallen, z.B. an einem Fluss). Daneben weiterhin `city_mask` (Rastermaske: (H,W) int, Siedlungs-ID pro Pixel, -1 = ausserhalb jeder Stadt) | geliefert (seit #72) |
 | 2 | Anschlusspunkte der Wege | Liste von (x,y)-Punkten je Siedlung: dort, wo eine Strecke aus `settlement.pathfinding` (`roads`/`sea_roads`) die Stadtgrenze schneidet | nirgends berechnet | **fehlt** — siehe 6.2 |
 | 3 | Stadtgroesse | int, Einheit "Anzahl Haeuser" (15–50, siehe §1) | `settlement.settlements` → `settlement_list[i].house_count` | geliefert |
 | 4 | Stadttyp | str, einer aus `"bergdorf" \| "marktstadt" \| "agrarstadt" \| "sonstige"` | `settlement.settlements` → `settlement_list[i].settlement_type` | geliefert |
@@ -186,22 +186,25 @@ erfunden.
 
 ### 6.2 Was fehlt, als eigene Tickets
 
-**#72 — Kontur als Polygon.** `settlement.city_boundary` muss zusaetzlich zu
-`city_mask` ein `city_boundary_polygons: Dict[int, List[(x,y)]]` liefern (ein
-Polygon je Siedlung, Schluessel = `location_id`). Der Baustein dafuer
-existiert bereits, nur an der falschen Stelle:
-`PlotPhysicsSystem._build_city_boundary_polygons()`
-(core/settlement_generator.py) macht per Marching-Squares genau das — Kontur
-von `city_mask == settlement_id` als Shapely-Polygon —, aber nur intern fuer
-das Grundstuecks-System, nicht als Ausgabe des Calculator-Knotens. #72 muss
-diese Extraktion (oder eine leichtgewichtigere eigene Kopie davon) in
-`_calc_city_boundary()` einhaengen.
+**#72 — Kontur als Polygon. Erledigt.** `settlement.city_boundary` liefert
+seit diesem Ticket zusaetzlich zu `city_mask` ein `city_boundary_polygons:
+Dict[location_id, List[List[(x,y)]]]`. Der Baustein dafuer existierte
+bereits, nur an der falschen Stelle:
+`PlotPhysicsSystem._build_city_boundary_polygons()` (core/settlement_generator.py)
+machte per Marching-Squares genau das — Kontur von `city_mask ==
+settlement_id` als Shapely-Polygon —, aber nur intern fuer das
+Grundstuecks-System, nicht als Ausgabe des Calculator-Knotens. Statt die
+Berechnung zu verdoppeln, wurde sie in eine geteilte freie Funktion
+`_extract_city_boundary_polygons()` gezogen, die jetzt sowohl
+`PlotPhysicsSystem` (Grundstuecksverteilung, braucht Shapely-Polygone) als
+auch `_calc_city_boundary()` (Naht-Ausgabe, braucht nur Punktlisten) aufrufen
+— ein Algorithmus, zwei Abnehmer.
 
-**#73 — Anschlusspunkte der Wege.** Sobald #72 die Polygon-Kontur liefert,
+**#73 — Anschlusspunkte der Wege.** Jetzt, wo #72 die Polygon-Kontur liefert,
 kann jede Strecke aus `roads`/`sea_roads` gegen das Polygon der jeweiligen
 Zielsiedlung geschnitten werden (der Punkt, an dem die Strecke die Kontur
-durchstoesst). Ohne #72 gibt es keine Kontur zum Schneiden — #73 ist deshalb
-"Blocked by #72".
+durchstoesst). Vorher gab es keine Kontur zum Schneiden — #73 war deshalb
+"Blocked by #72"; die Blockade ist jetzt aufgehoben, #73 selbst bleibt offen.
 
 ### 6.3 Was ausdruecklich NICHT zur Naht gehoert
 
@@ -227,7 +230,10 @@ einer Naht.
 
 `tests/smoke_test_siedlungsnaht_felder.py` faehrt die echte Pipeline bis
 `settlement.city_boundary`/`settlement.pathfinding` und zaehlt die sechs
-Felder nach: die vier gelieferten pruefen GRUEN, die zwei fehlenden schlagen
-ABSICHTLICH und NAMENTLICH fehl (kein Crash, sondern "dieses Feld fehlt noch,
-Ticket #72/#73") — solange, bis diese beiden Tickets geschlossen sind. Danach
-werden die zwei Platzhalter-Fehlschlaege durch echte Pruefungen ersetzt.
+Felder nach: seit #72 pruefen fuenf Felder GRUEN (die vier urspruenglichen
+plus die Kontur der Stadtgrenze, echt geprueft: Polygon vorhanden, mindestens
+drei Punkte, Koordinaten im Kartenbereich). Nur "Anschlusspunkte der Wege"
+schlaegt weiterhin ABSICHTLICH und NAMENTLICH fehl (kein Crash, sondern
+"dieses Feld fehlt noch, Ticket #73") — solange, bis auch dieses Ticket
+geschlossen ist. Danach wird der letzte Platzhalter-Fehlschlag durch eine
+echte Pruefung ersetzt.

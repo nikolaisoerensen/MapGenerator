@@ -7,18 +7,23 @@ von sechs Feldern, nicht "was gerade an internen Feldern existiert". Dieser
 Test prueft die Naht von der Abnehmer-Seite: er faehrt eine echte
 Pipeline-Ausgabe und zaehlt nach, ob genau diese sechs Felder da sind.
 
-VIER Felder gibt es heute schon (Stadtgroesse, Stadttyp, Rang, Kultur - alle
-vier stehen auf jedem core.settlement_generator.Location-Eintrag aus
-settlement.settlements/settlement_list) und pruefen entsprechend GRUEN.
+FUENF Felder gibt es heute schon und pruefen entsprechend GRUEN:
+Stadtgroesse, Stadttyp, Rang, Kultur (alle vier stehen auf jedem
+core.settlement_generator.Location-Eintrag aus
+settlement.settlements/settlement_list) sowie seit Ticket #72 die Kontur der
+Stadtgrenze (settlement.city_boundary -> city_boundary_polygons, ein
+Marching-Squares-Polygon je Siedlung).
 
-ZWEI Felder fehlen heute noch (Kontur der Stadtgrenze als Polygon,
-Anschlusspunkte der Wege an der Stadtgrenze) - darauf bauen die Folgetickets
-#72 und #73 auf. Dieser Test schlaegt fuer GENAU diese zwei Felder
-ABSICHTLICH und NAMENTLICH fehl - nicht als Crash, sondern als
-Platzhalter-Erwartung: "dieses Feld gibt es noch nicht, und der Test soll
-das laut sagen, bis #72/#73 es liefern." Ein rotes Ergebnis hier ist bis zum
-Schliessen von #72/#73 der ERWARTETE Zustand, keine Regression - siehe
-docs/SIEDLUNGEN_ENTWURF.md §6.4 und den Morgenbericht der Nacht 2026-09-18.
+EIN Feld fehlt heute noch (Anschlusspunkte der Wege an der Stadtgrenze) -
+darauf baut das Folgeticket #73 auf ("Blocked by #72", siehe
+docs/SIEDLUNGEN_ENTWURF.md §6.2 - erst seit #72 gibt es ueberhaupt eine
+Kontur, gegen die eine Strecke geschnitten werden koennte). Dieser Test
+schlaegt fuer GENAU dieses eine Feld ABSICHTLICH und NAMENTLICH fehl - nicht
+als Crash, sondern als Platzhalter-Erwartung: "dieses Feld gibt es noch
+nicht, und der Test soll das laut sagen, bis #73 es liefert." Ein rotes
+Ergebnis hier ist bis zum Schliessen von #73 der ERWARTETE Zustand, keine
+Regression - siehe docs/SIEDLUNGEN_ENTWURF.md §6.4 und den Morgenbericht der
+Nacht 2026-09-18.
 
 Aufruf:
     .venv/Scripts/python.exe tests/smoke_test_siedlungsnaht_felder.py
@@ -79,29 +84,37 @@ def _lauf():
         "settlement.settlements", "settlement_list", LOD)
     city_mask = manager.get_calculator_output(
         "settlement.city_boundary", "city_mask", LOD)
+    city_boundary_polygons = manager.get_calculator_output(
+        "settlement.city_boundary", "city_boundary_polygons", LOD)
     roads = manager.get_calculator_output(
         "settlement.pathfinding", "roads", LOD)
-    return settlement_list, city_mask, roads
+    return settlement_list, city_mask, city_boundary_polygons, roads
 
 
 # Die sechs Felder der Naht, docs/SIEDLUNGEN_ENTWURF.md §6.1, in derselben
 # Reihenfolge wie dort. `attribut=None` heisst: dieses Feld gibt es auf
 # Location (noch) nicht - das ist der beabsichtigt rote Teil dieses Tests.
+#
+# "Kontur der Stadtgrenze" (Feld 1) ist seit Ticket #72 kein Platzhalter
+# mehr: `attribut` traegt jetzt den echten Zugriffspfad
+# (settlement.city_boundary -> city_boundary_polygons, ein Dict
+# location_id -> Liste von Punktlisten, siehe _calc_city_boundary()). Weil
+# das kein Attribut auf Location ist wie die vier folgenden Felder, sondern
+# ein eigener Calculator-Output, bekommt es `quelle="city_boundary_polygons"`
+# und wird unten in main() ueber einen eigenen Zweig geprueft statt ueber
+# den generischen getattr(settlement, attribut)-Zweig.
 NAHT_FELDER = [
     dict(
         name="Kontur der Stadtgrenze",
-        attribut=None,
-        ticket="#72",
-        begruendung=(
-            "existiert nur als Rastermaske (settlement.city_boundary -> "
-            "city_mask), nicht als Polygon; die Polygon-Extraktion selbst "
-            "gibt es zwar schon (PlotPhysicsSystem._build_city_boundary_"
-            "polygons(), core/settlement_generator.py), aber NICHT als "
-            "Ausgabe des Calculator-Knotens settlement.city_boundary"),
+        attribut="city_boundary_polygons",
+        quelle="city_boundary_polygons",
+        ticket=None,
+        begruendung=None,
     ),
     dict(
         name="Anschlusspunkte der Wege",
         attribut=None,
+        quelle=None,
         ticket="#73",
         begruendung=(
             "weder settlement.pathfinding (roads/sea_roads) noch "
@@ -109,20 +122,22 @@ NAHT_FELDER = [
             "Stadtgrenze schneidet - roads ist nur eine Punktliste "
             "zwischen zwei Siedlungszentren"),
     ),
-    dict(name="Stadtgroesse", attribut="house_count", ticket=None, begruendung=None),
-    dict(name="Stadttyp", attribut="settlement_type", ticket=None, begruendung=None),
-    dict(name="Rang", attribut="rank", ticket=None, begruendung=None),
-    dict(name="Kultur", attribut="culture", ticket=None, begruendung=None),
+    dict(name="Stadtgroesse", attribut="house_count", quelle=None, ticket=None, begruendung=None),
+    dict(name="Stadttyp", attribut="settlement_type", quelle=None, ticket=None, begruendung=None),
+    dict(name="Rang", attribut="rank", quelle=None, ticket=None, begruendung=None),
+    dict(name="Kultur", attribut="culture", quelle=None, ticket=None, begruendung=None),
 ]
 
 
 def main():
     fehler = []
-    settlement_list, city_mask, roads = _lauf()
+    settlement_list, city_mask, city_boundary_polygons, roads = _lauf()
 
     print("Siedlungen in diesem Lauf: %d" % len(settlement_list))
     print("city_mask vorhanden: %s, Wege (roads) in diesem Lauf: %d"
           % (city_mask is not None, len(roads or [])))
+
+    kartengroesse = city_mask.shape[0] if city_mask is not None else SIZE
 
     if not settlement_list:
         fehler.append(
@@ -137,6 +152,7 @@ def main():
     for feld in NAHT_FELDER:
         name = feld["name"]
         attribut = feld["attribut"]
+        quelle = feld.get("quelle")
 
         if attribut is None:
             # ABSICHTLICH ROT: dieses Feld gibt es noch nicht, siehe Docstring.
@@ -147,6 +163,45 @@ def main():
                 "(docs/SIEDLUNGEN_ENTWURF.md §6.2). Das ist ein "
                 "beabsichtigter Platzhalter-Fehlschlag, keine Regression."
                 % (name, feld["begruendung"], feld["ticket"]))
+            continue
+
+        if quelle == "city_boundary_polygons":
+            # Eigener Zweig statt getattr(settlement, attribut): dieses Feld
+            # ist ein Calculator-Output (Dict location_id -> Liste von
+            # Punktlisten), kein Attribut auf Location. Echte Pruefung
+            # (Ticket #72): Polygon vorhanden, mindestens 3 Punkte,
+            # Koordinaten liegen im Kartenbereich.
+            fehlende_ids = []
+            ungueltige = []
+            for s in settlement_list:
+                polygone = (city_boundary_polygons or {}).get(s.location_id)
+                if not polygone or not any(len(p) >= 3 for p in polygone):
+                    fehlende_ids.append(s.location_id)
+                    continue
+                for punktliste in polygone:
+                    for (x, y) in punktliste:
+                        if not (0 <= x <= kartengroesse and 0 <= y <= kartengroesse):
+                            ungueltige.append(s.location_id)
+                            break
+            if fehlende_ids:
+                print("   ROT     %-28s -> bei %d/%d Siedlungen kein Polygon "
+                      "mit >=3 Punkten (IDs %s)"
+                      % (name, len(fehlende_ids), len(settlement_list), fehlende_ids))
+                fehler.append(
+                    "Naht-Feld '%s' hat bei %d von %d Siedlungen kein "
+                    "gueltiges Polygon (location_id %s)"
+                    % (name, len(fehlende_ids), len(settlement_list), fehlende_ids))
+            elif ungueltige:
+                print("   ROT     %-28s -> bei %s Koordinaten ausserhalb "
+                      "des Kartenbereichs [0, %d]" % (name, ungueltige, kartengroesse))
+                fehler.append(
+                    "Naht-Feld '%s' hat Koordinaten ausserhalb des "
+                    "Kartenbereichs (location_id %s)" % (name, ungueltige))
+            else:
+                beispiel_id = settlement_list[0].location_id
+                beispiel = city_boundary_polygons[beispiel_id][0]
+                print("   OK      %-28s -> z.B. %d Punkte fuer Siedlung %s "
+                      "(city_boundary_polygons)" % (name, len(beispiel), beispiel_id))
             continue
 
         # "" (leerer String) und 0 (bei house_count ausserhalb 15-50 nie
@@ -175,8 +230,8 @@ def main():
 
     print("")
     if fehler:
-        print("NICHT IN ORDNUNG - %d Befund(e) (2 davon SOLLEN heute rot "
-              "sein - Ticket #72/#73, siehe Docstring):" % len(fehler))
+        print("NICHT IN ORDNUNG - %d Befund(e) (1 davon SOLL heute rot "
+              "sein - Ticket #73, siehe Docstring):" % len(fehler))
         for f in fehler:
             print("   " + f)
         return 1

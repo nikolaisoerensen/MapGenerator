@@ -366,9 +366,13 @@ _CALCULATOR_SPECS = [
                    ["combined_suitability_map"]),
     CalculatorSpec("settlement.settlements", "settlement",
                    ["settlement.suitability", "terrain.redistribution"], ["settlement_list"]),
+    # city_boundary_polygons ergaenzt (Ticket #72): dieselbe Kontur, die
+    # PlotPhysicsSystem._build_city_boundary_polygons() intern schon immer
+    # aus city_mask baute, jetzt zusaetzlich als Ausgabe dieses Knotens -
+    # siehe docs/SIEDLUNGEN_ENTWURF.md §6.1/§6.2 (die Siedlungsnaht).
     CalculatorSpec("settlement.city_boundary", "settlement",
                    ["settlement.settlements", "terrain.redistribution", "erosion.slope"],
-                   ["city_mask", "city_cost_map"]),
+                   ["city_mask", "city_cost_map", "city_boundary_polygons"]),
     # settlement.city_blocks/settlement.landscape_voronoi (CityBlockSystem/
     # LandscapeVoronoiSystem) entfernt - vollständig durch settlement.plot_nodes
     # (PlotPhysicsSystem) ersetzt, siehe [[project-settlement-plot-physics-rebuild]].

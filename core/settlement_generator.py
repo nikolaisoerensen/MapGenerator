@@ -2260,6 +2260,55 @@ class CityBoundaryAnalyzer:
         return city_mask, city_cost_map
 
 
+def _extract_city_boundary_polygons(city_mask, settlement_ids, min_area=0.0):
+    """Baut je Siedlungs-ID ein oder mehrere Grenzpolygone aus city_mask per
+    Marching-Squares (eine Stadt kann in mehrere getrennte Flecken zerfallen,
+    z.B. an einem Fluss - daher eine LISTE von Polygonen je ID, nicht nur
+    eines). Reine Funktion ohne Instanzabhaengigkeiten, damit sie sich teilen
+    laesst: PlotPhysicsSystem._build_city_boundary_polygons() (Grundstuecks-
+    verteilung, braucht Shapely-Polygone) UND der Calculator-Knoten
+    settlement.city_boundary (_calc_city_boundary, Ticket #72, braucht nur
+    die Punktlisten fuer die Siedlungsnaht, siehe
+    docs/SIEDLUNGEN_ENTWURF.md §6.1/§6.2) rufen dieselbe Berechnung auf -
+    KEIN neuer Algorithmus, nur diese eine Stelle statt zwei Kopien.
+
+    Args:
+        city_mask: (H,W) int, Siedlungs-ID pro Pixel, -1 = ausserhalb jeder Stadt.
+        settlement_ids: Iterable von Siedlungs-IDs (settlement.location_id).
+        min_area: Polygone mit kleinerer Flaeche (Shapely .area, Pixel^2)
+            werden verworfen (Rauschen aus der Konturfindung).
+
+    Returns:
+        Dict[int, List[Polygon]] - Shapely-Polygon(e) je Siedlungs-ID, leere
+        Liste, wenn die Siedlung keine Pixel in city_mask hat.
+    """
+    city_polygons = {}
+    for sid in settlement_ids:
+        mask = (city_mask == sid).astype(np.float32)
+        if not np.any(mask):
+            city_polygons[sid] = []
+            continue
+
+        padded_mask = np.pad(mask, 1, mode="constant", constant_values=0.0)
+        contours = measure.find_contours(padded_mask, level=0.5)
+        polygons = []
+        for c in contours:
+            pts = np.column_stack([c[:, 1] - 1.0, c[:, 0] - 1.0])
+            if len(pts) < 4:
+                continue
+            poly = Polygon(pts)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty:
+                continue
+            candidates = list(poly.geoms) if isinstance(poly, MultiPolygon) else [poly]
+            for cand in candidates:
+                if cand.is_valid and not cand.is_empty and cand.area > min_area:
+                    polygons.append(cand)
+        city_polygons[sid] = polygons
+    return city_polygons
+
+
 # ==========================================================================
 # PlotPhysicsSystem: ersetzt LandscapeVoronoiSystem + CityBlockSystem (und,
 # weiter unten im File, das alte PlotNodeSystem) durch ein einziges,
@@ -2803,34 +2852,13 @@ class PlotPhysicsSystem:
 
     def _build_city_boundary_polygons(self):
         """Baut fuer JEDE Siedlung ein eigenes Polygon ihres Stadtgebiets
-        via Marching-Squares auf city_mask == settlement.location_id. 1:1
-        aus tools/biome_lab/scene.py's _build_city_boundary_polygons()."""
-        city_polygons = {}
-        for settlement in self.settlements:
-            sid = settlement.location_id
-            mask = (self.city_mask == sid).astype(np.float32)
-            if not np.any(mask):
-                city_polygons[sid] = []
-                continue
-
-            padded_mask = np.pad(mask, 1, mode="constant", constant_values=0.0)
-            contours = measure.find_contours(padded_mask, level=0.5)
-            polygons = []
-            for c in contours:
-                pts = np.column_stack([c[:, 1] - 1.0, c[:, 0] - 1.0])
-                if len(pts) < 4:
-                    continue
-                poly = Polygon(pts)
-                if not poly.is_valid:
-                    poly = poly.buffer(0)
-                if poly.is_empty:
-                    continue
-                candidates = list(poly.geoms) if isinstance(poly, MultiPolygon) else [poly]
-                for cand in candidates:
-                    if cand.is_valid and not cand.is_empty and cand.area > self.CITY_MIN_AREA:
-                        polygons.append(cand)
-            city_polygons[sid] = polygons
-        return city_polygons
+        via Marching-Squares auf city_mask == settlement.location_id.
+        Delegiert seit Ticket #72 an die geteilte Funktion
+        _extract_city_boundary_polygons() (siehe deren Docstring) - Verhalten
+        unveraendert, nur nicht mehr dupliziert, weil derselbe Algorithmus
+        jetzt auch der Calculator-Knoten settlement.city_boundary braucht."""
+        settlement_ids = [settlement.location_id for settlement in self.settlements]
+        return _extract_city_boundary_polygons(self.city_mask, settlement_ids, self.CITY_MIN_AREA)
 
     def _gen_step_2_plot_cores(self):
         """Sampled Seed-Punkte gleichmaessig ueber die gesamte Karte, mit
@@ -5143,10 +5171,21 @@ class SettlementGenerator:
     def _calc_city_boundary(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'settlement.city_boundary' (NEU) - terrain-cost-gewichtete
         Stadtgrenze je Settlement, Grundlage fuer die Trennung Stadt-Innen (spaeteres
-        Block-System) vs. Landschaft (LandscapeVoronoiSystem). Siehe _is_final_lod()."""
+        Block-System) vs. Landschaft (LandscapeVoronoiSystem). Siehe _is_final_lod().
+
+        Liefert seit Ticket #72 zusaetzlich city_boundary_polygons: dieselbe
+        Kontur-Extraktion (Marching-Squares auf city_mask), die
+        PlotPhysicsSystem._build_city_boundary_polygons() intern schon fuer
+        die Grundstuecksverteilung nutzte, jetzt auch als externe Ausgabe
+        dieses Knotens - das ist Feld 1 der Siedlungsnaht
+        (docs/SIEDLUNGEN_ENTWURF.md §6.1/§6.2). Format:
+        Dict[location_id, List[List[(x, y)]]] - je Siedlung eine Liste von
+        Punktlisten, weil eine Stadt in mehrere getrennte Flecken zerfallen
+        kann (z.B. beidseits eines Flusses)."""
         if not self._is_final_lod(calculator_id, lod_level):
             self.data_lod_manager.set_calculator_output(
-                calculator_id, lod_level, {"city_mask": None, "city_cost_map": None})
+                calculator_id, lod_level,
+                {"city_mask": None, "city_cost_map": None, "city_boundary_polygons": None})
             return
         self._update_progress("City Boundary", 20, "Computing city boundaries...")
         inputs = self._get_prepared_settlement_inputs(lod_level)
@@ -5158,8 +5197,27 @@ class SettlementGenerator:
         analyzer = CityBoundaryAnalyzer(self.terrain_factor_villages, self.city_reach_factor, self.shader_manager)
         city_mask, city_cost_map = analyzer.compute_city_boundaries(
             inputs["heightmap"], inputs["slopemap"], settlement_list, self._update_progress)
+
+        # Flaechenschwelle wie PlotPhysicsSystem.CITY_MIN_AREA, aber ohne
+        # eine vollstaendige PlotPhysicsSystem-Instanz zu bauen (die braucht
+        # Physik-Parameter, die an dieser Stelle der Pipeline noch gar nicht
+        # feststehen) - dieselbe map_size-Quadrat-Skalierung wie dort (siehe
+        # PlotPhysicsSystem.__init__, area_scale_factor), auf die
+        # unskalierte Klassen-Konstante angewandt.
+        map_size = city_mask.shape[0]
+        area_scale_factor = (map_size / 128.0) ** 2
+        min_area = PlotPhysicsSystem.CITY_MIN_AREA * area_scale_factor
+        settlement_ids = [s.location_id for s in settlement_list]
+        polygons_by_id = _extract_city_boundary_polygons(city_mask, settlement_ids, min_area)
+        city_boundary_polygons = {
+            sid: [list(poly.exterior.coords) for poly in polys]
+            for sid, polys in polygons_by_id.items()
+        }
+
         self.data_lod_manager.set_calculator_output(
-            calculator_id, lod_level, {"city_mask": city_mask, "city_cost_map": city_cost_map})
+            calculator_id, lod_level,
+            {"city_mask": city_mask, "city_cost_map": city_cost_map,
+             "city_boundary_polygons": city_boundary_polygons})
 
     def _calc_pathfinding(self, calculator_id: str, lod_level: int) -> None:
         """
