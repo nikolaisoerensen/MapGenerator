@@ -262,7 +262,7 @@ class RiverTab(BaseMapTab):
         gen.logger = self.logger
         gen._current_parameters = dict(self.get_current_parameters())
         try:
-            H, _m, _o, _g, _w = gen._weltfluesse(
+            H, _m, _o, _g, _w, _fg = gen._weltfluesse(
                 basis.copy(), felder, VORSCHAU_PX, seed)
         except Exception as fehler:                       # pragma: no cover
             self.logger.error("Flussvorschau fehlgeschlagen: %s", fehler)
