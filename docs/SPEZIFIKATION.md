@@ -33,50 +33,141 @@ müssen, wo Probleme aufschwingen.
 
 ---
 
-## 2. Zielkatalog: 20 Landschaften
+## 2. Zielkatalog: Neun Regionen
 
-Die Abnahme erfolgt gegen diese Liste. Jede Landschaft braucht Referenzbilder
-und ausgefüllte Zielwerte. **Noch offen — gemeinsam mit dem Nutzer zu füllen.**
+**Berichtigt 2026-09-17 (Ticket #43).** An dieser Stelle stand bis hierhin
+eine Liste von 20 frei erdachten Einzel-Landschaften (Sahara, Alpen, Amazonas,
+...) mit durchweg leeren Zielwerten — als Katalog aus der Zeit angelegt, bevor
+die Karte in Regionen eingeteilt wurde, und seither nie befuellt. Das
+Programm rechnet seit der Weltkarte nicht mehr mit frei waehlbaren
+Einzel-Landschaften, sondern mit **neun festen Regionen**, die zusammen einen
+Kontinent bilden (Voronoi-Aufteilung, siehe `core/terrain_weltkarte.py`).
+Jede Region ist an einem realen Bezugsort geeicht — das Oberziel "reale
+Landschaften nachbilden" (§1) gilt unveraendert, nur an neun festen statt an
+20 frei waehlbaren Stellen.
 
-| # | Landschaft | Breite | Basishöhe | Relief | Talform | Untergrund |
+Massgebliche Quelle fuer saemtliche Kennwerte in diesem Abschnitt ist
+`core/daten/regionen_welt.toml` (Stand 2026-09-17, seit Ticket #29 in einer
+eigenen Datei; zuvor standen dieselben Werte, unveraendert, als
+Modulkonstanten in `core/terrain_weltkarte.py`). Wer die Karte aendern will,
+aendert diese Datei; wer nur diese Spezifikation aendert, aendert am
+Programm nichts.
+
+| Region | Volk | Bezugsort | Charakter |
+|---|---|---|---|
+| Clonagh | Kelten | Cork | sanfte Wellen, breite Sohlen, dichtes Bachnetz |
+| Skerrheim | Wikinger | Bergen | ein Hauptfjord, Hochflaeche, steile Waende |
+| Morobora | Slawen | Wologda | flaches Hochland, weite Mulden, traege Maeander |
+| Estrande | Franken | La Rochelle | Kuestenebene mit Aestuar, Kliff im Norden |
+| Nevadin | Alemannen | Chur | Trogtaeler, scharfe Grate, grosse Massive |
+| Nebelrode | Sachsen | Bamberg | dichte dendritische Zertalung |
+| Samarcia | Andalusier | Madrid | Trockentaeler, weite Flaechen, wenig Netz |
+| Macchia | Italiener | Rom | Kuestengebirge direkt am Meer, kurze steile Laeufe |
+| Thalassia | Byzantiner | Iraklio | Archipel, viel Wasser, kleine steile Inseln |
+
+### 2.1 Gelände-Kennwerte
+
+Hoehen sind auf die Kontinentgroesse umgerechnet, nicht von den Vorbildern
+abgeschrieben — uebernommen ist das VERHAELTNIS von Relief zu Breite, nicht
+der Absolutwert realer Gebirge (Begruendung ausfuehrlich im Kopfkommentar
+von `core/daten/regionen_welt.toml`).
+
+| Region | hoehe_m | relief_m | formgroesse_m | rauheit | potenz | talform |
 |---|---|---|---|---|---|---|
-| 1 | Sahara Sandwüste (Erg) | 25° | 300 m | gering | – | Sand |
-| 2 | Sahara Felswüste (Hamada) | 27° | 500 m | mittel | V, kurz | Fels |
-| 3 | Atacama | 24° S | 2400 m | mittel | V | Fels/Schotter |
-| 4 | Alpen Hochtal (Wallis) | 46° | 700 m | 3000 m | U (glazial) | Fels/Moräne |
-| 5 | Dolomiten Kalkgebirge | 46° | 1000 m | 2000 m | V steil | Kalk |
-| 6 | Karst Guilin/Vietnam | 23° | 100 m | 300 m | Türme | Kalk |
-| 7 | Norwegen Skerrheim (Inland) | 62° | 200 m | 1500 m | U tief | Fels |
-| 8 | Schottisches Hochland | 57° | 200 m | 1200 m | U breit | Torf/Fels |
-| 9 | Island Vulkanhochland | 65° | 600 m | 1000 m | V jung | Basalt/Asche |
-| 10 | Amazonas Tiefland | 3° S | 100 m | gering | flach | Lehm |
-| 11 | Ostafrikanischer Graben | 2° | 1500 m | 2000 m | Bruchstufen | Basalt |
-| 12 | Serengeti Savanne | 3° S | 1500 m | gering | flach | Lehm |
-| 13 | Tibet Hochplateau | 32° | 4500 m | gering | flach | Schotter |
-| 14 | Anden Altiplano | 18° S | 3800 m | mittel | U weit | Asche |
-| 15 | Colorado Plateau/Canyon | 36° | 1800 m | 1500 m | Schluchten | Sandstein |
-| 16 | Badlands South Dakota | 44° | 800 m | 200 m | V dicht | Ton |
-| 17 | Westsibirische Moorebene | 60° | 100 m | gering | flach | Torf |
-| 18 | Kanadischer Schild | 50° | 300 m | gering | Seenwannen | Fels |
-| 19 | Toskanisches Hügelland | 43° | 300 m | 400 m | U sanft | Lehm/Mergel |
-| 20 | Neuseeland Südalpen | 44° S | 400 m | 2500 m | U | Fels |
+| Clonagh | 165.3 | 79.5 | 1600 | 0.52 | 1.0 | 1.3 |
+| Skerrheim | -52.0 | 484.9 | 1400 | 0.45 | 0.55 | 2.6 |
+| Morobora | 293.6 | 118.1 | 3000 | 0.42 | 0.9 | 2.0 |
+| Estrande | -80.9 | 147.1 | 2400 | 0.50 | 1.3 | 1.5 |
+| Nevadin | 1000.0 | 1050.0 | 3800 | 0.68 | 1.5 | 0.8 |
+| Nebelrode | 350.0 | 134.7 | 1400 | 0.62 | 1.0 | 1.3 |
+| Samarcia | 230.0 | 109.4 | 2600 | 0.48 | 1.4 | 1.1 |
+| Macchia | 0.6 | 312.9 | 1800 | 0.60 | 1.2 | 0.9 |
+| Thalassia | -67.8 | 403.6 | 1100 | 0.58 | 1.1 | 0.9 |
 
-### 2.1 Zielwerte je Landschaft — Schema
+`hoehe_m` ist die MITTLERE Hoehe der Region (negativ = ueberwiegend Wasser),
+nicht der tiefste Punkt. `talform` ist der Exponent der Querschnittskurve
+beim Taeleingraben (`profil = (1 - exp(-abstand/breite)) ** talform`): klein
+(0.8–1.1) V-Tal, mittel (1.3–1.5) dazwischen, gross (2.0–2.6) U-Tal — das
+ersetzt die frühere kategoriale Spalte "Talform: V / U / Schlucht / flach"
+aus dem alten §2.1 (unten, §2.4, bleibt nur noch fuer Groessen offen, die
+diese Datei nicht enthaelt).
 
-Für jede Landschaft auszufüllen. Absolute Zahlen sind zweitrangig, die
-**Verhältnisse zwischen den Landschaften** sind das Abnahmekriterium.
+> Nachgebessert 2026-08-06: die erste Eichung von Skerrheims `hoehe_m` (2
+> Seeds) stand auf 196.6 m; ueber 5 Seeds gemessen fehlten dabei 10
+> Prozentpunkte Wasseranteil. Der oben stehende Wert (-52.0 m) ist bereits
+> die korrigierte, aktuelle Fassung.
+
+**Was hier fehlt:** eine Untergrund-/Gesteinsspalte wie im alten §2 gibt es
+fuer die neun Regionen nicht. Gemessene Pro-Region-Konstanten dieser Art
+(`MESSWERTE_JE_REGION` u.ae.) liegen laut Commit `212dda0` (Ticket #29)
+weiterhin literal in `core/vektor_kueste.py` — bewusst ausserhalb des
+Zuschnitts von #29, und auch von diesem Ticket nicht bewegt.
+
+### 2.2 Wasser, Küste, Klima
+
+| Region | wasser_soll (%) | flaeche_soll | kuestenform | hang_trockenheit |
+|---|---|---|---|---|
+| Clonagh | 0.0 | 1.11 | 1.45 | 0.15 |
+| Skerrheim | 20.0 | 1.09 | 1.90 | 0.10 |
+| Morobora | 0.0 | 1.00 | 0.45 | 0.20 |
+| Estrande | 45.0 | 1.44 | 1.00 | 0.12 |
+| Nevadin | 0.0 | 1.21 | 1.00 | 0.30 |
+| Nebelrode | 0.0 | 1.09 | 0.45 | 0.20 |
+| Samarcia | 0.0 | 0.92 | 1.10 | 0.45 |
+| Macchia | 40.0 | 1.39 | 1.00 | 0.35 |
+| Thalassia | 65.0 | 1.22 | 1.00 | 0.30 |
+
+`flaeche_soll` ist ein EINGABE-Faktor fuer die Grundflaeche, nicht der
+Zielwert selbst — die eigentlichen Flaechenziele (Nullsummenspiel, eine
+Region gewinnt nur, was eine andere abgibt) stehen in
+`tests/smoke_test_regionen_fairness.py`. `hang_trockenheit` ist eine
+RELATIVE Modulation: ein voller Suedhang wird um diesen Anteil trockener als
+die Ebene, ein voller Nordhang um denselben Betrag feuchter.
+
+| Region | temp_mittel_m0 (°C, Meereshöhe) | temp_spanne (K) | niederschlag_mm (mm/Jahr) | Wind |
+|---|---|---|---|---|
+| Clonagh | 10.9 | 9.5 | 1200 | sh. §3.5 |
+| Skerrheim | 8.6 | 13.0 | 2250 | sh. §3.5 |
+| Morobora | 3.8 | 29.0 | 600 | sh. §3.5 |
+| Estrande | 13.6 | 14.0 | 780 | sh. §3.5 |
+| Nevadin | 12.8 | 18.5 | 850 | sh. §3.5 |
+| Nebelrode | 11.2 | 18.5 | 640 | sh. §3.5 |
+| Samarcia | 20.0 | 19.0 | 430 | sh. §3.5 |
+| Macchia | 16.9 | 17.5 | 800 | sh. §3.5 |
+| Thalassia | 19.7 | 14.0 | 480 | sh. §3.5 |
+
+`temp_mittel_m0`/`temp_spanne` sind KEINE gemessenen Kartenwerte, sondern
+gegen die Regionsmischung vorkompensierte Eingabewerte — ein als Region
+gefuehrtes Pixel traegt im Mittel fremdes Gewicht der Nachbarregionen und
+wird dadurch verduennt. Geeicht am 2026-08-07 (nach Einfuehrung von
+KLIMA_SCHAERFE, 3 Seeds, 7 Runden), so dass die GEMESSENEN Werte auf der
+Karte die Vorbildorte treffen; `tests/smoke_test_regionen_welt.py` prueft
+die gemessenen Werte gegen diese hier. `niederschlag_mm` ist dagegen direkt
+der Zielwert: das Wettersystem normiert das fertige Niederschlagsfeld
+unmittelbar darauf (`weather_generator._je_region_auf_mittel`). Fuer Wind
+gilt bereits die vollstaendige, auf die neun Regionen umgestellte
+Ziel/Stand-Tabelle in §3.5 — die dortigen Zielwerte sind bit-identisch mit
+`wind_mittel_ms` in `core/daten/regionen_welt.toml`.
+
+### 2.3 Bekannte Ziel/Ist-Abweichungen mit Datum
+
+| Region | Größe | Ziel | Ist | Datum | Erklärung |
+|---|---|---|---|---|---|
+| Morobora | Hangneigung (Regionsmittel) | 3.0 (Sollhang, reine Region) | 3.4 (Regionsmittel, ~33 % Fremdgewicht der Nachbarn) | 2026-08-06 | Bei Mischungs-Reinheit > 0.95 wird der Sollhang exakt getroffen. `relief_m` bleibt bewusst auf die REINE Region geeicht statt auf die Mischung — sonst würde das Relief auf rund 30 m gedrückt, eine Region ohne Charakter, nur damit eine Kennzahl stimmt, die etwas anderes misst. |
+| alle neun | Windgeschwindigkeit | s. §3.5 | s. §3.5 | 2026-08-04 (Seed) | Bereits vollständig migriert, eigene Tabelle mit allen neun Regionen. |
+| Gesamt | Wasserbilanz | < 1 % | +10.7 % | s. §3.6 | Ursache noch ungeklärt. |
+
+### 2.4 Noch offen — je Region zu messen
+
+Nicht Teil von `core/daten/regionen_welt.toml`, weil es keine Reglergrößen
+sind, sondern gemessene Ergebnisse der fertigen Karte. **Noch offen —
+gemeinsam mit dem Nutzer zu füllen**, sobald ein Messverfahren dafür steht.
 
 | Größe | Einheit | Anmerkung |
 |---|---|---|
-| Temperatur Sommer / Winter | °C auf Basishöhe | Monatsmittel, nicht Extremwerte |
-| Jahresschwankung | K | maritim klein, kontinental groß |
-| Windstärke | m/s | Jahresmittel und Böenanteil |
-| Niederschlag | relativ, Sahara = 1 | absolute mm folgen aus einem Faktor |
-| Saisonalität des Regens | Anteil in der feuchtesten Jahreshälfte | Monsun gegen gleichmäßig |
 | Anzahl Flüsse | pro 15×15 km | wieviele erreichen den Kartenrand |
 | Flussbreite | m, größter Lauf | folgt aus dem Durchfluss |
-| Talform | V / U / Schlucht / flach | hängt am Untergrund |
-| Biome | Flächenanteile in % | 3–5 dominante |
+| Biome | Flächenanteile in % | 3–5 dominante, je Region |
 
 ---
 
@@ -375,7 +466,8 @@ Bei jeder Änderung diese vier Fragen beantworten:
   unbemerkt.
 - Zielwerte für Wind (§3.5), Mäander und Flussbreite (§3.6), Biom-Zusammenhang
   (§3.7).
-- Die Referenzbilder und Zielwerte der 20 Landschaften (§2).
+- Die noch offenen Zielwerte je Region — Anzahl Flüsse, Flussbreite, Biome
+  (§2.4).
 
 ---
 

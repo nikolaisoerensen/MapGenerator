@@ -37,6 +37,9 @@ import numpy as np
 
 _WURZEL = r"C:\Lokale Dateien\Projects\Python\MapGenerator"
 sys.path.insert(0, _WURZEL)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+
+from seedfuehrung import WAECHTER_SEED
 
 # Die Qt-Anwendung MUSS modulweit gehalten werden - als lokale Variable raeumt
 # Python sie ab, waehrend der GL-Kontext noch lebt (Segfault ohne Meldung).
@@ -52,7 +55,10 @@ def _qt():
 
 
 SIZE = 512
-SEED = 20260804
+# Wächter-Seed, benannt und begründet in tests/seedfuehrung.py (Ticket #48) -
+# derselbe Wert wie zuvor (20260804), jetzt an einer Stelle statt lokal
+# kopiert.
+SEED = WAECHTER_SEED
 
 # Zielhangneigung (Median, Grad) je Region - das, was die Landschaft ausmacht.
 #
