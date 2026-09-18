@@ -10,16 +10,29 @@ Erosion-Schalter, fast alle Water-Schalter. Kein Test haette das gefunden - die
 vorhandenen pruefen je einen Generator, und die Anzeige liest Outputs, die
 dabei gar nicht entstehen.
 
-Geprueft wird je Output eine von vier Lagen:
+Geprueft wird je Output eine von fuenf Lagen:
 
-    FEHLT       der Knoten hat ihn nie geschrieben
-    NUR NULL    vorhanden, aber ueberall exakt 0 - die Anzeige bleibt leer
-    KONSTANT    vorhanden, aber ueberall derselbe Wert
-    OK          enthaelt echte Werte
+    FEHLT                    der Knoten hat ihn nie geschrieben
+    NUR NULL                 vorhanden, aber ueberall exakt 0 - die Anzeige bleibt leer
+    KONSTANT                 vorhanden, aber ueberall derselbe Wert
+    OK                       enthaelt echte Werte
+    NICHT-ENDLICH            enthaelt NaN/Inf
+    TEILWEISE, NaN dokumentiert   Sonderfall von NICHT-ENDLICH, siehe unten
 
 "NUR NULL" ist nicht automatisch ein Fehler: erosion.* liefert absichtlich
 Nullkarten, solange EROSION_AKTIV auf False steht (§8). Der Test nennt das
-deshalb getrennt.
+deshalb getrennt. Dasselbe gilt fuer einzelne, namentlich gelistete Outputs
+ausserhalb von erosion.* - siehe NUR_NULL_DOKUMENTIERT weiter unten
+(z.B. geology.intrusions/height_delta, Ticket #79: Stoerungen greifen laut
+eigener Vorgabe nicht in das Terrain ein, das Feld ist absichtlich immer
+Null).
+
+"NICHT-ENDLICH" (NaN/Inf im Feld) ist ebenfalls nicht automatisch ein Fehler:
+manche Felder benutzen NaN als dokumentiertes "nicht zutreffend"-Sentinel für
+die Anzeige, nicht als Rechenfehler. Solche Outputs stehen namentlich in
+NAN_SENTINEL_DOKUMENTIERT weiter unten und bekommen dafuer die eigene Lage
+"TEILWEISE, NaN dokumentiert" (z.B. terrain.redistribution/hinterland_height,
+Ticket #71).
 
 ZWEI DURCHGAENGE, das ist der zweite Zweck:
 
@@ -137,8 +150,49 @@ def _reihenfolge():
     return fertig
 
 
-def _lage(wert):
-    """FEHLT / NUR NULL / KONSTANT / OK / NICHT-ENDLICH."""
+# --- Dokumentierte Ausnahmen von der generischen Einstufung ---
+#
+# _lage() sieht nur den Zahlenwert, nicht seine Bedeutung. Die beiden
+# folgenden Outputs sehen darin aus wie ein Fehler, sind es laut ihrer
+# eigenen Code-Dokumentation aber nicht. Neue Eintraege hier nur mit
+# Verweis auf die Stelle, die das Verhalten begruendet - sonst wird aus der
+# Ausnahmeliste ein Freibrief.
+
+# terrain.redistribution/hinterland_height: core/terrain_weltkarte.py,
+# Funktion kuestengebiete() ("hoehen_karte = np.full(H.shape, np.nan, ...)",
+# Kommentar "DIE HOEHENFAKTOR-KARTE (2026-08-26)"): "Auf See und im alpinen
+# Sonderfall NaN, damit die Anzeige dort nichts einfaerbt." NaN ist hier ein
+# absichtliches "nicht zutreffend"-Sentinel fuer See- und Alpin-Sonderfall,
+# kein Rechenfehler (Ticket #71).
+NAN_SENTINEL_DOKUMENTIERT = {
+    "terrain.redistribution / hinterland_height",
+}
+
+# Ersatz-Lage fuer Felder aus NAN_SENTINEL_DOKUMENTIERT: statt des generischen
+# Fehlerbefunds "NICHT-ENDLICH" ein eigener, nicht-fehlerhafter Status.
+LAGE_NAN_DOKUMENTIERT = "TEILWEISE, NaN dokumentiert"
+
+# geology.intrusions/height_delta: core/geology_generator.py, Modul-Docstring
+# (Zeilen 15-25), TectonicDisplacementField-Docstring (Zeilen 599-601) und
+# _calc_intrusions() (Zeilen 1222-1239) - Nutzer-Vorgabe "Stoerungen greifen
+# nicht in das Terrain ein". Das Feld ist absichtlich immer exakt Null, kein
+# leerer/kaputter Output (Ticket #79). Analog zur bestehenden erosion.*-
+# Ausnahme (§8), nur als einzelner, ausserhalb von erosion.* liegender
+# Schluessel statt eines Praefixes.
+NUR_NULL_DOKUMENTIERT = {
+    "geology.intrusions / height_delta",
+}
+
+
+def _lage(wert, schluessel=None):
+    """FEHLT / NUR NULL / KONSTANT / OK / NICHT-ENDLICH.
+
+    `schluessel` ("Knoten / Output", wie in `ergebnis` verwendet) ist
+    optional und wird nur gebraucht, um NAN_SENTINEL_DOKUMENTIERT zu
+    erkennen: ein Feld, das dort namentlich gelistet ist, bekommt statt
+    "NICHT-ENDLICH" den eigenen, nicht-fehlerhaften Status
+    LAGE_NAN_DOKUMENTIERT (siehe Begruendung oben, Ticket #71).
+    """
     if wert is None:
         return "FEHLT"
     # Nicht jeder Output ist ein Feld - Settlement liefert z.B. Listen von
@@ -157,6 +211,8 @@ def _lage(wert):
     if not np.issubdtype(feld.dtype, np.number):
         return "OK"
     if not np.all(np.isfinite(feld)):
+        if schluessel in NAN_SENTINEL_DOKUMENTIERT:
+            return LAGE_NAN_DOKUMENTIERT
         return "NICHT-ENDLICH"
     if np.all(feld == 0):
         return "NUR NULL"
@@ -206,7 +262,8 @@ def _durchlauf(mit_gpu):
         for schluessel in spec.output_keys:
             wert = manager.get_calculator_output(knoten, schluessel, LOD)
             form = getattr(wert, "shape", None)
-            ergebnis["%s / %s" % (knoten, schluessel)] = (_lage(wert), form)
+            voller_schluessel = "%s / %s" % (knoten, schluessel)
+            ergebnis[voller_schluessel] = (_lage(wert, voller_schluessel), form)
     return ergebnis, abbrueche
 
 
@@ -236,7 +293,8 @@ def lauf():
 
     print()
     print("Zusammenfassung ueber %d Outputs:" % len(gpu))
-    for lage in ("OK", "NUR NULL", "KONSTANT", "FEHLT", "NICHT-ENDLICH"):
+    for lage in ("OK", "NUR NULL", "KONSTANT", "FEHLT", "NICHT-ENDLICH",
+                 LAGE_NAN_DOKUMENTIERT):
         if zaehler.get(lage):
             print("   %-14s %d" % (lage, zaehler[lage]))
 
@@ -248,10 +306,16 @@ def lauf():
                 print("   %s" % eintrag)
                 fehler.append("%s-Durchlauf: %s" % (name, eintrag))
 
-    # NUR NULL ist bei erosion.* erwartet, solange der Hauptschalter aus ist.
+    # NUR NULL ist bei erosion.* erwartet, solange der Hauptschalter aus ist,
+    # und bei den einzelnen, namentlich gelisteten Outputs aus
+    # NUR_NULL_DOKUMENTIERT (Ticket #79). NICHT-ENDLICH ist bei den Outputs
+    # aus NAN_SENTINEL_DOKUMENTIERT erwartet - die tragen bereits die eigene
+    # Lage LAGE_NAN_DOKUMENTIERT statt NICHT-ENDLICH (Ticket #71) und fallen
+    # deshalb hier ohnehin nicht unter "NICHT-ENDLICH".
     unerwartet_null = [s for s, (l, _) in gpu.items()
                        if l in ("FEHLT", "NICHT-ENDLICH")
-                       or (l == "NUR NULL" and not s.startswith("erosion."))]
+                       or (l == "NUR NULL" and not s.startswith("erosion.")
+                           and s not in NUR_NULL_DOKUMENTIERT)]
     if unerwartet_null:
         print()
         print("Outputs ohne Daten (Anzeige bleibt leer):")
