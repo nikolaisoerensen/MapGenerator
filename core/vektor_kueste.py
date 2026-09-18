@@ -2261,20 +2261,38 @@ class VektorKueste:
 
     # ------------------------------------------------------------------ #
 
-    def basis_hoehe(self, x, y):
-        """Bilinear abgetastete Basis-Heightmap an beliebigen Koordinaten."""
-        H = self.H_basis
-        h, w = H.shape
-        x = np.clip(np.asarray(x, dtype=np.float64), 0.0, w - 1.001)
-        y = np.clip(np.asarray(y, dtype=np.float64), 0.0, h - 1.001)
-        x0 = np.floor(x).astype(np.int32)
-        y0 = np.floor(y).astype(np.int32)
+    @staticmethod
+    def _bilinear(feld, x, y):
+        """
+        Ein Rasterfeld an BELIEBIGEN Koordinaten abtasten, nicht nur an
+        Pixelmitten.
+
+        Ausgelagert, weil ausser der Basis-Heightmap auch die Groessenbaender
+        so gelesen werden muessen (siehe `_hoehe_block()`). Wer ein Rasterfeld
+        stattdessen an der gerundeten Position liest, bekommt eine Treppe mit
+        der Stufenbreite eines Pixels - bei 384 px sind das 55 m, und die
+        Treppenkanten erscheinen als Naht im Gelaende.
+        """
+        h, w = feld.shape
+        # AUF w-1 KLEMMEN, nicht auf w-1.001. Mit dem alten Abzug landete
+        # eine Abfrage genau auf der letzten Spalte (x = w-1) bei x0 = w-2
+        # und Bruchteil 0.999 - die Randspalte wurde also aus ihrem NACHBARN
+        # interpoliert statt gelesen. Gemessen 2026-09-18: 734 Pixel am
+        # rechten und unteren Rand wichen dadurch um bis zu 2.7 mm ab.
+        x = np.clip(np.asarray(x, dtype=np.float64), 0.0, w - 1.0)
+        y = np.clip(np.asarray(y, dtype=np.float64), 0.0, h - 1.0)
+        x0 = np.minimum(np.floor(x).astype(np.int32), w - 1)
+        y0 = np.minimum(np.floor(y).astype(np.int32), h - 1)
         x1 = np.minimum(x0 + 1, w - 1)
         y1 = np.minimum(y0 + 1, h - 1)
         fx, fy = x - x0, y - y0
-        oben = H[y0, x0] * (1 - fx) + H[y0, x1] * fx
-        unten = H[y1, x0] * (1 - fx) + H[y1, x1] * fx
+        oben = feld[y0, x0] * (1 - fx) + feld[y0, x1] * fx
+        unten = feld[y1, x0] * (1 - fx) + feld[y1, x1] * fx
         return oben * (1 - fy) + unten * fy
+
+    def basis_hoehe(self, x, y):
+        """Bilinear abgetastete Basis-Heightmap an beliebigen Koordinaten."""
+        return self._bilinear(self.H_basis, x, y)
 
     def _auf_strecken(self, punkte, idx):
         """
@@ -2824,13 +2842,32 @@ class VektorKueste:
         untergrenze = np.where(ist_land, MINDEST_LANDHOEHE_M, -np.inf)
 
         if getattr(self, "baender", None) and BAND_EXPONENTEN:
-            xi = np.clip(np.round(x).astype(np.int32), 0, self.size - 1)
-            yi = np.clip(np.round(y).astype(np.int32), 0, self.size - 1)
+            # BILINEAR, nicht auf die naechste Pixelmitte gerundet.
+            #
+            # GEMESSEN 2026-09-17 (.scratch/skerrheim-kuesten-echtheit/
+            # issues/06-naht-dritte-ursache.md, "Ursache B"): mit
+            # `round(x), round(y)` bleibt die gelesene Pixelkoordinate
+            # laengs eines Schnitts lange gleich und springt dann um eins.
+            # Am Hals (236,118) wechselte yi genau dort von 118 auf 119,
+            # und der Rauschanteil fiel im selben Schritt von 6.40 m auf
+            # 5.27 m - das erklaerte den dort gemessenen Hoehensprung von
+            # 1.12 m praktisch vollstaendig, waehrend der Kuestenanteil
+            # glatt weiterlief. Die Basis-Heightmap wurde nebenan schon
+            # immer bilinear gelesen (`basis_hoehe`); die Baender waren die
+            # einzige Ausnahme.
+            #
+            # Fuer den Rasterweg (`als_raster`) aendert das NICHTS: dort
+            # liegen die Abfragepunkte auf Pixelmitten, und bilinear faellt
+            # dann exakt auf den Pixelwert zurueck. NACHGEMESSEN 2026-09-18,
+            # beide Varianten im selben Lauf gegeneinander: groesste
+            # Abweichung 0.0 m, 0 von 147456 Pixeln betroffen. Betroffen
+            # sind nur Abfragen ZWISCHEN den Pixeln - das 3D-Netz und die
+            # Schnitte der Nahtpruefung.
             rest = np.zeros(x.shape, dtype=np.float64)
             gegen = np.clip(1.0 - staerke, 0.0, 1.0)
 
             for band, p in zip(self.baender, BAND_EXPONENTEN):
-                rest += band[yi, xi] * np.power(gegen, p)
+                rest += self._bilinear(band, x, y) * np.power(gegen, p)
             return np.where(ist_land,
                             np.maximum(profil * staerke + rest, untergrenze),
                             basis)
