@@ -145,6 +145,19 @@ Nachsehen ein, eine falsche schliesst die Frage. Das gilt fuer die
 Erosionskette ebenso wie fuer eine laengst behobene GPU-Messung, die
 wochenlang als offen weitergefuehrt wurde.
 
+**Nachtrag 2026-09-18 (Ticket #30):** die oben beschriebene Paritaet wurde
+ein drittes Mal bestaetigt (`smoke_test_erosion_gpu_parity.py`, echte GPU,
+PASS, Einzelschritt-Abweichung 0). Zusaetzlich gemessen: bei 1024 px braucht
+ein vollstaendiger CPU-Lauf 8-10 Minuten gegen 8-16 Sekunden auf der GPU
+(Faktor 37-65x, Maschinenrauschen siehe Messwarnung oben). Der CPU-Pfad wird
+im Normalbetrieb nicht genommen - `MAX_CPU_RESOLUTION=256` in
+`core/erosion_generator.py` verweigert oberhalb dieser Groesse laut, sowohl
+wenn keine GPU vorhanden ist als auch im Normalfall mit GPU. Eine schmale
+Ausnahme (GPU vorhanden, aber ein Abschnitt schlaegt mitten im Lauf fehl)
+ist NICHT durch dieselbe Sperre abgedeckt; als offener Punkt
+`docs/OFFENE_PUNKTE.md` 10.7 vermerkt, absichtlich nicht in dieser Sitzung
+behoben. Volle Herleitung in `docs/SITZUNGSLOG.md`, Eintrag 2026-09-18.
+
 ## 4. Was neu grün ist
 
 Acht Testdateien sind seit dem 24.08. dazugekommen, alle grün:

@@ -10,6 +10,126 @@ gekennzeichnet; alles andere ist geprueft.
 
 ---
 
+# 2026-09-18 — Ticket #30: CPU-Erosion bei 1024 px gemessen, Faktor-385-Praemisse war schon behoben
+
+## Ausgangslage
+
+Ticket #30 verlangte zwei Messungen, bevor irgendetwas repariert wird: wie
+lange der CPU-Erosionspfad bei 1024 px gegen die GPU braucht, und ob er im
+Betrieb ueberhaupt genommen wird. Der im Ticket-Text zitierte "Faktor 385"
+war zu diesem Zeitpunkt schon ueberholt - der Github-Kommentar vom 17.09.2026
+auf Issue #30 (aus der vorangegangenen Nachtsitzung) hatte das bereits
+festgehalten: die Paritaet ist seit dem 27.08.2026 hergestellt (Eintrag
+"Erosion wieder eingeschaltet", unten), am 16.09.2026 mit echter GPU erneut
+bestaetigt. Erneut laufen lassen
+(`tests/smoke_test_erosion_gpu_parity.py`, echte GPU, kein Fallback)
+bestaetigt das ein drittes Mal: PASS, Einzelschritt-Abweichung 0.
+
+Die zwei tatsaechlich noch offenen Kriterien aus dem Ticket waren damit nur
+noch: Laufzeit messen, und klaeren, ob der CPU-Pfad im Betrieb je gebraucht
+wird.
+
+## Gemessen
+
+1024x1024, Terrain wie im bestehenden Paritaetstest gebaut (Gauss-verwischtes
+Rauschen, hier Relief 974 m), Produktions-Vorgaben (`max_steps=8000`,
+`convergence_threshold=1e-6`), zwei Wiederholungen wegen der bekannten
+Maschinenschwankung (Faktor 2-3, siehe `docs/TESTBERICHT.md`):
+
+| Lauf | GPU (vollstaendig bis Konvergenz) | CPU (Rate hochgerechnet) |
+|---|---|---|
+| 1 | 7,70 s, 750 Schritte, konvergiert, Bilanz -0,19 % | 0,64 s/Schritt (gemessen ueber 25 Schritte) x 750 = 497 s (8,3 min) |
+| 2 | 16,43 s, 750 Schritte, konvergiert, Bilanz -0,19 % | 0,81 s/Schritt (gemessen ueber 100 Schritte) x 750 = 607 s (10,1 min) |
+
+Die CPU-Rate wurde NICHT durch einen echten Lauf bis zur Konvergenz bei
+1024 px gemessen - laut dem Kommentar bei
+`HydraulicFieldSimulator.MAX_CPU_RESOLUTION` wuerde das "Stunden" dauern und
+haette das Nachtbudget gesprengt. Stattdessen: kurze, ungeklemmte Laeufe (25
+bzw. 100 Schritte, `StepProbe`-Technik wie im Paritaetstest) fuer die
+Sekunden/Schritt-Rate, hochgerechnet auf die Schrittzahl, die der echte
+GPU-Lauf bis zur Konvergenz brauchte. Hochrechnung auf die volle Obergrenze
+`max_steps=8000` (worst case, keine Konvergenz erreicht): 88-108 Minuten.
+
+**Ergebnis: Faktor 37-65x, CPU-Vollauf 8-10 Minuten fuer einen realen
+konvergenten Lauf gegen 8-16 Sekunden auf der GPU.** Das trifft die
+Groessenordnung aus dem Ticket-Beispiel ("6 Minuten gegen 25 Sekunden") -
+eindeutig der Fall "um Groessenordnungen langsamer".
+
+Messskript nicht eingecheckt (Wegwerfskript dieser Sitzung). Es hebt
+`HydraulicFieldSimulator.MAX_CPU_RESOLUTION` NUR zur Laufzeit im eigenen
+Skript an (256 auf 4096, in einem try/finally wieder zurueckgesetzt), um
+ueberhaupt einen CPU-Lauf bei 1024 px anstossen zu koennen - keine Aenderung
+an `core/erosion_generator.py`.
+
+## Wird der CPU-Pfad im Betrieb genommen?
+
+Nachverfolgt in `core/erosion_generator.py`:
+
+- **Normalfall (GPU vorhanden):** `ErosionSystemGenerator` bekommt den
+  `shader_manager` immer vom `GenerationOrchestrator`
+  (`managers/generation_orchestrator.py`, Zeile 1346). Ist `has_gpu_path()`
+  True, laeuft ausschliesslich die GPU. Die CPU-Schleife wird nicht
+  erreicht.
+- **Keine GPU ueberhaupt** (`has_gpu_path()` False, z.B. kein OpenGL 4.3):
+  `simulate()` verweigert bei Kartengroessen ueber `MAX_CPU_RESOLUTION`
+  (256 px) SOFORT mit einer lauten `ValueError` (Zeile 606-612). Bei der
+  Produktionsgroesse 1024 px wird die langsame CPU-Schleife also gar nicht
+  erreicht - die vorhandene Sperre wirkt wie vorgesehen.
+- **Ein neuer, schmaler Fund:** Ist eine GPU zwar vorhanden UND registriert
+  (`has_gpu_path()` True), schlaegt aber EIN Abschnitt mitten im Lauf fehl
+  oder reisst den 30-s-Timeout von `GPUWorker.submit()` (`_simulate_gpu()`
+  gibt dann `None` zurueck, mit `logger.warning(...)`), faellt `simulate()`
+  danach OHNE erneute Groessenpruefung in die CPU-Schleife (Zeile 619-624).
+  Bei 1024 px wuerde das den oben gemessenen 8-10-Minuten- bis
+  88-108-Minuten-Lauf ausloesen - geloggt, aber ohne dieselbe Sperre, die
+  fuer den "GPU fehlt ganz"-Fall bereits existiert. Ein seltener Pfad
+  (GPU-Treiberfehler, Abschnitts-Timeout), kein Alltagsfall, und keine
+  Paritaetsfrage (die Physik stimmt exakt ueberein) - aber der einzige
+  verbleibende Rueckfall, der nicht durch dieselbe Sperre wie die anderen
+  beiden Faelle abgefangen ist. Vermerkt in `docs/OFFENE_PUNKTE.md` 10.7,
+  NICHT in dieser Sitzung behoben (siehe unten, warum).
+
+## Entscheidung nach Ticket-Vorgabe
+
+Der Fall "um Groessenordnungen langsamer und im Normalbetrieb nicht genommen"
+trifft zu - mit der oben genannten Einschraenkung fuer den seltenen
+Abschnitts-Fehlschlag-Fall. Eine Aenderung an `core/erosion_generator.py`
+(dieselbe `MAX_CPU_RESOLUTION`-Pruefung auch im Fallback-Zweig von
+`simulate()` einziehen) waere die naheliegende Behebung, ist aber
+ausdruecklich NICHT Teil dieser Sitzung: die Nachtvorgabe fuer Ticket #30
+untersagt jede Aenderung an der Erosionsberechnung selbst ohne Ruecksprache
+mit dem Nutzer, unabhaengig davon, wie klein die Aenderung aussieht.
+`tests/smoke_test_erosion_gpu_parity.py` bleibt unveraendert - er ist
+bereits gruen und deckt bereits genau den Paritaetsfall, um den es in der
+urspruenglichen Ticket-Formulierung ging.
+
+## Ergebnis fuer Ticket #30
+
+- [x] Laufzeit CPU gegen GPU bei 1024 px gemessen (siehe Tabelle oben).
+- [x] Belegt: CPU-Pfad wird im Normalbetrieb (GPU vorhanden ODER GPU fehlt
+      ganz) nicht genommen; einzige Ausnahme ist ein seltener
+      GPU-Abschnitts-Fehlschlag mitten im Lauf.
+- [x] Paritaet besteht bereits (das war die eigentliche Ausgangsfrage, siehe
+      Ticket-Kommentar vom 17.09.2026), `smoke_test_erosion_gpu_parity.py`
+      erneut gruen (echte GPU, kein Fallback).
+- [ ] Der CPU-Pfad ist nicht zusaetzlich "laut stillgelegt" fuer den
+      schmalen Fallback-Fall - er verweigert bereits laut bei fehlender GPU
+      oberhalb 256 px, aber nicht in diesem einen Zweig. Als
+      `docs/OFFENE_PUNKTE.md` 10.7 vermerkt, keine Aenderung an der
+      Erosionsberechnung vorgenommen.
+
+## Lehre
+
+Dieselbe Lehre wie beim Eintrag vom 16.09.2026, aus einer anderen Richtung:
+ein Ticket, dessen Praemisse laengst korrigiert wurde, verlangt nicht
+automatisch keine Arbeit mehr - die Restpunkte, die im Github-Kommentar vom
+17.09. schon als "kleiner als gedacht" markiert waren, waren trotzdem echte,
+messbare Arbeit, und die Messung selbst hat einen neuen, kleinen echten Fund
+gebracht (10.7). Eine ueberholte Praemisse ist ein Grund, den Rahmen zu
+verkleinern - kein Grund, gar nicht erst nachzusehen.
+
+---
+
 # 2026-09-16 — Testbericht behauptete einen laengst behobenen Befund (Fund beim Abschluss-Testlauf)
 
 ## Befund
