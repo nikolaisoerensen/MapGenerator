@@ -24,6 +24,15 @@ Ausfall (Nutzer-Vorgabe "Stoerungen greifen nicht in das Terrain ein",
 siehe core/geology_generator.py Modul-Docstring Zeilen 15-25 und
 _calc_intrusions() Zeilen 1222-1239). Der Test nennt das deshalb getrennt.
 
+Ebenso settlement.pathfinding/sea_roads: eine leere Liste ist auf DIESER
+Testkarte (SIZE/KM/SEED oben) korrekt, kein Ausfall (Ticket #80). Ein
+Seeweg entsteht nur, wenn ein Kulturpaar KEINEN endlichen Landweg hat
+(calculate_road_network(), §4.4-Zweig). Nachgemessen: bei diesem Seed
+liegen alle 40 Siedlungen auf derselben, 5326 px grossen Hauptlandmasse
+(daneben nur neun Kleinstinseln mit 5-9 px, siedlungsfrei) - jedes der
+neun Kulturpaare findet also einen Landweg, 0 Seewege ist damit die
+richtige Zahl fuer diese Karte, nicht ein Zeichen fehlender Berechnung.
+
 ZWEI DURCHGAENGE, das ist der zweite Zweck:
 
     mit ShaderManager    der GPU-Pfad, wie die App ihn nimmt
@@ -252,13 +261,16 @@ def lauf():
                 fehler.append("%s-Durchlauf: %s" % (name, eintrag))
 
     # NUR NULL ist bei erosion.* erwartet, solange der Hauptschalter aus ist,
-    # und bei geology.intrusions/height_delta immer (Ticket #79: die
-    # Nullkarte ist dort Absicht, kein Ausfall).
-    ERWARTET_NULL = "geology.intrusions / height_delta"
+    # bei geology.intrusions/height_delta immer (Ticket #79: die Nullkarte
+    # ist dort Absicht, kein Ausfall), und bei settlement.pathfinding/
+    # sea_roads auf dieser Testkarte (Ticket #80: kein Kulturpaar braucht
+    # hier einen Seeweg, siehe Modul-Docstring oben).
+    ERWARTET_NULL = ("geology.intrusions / height_delta",
+                      "settlement.pathfinding / sea_roads")
     unerwartet_null = [s for s, (l, _) in gpu.items()
                        if l in ("FEHLT", "NICHT-ENDLICH")
                        or (l == "NUR NULL" and not s.startswith("erosion.")
-                           and s != ERWARTET_NULL)]
+                           and s not in ERWARTET_NULL)]
     if unerwartet_null:
         print()
         print("Outputs ohne Daten (Anzeige bleibt leer):")
