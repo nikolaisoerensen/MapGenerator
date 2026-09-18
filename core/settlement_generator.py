@@ -5498,8 +5498,10 @@ class SettlementGenerator:
             if raenge[i] in erlaubt:
                 continue
             if ort.settlement_type == "marktstadt":
-                # nur anheben, nie senken (siehe Docstring)
-                raenge[i] = erlaubt[-1] if RANG_ZAHL.get(raenge[i], 1) < RANG_ZAHL[erlaubt[0]] \
+                # nur anheben, nie senken (siehe Docstring) - auf den
+                # NIEDRIGSTEN erlaubten Rang (erlaubt[0]), nicht den hoechsten,
+                # sonst entstehen zwei "stadt" je Kultur (Ticket #84).
+                raenge[i] = erlaubt[0] if RANG_ZAHL.get(raenge[i], 1) < RANG_ZAHL[erlaubt[0]] \
                     else raenge[i]
                 if raenge[i] not in erlaubt:
                     raenge[i] = erlaubt[0]
