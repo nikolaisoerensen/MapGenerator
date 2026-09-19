@@ -171,3 +171,28 @@ fertige Reiterleiste durch, nicht nur die Importe.
 `layer_2d_3d_parity` prüft die Registrierung und die Farbtafel — also
 genau die Buchhaltung, die diesmal den Fehler fand. Ob das Bild danach
 richtig aussieht, prüft nach wie vor niemand außer dir.
+
+## 6. Seenfläche neu erhoben (Ticket #32)
+
+Die frühere Behauptung **"Seenfläche 0,0 %"** trifft nicht mehr zu.
+Neu gemessen mit `tests/smoke_test_seenflaeche_messung.py` bei 256/512/1024 px,
+je drei Seeds (20260804, 12345, 4242), alle neun Regionen einzeln:
+
+| px | Mittel See-Anteil an Landfläche |
+|---:|---:|
+| 256 | 4,15 % |
+| 512 | 2,61 % |
+| 1024 | 1,37 % |
+
+Spanne über alle 9 Messungen: 1,30 % bis 4,42 %, Mittel 2,71 %. Jede der
+neun Regionen hat in jeder Messung mindestens einen See — keine Region
+bleibt bei 0,0 %. Auffällig, aber nicht Teil der Abnahmekriterien: der
+Seenanteil sinkt mit steigender Auflösung (4,15 % → 1,37 %), vermutlich
+weil kleine Seen bei feinerem Raster in mehr, aber im Summenanteil
+kleinere Einzelbecken zerfallen — nicht weiter untersucht.
+
+Welche Änderung seither verantwortlich ist: der alte 0,0-%-Wert stammt aus
+der Zeit vor Seegliederung, Seegrad-Voronoi und Seewegen (siehe
+`docs/SITZUNGSLOG.md`, Block "See-Voronoi/Seegliederung") — die Messung war
+überholt, kein Fehler wurde behoben. Ob und wie nachgesteuert wird, ist laut
+Ticket #32 ein Folgeticket, hier nur die Ist-Erhebung.
