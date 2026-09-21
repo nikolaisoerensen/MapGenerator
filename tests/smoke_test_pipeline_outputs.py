@@ -10,19 +10,22 @@ Erosion-Schalter, fast alle Water-Schalter. Kein Test haette das gefunden - die
 vorhandenen pruefen je einen Generator, und die Anzeige liest Outputs, die
 dabei gar nicht entstehen.
 
-Geprueft wird je Output eine von vier Lagen:
+Geprueft wird je Output eine von fuenf Lagen:
 
-    FEHLT       der Knoten hat ihn nie geschrieben
-    NUR NULL    vorhanden, aber ueberall exakt 0 - die Anzeige bleibt leer
-    KONSTANT    vorhanden, aber ueberall derselbe Wert
-    OK          enthaelt echte Werte
+    FEHLT                        der Knoten hat ihn nie geschrieben
+    NUR NULL                     vorhanden, aber ueberall exakt 0 - die Anzeige bleibt leer
+    KONSTANT                     vorhanden, aber ueberall derselbe Wert
+    OK                           enthaelt echte Werte
+    NICHT-ENDLICH                enthaelt NaN/Inf
+    TEILWEISE, NaN dokumentiert  Sonderfall von NICHT-ENDLICH, siehe unten
 
 "NUR NULL" ist nicht automatisch ein Fehler: erosion.* liefert absichtlich
 Nullkarten, solange EROSION_AKTIV auf False steht (§8). Dasselbe gilt fuer
 geology.intrusions/height_delta - die Nullkarte ist dort Absicht, nicht
 Ausfall (Nutzer-Vorgabe "Stoerungen greifen nicht in das Terrain ein",
 siehe core/geology_generator.py Modul-Docstring Zeilen 15-25 und
-_calc_intrusions() Zeilen 1222-1239). Der Test nennt das deshalb getrennt.
+_calc_intrusions() Zeilen 1222-1239). Der Test nennt das deshalb getrennt
+(Ticket #79).
 
 Ebenso settlement.pathfinding/sea_roads: eine leere Liste ist auf DIESER
 Testkarte (SIZE/KM/SEED oben) korrekt, kein Ausfall (Ticket #80). Ein
@@ -32,6 +35,23 @@ liegen alle 40 Siedlungen auf derselben, 5326 px grossen Hauptlandmasse
 (daneben nur neun Kleinstinseln mit 5-9 px, siedlungsfrei) - jedes der
 neun Kulturpaare findet also einen Landweg, 0 Seewege ist damit die
 richtige Zahl fuer diese Karte, nicht ein Zeichen fehlender Berechnung.
+
+"NICHT-ENDLICH" (NaN/Inf im Feld) ist ebenfalls nicht automatisch ein
+Fehler: manche Felder benutzen NaN als dokumentiertes "nicht zutreffend"-
+Sentinel fuer die Anzeige, kein Rechenfehler. terrain.redistribution/
+hinterland_height ist so ein Fall - core/terrain_weltkarte.py,
+kuestengebiete(), belegt die Hoehenkarte mit
+"np.full(H.shape, np.nan, ...)" und ueberschreibt nur Landflaechen mit
+zugeordnetem Kuestengebiet; auf See und im alpinen Sonderfall bleibt NaN
+stehen ("DIE HOEHENFAKTOR-KARTE (2026-08-26)": "Auf See und im alpinen
+Sonderfall NaN, damit die Anzeige dort nichts einfaerbt."). Ein Output, der
+namentlich in NAN_SENTINEL_DOKUMENTIERT steht, bekommt deshalb statt
+"NICHT-ENDLICH" die eigene, nicht-fehlerhafte Lage
+"TEILWEISE, NaN dokumentiert" (Ticket #71). Auf dieser Karte wird der
+Output derzeit noch nicht erzeugt (hinterland_height kommt erst mit
+Ticket #64 in den CALCULATOR_GRAPH), die Ausnahme greift also aktuell
+nicht sichtbar - sie ist trotzdem hier eingetragen, damit der Fehlalarm
+nicht erneut auftritt, sobald #64 gemerged ist.
 
 ZWEI DURCHGAENGE, das ist der zweite Zweck:
 
@@ -149,8 +169,33 @@ def _reihenfolge():
     return fertig
 
 
-def _lage(wert):
-    """FEHLT / NUR NULL / KONSTANT / OK / NICHT-ENDLICH."""
+# terrain.redistribution/hinterland_height: core/terrain_weltkarte.py,
+# Funktion kuestengebiete() ("hoehen_karte = np.full(H.shape, np.nan, ...)",
+# Kommentar "DIE HOEHENFAKTOR-KARTE (2026-08-26)"): "Auf See und im alpinen
+# Sonderfall NaN, damit die Anzeige dort nichts einfaerbt." NaN ist hier ein
+# absichtliches "nicht zutreffend"-Sentinel fuer See- und Alpin-Sonderfall,
+# kein Rechenfehler (Ticket #71). Neue Eintraege hier nur mit Verweis auf
+# die Stelle, die das Verhalten begruendet - sonst wird aus der
+# Ausnahmeliste ein Freibrief.
+NAN_SENTINEL_DOKUMENTIERT = (
+    "terrain.redistribution / hinterland_height",
+)
+
+# Ersatz-Lage fuer Felder aus NAN_SENTINEL_DOKUMENTIERT: statt des
+# generischen Fehlerbefunds "NICHT-ENDLICH" ein eigener, nicht-fehlerhafter
+# Status.
+LAGE_NAN_DOKUMENTIERT = "TEILWEISE, NaN dokumentiert"
+
+
+def _lage(wert, schluessel=None):
+    """FEHLT / NUR NULL / KONSTANT / OK / NICHT-ENDLICH.
+
+    `schluessel` ("Knoten / Output", wie in `ergebnis` verwendet) ist
+    optional und wird nur gebraucht, um NAN_SENTINEL_DOKUMENTIERT zu
+    erkennen: ein Feld, das dort namentlich gelistet ist, bekommt statt
+    "NICHT-ENDLICH" den eigenen, nicht-fehlerhaften Status
+    LAGE_NAN_DOKUMENTIERT (Ticket #71).
+    """
     if wert is None:
         return "FEHLT"
     # Nicht jeder Output ist ein Feld - Settlement liefert z.B. Listen von
@@ -169,6 +214,8 @@ def _lage(wert):
     if not np.issubdtype(feld.dtype, np.number):
         return "OK"
     if not np.all(np.isfinite(feld)):
+        if schluessel in NAN_SENTINEL_DOKUMENTIERT:
+            return LAGE_NAN_DOKUMENTIERT
         return "NICHT-ENDLICH"
     if np.all(feld == 0):
         return "NUR NULL"
@@ -218,7 +265,8 @@ def _durchlauf(mit_gpu):
         for schluessel in spec.output_keys:
             wert = manager.get_calculator_output(knoten, schluessel, LOD)
             form = getattr(wert, "shape", None)
-            ergebnis["%s / %s" % (knoten, schluessel)] = (_lage(wert), form)
+            voller_schluessel = "%s / %s" % (knoten, schluessel)
+            ergebnis[voller_schluessel] = (_lage(wert, voller_schluessel), form)
     return ergebnis, abbrueche
 
 
@@ -248,7 +296,8 @@ def lauf():
 
     print()
     print("Zusammenfassung ueber %d Outputs:" % len(gpu))
-    for lage in ("OK", "NUR NULL", "KONSTANT", "FEHLT", "NICHT-ENDLICH"):
+    for lage in ("OK", "NUR NULL", "KONSTANT", "FEHLT", "NICHT-ENDLICH",
+                 LAGE_NAN_DOKUMENTIERT):
         if zaehler.get(lage):
             print("   %-14s %d" % (lage, zaehler[lage]))
 
@@ -267,6 +316,10 @@ def lauf():
     # hier einen Seeweg, siehe Modul-Docstring oben).
     ERWARTET_NULL = ("geology.intrusions / height_delta",
                       "settlement.pathfinding / sea_roads")
+    # NICHT-ENDLICH bleibt hier ein Fehlerbefund - Outputs aus
+    # NAN_SENTINEL_DOKUMENTIERT tragen wegen _lage() bereits die eigene Lage
+    # LAGE_NAN_DOKUMENTIERT statt "NICHT-ENDLICH" (Ticket #71) und fallen
+    # deshalb gar nicht erst unter diese Bedingung.
     unerwartet_null = [s for s, (l, _) in gpu.items()
                        if l in ("FEHLT", "NICHT-ENDLICH")
                        or (l == "NUR NULL" and not s.startswith("erosion.")
