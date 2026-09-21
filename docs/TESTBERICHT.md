@@ -266,3 +266,79 @@ Betroffene/neue Tests: `smoke_test_erosion_gpu_parity.py` (unverändert grün),
 `smoke_test_erosion_field.py` (ein Test ergänzt, Rest unverändert grün außer
 dem bereits bekannten, hier nicht behandelten `colour_ranges_fit_the_data`,
 siehe Abschnitt 3).
+## 8. Sinuosität erstmals gemessen (Ticket #33)
+
+Die Kennzahl aus `docs/SPEZIFIKATION.md` §3.6 ("Mäander (Sinuosität der
+Hauptläufe) | > 1,2 | nicht gemessen") ist jetzt gemessen. Neue Messfunktion
+in `core/fluss_sinuositaet.py` (`sinuositaet_pfad`, `fluss_segmente`,
+`sinuositaet_je_fluss`), TDD-getestet in
+`tests/smoke_test_sinuositaet.py` (6/6 grün: gerader Lauf = 1,0, Sägezahn =
+√2 = 1,414214, Handbaum-Segmentierung, echte 128px-Karte ohne Absturz).
+
+Definition: Lauflänge des Spannbaum-Astes geteilt durch die Luftlinie
+zwischen seinen Enden, gemessen an den Knoten des Flussnetzes aus
+`core/terrain_weltfluesse.flussnetz()` (der aktiven, regionsbewussten
+Weltkarten-Pipeline — nicht am lokalen, standardmäßig abgeschalteten Netz in
+`core/terrain_river_network.py`). Ein "Fluss" ist eine maximale Kette
+gleicher Strahler-Ordnung im Baum.
+
+Ist-Erhebung: 512 px und 1024 px, je drei Seeds (20260804, 314159,
+20260921), 9054 Fluss-Segmente insgesamt.
+
+**Nach Flussordnung** (Bäche mäandern anders als große Ströme — bestätigt):
+
+| Ordnung | n | Median | Mittel | Max |
+|---:|---:|---:|---:|---:|
+| 1 (Quellbach) | 8778 | 1,000 | 1,076 | 6,321 |
+| 2 | 1454 | 1,062 | 1,241 | 4,991 |
+| 3 | 333 | 1,199 | 1,407 | 6,888 |
+| 4 | 70 | 1,458 | 1,818 | 6,951 |
+| 5 | 19 | 1,817 | 1,987 | 3,904 |
+| 6 | 2 | 2,076 | 2,076 | 2,163 |
+
+Die Sinuosität steigt klar und durchgehend mit der Flussordnung — kleine
+Bäche laufen im Spannbaum fast gerade (Median 1,0), große Ströme (Ordnung
+4-6) liegen im Mittel klar über der Mäander-Schwelle 1,2 aus der
+Spezifikation (1,82 bis 2,08).
+
+**Nach Region — Flachland gegen Gebirge:** hier gilt die Vorwarnung aus
+`tests/smoke_test_sinuositaet.py`-Auswertung selbst: 80 % aller Flüsse sind
+Ordnung 1 und fast schnurgerade, darum ist der Median je Region bei allen
+neun Regionen 1,000 und sagt nichts aus. Aussagekräftig ist das Mittel ab
+Ordnung 2, gegen den tatsächlich am erzeugten Gelände gemessenen Median-Hang
+(nicht die statischen `relief_m`-Reglerwerte — echtes Gelände nach allen
+Formungspässen):
+
+| Region | Hang (Grad, gemessen) | Mittel-Sinuosität ab Ordnung 2 |
+|---|---:|---:|
+| Estrande | 3,82 | 1,345 |
+| Morobora | 4,10 | 1,231 |
+| Clonagh | 4,73 | 1,321 |
+| Thalassia | 4,87 | 1,265 |
+| Samarcia | 5,88 | 1,284 |
+| Nebelrode | 6,22 | 1,329 |
+| Macchia | 8,48 | 1,304 |
+| Skerrheim | 9,04 | 1,302 |
+| Nevadin | 23,78 | 1,319 |
+
+Flachere Hälfte (Estrande/Morobora/Clonagh/Thalassia) 1,291 gegen steilere
+Hälfte (Nebelrode/Macchia/Skerrheim/Nevadin) 1,314 — Differenz −0,023.
+Korrelation Hang↔Sinuosität über alle 9 Regionen: r = +0,233 (schwach,
+positiv, nicht das erwartete Vorzeichen).
+
+**Antwort auf die Ticketfrage:** Nein, mit diesen Zahlen mäandert das
+Flachland in diesem Programm NICHT stärker als das Gebirge — der
+Unterschied ist mit vier Regionen je Gruppe nicht von Null zu unterscheiden,
+und die schwache Korrelation zeigt eher in die Gegenrichtung. Das ist
+plausibel: der Mäander entsteht hier ausschließlich aus dem
+Kosten-Spannbaum, der dem Gelände ausweicht (`docs/SPEZIFIKATION.md`
+§15/§16) — dieser Mechanismus reagiert auf lokale Hangwechsel im
+Wegverlauf, nicht auf den Regions-Median-Hang. Nevadin (steil, viele lokale
+Hindernisse zum Umlaufen) mäandert deswegen ähnlich stark wie die flachen
+Regionen. Ob das ein gewünschtes Verhalten ist oder ein eigenes Ticket
+braucht (z. B. ein Flachland-Bonus auf die Ausweich-Kosten), ist eine
+Entscheidung am Tag — hier nur die Ist-Erhebung, wie im Ticket verlangt.
+
+Erhebungsskript nicht Teil des Repos (reine Einmalmessung, kein
+Regressionswächter mit Bandgrenzen) — Zahlen und Methode stehen vollständig
+hier und im Commit-Text.
