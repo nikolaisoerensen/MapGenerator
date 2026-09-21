@@ -19,9 +19,11 @@ MESSWARNUNG, die in jeden Bericht gehoert: diese Maschine schwankt um Faktor
 erkennbare Fremdlast. Laufzeiten sind Groessenordnungen, keine Messwerte.
 
 Aufruf:
-    .venv/Scripts/python.exe tools/testlauf.py              # alles
-    .venv/Scripts/python.exe tools/testlauf.py --schnell    # nur die kurzen
-    .venv/Scripts/python.exe tools/testlauf.py --nur kueste # Namensfilter
+    .venv/Scripts/python.exe tools/testlauf.py                    # alles
+    .venv/Scripts/python.exe tools/testlauf.py --schnell          # nur die kurzen
+    .venv/Scripts/python.exe tools/testlauf.py --nur kueste       # Namensfilter
+    .venv/Scripts/python.exe tools/testlauf.py --rang waechter    # Ticket #46
+    .venv/Scripts/python.exe tools/testlauf.py --rang eichung     # Ticket #46
 """
 
 import argparse
@@ -31,8 +33,18 @@ import subprocess
 import sys
 import time
 
+import test_raenge
+
 WURZEL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PYTHON = os.path.join(WURZEL, ".venv", "Scripts", "python.exe")
+# NICHT os.path.join(WURZEL, ".venv", ...): der geteilte venv liegt am
+# Hauptcheckout, nicht in jedem Worktree (siehe CLAUDE.md, "Git worktrees:
+# changes are invisible..."). WURZEL zeigt aus einem Worktree heraus aber auf
+# den Worktree selbst, also genau dieselbe __file__-Falle, vor der CLAUDE.md
+# an drei anderen Stellen warnt. sys.executable ist stattdessen IMMER der
+# Interpreter, mit dem dieses Skript tatsaechlich gestartet wurde - und die
+# Aufrufkonvention des Projekts ist ohnehin ausschliesslich
+# "<venv>/Scripts/python.exe tools/testlauf.py".
+PYTHON = sys.executable
 TESTS = os.path.join(WURZEL, "tests")
 
 # Tests, die Gelaende oder die volle Pipeline fahren - alles andere ist kurz.
@@ -56,7 +68,7 @@ def ist_teuer(pfad):
     return any(w in quelle for w in TEURE_MERKMALE)
 
 
-def sammeln(nur=None, schnell=False):
+def sammeln(nur=None, schnell=False, rang=None):
     dateien = sorted(f for f in os.listdir(TESTS)
                      if f.startswith("smoke_test_") and f.endswith(".py"))
     if nur:
@@ -64,6 +76,12 @@ def sammeln(nur=None, schnell=False):
     if schnell:
         dateien = [f for f in dateien
                    if not ist_teuer(os.path.join(TESTS, f))]
+    if rang:
+        # test_raenge.dateien_im_rang() prueft dabei nebenbei mit, dass JEDE
+        # uebergebene Datei ueberhaupt eingestuft ist (RangUnbekannt statt
+        # einer stillschweigend uebersprungenen Datei) - siehe
+        # tools/test_raenge.py.
+        dateien = test_raenge.dateien_im_rang(dateien, rang)
     return dateien
 
 
@@ -109,11 +127,14 @@ def main():
     p.add_argument("--schnell", action="store_true",
                    help="nur Tests ohne Gelaende-/Pipelinelauf")
     p.add_argument("--nur", default=None, help="Namensfilter")
+    p.add_argument("--rang", choices=test_raenge.RAENGE, default=None,
+                   help="nur 'waechter' (< 2 Min, jede Aenderung) oder "
+                        "'eichung' (nachts, siehe tools/test_raenge.py)")
     p.add_argument("--bericht", default=None,
                    help="JSON-Datei fuer die Rohergebnisse")
     args = p.parse_args()
 
-    dateien = sammeln(args.nur, args.schnell)
+    dateien = sammeln(args.nur, args.schnell, args.rang)
     print(f"{len(dateien)} Testdateien, je eigener Prozess, "
           f"Zeitgrenze {ZEITGRENZE_S} s\n")
 
