@@ -7,6 +7,8 @@ morgens jemand ueberrascht wird.
   * sperrliste.toml - wo nachts niemand hinfasst, mit Begruendung je Eintrag
   * sperre.py       - die Durchsetzung dieser Liste
   * branch.py       - das Branch- und Commit-Verfahren einer Nacht
+  * seeds.py        - Seedfuehrung: fester Seed fuer Waechter, drei
+                       nachvollziehbar wechselnde Seeds fuer die Eichung
 
 Der Ablauf und die Entscheidungen dahinter stehen in docs/NACHTBETRIEB.md.
 Bedient wird das Ganze ueber tools/nachtlauf.py.
