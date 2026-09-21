@@ -896,7 +896,7 @@ class RIVER_NETWORK:
 # =============================================================================
 # Steht er, kommt die Heightmap aus core/terrain_weltkarte.py: neun Regionen
 # als Parameterfeld auf einer unregelmaessigen Kontinentform, mit Meer
-# (docs/INTEGRATIONSPLAN.md, Teil II). Der alte Pfad - Noise, Potenzkurve,
+# (docs/archiv/2026-08-04_INTEGRATIONSPLAN.md, Teil II). Der alte Pfad - Noise, Potenzkurve,
 # ATEF-Filter, Flussnetz - bleibt vollstaendig erhalten und laeuft, sobald der
 # Schalter aus ist.
 #

@@ -28,7 +28,7 @@ und DataLODManager-Zustaenden die richtigen Overlay-Objekte baut und ueber
 _push_overlays() TATSAECHLICH bei beiden Anzeigen ankommt - das ist reine
 Python-Logik und headless pruefbar. Ob die Textur am Bildschirm ERSCHEINT,
 kann dieser Test NICHT sagen (CLAUDE.md - OpenGL braucht ein sichtbares
-Fenster); dafuer steht ein Eintrag in docs/PRUEFLISTE_LIVE.md. Der
+Fenster); dafuer steht ein Eintrag in docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md. Der
 generische Dispatch-Mechanismus selbst (Register, current_view kommt nicht
 mehr vor) ist bereits durch tests/smoke_test_push_overlays.py abgedeckt -
 dieser Test prueft zusaetzlich, dass BiomeTab.apply_overlays() ihn mit den

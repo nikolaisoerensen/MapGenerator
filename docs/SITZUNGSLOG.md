@@ -34,9 +34,9 @@ seither nie neu erzeugt und blieb drei Wochen falsch.
 
 ## Behoben
 
-`docs/TESTBERICHT.md` (Abschnitt 3, Tabelle und Fliesstext), `docs/AUFRAEUMPLAN.md`
+`docs/TESTBERICHT.md` (Abschnitt 3, Tabelle und Fliesstext), `docs/archiv/2026-08-25_AUFRAEUMPLAN.md`
 (Abschnitt 4.7 und die Ziel-Tabelle) und der Nachtrag in
-`docs/SPEZIFIKATION.md` §7 korrigiert. `docs/NACHTBETRIEB.md` und
+`docs/archiv/2026-07-29_SPEZIFIKATION.md` §7 korrigiert. `docs/NACHTBETRIEB.md` und
 `docs/SOLLBESCHREIBUNG.md` enthalten dieselbe veraltete Behauptung
 (Faktor 385 / "ungeklaerter Faktor 385"), sind aber hart gesperrt und daher
 nachts nicht anfassbar - offener Punkt fuer den Nutzer oder eine Tagsitzung.
@@ -161,7 +161,7 @@ Behoben, mit Begruendung im Code.
 
 ## Doku
 
-`docs/PRUEFLISTE_LIVE.md` neu aufgebaut: **Teil A** ist der neue Ablauf
+`docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md` neu aufgebaut: **Teil A** ist der neue Ablauf
 (A.0 Reiterfolge, A.1 Regionen, A.2 Kontinent, A.3 Fluesse, A.4 die vier
 neuen Karten je in 2D UND 3D, A.5 Stufenschalter, A.6 Nevadin-Spitzen,
 A.7 die offene Frage zu den Kuestentypen in der Regionsvorschau), **Teil
@@ -1218,7 +1218,7 @@ noch niemand gesehen.
 # 2026-08-25 — Abschalthaekchen und die Alpenspitzen
 
 Auftrag in zwei Teilen. Der Plan fuer den Rest steht in
-`docs/AUFRAEUMPLAN.md`.
+`docs/archiv/2026-08-25_AUFRAEUMPLAN.md`.
 
 ## 1. Drei Abschalthaekchen (Schritt 1 des Aufraeumplans)
 
@@ -2185,7 +2185,7 @@ Biomkarten mit unterschiedlicher Aufgabe:
     Wahrscheinlichkeiten in Pixel um; dort liegen 311 Strandpixel.
 
 Wer Straende sehen will, muss also `biome_map_super` anzeigen. Das ist
-Bauart, kein Fehler - und die Vermutung in ANZEIGE_UND_SEEN.md, es sei
+Bauart, kein Fehler - und die Vermutung in docs/archiv/2026-08-24_ANZEIGE_UND_SEEN.md, es sei
 ein reines Anzeigeproblem, war fuer die STRAENDE richtig und fuer die
 GROSSEN FLUESSE falsch.
 
@@ -2391,13 +2391,13 @@ Wasser im Oberlauf heisst flussabwaerts eine KONSTANTE Zugabe).
 wurden gemessen und widerlegt — zerstueckelte Landmasse (Skerrheim liegt
 zu 100 % in einem Stueck), kurze Fliesswege (es hat mit 832 m den
 ZWEITLAENGSTEN mittleren Kuestenabstand), zu wenig Buendelung (die Metrik
-ist nicht schluessig). Sie stehen in `docs/FLUESSE_UND_WASSER.md`, damit
+ist nicht schluessig). Sie stehen in `docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md`, damit
 sie niemand erneut prueft.
 
 **Block 3 (Seen als Sammler) ist fuer das Skerrheim wirkungslos:** die
 Karte hat 11 Binnenseen ueber 4 Pixel, und keiner liegt dort.
 
-Ordnung und weitere Bloecke: `docs/FLUESSE_UND_WASSER.md`.
+Ordnung und weitere Bloecke: `docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md`.
 
 ## Offen am Ende dieser Sitzung
 
@@ -2797,4 +2797,4 @@ Alle acht beruehrten Testdateien gruen:
 
 ## Was der Nutzer pruefen muss
 
-Steht in `docs/PRUEFLISTE_LIVE.md`.
+Steht in `docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md`.

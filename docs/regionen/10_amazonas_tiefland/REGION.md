@@ -7,7 +7,7 @@
 ## Zielwerte
 
 Die absoluten Zahlen sind zweitrangig. Abnahmekriterium sind die
-VERHAELTNISSE zwischen den Regionen (siehe docs/SPEZIFIKATION.md §2).
+VERHAELTNISSE zwischen den Regionen (siehe docs/archiv/2026-07-29_SPEZIFIKATION.md §2).
 
 | Groesse | Zielwert | Quelle |
 |---|---|---|

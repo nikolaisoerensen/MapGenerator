@@ -36,4 +36,4 @@ laufen.
 - [ ] Protokolliert, ob "Baeche (Mikro)" im Ergebnis tatsaechlich vorkommt.
       Falls nein: als eigener Punkt in `docs/OFFENE_PUNKTE.md`, nicht hier
       behoben.
-- [ ] Am laufenden Programm bestaetigt, Eintrag in `docs/PRUEFLISTE_LIVE.md`.
+- [ ] Am laufenden Programm bestaetigt, Eintrag in `docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md`.

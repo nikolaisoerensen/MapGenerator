@@ -3,7 +3,7 @@ Path: gui/tabs/region_tab.py
 
 Der Regionsreiter - hier wird die Optik jeder Region eingestellt.
 
-NUTZERENTWURF 2026-08-26 (docs/AUFRAEUMPLAN.md 4.10/4.11):
+NUTZERENTWURF 2026-08-26 (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.10/4.11):
 
     *"als ziel wuerde ich vorschlagen, dass wir am anfang eine
     regionen-ansicht haben. das sind dann einfach maps von 128-256 px

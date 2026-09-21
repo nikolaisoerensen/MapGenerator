@@ -5,7 +5,7 @@ REITER "FLUSSNETZWERK" - das Flussnetz der Weltkarte.
 
 Er steht direkt hinter Terrain, weil das Netz dessen Heightmap FORMT: die
 Taeler werden eingegraben, bevor Geologie, Wetter und alles Weitere darauf
-rechnen (core/terrain_weltfluesse.py, docs/INTEGRATIONSPLAN.md Stufe P2).
+rechnen (core/terrain_weltfluesse.py, docs/archiv/2026-08-04_INTEGRATIONSPLAN.md Stufe P2).
 
 Eigene Regler hat er nicht - das Netz haengt an denselben Groessen wie das
 Gelaende, und eine zweite Stelle mit denselben Reglern waere eine zweite
@@ -37,7 +37,7 @@ from PyQt6.QtWidgets import (
 from gui.tabs.base_tab import BaseMapTab, Overlay
 
 
-# LIVE-VORSCHAU DES FLUSSNETZES (docs/AUFRAEUMPLAN.md 4.10)
+# LIVE-VORSCHAU DES FLUSSNETZES (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.10)
 #
 # Nutzerentwurf 2026-08-26: *"dann kommt flussnetzwerke und auch hier sollte
 # eine live sicht moeglich sein."*

@@ -36,4 +36,4 @@ Fehlerklasse.
       vorzeitige Ausstieg zurueckkommt. (Der allgemeine Waechter ist
       Ticket 04; hier genuegt der gezielte Fall.)
 - [ ] Am laufenden Programm bestaetigt, mit Eintrag in
-      `docs/PRUEFLISTE_LIVE.md`. Headless ist das nicht zu sehen.
+      `docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md`. Headless ist das nicht zu sehen.

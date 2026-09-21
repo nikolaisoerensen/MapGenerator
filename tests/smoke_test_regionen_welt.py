@@ -2,7 +2,7 @@
 Path: tests/smoke_test_regionen_welt.py
 
 Prueft die Regionenwelt (core/terrain_weltkarte.py, Stufe A des
-docs/INTEGRATIONSPLAN.md).
+docs/archiv/2026-08-04_INTEGRATIONSPLAN.md).
 
 "Sieht gut aus" ist nicht pruefbar - der Charakter einer Landschaft schon.
 Geprueft werden deshalb fuenf Dinge, und jedes davon hat schon einmal einen

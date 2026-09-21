@@ -521,7 +521,7 @@ class BiomeTab(BaseMapTab):
                                     and (settlements or landmarks or roadsites))
 
         # FLUSSNETZ - DIESELBE QUELLE UND DASSELBE OVERLAY WIE IM FLUSS-REITER
-        # (docs/ANZEIGE_UND_SEEN.md B.1). `river_generation` aus dem
+        # (docs/archiv/2026-08-24_ANZEIGE_UND_SEEN.md B.1). `river_generation` aus dem
         # Weltflussnetz, NICHT die aus `flow_map` selbst geschnittene
         # Perzentil-Maske - zwei Quellen fuer dieselbe Aussage waren die Falle
         # vom 2026-08-25 (man sah in zwei Reitern zwei verschiedene Flusssysteme).

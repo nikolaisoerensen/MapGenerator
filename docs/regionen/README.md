@@ -1,7 +1,7 @@
 # Referenzregionen
 
 Zwanzig reale Landschaften, gegen die der Generator abgenommen wird. Sie sind
-der Zielkatalog aus `docs/SPEZIFIKATION.md` §2, hier je Region ausgeführt.
+der Zielkatalog aus `docs/archiv/2026-07-29_SPEZIFIKATION.md` §2, hier je Region ausgeführt.
 
 **Alle ohne Meer** — Küstenlinien und Ozean sind bewusst ausgeklammert.
 

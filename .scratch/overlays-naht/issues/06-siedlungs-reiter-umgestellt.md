@@ -34,4 +34,4 @@ laufen.
 - [ ] Die beiden getrennten Anzeigepfade sind zu einem geworden; die Daten
       werden einmal beschafft, nicht zweimal.
 - [ ] Die anklickbaren Objekte der 3D-Ansicht funktionieren weiter.
-- [ ] Am laufenden Programm bestaetigt, Eintrag in `docs/PRUEFLISTE_LIVE.md`.
+- [ ] Am laufenden Programm bestaetigt, Eintrag in `docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md`.

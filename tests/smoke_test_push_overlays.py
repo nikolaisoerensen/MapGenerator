@@ -20,7 +20,7 @@ WAS HIER GEPRUEFT WIRD (docs/SPEC_OVERLAYS.md, Testing Decisions):
 
 NICHT geprueft (siehe SPEC Punkt "Was sich nur am laufenden Programm pruefen
 laesst"): ob die RGBA-Textur im 3D an der richtigen Stelle sitzt und lesbar
-aussieht - das sieht nur der Nutzer, siehe docs/PRUEFLISTE_LIVE.md.
+aussieht - das sieht nur der Nutzer, siehe docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md.
 """
 import ast
 import inspect

@@ -161,7 +161,7 @@ class CanvasSettings:
             # ohnehin die vertraeglichere Wahl: ein Faktor 2 daneben
             # verschiebt sie nur um 8 % der Rampe.
             "flow_map": ("Blues", 20.0, 8000.0, "log"),
-            # Strahler-Ordnung des Weltflussnetzes (docs/ANZEIGE_UND_SEEN.md
+            # Strahler-Ordnung des Weltflussnetzes (docs/archiv/2026-08-24_ANZEIGE_UND_SEEN.md
             # B.1). Ohne Eintrag fiel der Reiter auf Auto-Skalierung zurueck -
             # und weil 0 (kein Fluss) den weitaus groessten Teil der Karte
             # ausmacht, sass die ganze Farbskala im Nichts.

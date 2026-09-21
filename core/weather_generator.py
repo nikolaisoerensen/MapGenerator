@@ -1267,7 +1267,7 @@ class WeatherSystemGenerator:
             humid_map = np.mean(np.stack(monthly_humid_maps, axis=0), axis=0).astype(np.float32)
             precip_map = np.mean(np.stack(monthly_precip_maps, axis=0), axis=0).astype(np.float32)
 
-            # WIND IST SEIT 2026-08-11 REGIONAL KALIBRIERT (SPEZIFIKATION.md
+            # WIND IST SEIT 2026-08-11 REGIONAL KALIBRIERT (docs/archiv/2026-07-29_SPEZIFIKATION.md
             # §3.5), zwei multiplikative Faktorfelder statt einer eigenen
             # Formel - die Simulation liefert weiterhin Boeen an Graten und
             # Kanalisierung in Taelern:
@@ -2539,7 +2539,7 @@ class WeatherSystemGenerator:
             feld = self._interpolate_2d_bicubic(feld.astype(np.float32), ziel)
         return feld.astype(np.float64)
 
-    # Luv/Lee-Kontrast am Gebirge fuer Wind (SPEZIFIKATION.md §3.5): "1.5-2x -
+    # Luv/Lee-Kontrast am Gebirge fuer Wind (docs/archiv/2026-07-29_SPEZIFIKATION.md §3.5): "1.5-2x -
     # deutlich schwaecher als der 3.6x bei Niederschlag, Wind bremst sich am
     # Hang, staut sich aber nicht wie Feuchte". WIND_LUV_STAERKE so gewaehlt,
     # dass volle Luv- gegen volle Lee-Seite (tanh -> +-1) genau das
@@ -2575,7 +2575,7 @@ class WeatherSystemGenerator:
     def _wind_regional_faktor(self, wind_map: np.ndarray, lod_level: int) -> Optional[np.ndarray]:
         """
         Windgeschwindigkeit JE REGION auf `wind_ziel_map` normieren
-        (SPEZIFIKATION.md §3.5, core/terrain_weltkarte.py REGIONEN.
+        (docs/archiv/2026-07-29_SPEZIFIKATION.md §3.5, core/terrain_weltkarte.py REGIONEN.
         wind_mittel_ms) - Richtung bleibt unveraendert, nur die LAENGE des
         Vektors wird skaliert. Exakt dasselbe Prinzip wie
         niederschlagsfeld_festgelegt's "direkt auf den Zielwert normieren":

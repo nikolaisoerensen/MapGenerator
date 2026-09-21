@@ -3,7 +3,7 @@ Path: gui/tabs/kontinent_tab.py
 
 Der Kontinentreiter - hier wird die Grundform der Landmasse eingestellt.
 
-NUTZERENTWURF 2026-08-26 (docs/AUFRAEUMPLAN.md 4.10):
+NUTZERENTWURF 2026-08-26 (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.10):
 
     *"dann gehts in 'kontinent' sicht mit map size, form des kontinents und
     solcher sachen. zB laesst sich hier ein eher runder kontinent erstellen

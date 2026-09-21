@@ -1,7 +1,7 @@
 """
 Path: tests/smoke_test_kontinentform.py
 
-Der Formregler des Kontinents (docs/AUFRAEUMPLAN.md 4.10).
+Der Formregler des Kontinents (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.10).
 
 NUTZERENTWURF 2026-08-26: *"zB laesst sich hier ein eher runder kontinent
 erstellen oder aber einer mit vielen armen (also die grundformen als slider,

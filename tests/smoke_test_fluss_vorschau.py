@@ -1,7 +1,7 @@
 """
 Path: tests/smoke_test_fluss_vorschau.py
 
-Die Live-Vorschau des Flussreiters (docs/AUFRAEUMPLAN.md 4.10).
+Die Live-Vorschau des Flussreiters (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.10).
 
 NUTZERENTWURF 2026-08-26: *"dann kommt flussnetzwerke und auch hier sollte
 eine live sicht moeglich sein."*

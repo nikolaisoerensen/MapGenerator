@@ -4,7 +4,7 @@ Path: core/terrain_weltkarte.py
 DIE REGIONENWELT - Rechenkern, ohne Fenster.
 
 Neun Regionen in einem 3x3-Gitter, jede 4 x 4 km, Kontinent also 12 x 12 km,
-Welt 15 x 15 km mit Wasser ringsum (docs/INTEGRATIONSPLAN.md).
+Welt 15 x 15 km mit Wasser ringsum (docs/archiv/2026-08-04_INTEGRATIONSPLAN.md).
 
 Anordnung wie die Gegenden wirklich liegen, Spalte West -> Ost:
 
@@ -472,7 +472,7 @@ def oktavenstapel(size, seed, shader_manager=None, mpp=None, hoehe=None):
     """
     # RECHTECKIG MOEGLICH (2026-08-26). `hoehe` ueberschreibt die
     # Zeilenzahl; ohne sie bleibt es quadratisch wie bisher. Gebraucht von
-    # der Regionsansicht (docs/AUFRAEUMPLAN.md 4.10), die eine EINZELNE
+    # der Regionsansicht (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.10), die eine EINZELNE
     # Region als Rechteck zeigt.
     #
     # `noise2array(x, y)` nimmt seit jeher ZWEI Achsen - hier wurde nur
@@ -858,7 +858,7 @@ def voronoi_regionen(maske, seed, punktzahl=200, zweitanteil=0.35,
     # DIE ZELL-ETIKETTEN MIT ZURUECKGEBEN (2026-08-26).
     #
     # Bis hierher wurden sie hier weggeworfen. Das Gebietssystem
-    # (docs/AUFRAEUMPLAN.md 4.8) braucht sie: es waechst Hoehengebiete
+    # (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.8) braucht sie: es waechst Hoehengebiete
     # UEBER DEN ZELLGRAPHEN von der Kueste ins Land, so wie
     # `seegliederung()` den Seegrad ueber denselben Graphen nach aussen
     # traegt. Ohne die Etiketten muesste es eine zweite Zellzerlegung
@@ -869,7 +869,7 @@ def voronoi_regionen(maske, seed, punktzahl=200, zweitanteil=0.35,
 
 
 # =============================================================================
-# KUESTENGEBIETE IM HINTERLAND (docs/AUFRAEUMPLAN.md 4.8)
+# KUESTENGEBIETE IM HINTERLAND (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.8)
 # =============================================================================
 
 # WIE WEIT DIE GEBIETSHOEHEN AUSEINANDERLIEGEN, als Anteil des Regionsreliefs.
@@ -1227,7 +1227,7 @@ def kuestengebiete(H, felder, zell_etikett, seed):
 
 
 # =============================================================================
-# DIE REGIONSANSICHT (docs/AUFRAEUMPLAN.md 4.10/4.11)
+# DIE REGIONSANSICHT (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.10/4.11)
 # =============================================================================
 
 # Wie breit eine Region ist. Die Welt ist ein 3x3-Raster, also ein Drittel.
@@ -1406,7 +1406,7 @@ def regionsfeld(regionsname, breite_px, hoehe_px=None, seed=0,
     Oktavenstapel mit EINEM Parametersatz, die Potenzkurve und - wenn
     gewuenscht - der Erosionsfilter. Gemessen 0.08 s bei 128 px, 0.32 s bei
     256 px; damit ist eine Live-Vorschau am Regler moeglich
-    (docs/AUFRAEUMPLAN.md 4.9).
+    (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.9).
 
     MASSSTAB. `km` ist die Kantenlaenge des Ausschnitts; ohne Angabe die
     volle Regionsbreite (7.1 km). Bei 256 px sind das 27.7 m/px - ein
@@ -1846,7 +1846,7 @@ def parameterfeld(name, gewichte, schaerfe=1.0, ueberschreibung=None):
 
     `ueberschreibung` ist {Regionsname: {Reglername: Wert}} und ersetzt
     einzelne Katalogwerte - der EINZIGE Weg, auf dem die Einstellungen des
-    Regionsreiters in die Karte kommen (docs/AUFRAEUMPLAN.md 4.2).
+    Regionsreiters in die Karte kommen (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.2).
     Nutzerentscheidung 2026-08-25: sie gelten **nur fuer die aktuelle
     Karte**; der Katalog bleibt unangetastet, und die Tests messen weiter
     gegen ihn.
@@ -2872,7 +2872,7 @@ def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=Non
         with _s(schritte, "kuesten_umformen_raster"):
             H = _kuesten_umformen(H, felder, seed, size)
 
-    # DIE KUESTENGEBIETE IM HINTERLAND (docs/AUFRAEUMPLAN.md 4.8).
+    # DIE KUESTENGEBIETE IM HINTERLAND (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.8).
     #
     # HIER und nicht frueher: die Archetypfelder stehen erst seit der Zeile
     # darueber. Vor der Seetiefe, weil das Delta nur auf Land wirkt und die

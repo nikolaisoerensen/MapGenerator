@@ -588,7 +588,7 @@ def filter_heightmap(heightmap: np.ndarray, meters_per_pixel: float,
     # Rinnen in der laengeren Richtung gestreckt - ein Fehler, den man erst
     # im Bild sieht.
     #
-    # Gebraucht von der Regionsansicht (docs/AUFRAEUMPLAN.md 4.10).
+    # Gebraucht von der Regionsansicht (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.10).
     hoehe_px, size = heightmap.shape
     p = dict(ATEF_DEFAULTS)
     # Der konstante Hoehenversatz des Demonstrationsteils entfaellt: er

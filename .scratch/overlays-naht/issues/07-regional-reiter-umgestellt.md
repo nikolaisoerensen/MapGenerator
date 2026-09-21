@@ -40,6 +40,6 @@ laufen.
 - [ ] Die Schuldliste ist durch dieses Ticket nicht gewachsen.
 - [ ] Der Reiter zeichnet weiterhin seine Basiskarte — der bestehende
       Sonderteil des Waechtertests dafuer bleibt gruen.
-- [ ] Am laufenden Programm bestaetigt, Eintrag in `docs/PRUEFLISTE_LIVE.md`.
+- [ ] Am laufenden Programm bestaetigt, Eintrag in `docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md`.
       Dieser Reiter hatte am 2026-08-13 schon einmal einen Fehler, den kein
       headless-Test gefunden haette.

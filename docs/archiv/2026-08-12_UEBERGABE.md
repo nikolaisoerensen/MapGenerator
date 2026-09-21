@@ -78,7 +78,7 @@ In dieser Reihenfolge:
 
 1. **`CLAUDE.md`** — Arbeitsregeln. Enthält vier teuer bezahlte Lektionen
    (Worktrees, numpy/numba, Pfade aus `__file__`, headless testbare Shader).
-2. **`docs/SPEZIFIKATION.md`** §1–§6 — Ziel, Komponentenziele, **Invarianten**.
+2. **`docs/archiv/2026-07-29_SPEZIFIKATION.md`** §1–§6 — Ziel, Komponentenziele, **Invarianten**.
    Vor jeder Änderung lesen, nach jeder Änderung die Prüflisten abgehen.
    (§7 und alles danach sind datierte Sitzungsprotokolle, kein Pflichtstoff.)
 3. **`docs/OFFENE_PUNKTE.md`** — **die einzige Aufgabenliste.** 95 Punkte,
@@ -167,11 +167,11 @@ Alles in `docs/` wurde am 2026-08-12 gesichtet.
 |---|---|
 | `OFFENE_PUNKTE.md` | **gültig, einzige Aufgabenliste** |
 | `TESTBERICHT.md` | **gültig, frisch gemessen** |
-| `SPEZIFIKATION.md` | gültig (§1–§6 Pflicht, §7+ Protokolle) |
+| `docs/archiv/2026-07-29_SPEZIFIKATION.md` | gültig (§1–§6 Pflicht, §7+ Protokolle) |
 | `BIOME_MATRIX.md` | gültig als **Sollvorgabe** — Kopf sagte fälschlich „nicht umgesetzt" |
 | `KLIMA_UND_SEE.md` | gültig, besonders §0 — Kopf sagte fälschlich „zur Abstimmung" |
 | `KULTUREN_UND_ORTE.md`, `SIEDLUNGEN_ENTWURF.md` | gültig, umgesetzt |
-| `INTEGRATIONSPLAN.md` | **Weltmaße veraltet** (21.3 km statt 15 km), Warnkasten gesetzt |
+| `docs/archiv/2026-08-04_INTEGRATIONSPLAN.md` | **Weltmaße veraltet** (21.3 km statt 15 km), Warnkasten gesetzt |
 | `generation_pipeline_dependencies.md` | **Knotenzahl veraltet** (38 statt 29), Datenflüsse gültig, Warnkasten gesetzt |
 | `backlog.md` | Archiv; 3 offene Punkte nach 7.9–7.11 gerettet |
 | `archiv/` | historisch, gilt nicht mehr — eigenes README |

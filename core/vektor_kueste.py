@@ -1024,7 +1024,7 @@ MIN_UEBERGANG_M = 60.0
 # ausschliesslich in der Reichweite.
 #
 # WOHIN DAS GEHOERT: die tiefe Kopplung Kueste -> Hinterland ist der Zweck
-# des Gebietssystems (docs/AUFRAEUMPLAN.md) - es leitet die mittlere Hoehe
+# des Gebietssystems (docs/archiv/2026-08-25_AUFRAEUMPLAN.md) - es leitet die mittlere Hoehe
 # des Hinterlands aus dem Kuestenarchetyp ab UND erhaelt dabei das
 # Regionsmittel, weshalb es die Eichung nicht umwirft. p2 zu strecken
 # erreicht dasselbe Ziel auf die grobe Tour und kaempft gegen die Eichung.

@@ -68,7 +68,7 @@ mussten deswegen neu gemessen werden.
 Flussgröße hängt am Niederschlag statt an der Fläche; Hauptstrom-Quoten
 je Region (Skerrheim 100 %, Morobora und Atlantik je 66 %); Talformen V/U
 je Region über `talform`. Die Ordnung dazu steht in
-`docs/FLUESSE_UND_WASSER.md` — **was dort nicht steht, ist nicht
+`docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md` — **was dort nicht steht, ist nicht
 beschlossen.**
 
 ### 5. Drei größere Fehler gefunden — alle nach demselben Muster
@@ -164,7 +164,7 @@ Bauauftrag.
 ### 1. B.1 — Flussnetz als Overlay im Fluss-Reiter
 Das Overlay-System steht (`smoke_test_fluss_overlay.py` sichert die
 Verdrahtung), und seit dem Flussstufen-Fix gibt es endlich große Flüsse,
-die sich zu zeigen lohnen. Plan: `docs/ANZEIGE_UND_SEEN.md`.
+die sich zu zeigen lohnen. Plan: `docs/archiv/2026-08-24_ANZEIGE_UND_SEEN.md`.
 
 ### 2. ENTSCHEIDUNG: Anzeige auf `biome_map_super` umstellen?
 Es gibt zwei Biomkarten:
@@ -207,7 +207,7 @@ steiler, die Wasserklassifikation hat drei statt einer Flussstufe.
 
 Headless ist alles grün. Gesehen hat es niemand.
 
-`docs/PRUEFLISTE_LIVE.md` listet, was nur am laufenden Programm zu prüfen
+`docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md` listet, was nur am laufenden Programm zu prüfen
 ist. Das sollte früh in der nächsten Sitzung passieren — je mehr sich
 darüber stapelt, desto schwerer wird zuzuordnen, was einen Fehler
 verursacht hat.

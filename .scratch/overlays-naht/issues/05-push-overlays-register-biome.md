@@ -69,5 +69,5 @@ ein neutrales Modul, was geht, aber unordentlich ist.
       Protokollen.
 - [ ] Tests laufen gegen die echten Kartengroessen (128/256/512/1024), nicht
       gegen ausgedachte — die Lehre aus dem adaptiven Netz.
-- [ ] Am laufenden Programm bestaetigt, Eintrag in `docs/PRUEFLISTE_LIVE.md`.
+- [ ] Am laufenden Programm bestaetigt, Eintrag in `docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md`.
       Dass die Textur **richtig aussieht**, sieht kein Test.

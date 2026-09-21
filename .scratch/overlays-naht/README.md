@@ -53,7 +53,7 @@ dazu beliebig viele Marker.
   `vorarbeit`
 
 Die beiden ersten Marker sind projektspezifisch und verdienen ihren Platz:
-`sichtpruefung` hat eine eigene Datei (`docs/PRUEFLISTE_LIVE.md`), und
+`sichtpruefung` hat eine eigene Datei (`docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md`), und
 `stiller-ausfall` ist die Fehlerklasse, die hier nachweislich fuenfmal
 durchgekommen ist — Shaderpfade nach dem Dateiumzug, adaptives Netz,
 Geologie-Dispatch, `impact_matrix`, und jetzt die Overlays.

@@ -3,7 +3,7 @@ Path: tests/smoke_test_region_tab.py
 
 Der Regionsreiter - baut er sich auf, und verstellt er dabei etwas?
 
-ANLASS: der Reiter (docs/AUFRAEUMPLAN.md 4.10) laesst die neun
+ANLASS: der Reiter (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.10) laesst die neun
 Regionsparameter fuer die aktuelle Karte ueberschreiben. **Der Katalog
 bleibt die Vorgabe** (Nutzerentscheidung 2026-08-25), und die Tests der
 Pipeline messen weiter gegen ihn. Ein Reiter, der schon beim Aufbau eine

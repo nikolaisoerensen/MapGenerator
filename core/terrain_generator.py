@@ -1681,7 +1681,7 @@ class BaseTerrainGenerator:
         """
         parameters = self._current_parameters
 
-        # WELTKARTE - die Weiche (docs/INTEGRATIONSPLAN.md, Stufe P1).
+        # WELTKARTE - die Weiche (docs/archiv/2026-08-04_INTEGRATIONSPLAN.md, Stufe P1).
         #
         # Ist sie aktiv, kommt die Heightmap aus core/terrain_weltkarte.py:
         # neun Regionen als Parameterfeld auf einer Plaetzchenform, mit Meer.
@@ -1960,7 +1960,7 @@ class BaseTerrainGenerator:
             # Kostet rund 1 s bei 1024 px (gemessen), gegenueber den ~33 s
             # dieses Knotens vernachlaessigbar.
             "spielkarte": self._weltkarte_spielkarten(heightmap, felder, seed),
-            # Regionsziel fuer die Windgeschwindigkeit (SPEZIFIKATION.md §3.5),
+            # Regionsziel fuer die Windgeschwindigkeit (docs/archiv/2026-07-29_SPEZIFIKATION.md §3.5),
             # weich ueber die Regionsgrenzen gemischt wie klima_map - siehe
             # weather_generator.py._run_coupled_atmosphere_simulation fuer die
             # Verwendung als raeumlicher wind_speed_factor.
@@ -2044,12 +2044,12 @@ class BaseTerrainGenerator:
                                          -MUENDUNGSTIEFE_M)),
             erbe_kosten=regler("river_inherit_cost", ERBE_KOSTEN),
             # WASSERMENGE STATT KNOTENZAHL (Block 1.1,
-            # docs/FLUESSE_UND_WASSER.md). `felder` liegt hier seit jeher
+            # docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md). `felder` liegt hier seit jeher
             # vollstaendig vor - der Niederschlag wurde nur nie
             # weitergereicht, und das Flussnetz zaehlte deshalb Knoten
             # statt Wasser.
             niederschlag_mm=felder.get("niederschlag_mm"),
-            # Fuer die Hauptstrom-Quote (Block 2, docs/FLUESSE_UND_WASSER.md).
+            # Fuer die Hauptstrom-Quote (Block 2, docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md).
             region_map=felder.get("regionen"))
         if netz is None:
             leer = np.zeros((size, size), dtype=np.float32)

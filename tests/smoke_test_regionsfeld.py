@@ -3,7 +3,7 @@ Path: tests/smoke_test_regionsfeld.py
 
 Zeigt die Regionsansicht dasselbe wie die Pipeline?
 
-ANLASS: die Regionsansicht (docs/AUFRAEUMPLAN.md 4.10) rechnet BEWUSST einen
+ANLASS: die Regionsansicht (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.10) rechnet BEWUSST einen
 eigenen, viel kuerzeren Weg - Oktavenstapel mit EINEM Parametersatz,
 Potenzkurve, Erosionsfilter. Kein Kontinent, keine Voronoi-Mischung, keine
 Kueste. Nur so ist sie live (0.04-0.22 s statt 2-19 s).

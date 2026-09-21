@@ -2,7 +2,7 @@
 
 Stand 2026-08-04, zweite Fassung. Die erste ging von einer 240-km-Welt mit
 Zoomfenstern aus; beides ist nach den Festlegungen des Nutzers hinfällig.
-Ergänzt `SPEZIFIKATION.md`, ersetzt sie nicht.
+Ergänzt `docs/archiv/2026-07-29_SPEZIFIKATION.md`, ersetzt sie nicht.
 
 > **UMGESETZT — dieses Dokument ist ab 2026-08-12 ein Planungsarchiv, keine
 > Vorgabe mehr.** Der hier geplante Umbau ist gebaut und steht in

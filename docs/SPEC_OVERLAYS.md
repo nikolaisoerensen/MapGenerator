@@ -366,7 +366,7 @@ Faelle unbemerkt.
 Dass die Textur **richtig aussieht**. Die Tests koennen belegen, dass beide
 adapter mit vergleichbaren Daten gerufen werden; ob die RGBA-Haut im 3D an der
 richtigen Stelle sitzt und lesbar ist, sieht nur der Nutzer. Dafuer je
-umgestelltem Reiter ein Eintrag in `docs/PRUEFLISTE_LIVE.md`.
+umgestelltem Reiter ein Eintrag in `docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md`.
 
 ---
 

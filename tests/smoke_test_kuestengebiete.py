@@ -1,7 +1,7 @@
 """
 Path: tests/smoke_test_kuestengebiete.py
 
-Die Kuestengebiete im Hinterland (docs/AUFRAEUMPLAN.md 4.8).
+Die Kuestengebiete im Hinterland (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.8).
 
 ANLASS (Nutzerbefund 2026-08-25 am 3D-Bild): *"siehst du die kuestenformen
 (farbig) wie sie uebergehen in die noiseregionen (gruen). es sieht nicht so
