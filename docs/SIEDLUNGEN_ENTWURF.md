@@ -152,3 +152,76 @@ abgelegene Stellen. Sie duerfen ausdruecklich weitab jedes Weges liegen.
 Erreichbarkeit (Faktor 5 in Abschnitt 2) haengt am Netz, das Netz an den Orten.
 Aufgeloest wird das in **einem** Rueckschritt: nach Schritt 7 werden die Raenge
 einmal nachkorrigiert, ohne die Orte zu verschieben. Kein zweiter Durchlauf.
+
+
+## 6. Die Siedlungsnaht — was das Spiel vom Editor abholt
+
+Stand 2026-09-21 (Ticket #35). **Naht** heisst hier: die eine Stelle, an der
+das Spiel Siedlungsdaten vom Editor abholt — mit genau den Feldern, die unten
+stehen, und nicht mehr. Alles andere, was der Editor intern rechnet (Parzellen,
+Strassenraster, Hausformen, Gewerbe), ist Innenleben des Editors und darf sich
+frei aendern, ohne dass das Spiel etwas davon merkt oder bricht. Der Editor
+liefert nur die **Aussenform** einer Stadt, das Spiel baut das Innere selbst.
+
+Diese Entscheidung ist bewusst eng: **vier Dinge**, keins davon ein
+Strassennetz oder eine Hausliste.
+
+1. die Kontur der Stadtgrenze
+2. die Anschlusspunkte der Wege — wo Wege die Stadtgrenze schneiden
+3. Stadtgroesse und Stadttyp
+4. Rang und Kultur
+
+Dazu kommt zwingend eine **Kennung samt Ort** je Stadt (`city_id`,
+`city_center`) — ohne sie waere keines der vier Felder oben einer bestimmten
+Stadt zuzuordnen. Das ist keine fuenfte Kategorie, sondern die Vorbedingung
+dafuer, dass die anderen vier ueberhaupt lesbar sind.
+
+### 6.1 Die Feldliste
+
+Koordinaten (`city_center`, alle Punkte in `city_boundary_polygons` und
+`road_entry_points`) sind **Pixelkoordinaten im generierten Raster**
+(`map_size` × `map_size`, z.B. 512×512). Die Umrechnung in Meter laeuft ueber
+`map_distance_km / map_size` (Standard 15 km, siehe `docs/SPEZIFIKATION.md`);
+das ist bewusst nicht Teil der Naht selbst — der Editor liefert Pixel, das
+Spiel rechnet um, wenn es seine eigene Kartenaufloesung kennt.
+
+| Feld | Typ | Einheit | Geliefert? | Fundstelle |
+|---|---|---|---|---|
+| `city_id` | int | — (eindeutige Kennung) | **JA** | `core/settlement_generator.py:441` (`Location.location_id`), gesetzt in `calculate_settlements()` Zeile 5639-5643 |
+| `city_center` | (float, float) | Pixel im `map_size`-Raster | **JA** | `Location.x`/`Location.y` (Zeile 442-443), gesetzt Zeile 5640 |
+| `city_boundary_polygons` | Liste von Polygonen, je Polygon eine Liste von (x,y)-Punkten (Pixel) | Pixel | **NEIN** | Vorstufe existiert nur INTERN: `PlotPhysicsSystem._city_polygons` (Zeile 2519), gebaut von `_build_city_boundary_polygons()` (Zeile 2738-2767) per Marching-Squares ueber `city_mask`. Wird nirgends auf `SettlementData` durchgereicht. → **Ticket #72** |
+| `road_entry_points` | Liste von (x,y)-Punkten je Stadt (Pixel), an denen eine Wegverbindung `city_boundary_polygons` schneidet | Pixel | **NEIN** | `SettlementData.roads`/`sea_roads`/`landmark_roads` (Zeile 144-150, befuellt in `calculate_road_network()` ab Zeile 5705) enthalten nur die volle Pfad-Polylinie von Ortszentrum zu Ortszentrum — keinen gesonderten Schnittpunkt mit der Stadtgrenze. → **Ticket #73** |
+| `city_size` (als `house_count`) | int | Haeuser, Bereich 15-50 | **JA** | `Location.house_count` (Zeile 450), gesetzt Zeile 5696 nach §1-Rangspanne |
+| `city_size` (als `radius`, ergaenzend) | float | Pixel | **JA** | `Location.radius` (Zeile 445), gesetzt Zeile 5700 aus `house_count` abgeleitet |
+| `city_type` | str, einer von `bergdorf`/`marktstadt`/`agrarstadt`/`sonstige` | — | **JA** | `Location.settlement_type` (Zeile 456), zugewiesen Zeile 5485-5500 (siehe auch `docs/OFFENE_PUNKTE.md` 5.16) |
+| `rank` | str, einer von `dorf`/`siedlung`/`stadt` | — | **JA** | `Location.rank` (Zeile 449), gesetzt Zeile 5695 |
+| `culture` | str, Name aus `core/terrain_weltkarte.py` REGIONEN-`volk`-Feld | — | **JA** | `Location.culture` (Zeile 448), gesetzt Zeile 5642 |
+
+**Befund in einem Satz:** von acht Feldern liefert der Editor heute sechs
+(`city_id`, `city_center`, `city_size` in beiden Auspraegungen, `city_type`,
+`rank`, `culture`) direkt aus der `Location`-Dataclass. Die zwei fehlenden
+Felder sind keine Ueberraschung, sondern der genaue Gegenstand der beiden
+parallel laufenden Tickets #72 und #73 — dieses Ticket (#35) legt nur fest,
+WIE die Felder heissen und WAS sie tragen sollen, es baut sie nicht.
+
+### 6.2 Was NICHT zur Naht gehoert
+
+Diese Ausgaben existieren im Editor, sind aber ausdruecklich **Innenleben**
+und Teil der Naht — sie duerfen sich jederzeit aendern, ohne das Spiel zu
+brechen, weil das Spiel sie gar nicht lesen soll:
+
+| Ausgabe | Warum sie draussen bleibt |
+|---|---|
+| `plot_map`, `house_parcel_map`, `street_mask` | Parzellen- und Strassenraster INNERHALB einer Stadt — laut Ticketvorgabe entsteht das im Spiel aus `city_boundary_polygons` + `city_size` + `city_type`, nicht im Editor |
+| `plots`, `plot_nodes`, `plot_cores`, `plot_edges` | Das Grundstücks-/Wege-Innenmodell des Editors (Voronoi-Zellen, Federphysik) — reine Rechenhilfe fuer die Editor-eigene Darstellung |
+| `potential_field` | Kraftfeld der Plot-Physik-Simulation, rein intern |
+| `voronoi_cell_map` | Landschafts-Plot-Zell-ID pro Pixel ausserhalb von Staedten — Wildnis-Binnenstruktur, nicht Stadtform |
+| `wilderness_polygons` | Kontur der Wildnisflaechen (das Gegenteil von `city_boundary_polygons`) — nicht Teil dieses Tickets |
+
+**Ausdruecklich offen gelassen, nicht Teil DIESES Tickets:** `landmark_list`,
+`roadsite_list` und die vollen Weg-Polylinien (`roads`, `sea_roads`,
+`landmark_roads`) sind eigene Ausgaben desselben Generators, aber die
+Ticketvorgabe fuer #35 nennt nur die Siedlungsflaeche selbst (Kontur,
+Wege-Anschluss, Groesse/Typ/Rang/Kultur). Ob und wie Landmarks/Roadsites/das
+volle Wegenetz Teil einer (ggf. eigenen) Naht werden, ist hier nicht
+entschieden.
