@@ -867,6 +867,37 @@ WASSER_SPERRE_M = -10.0      # tiefer: gesperrt
 WEGERABATT = 0.4             # auf einem bereits gebauten Weg
 
 
+# Fluss-/Bachquerungen auf LAND, Ticket #42 ("Bruecken und Uferwege in die
+# Wegekosten"). Die Wasserstufen oben greifen nur bei h <= 0 (Meeresspiegel).
+# Ein Fluss schneidet sich aber NICHT in die heightmap ein (core/water_
+# generator.py laesst heightmap unveraendert) - er liegt auf normalem Land
+# mit h > 0 und wurde vom Kostenfeld bisher wie ebenes Gelaende behandelt:
+# kein Uferbonus, keine Furtkosten. water_map/water_biomes_map (aus dem
+# Rechenknoten water.manning_flow) schliesst die Luecke: 0=kein Wasser,
+# 1=Bach, 2=Fluss, 3=Grossfluss, 4=See.
+#
+# ZWEI GEGENLAEUFIGE WIRKUNGEN, beide gefordert:
+#   LAENGS (dem Ufer folgen) macht Wege GUENSTIGER - flach, wassernah.
+#   QUER (die Furt) macht Wege TEURER - eine Furt ohne Bruecke ist ein Umweg
+#   wert. Eine BRUECKE ist dabei kein Gelaendewert, sondern ein Bauwerk: sie
+#   aendert die Kosten an genau der einen Stelle, an der sie steht (siehe
+#   platziere_bruecken() weiter unten) - Teil desselben Regelkreises wie der
+#   WEGERABATT oben, nicht eine zweite, unabhaengige Regel.
+UFERWEG_RABATT = 0.7          # Faktor auf die sonstigen Kosten, wie WEGERABATT
+UFERWEG_RADIUS_PX = 2         # wie weit vom Ufer der Rabatt noch gilt
+
+# Furtkosten je Wassertyp - gestaffelt wie WASSERTYP_GEWICHT (siehe unten bei
+# der Eignungsbewertung), aber als KOSTEN statt als Eignung: ein Bach ist mit
+# nassen Fuessen zu durchqueren, ein Grossfluss so gut wie nur mit Bruecke.
+FURT_KOSTEN_JE_TYP = {1: 5.0, 2: 10.0, 3: 22.0, 4: WASSERKOSTEN_TIEF}
+
+# Bruecke: sobald sie an einer Stelle steht, kostet die Querung dort nur noch
+# das hier - unabhaengig vom Wassertyp, denn eine Bruecke macht die Furt
+# irrelevant. Guenstiger als jede Furtstufe, aber nicht so billig wie freies
+# Land (eine Bruecke bleibt ein Nadeloehr).
+BRUECKE_KOSTEN = 1.5
+
+
 # Steigungskosten fuer den Wegebau (2026-08-13, docs/OFFENE_PUNKTE.md 5.19).
 #
 # Die Kosten wachsen EXPONENTIELL mit dem Neigungswinkel in Grad, nicht mehr
@@ -893,7 +924,8 @@ MAX_WEG_STEIGUNG_GRAD = 30.0
 WEGEBAU_UNMOEGLICH = 500.0
 
 
-def bau_kostenfeld(heightmap, slopemap, slope_distance_ratio, weg_maske=None):
+def bau_kostenfeld(heightmap, slopemap, slope_distance_ratio, weg_maske=None,
+                    water_map=None, bruecken_maske=None):
     """
     Das Kostenfeld EINMAL bauen, docs/SIEDLUNGEN_ENTWURF.md §4.1 ("Kostenfeld
     zuerst") - nicht wie in der Vorlage je A*-Schritt neu aus slopemap
@@ -915,6 +947,17 @@ def bau_kostenfeld(heightmap, slopemap, slope_distance_ratio, weg_maske=None):
     MAX_WEG_STEIGUNG_GRAD gilt der Hang als unbrauchbar und kostet
     WEGEBAU_UNMOEGLICH.
 
+    FLUSSKOSTEN SEIT TICKET #42 (nur wenn `water_map` uebergeben wird - ohne
+    bleibt das alte Verhalten exakt erhalten, keine Bruchaenderung fuer
+    bestehende Aufrufer). `water_map` ist die Klassifikation aus water.
+    manning_flow (0..4). Fuer jedes LAND-Pixel (h > 0) auf einem Fluss/Bach
+    gilt eine Furtkosten-Stufe statt der Hangkosten; steht dort zusaetzlich
+    eine Bruecke (`bruecken_maske`), gilt stattdessen BRUECKE_KOSTEN. Land in
+    UFERWEG_RADIUS_PX Pixeln Abstand zu einem Fluss bekommt den Uferweg-Rabatt
+    UFERWEG_RABATT auf seine sonstigen Kosten (Hang- oder Furtkosten). Reine
+    Meeres-/Seewasser-Pixel (h <= 0) sind hiervon nicht betroffen - die
+    bleiben bei den Wasserkosten-Stufen oben.
+
     Rueckgabe: (H,W) float64, np.inf wo gesperrt (Wasser tiefer als
     WASSER_SPERRE_M).
     """
@@ -935,11 +978,108 @@ def bau_kostenfeld(heightmap, slopemap, slope_distance_ratio, weg_maske=None):
         kosten = np.where(flach, WASSERKOSTEN_FLACH, kosten)
         kosten = np.where(tief, WASSERKOSTEN_TIEF, kosten)
         kosten = np.where(gesperrt, np.inf, kosten)
+    else:
+        h = None
+
+    if water_map is not None and h is not None:
+        wm = np.asarray(water_map)
+        fluss_land = (wm > 0) & (h > 0.0)
+        if np.any(fluss_land):
+            furt = np.select(
+                [wm == 1, wm == 2, wm == 3, wm == 4],
+                [FURT_KOSTEN_JE_TYP[1], FURT_KOSTEN_JE_TYP[2],
+                 FURT_KOSTEN_JE_TYP[3], FURT_KOSTEN_JE_TYP[4]],
+                default=FURT_KOSTEN_JE_TYP[2])
+            kosten = np.where(fluss_land, furt, kosten)
+
+            if bruecken_maske is not None:
+                bruecke = np.asarray(bruecken_maske, dtype=bool) & fluss_land
+                kosten = np.where(bruecke, BRUECKE_KOSTEN, kosten)
+
+            # Uferweg: Rabatt auf normales Land NEBEN dem Fluss - nicht auf
+            # dem Fluss selbst (das ist die Furt/Bruecke oben) und nicht auf
+            # Meeres-/Seewasser (eigene Stufe oben).
+            ufer_distanz = distance_transform_edt(~fluss_land)
+            ufer_land = ((ufer_distanz > 0)
+                         & (ufer_distanz <= UFERWEG_RADIUS_PX)
+                         & (h > 0.0))
+            kosten = np.where(ufer_land, kosten * UFERWEG_RABATT, kosten)
 
     if weg_maske is not None and np.any(weg_maske):
         kosten = np.where(weg_maske, kosten * WEGERABATT, kosten)
 
     return kosten
+
+
+# Verkehrsschwelle fuer platziere_bruecken(): eine Furt, die nur EIN Weg je
+# benutzt, bekommt KEINE Bruecke - sie lohnt sich nicht mehr als die Furt
+# selbst. Erst wo sich mehrere Wege an derselben Furt buendeln (der
+# WEGERABATT-Effekt aus §4.1 sorgt dafuer, dass sich Wege ueberhaupt
+# buendeln), ist der Nutzen real messbar. Das ist die Antwort auf
+# Abnahmekriterium 3: "nicht zufaellig, nicht ueberall."
+BRUECKEN_MIN_VERKEHR = 2
+
+
+def platziere_bruecken(weg_maske, roads, fluss_land, water_map,
+                        mindest_verkehr=BRUECKEN_MIN_VERKEHR):
+    """
+    Welche Furt-Querungen eine Bruecke bekommen, Ticket #42.
+
+    Kein fester Gelaendewert - eine Bruecke ist ein BAUWERK, das dort
+    entsteht, wo sich das Queren tatsaechlich haeuft. Dazu wird NACH dem
+    ersten Routing-Durchlauf (mit Furtkosten, aber ohne Bruecken) gezaehlt,
+    wie viele VERSCHIEDENE Wege ueberhaupt ueber dieselbe Flussstelle
+    gefuehrt wurden - genau der Ort, an dem sich der WEGERABATT (§4.1) schon
+    zu einer gemeinsamen Furt gebuendelt hat. Eine Furt, die nur ein Weg je
+    nutzt, bleibt Furt.
+
+    `roads` ist die Liste der bereits gebauten Pfade (Liste von (x,y)-Listen,
+    wie sie calculate_road_network() intern fuehrt). `fluss_land` ist die
+    boolsche Maske aus `(water_map > 0) & (heightmap > 0)`.
+
+    Rueckgabe: (bruecken_maske (H,W) bool, bruecken_liste), wobei
+    bruecken_liste eine Liste von (x, y, wassertyp, verkehr)-Tupeln ist - der
+    Schwerpunkt jeder Bruecke plus die Messdaten fuer Abnahmekriterium 4.
+    """
+    from scipy.ndimage import binary_dilation
+
+    furt_maske = weg_maske & fluss_land
+    leer = np.zeros(fluss_land.shape, dtype=bool)
+    if not np.any(furt_maske):
+        return leer, []
+
+    # Kleine Aufweichung: zwei Wege treffen sich beim Queren so gut wie nie
+    # auf exakt demselben Pixel. Ohne das wuerde jede Furt als eigene
+    # Komponente zaehlen, auch wenn sie de facto dieselbe Stelle ist.
+    geglaettet = binary_dilation(furt_maske, iterations=2)
+    komponenten, anzahl = label(geglaettet)
+
+    bruecken_maske = leer.copy()
+    bruecken_liste = []
+    hoehe, breite = fluss_land.shape
+    for komponenten_id in range(1, anzahl + 1):
+        komponente = (komponenten == komponenten_id) & furt_maske
+        if not np.any(komponente):
+            continue
+        ys, xs = np.nonzero(komponente)
+
+        verkehr = 0
+        for pfad in roads:
+            for (px, py) in pfad:
+                xi = int(round(px))
+                yi = int(round(py))
+                if 0 <= xi < breite and 0 <= yi < hoehe and komponente[yi, xi]:
+                    verkehr += 1
+                    break
+
+        if verkehr >= mindest_verkehr:
+            bruecken_maske[komponente] = True
+            typ = int(round(float(np.median(water_map[ys, xs]))))
+            cx = int(round(float(xs.mean())))
+            cy = int(round(float(ys.mean())))
+            bruecken_liste.append((cx, cy, typ, verkehr))
+
+    return bruecken_maske, bruecken_liste
 
 
 # Seeweg-Kostenfeld, docs/SIEDLUNGEN_ENTWURF.md §4.4 - das SPIEGELBILD des
@@ -5053,11 +5193,14 @@ class SettlementGenerator:
         # Kostenfeld fuer die Erreichbarkeit der Marktstadt-Wahl (5.17).
         # Dasselbe Feld, das auch das Wegenetz benutzt - eine zweite
         # Kostendefinition waere eine zweite Wahrheit. Die Erreichbarkeit
-        # selbst rechnet darauf grob (siehe erreichbarkeits_matrix()).
+        # selbst rechnet darauf grob (siehe erreichbarkeits_matrix()). Seit
+        # Ticket #42 zaehlt dazu auch water_map (Uferweg/Furt) - sonst waere
+        # es doch wieder eine zweite Wahrheit, nur verspaetet.
         kostenfeld = None
         try:
             kostenfeld = bau_kostenfeld(inputs["heightmap"], inputs["slopemap"],
-                                        self.road_slope_to_distance_ratio)
+                                        self.road_slope_to_distance_ratio,
+                                        water_map=inputs.get("water_map"))
         except Exception as fehler:
             self.logger.warning(
                 "Kostenfeld fuer die Marktstadt-Erreichbarkeit nicht gebaut (%s) - "
@@ -5122,7 +5265,7 @@ class SettlementGenerator:
 
         roads, sea_roads = self.calculate_road_network(
             settlement_list, inputs["heightmap"], inputs["slopemap"], lod_level, None,
-            seegrad=inputs.get("seegrad"))
+            seegrad=inputs.get("seegrad"), water_map=inputs.get("water_map"))
         self.data_lod_manager.set_calculator_output(
             calculator_id, lod_level, {"roads": roads, "sea_roads": sea_roads})
 
@@ -5709,7 +5852,7 @@ class SettlementGenerator:
         return settlements
 
     def calculate_road_network(self, settlements, heightmap, slopemap, lod, voronoi_cell_map=None,
-                               seegrad=None):
+                               seegrad=None, water_map=None):
         """
         Wegenetz nach docs/SIEDLUNGEN_ENTWURF.md §4.1-§4.3. Ablauf, in dieser
         Reihenfolge:
@@ -5750,10 +5893,31 @@ class SettlementGenerator:
         "ab Grad 1" statt "ab 10 m Tiefe", siehe bau_seekostenfeld()/
         _seeweg_anteil_tief(). None faellt auf die alte Hoehenschwelle zurueck.
 
+        `water_map` (Ticket #42, "Bruecken und Uferwege in die Wegekosten")
+        ist die Flussklassifikation aus water.manning_flow. Mit ihr bekommt
+        das Kostenfeld aus Schritt 1 zusaetzlich den Uferweg-Rabatt und die
+        Furtkosten (siehe bau_kostenfeld()). NACH Schritt 3 wird geprueft, wo
+        sich Furten tatsaechlich buendeln (platziere_bruecken()) - dort
+        entsteht eine Bruecke, und das Kostenfeld wird MIT ihr neu gebaut,
+        bevor Schritt 4 (Kulturzusammenhang, das noch fehlende Kanten "egal
+        was sie kosten" nachtraegt) weiterlaeuft. Eine Bruecke ist also kein
+        fester Gelaendewert, sondern wirkt ab dem Moment ihrer Platzierung im
+        selben Kostenfeld-Regelkreis wie der WEGERABATT. Ohne `water_map`
+        (None, Default) bleibt das Verhalten exakt wie vorher - keine
+        Bruchaenderung fuer bestehende Aufrufer.
+
+        Messwerte fuer Abnahmekriterium 4 stehen danach auf der Instanz:
+        `self.letzte_bruecken` (Liste aus platziere_bruecken(), leer wenn
+        kein Fluss oder keine Bruecke gebaut wurde) und
+        `self.letzter_uferweg_anteil` (Anteil aller Wegepixel im Uferweg-
+        Rabattbereich, 0.0 wenn kein Fluss vorhanden war).
+
         Returns: (roads, sea_roads) - je List[List[Tuple]]. Seewege getrennt
         zurueckgegeben, weil sie "anders gezeichnet werden - gestrichelt, in
         einem eigenen Blau" (§4.4), nicht weil sie technisch etwas anderes
-        waeren.
+        waeren. UNVERAENDERT 2-Tupel (Bruecken/Uferweg-Messwerte laufen ueber
+        Instanzattribute, nicht ueber den Rueckgabewert - mehrere bestehende
+        Aufrufer entpacken exakt `roads, sea_roads = ...`).
         """
         if len(settlements) < 2:
             return [], []
@@ -5771,13 +5935,23 @@ class SettlementGenerator:
         _ts = Teilschritte("settlement.pathfinding",
                            fortschritt=self._update_progress, von=25, bis=90,
                            plan=[("kostenfeld", 2.0), ("gabriel_kandidaten", 1.0),
-                                 ("routen_bewerten", 70.0), ("seekostenfeld", 2.0),
+                                 ("routen_bewerten", 70.0), ("bruecken", 2.0),
+                                 ("seekostenfeld", 2.0),
                                  ("kulturzusammenhang", 15.0),
                                  ("bedarfsausbau", 10.0)])
         self._a_stern_zaehler = [0, 0.0]
+        self.letzte_bruecken = []
+        self.letzter_uferweg_anteil = 0.0
+
+        fluss_land = None
+        if water_map is not None:
+            fluss_land = (np.asarray(water_map) > 0) & (heightmap > 0.0)
+            if not np.any(fluss_land):
+                fluss_land = None
 
         with _s(_ts, "kostenfeld", "Kostenfeld"):
-            basis_kostenfeld = bau_kostenfeld(heightmap, slopemap, self.road_slope_to_distance_ratio)
+            basis_kostenfeld = bau_kostenfeld(heightmap, slopemap, self.road_slope_to_distance_ratio,
+                                              water_map=water_map)
         weg_maske = np.zeros(basis_kostenfeld.shape, dtype=bool)
 
         def route(a, b):
@@ -5884,6 +6058,45 @@ class SettlementGenerator:
                 progress = 25 + (road_count * 12) // total_roads
                 self._update_progress("Road Building", progress,
                                       f"Bewertet {road_count}/{total_roads} Kandidaten")
+
+        # -------------------------------------------------------- 3.5: Bruecken
+        #
+        # Ticket #42: eine Bruecke ist kein fester Gelaendewert, sondern ein
+        # Bauwerk, das dort entsteht, wo sich das Queren tatsaechlich lohnt -
+        # NACH dem Routing gemessen, nicht vorher geraten. platziere_bruecken()
+        # zaehlt, an welchen Furten sich mehrere der eben gebauten Wege
+        # buendeln (der WEGERABATT-Effekt aus Schritt 1 sorgt ueberhaupt erst
+        # dafuer, dass sich Wege buendeln). Nur DORT wird eine Bruecke gebaut;
+        # das Kostenfeld wird danach MIT ihr neu berechnet (billige Operation,
+        # reines Numpy, kein zweiter A*-Lauf) - Schritt 4 (Kulturzusammenhang)
+        # und der Bedarfsausbau darunter sehen die Bruecke dadurch bereits,
+        # weil `route()` `basis_kostenfeld` bei jedem Aufruf aus dem
+        # umschliessenden Scope neu liest.
+        if fluss_land is not None and np.any(weg_maske):
+            with _s(_ts, "bruecken", "Bruecken"):
+                bruecken_maske, bruecken_liste = platziere_bruecken(
+                    weg_maske, roads, fluss_land, water_map)
+                if bruecken_liste:
+                    basis_kostenfeld = bau_kostenfeld(
+                        heightmap, slopemap, self.road_slope_to_distance_ratio,
+                        water_map=water_map, bruecken_maske=bruecken_maske)
+                self.letzte_bruecken = bruecken_liste
+                self.logger.info(
+                    "Bruecken: %d gebaut (Mindestverkehr %d Wege je Furt)",
+                    len(bruecken_liste), BRUECKEN_MIN_VERKEHR)
+
+        # Messung fuer Abnahmekriterium 4: Anteil der Wegepixel, die im
+        # Uferweg-Rabattbereich liegen (docs/SIEDLUNGEN_ENTWURF.md-Anhang,
+        # Ticket #42) - "folgen Wege tatsaechlich dem Ufer, nicht nur
+        # zufaellig". Reine Zaehlung, veraendert nichts mehr am Netz.
+        if fluss_land is not None and np.any(weg_maske):
+            ufer_distanz = distance_transform_edt(~fluss_land)
+            ufer_land = ((ufer_distanz > 0) & (ufer_distanz <= UFERWEG_RADIUS_PX)
+                        & (heightmap > 0.0))
+            wegpixel_gesamt = int(np.count_nonzero(weg_maske))
+            if wegpixel_gesamt > 0:
+                self.letzter_uferweg_anteil = float(
+                    np.count_nonzero(weg_maske & ufer_land) / wegpixel_gesamt)
 
         # ---------------------------------------------------- 4: Kulturzusammenhang
         _rb.__exit__(None, None, None)
