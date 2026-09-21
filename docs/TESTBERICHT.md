@@ -196,3 +196,73 @@ der Zeit vor Seegliederung, Seegrad-Voronoi und Seewegen (siehe
 `docs/SITZUNGSLOG.md`, Block "See-Voronoi/Seegliederung") — die Messung war
 überholt, kein Fehler wurde behoben. Ob und wie nachgesteuert wird, ist laut
 Ticket #32 ein Folgeticket, hier nur die Ist-Erhebung.
+
+## 7. CPU- gegen GPU-Laufzeit der Erosion gemessen und abgesichert (Ticket #30)
+
+**Der Auftrag: "Faktor 385, CPU 0,1 m gegen GPU 38,5 m Export" messen und dann
+entweder Parität herstellen oder den CPU-Pfad laut stilllegen.** Die Prämisse
+war beim Start dieses Tickets bereits überholt — Abschnitt 3 oben beschreibt,
+dass genau dieser Faktor 385 schon am 27.08.2026 gefunden und behoben wurde
+(zu grobes GPU-Meldeintervall, nicht Physik) und `smoke_test_erosion_gpu_parity.py`
+seit dem 16.09.2026 erneut grün gegengemessen ist. Erneut bestätigt in diesem
+Ticket: Einzelschritt-Abweichung 0,00e+00, Massenbilanz beider Pfade < 0,02 %.
+**Parität besteht bereits — Konsequenz A aus dem Ticket ist bereits erfüllt.**
+
+**Laufzeit gemessen** (Maschine dieser Sitzung, Streufaktor der Testumgebung
+beachten, siehe Kopf dieser Datei):
+
+| Pfad | Größe | Schritte | Zeit | ms/Schritt |
+|---|---:|---:|---:|---:|
+| CPU | 128 px | 200 | 1,07 s | 5,3 |
+| CPU | 256 px | 200 | 3,97 s | 19,9 |
+| GPU | 1024 px | 500 | 6,40 s | 12,8 |
+
+256 px ist die reale Obergrenze des CPU-Pfads (`MAX_CPU_RESOLUTION`) — er kann
+1024 px **strukturell nicht** real erreichen, das wird unten begründet.
+Skalierung 128→256 (×4 Zellen): ×3,7 Zeit, also ungefähr zellzahlproportional.
+Hochgerechnet auf 1024 px (×16 Zellen ggü. 256 px) mit dem produktiven
+Default `max_steps=8000`: **CPU ≈ 42 Minuten (geschätzt), GPU ≈ 102 Sekunden
+(real gemessen)** — Faktor rund 25, also dieselbe Größenordnung wie das
+Beispiel im Ticket ("6 Minuten gegen 25 Sekunden"), nur mit dem heutigen
+`max_steps`-Default noch deutlicher.
+
+**Wird der CPU-Pfad im Betrieb je genommen? Ja, aber nicht bei 1024 px.**
+`generation_orchestrator.py` injiziert immer einen echten `ShaderManager`;
+auf jeder Maschine mit OpenGL-4.3-fähiger GPU läuft die Erosion also real auf
+der GPU. Der CPU-Pfad greift als **beabsichtigter Rückfall für Maschinen ohne
+nutzbare GPU** — und genau dafür ist er bereits doppelt abgesichert:
+
+1. `ErosionSystemGenerator._resolve_simulation_size()` deckelt die
+   Simulationsauflösung ohne GPU-Pfad laut auf 256 px (WARNING-Logzeile,
+   `smoke_test_erosion_field.py::resolution_cap_follows_gpu_registration`
+   deckt das ab).
+2. `HydraulicFieldSimulator.simulate()` verweigert oberhalb 256 px mit einem
+   klaren `ValueError` statt stundenlang zu rechnen (Test
+   `cpu_limit_fails_loudly`).
+
+**Eine dritte, bisher ungeprüfte Lücke in genau diesem Sicherungsnetz wurde
+in diesem Ticket gefunden und geschlossen:** War ein GPU-Pfad registriert
+(`has_gpu_path()` True, Simulationsauflösung deshalb NICHT auf 256
+gedeckelt — z. B. 512 px), fiel `simulate()` bei einem GPU-Ausfall MITTEN im
+Lauf (Treiberfehler, Timeout — `_simulate_gpu()` fängt das ab und gibt `None`
+zurück) bisher UNGEPRÜFT in die volle CPU-Hauptschleife durch, ohne die
+Größe erneut gegen `MAX_CPU_RESOLUTION` zu prüfen. Ergebnis wäre ein
+stundenlanger, für den Nutzer nicht als "das dauert jetzt ewig" erkennbarer
+Rückfall gewesen — nur eine WARNING-Zeile im Log, kein Fehler. Behoben in
+`core/erosion_generator.py::HydraulicFieldSimulator.simulate()`: dieselbe
+`ValueError`-Meldung wie beim Start-Deckel greift jetzt auch nach einem
+gescheiterten GPU-Versuch. Neuer Test
+`smoke_test_erosion_field.py::gpu_midrun_failure_above_cpu_limit_fails_loudly`
+(Stub, dessen `request_shader_operation` sofort eine Exception wirft) deckt
+das ab — vor der Änderung rot (lief still auf der CPU weiter, `steps_taken`
+kam ohne Fehler zurück), nach der Änderung grün.
+
+**Kein stiller Rückfall bleibt übrig:** alle drei Wege in den CPU-Pfad
+(Start ohne GPU, Start mit zu großer Anfrage, GPU-Ausfall mitten im Lauf)
+enden entweder in einem tatsächlich brauchbar schnellen Lauf (≤ 256 px) oder
+in einem klaren Fehler statt in einer stillen Wartezeit.
+
+Betroffene/neue Tests: `smoke_test_erosion_gpu_parity.py` (unverändert grün),
+`smoke_test_erosion_field.py` (ein Test ergänzt, Rest unverändert grün außer
+dem bereits bekannten, hier nicht behandelten `colour_ranges_fit_the_data`,
+siehe Abschnitt 3).

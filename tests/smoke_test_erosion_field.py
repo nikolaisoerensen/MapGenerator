@@ -257,6 +257,46 @@ def run_resolution_cap_follows_gpu_registration():
     return ok
 
 
+def run_gpu_midrun_failure_above_cpu_limit_fails_loudly():
+    """
+    Ticket #30: faellt der GPU-Dispatch MITTEN im Lauf aus (Treiberfehler,
+    Timeout), gibt _simulate_gpu() None zurueck und simulate() faellt bislang
+    UNGEPRUEFT in die CPU-Hauptschleife unten durch - ungeachtet der Groesse.
+
+    Das ist genau der Fall, den MAX_CPU_RESOLUTION eigentlich verhindern soll:
+    eine Karte, die nur WEIL ein GPU-Pfad registriert war ueberhaupt groesser
+    als 256x256 gewaehlt wurde, wuerde nach einem GPU-Ausfall still auf der CPU
+    weiterrechnen - Stunden, mit nur einer WARNING-Zeile statt einem Fehler.
+
+    Der Stub hat einen registrierten Dispatch (has_gpu_path() also True, der
+    Groessen-Deckel am Anfang von simulate() greift NICHT), aber
+    request_shader_operation() wirft sofort eine Exception - simuliert einen
+    Treiberfehler nach Start des Laufs.
+    """
+    size = HydraulicFieldSimulator.MAX_CPU_RESOLUTION + 32
+    terrain = np.zeros((size, size), dtype=np.float32)
+
+    class FailingShaderManagerStub:
+        gpu_available = True
+
+        def request_shader_operation(self, *args, **kwargs):
+            raise RuntimeError("simulierter Treiberfehler")
+
+    simulator = HydraulicFieldSimulator(shader_manager=FailingShaderManagerStub())
+    ok = check("Stub meldet einen registrierten GPU-Pfad (Vorbedingung)",
+               simulator.has_gpu_path())
+    try:
+        simulator.simulate(terrain, hardness(size), {"max_steps": 1}, 10.0)
+    except ValueError as error:
+        ok &= check(
+            "GPU-Ausfall mitten im Lauf bei zu grosser Karte meldet einen "
+            "klaren Fehler statt still auf der CPU weiterzurechnen",
+            "GPU" in str(error) and str(size) in str(error))
+        return ok
+    return check("GPU-Ausfall mitten im Lauf bei zu grosser Karte meldet einen "
+                 "klaren Fehler statt still auf der CPU weiterzurechnen", False)
+
+
 # =============================================================================
 # (E) Konvergenz
 # =============================================================================
@@ -457,6 +497,8 @@ def main():
         ("input_is_not_mutated", run_input_is_not_mutated),
         ("cpu_limit_fails_loudly", run_cpu_limit_fails_loudly),
         ("resolution_cap_follows_gpu_registration", run_resolution_cap_follows_gpu_registration),
+        ("gpu_midrun_failure_above_cpu_limit_fails_loudly",
+         run_gpu_midrun_failure_above_cpu_limit_fails_loudly),
         ("convergence_reports_honestly", run_convergence_reports_honestly),
         ("colour_ranges_fit_the_data", run_colour_ranges_fit_the_data),
         ("progress_is_reported_often_enough", run_progress_is_reported_often_enough),

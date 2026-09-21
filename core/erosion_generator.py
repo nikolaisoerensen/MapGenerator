@@ -630,6 +630,24 @@ class HydraulicFieldSimulator:
             if gpu_result is not None:
                 return self._collect_results(
                     state, heightmap, gpu_result["steps_taken"], gpu_result["converged"])
+            # GPU wurde VERSUCHT (has_gpu_path() war True) und ist mitten im Lauf
+            # ausgefallen (Treiberfehler, Timeout) - _simulate_gpu() faengt das
+            # bereits mit einer WARNING ab und gibt None zurueck, siehe dort.
+            # Ohne diese zweite Pruefung wuerde der Code direkt in die
+            # CPU-Hauptschleife unten durchfallen, UNGEACHTET der Groesse - bei
+            # einer Karte, die nur wegen des GPU-Pfads ueberhaupt so gross
+            # gewaehlt wurde (MAX_CPU_RESOLUTION greift nur, wenn has_gpu_path()
+            # von vornherein False war), waere das ein stiller Rueckfall auf
+            # einen Lauf, der Stunden dauert, mit nur einer Logzeile statt einem
+            # Fehler. Ticket #30: genau dieser Fall blieb bislang ungeprueft.
+            if size > self.MAX_CPU_RESOLUTION:
+                raise ValueError(
+                    f"HydraulicFieldSimulator: GPU-Lauf bei {size}x{size} ist mitten "
+                    f"im Lauf fehlgeschlagen (siehe WARNING oben) und der CPU-Pfad "
+                    f"verweigert diese Groesse oberhalb {self.MAX_CPU_RESOLUTION}x"
+                    f"{self.MAX_CPU_RESOLUTION} - ein Weiterrechnen wuerde Stunden "
+                    f"dauern statt den Fehler sichtbar zu machen."
+                )
         max_steps = cfg["max_steps"]
         interval = self.CONVERGENCE_CHECK_INTERVAL
         reference = state["terrain"].copy()
