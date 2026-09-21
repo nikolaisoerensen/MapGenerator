@@ -461,8 +461,16 @@ class BaseMapTab(QWidget):
             error_label.setStyleSheet("color: red; padding: 20px; font-size: 12px;")
             fallback_layout.addWidget(error_label)
             self.setLayout(fallback_layout)
-        except Exception:
-            pass  # Auch Fallback fehlgeschlagen
+        except Exception as fehler:
+            # Stiller Ersatzpfad: das ist bereits der Fallback fuer einen
+            # gescheiterten Tab-Aufbau - scheitert auch ER, bleibt der Tab
+            # komplett leer und niemand erfaehrt, dass ueberhaupt zwei
+            # Fehler aufgetreten sind (urspruenglicher Setup-Fehler UND
+            # dieser). CLAUDE.md "jeder stille Rueckfall braucht eine laute
+            # Logzeile".
+            self.logger.error(
+                "Auch Fallback-UI fehlgeschlagen (%s) - urspruenglicher "
+                "Fehler war: %s. Tab bleibt leer.", fehler, error_message)
 
     def setup_manager_connections(self):
         """

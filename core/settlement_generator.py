@@ -2025,8 +2025,14 @@ class PathfindingSystem:
 
             smoothed_path = [(int(x), int(y)) for x, y in zip(smoothed_coords[0], smoothed_coords[1])]
             return smoothed_path
-        except:
-            # Fallback bei Spline-Fehlern
+        except Exception as fehler:
+            # Stiller Ersatzpfad: der Weg wird trotzdem gezeichnet, nur ohne
+            # Glättung - sieht auf der Karte plausibel aus, ist aber
+            # nicht der beabsichtigte sanfte Verlauf (CLAUDE.md "jeder
+            # stille Rueckfall braucht eine laute Logzeile").
+            logging.getLogger(__name__).warning(
+                "Spline-Glättung fehlgeschlagen (%s, %d Kontrollpunkte) "
+                "- Weg bleibt ungeglättet.", fehler, len(control_points))
             return path
 
 
@@ -7337,8 +7343,12 @@ def apply_spline_smoothing(self, path, smoothing_factor=3, progress_callback=Non
 
         smoothed_path = [(int(x), int(y)) for x, y in zip(smoothed_coords[0], smoothed_coords[1])]
         return smoothed_path
-    except:
-        # Fallback bei Spline-Fehlern
+    except Exception as fehler:
+        # Stiller Ersatzpfad, siehe apply_spline_smoothing() oben fuer die
+        # volle Begruendung.
+        logging.getLogger(__name__).warning(
+            "Spline-Glättung fehlgeschlagen (%s, %d Kontrollpunkte) - "
+            "Weg bleibt ungeglättet.", fehler, len(control_points))
         return path
 
 

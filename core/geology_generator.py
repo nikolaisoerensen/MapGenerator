@@ -1000,8 +1000,18 @@ class GeologySystemGenerator:
         if self.data_lod_manager is not None and hasattr(self.data_lod_manager, "get_map_distance_km"):
             try:
                 return float(self.data_lod_manager.get_map_distance_km())
-            except Exception:
-                pass
+            except Exception as fehler:
+                # Stiller Ersatzpfad: ohne diese Zeile rechnet die Geologie
+                # lautlos mit dem Fallback-Wert (TERRAIN.WORLD_SIZE_KM oder
+                # dem gespeicherten Parameter) weiter, obwohl der eigentlich
+                # vorhandene DataLODManager kaputt ist - das verstimmt die
+                # Massstabsskalierung fuer Haerte-/Erosionskarten, ohne dass
+                # es auffaellt (CLAUDE.md "jeder stille Rueckfall braucht
+                # eine laute Logzeile").
+                self.logger.warning(
+                    "data_lod_manager.get_map_distance_km() fehlgeschlagen "
+                    "(%s) - Geologie nutzt Fallback-Kartendistanz statt der "
+                    "realen LOD-Ausdehnung.", fehler)
         return float(self._current_parameters.get('map_distance_km', default_km))
 
     def _load_default_parameters(self) -> Dict[str, Any]:

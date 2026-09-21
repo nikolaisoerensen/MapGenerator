@@ -2176,7 +2176,13 @@ class MapDisplay3D(QOpenGLWidget):
         else:
             try:
                 rgb = _colorize_layer(np.asarray(overlay_data), layer_name)
-            except Exception:
+            except Exception as fehler:
+                # Stiller Ersatzpfad: ohne diese Meldung fehlt die Textur
+                # fuer "%s.%s" einfach lautlos - dieselbe Fehlerklasse wie
+                # "vier Karten ohne Farbtabelle im 3D" (CLAUDE.md-Historie).
+                self.rendering_error.emit(
+                    f"Einfaerbung fuer {tab_type}.{layer_name} "
+                    f"fehlgeschlagen ({fehler}) - Overlay bleibt aus")
                 return
 
             # See-Pixel klar absetzen (analog zu map_display_2d.py's _render_water_map()

@@ -248,8 +248,15 @@ class RiverTab(BaseMapTab):
             try:
                 seed = int(self.parameter_manager.get_tab_parameters(
                     "terrain").get("map_seed", seed))
-            except Exception:                             # pragma: no cover
-                pass
+            except Exception as fehler:                   # pragma: no cover
+                # Stiller Ersatzpfad: ohne diese Zeile rechnet die Fluss-
+                # Vorschau lautlos mit dem Ersatz-Seed 20260804 weiter, statt
+                # mit dem tatsaechlichen Karten-Seed - CLAUDE.md "jeder
+                # stille Rueckfall braucht eine laute Logzeile".
+                self.logger.warning(
+                    "Karten-Seed nicht lesbar (%s) - Flussvorschau nutzt "
+                    "Ersatz-Seed %d statt map_seed aus dem Terrain-Reiter.",
+                    fehler, seed)
         if self._vorschau_basis is None or self._vorschau_seed != seed:
             H, felder = _rw.weltfeld(VORSCHAU_PX, seed)
             self._vorschau_basis = (_np.asarray(H, _np.float32), felder)

@@ -559,7 +559,16 @@ class HydraulicFieldSimulator:
             return False
         try:
             from managers.shader_manager import DISPATCH_TABLE
-        except ImportError:
+        except ImportError as fehler:
+            # Stiller Ersatzpfad: liefert False wie "kein Dispatch
+            # registriert", tatsaechlich ist aber managers.shader_manager
+            # selbst kaputt/fehlend - GENAU die Fehlerklasse aus CLAUDE.md
+            # ("GPU-Erosion faellt auf CPU", Faktor 385 weniger Abtrag,
+            # 38,5 m gegen 0,1 m), nur diesmal am Import statt am Pfad.
+            self.logger.warning(
+                "managers.shader_manager nicht importierbar (%s) - "
+                "has_gpu_path() meldet False, Erosion rechnet auf CPU "
+                "weiter (gemessen Faktor 385 weniger Abtrag).", fehler)
             return False
         return self.GPU_OPERATION in DISPATCH_TABLE
 

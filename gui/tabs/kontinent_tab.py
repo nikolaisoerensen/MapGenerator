@@ -224,8 +224,15 @@ class KontinentTab(QWidget):
                     "terrain").get("map_seed")
                 if wert is not None:
                     return int(wert)
-            except Exception:                            # pragma: no cover
-                pass
+            except Exception as fehler:                  # pragma: no cover
+                # Stiller Ersatzpfad (CLAUDE.md "jeder stille Rueckfall
+                # braucht eine laute Logzeile"): ohne diese Zeile sieht die
+                # Kontinent-Vorschau bei falschem Seed-Parameter trotzdem
+                # plausibel aus - nur eben mit dem Ersatz-Seed statt dem
+                # Karten-Seed.
+                self.logger.warning(
+                    "Karten-Seed nicht lesbar (%s) - Ersatz-Seed 20260804 "
+                    "statt map_seed aus dem Terrain-Reiter.", fehler)
         return 20260804
 
     def _form(self):
