@@ -130,6 +130,14 @@ EINSTUFUNG = {
         "stille Rueckfall, weil sie den gesamten Schutzzaun abschaltet. "
         "Einziger Test fuer ein Werkzeug, das jede Nacht aktiv benutzt "
         "wird. 4.4 s."),
+    "smoke_test_stille_rueckfaelle.py": (WAECHTER,
+        "STILLER_RUECKFALL direkt am Namen: AST-Scan ueber die Hotspot- "
+        "Dateien, der jeden neuen stillen except-Block gegen eine feste "
+        "Allowlist prueft - genau die Fehlerklasse, die diesen ganzen "
+        "Rang begruendet, hier als eigener Waechter statt nur als Lehre "
+        "in CLAUDE.md. Nachtrag bei der #46-Pruefung eingestuft, weil "
+        "das Worktree des #46-Agenten vor dieser (#54-)Datei von main "
+        "abzweigte. 0.5 s."),
     "smoke_test_biome_preseed.py": (WAECHTER,
         "STILLER_RUECKFALL: prueft, dass CALCULATOR_GRAPH keinen Zyklus "
         "zwischen Feuchte und Biom enthaelt - eine kritische "
@@ -383,6 +391,13 @@ EINSTUFUNG = {
         "spezialisiert genug (Seeweg-Pathfinding, Katalog-Kultur-"
         "Konsistenz), um im nightly-Lauf ausreichend abgesichert zu "
         "sein."),
+    "smoke_test_wege_wasser_kosten.py": (EICHUNG,
+        "Praezise Regressionspruefung exakter Werte (Furt-/Bruecken-"
+        "kosten, Uferweg-Rabatt im Kostenfeld aus #42), kein Bezug zu "
+        "einer der drei Waechter-Fehlerklassen - gleiches Muster wie "
+        "smoke_test_settlement_roads.py. Nachtrag bei der #46-Pruefung "
+        "eingestuft, weil das Worktree des #46-Agenten vor dieser "
+        "(#42-)Datei von main abzweigte. 1.1 s."),
     "smoke_test_settlement_valley_routing.py": (EICHUNG,
         "A*-Routenqualitaet, traegt laut Bewertung noch eine ausgedachte "
         "Testgroesse (100px statt eines 32er-Vielfachen) - kleine "
@@ -523,8 +538,12 @@ if __name__ == "__main__":
 
     fehlend = sorted(echte_dateien - eingestufte_dateien)
     verwaist = sorted(eingestufte_dateien - echte_dateien)
-    waechter = sorted(d for d in echte_dateien if rang(d) == WAECHTER)
-    eichung = sorted(d for d in echte_dateien if rang(d) == EICHUNG)
+    # Nur ueber bekannte Dateien zaehlen: rang() wirft RangUnbekannt fuer
+    # jede Datei aus 'fehlend' - die Meldung dazu soll unten als Text
+    # erscheinen, nicht als Traceback vor dem ersten print().
+    bekannt = echte_dateien - set(fehlend)
+    waechter = sorted(d for d in bekannt if rang(d) == WAECHTER)
+    eichung = sorted(d for d in bekannt if rang(d) == EICHUNG)
 
     print("%d Testdateien insgesamt, %d Waechter, %d Eichung"
           % (len(echte_dateien), len(waechter), len(eichung)))
