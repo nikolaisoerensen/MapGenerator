@@ -351,8 +351,21 @@ _CALCULATOR_SPECS = [
     # water.manning_flow statt water.flow_network: Siedlungseignung bewertet
     # die Naehe zu tatsaechlichen Gewaesserflaechen, also die FINALE gemalte
     # Klassifikation - siehe water.manning_flow-Kommentar oben.
+    #
+    # biome.integrate_layers ergaenzt (Ticket #34, 2026-09-21): die Eignung
+    # sah bis dahin die Biomkarte gar nicht - Siedlungen wurden platziert, ohne
+    # zu wissen, ob der Ort Wueste, Sumpf oder Wiese ist. Dieselbe Kante steht
+    # bereits an settlement.pathfinding (siehe deren Kommentar unten), aus
+    # demselben Grund: OHNE die deklarierte Abhaengigkeit darf Settlement in
+    # derselben Runde wie Biome laufen und je nach Thread-Timing die
+    # hoehenbasierte Notfall-Ersatzkarte statt der echten Biome-Klassifikation
+    # bekommen - nicht reproduzierbar. biome.integrate_layers liegt VOR dem
+    # Settlement-Block (siehe oben), die Reihenfolge ist damit bereits durch
+    # den bestehenden Rueckkopplungs-Mechanismus sichergestellt
+    # (CalculatorDispatcher._generators_after_feedback()/_is_held_back()).
     CalculatorSpec("settlement.suitability", "settlement",
-                   ["terrain.redistribution", "erosion.slope", "water.manning_flow"],
+                   ["terrain.redistribution", "erosion.slope", "water.manning_flow",
+                    "biome.integrate_layers"],
                    ["combined_suitability_map"]),
     CalculatorSpec("settlement.settlements", "settlement",
                    ["settlement.suitability", "terrain.redistribution"], ["settlement_list"]),

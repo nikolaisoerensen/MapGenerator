@@ -572,6 +572,52 @@ ELEVATION_DAEMPFUNG_M = 600.0
 WASSERTYP_GEWICHT = {4: 1.0, 3: 1.0, 2: 0.8, 1: 0.5}
 KUeSTE_GEWICHT = 0.75
 
+# Biom-Eignung fuer Siedlungen (Ticket #34, 2026-09-21) - DAEMPFEND wie
+# Hoehenlage/Erreichbarkeit, nicht additiv: ein Ort in schlechtem Biom soll
+# schlechter sein als derselbe Ort in gutem Biom, nicht "trotzdem gut genug",
+# weil Wasser/Ebene/Ackerland separat schon hoch punkten. 1.0 = keine
+# Einschraenkung, 0.0 = praktisch unbewohnbar.
+#
+# IDs 0-14: die 15 Grundbiome aus core/biome_generator.py
+# (BaseBiomeClassifier.biome_definitions) - Namen dort woertlich uebernommen.
+# IDs 15-26: die "Super-Biome" (Wasser/Relief-Ueberlagerung, super_biome_offset
+# in BiomeClassificationSystem), soweit sie ueberhaupt auf Land vorkommen
+# koennen - Ozean/Seeeis liegen ausserhalb von land_mask und werden nie
+# gelesen, stehen hier trotzdem korrekt fuer den Fall, dass sie es doch tun.
+#
+# Werte sind eine gutachterliche Einschaetzung (keine Messreihe, kein Regler
+# in docs/SIEDLUNGEN_ENTWURF.md) - fruchtbares Offenland/Laubwald hoch,
+# Nadel-/Bergwald mittel, Moor/Bruch/Steilheit/Hochlage niedrig.
+BIOME_SIEDLUNGSEIGNUNG = {
+    0: 0.30,   # hochmoor - nass, sauer, kaum tragfaehiger Baugrund (Moor)
+    1: 0.40,   # bruchwald - Sumpfwald, staendig vernaesst
+    2: 0.80,   # feuchtwiese - nass, aber gutes Weideland
+    3: 1.00,   # grasland - Referenzwert, bestes Ackerland
+    4: 0.65,   # heide - naehrstoffarmer Boden
+    5: 0.45,   # fjell - baumfrei, rau, kurze Vegetationszeit
+    6: 0.70,   # nadelwald - nutzbar, aber kargerer Boden als Laubwald
+    7: 0.80,   # mischwald - guter Kompromiss
+    8: 0.90,   # buchenwald - fruchtbarer Laubwaldboden
+    9: 0.90,   # eichenwald - fruchtbarer Laubwaldboden
+    10: 0.55,  # bergwald - steile Hanglagen, kurze Vegetationszeit
+    11: 0.70,  # macchia - mediterranes Buschland, nutzbar aber trocken
+    12: 0.70,  # steineichenwald - vergleichbar macchia
+    13: 0.50,  # trockensteppe - wenig Niederschlag fuer Ackerbau
+    14: 0.25,  # halbwueste - kaum Niederschlag ("Wueste" im Ticket-Wortlaut)
+    15: 0.00,  # ocean - kein Land (Sicherheitswert, land_mask filtert das)
+    16: 0.00,  # lake - kein Land
+    17: 0.00,  # grand_river - kein Land
+    18: 0.00,  # river - kein Land
+    19: 0.00,  # creek - kein Land
+    20: 0.15,  # cliff - Steilklippe, kaum bebaubar
+    21: 0.65,  # beach - sandig, aber flach und siedelbar
+    22: 0.85,  # lake_edge - Ufer, fruchtbar UND nah am Wasser
+    23: 0.85,  # river_bank - Ufer, fruchtbar UND nah am Wasser
+    24: 0.10,  # snow_level - Dauerschnee, unbewohnbar
+    25: 0.20,  # alpine_level - Hochlage oberhalb der Waldgrenze
+    26: 0.00,  # sea_ice - kein Land
+}
+
 
 class TerrainSuitabilityAnalyzer:
     """
@@ -714,15 +760,65 @@ class TerrainSuitabilityAnalyzer:
                                 size=2 * self.farmland_radius_px + 1, mode="nearest")
         return anteil.astype(np.float32)
 
+    def evaluate_biome_suitability(self, biome_map, progress_callback=None):
+        """
+        Biom-Eignung, DAEMPFEND wie Hoehenlage (siehe BIOME_SIEDLUNGSEIGNUNG)
+        - Sumpf/Moor/Halbwueste drosseln einen sonst guten Standort, statt ihn
+        additiv nur ein wenig zu senken.
+
+        `biome_map` ist None -> neutraler Faktor 1.0 UEBERALL, mit einer
+        lauten Logzeile (Pipeline-Logger) statt stillem Weiterrechnen -
+        Ticket #34, Abnahmekriterium "greift die Biomkarte einmal nicht, wird
+        eine laute Logzeile geschrieben". Das darf nur beim Fallback-Pfad
+        passieren (Standalone-Aufruf ohne Biome-Generator); ueber den
+        Calculator-Graph ist biome.integrate_layers jetzt eine harte
+        Abhaengigkeit von settlement.suitability.
+        """
+        if progress_callback:
+            progress_callback("Terrain Analysis", 8, "Evaluating biome suitability...")
+
+        if biome_map is None:
+            logging.getLogger("Pipeline").warning(
+                "settlement.suitability: biome_map fehlt - Eignungsrechnung "
+                "laeuft OHNE Biom-Einfluss (neutraler Faktor 1.0 ueberall). "
+                "Siedlungen koennen dadurch in Sumpf/Wueste genauso haeufig "
+                "entstehen wie in Grasland.")
+            return None
+
+        biome_ids = biome_map.astype(np.int32)
+        eignung = np.ones(biome_ids.shape, dtype=np.float32)
+
+        bekannt = np.zeros(biome_ids.shape, dtype=bool)
+        for biome_id, faktor in BIOME_SIEDLUNGSEIGNUNG.items():
+            maske = biome_ids == biome_id
+            eignung[maske] = faktor
+            bekannt |= maske
+
+        unbekannt = ~bekannt
+        if np.any(unbekannt):
+            fremde_ids = sorted(int(i) for i in np.unique(biome_ids[unbekannt]))
+            logging.getLogger("Pipeline").warning(
+                "settlement.suitability: %d Pixel mit unbekannter Biom-ID %s "
+                "(nicht in BIOME_SIEDLUNGSEIGNUNG) - laufen mit neutralem "
+                "Faktor 1.0, statt korrekt gedaempft zu werden.",
+                int(np.sum(unbekannt)), fremde_ids)
+
+        return np.clip(eignung, 0.0, 1.0).astype(np.float32)
+
     def create_combined_suitability(self, heightmap, slopemap, water_map,
-                                    reachability_map=None, progress_callback=None):
+                                    reachability_map=None, biome_map=None,
+                                    progress_callback=None):
         """
         Fuenf Faktoren zur Standortguete. Wasser/Ebene/Ackerland gehen additiv
         gewichtet ein (Wasser am staerksten, die Begruendung siehe
-        WASSERTYP_GEWICHT), Hoehe und Erreichbarkeit wirken DAEMPFEND -
+        WASSERTYP_GEWICHT), Hoehe, Biom und Erreichbarkeit wirken DAEMPFEND -
         multiplikativ auf das Ergebnis, nicht als weiterer additiver Term -
         weil sie im Entwurf ausdruecklich als daempfende Faktoren beschrieben
         sind, nicht als weitere Qualitaeten, die sich aufaddieren.
+
+        `biome_map` neu seit Ticket #34 (2026-09-21) - vorher sah diese
+        Berechnung die Biomkarte ueberhaupt nicht, Siedlungen entstanden also
+        unabhaengig davon, ob der Ort Wueste, Sumpf oder Wiese war.
         """
         land_mask = heightmap > 0.0
         wasser_suit = self.calculate_water_proximity(water_map, heightmap, progress_callback)
@@ -730,6 +826,7 @@ class TerrainSuitabilityAnalyzer:
         hoehe_suit = self.evaluate_elevation_fitness(heightmap, progress_callback)
         acker_suit = self.evaluate_farmland_radius(flach_suit, hoehe_suit, land_mask,
                                                    progress_callback)
+        biom_suit = self.evaluate_biome_suitability(biome_map, progress_callback)
 
         gewichte = {'wasser': 0.45, 'flach': 0.30 * self.terrain_factor,
                    'acker': 0.25 * self.terrain_factor}
@@ -739,6 +836,8 @@ class TerrainSuitabilityAnalyzer:
                      + acker_suit * gewichte['acker']) / summe_gewichte
 
         daempfung = hoehe_suit
+        if biom_suit is not None:
+            daempfung = daempfung * biom_suit
         if reachability_map is not None:
             daempfung = daempfung * np.clip(reachability_map, 0.0, 1.0)
 
@@ -5131,8 +5230,21 @@ class SettlementGenerator:
         seegrad = self.data_lod_manager.get_calculator_output(
             "terrain.redistribution", "seegrad", lod_level)
 
+        # Biomkarte (Ticket #34, 2026-09-21): seit dem Graph-Update eine ECHTE
+        # Abhaengigkeit von settlement.suitability (siehe calculator_graph.py)
+        # - anders als region_map/seegrad also eigentlich immer vorhanden,
+        # wenn der Calculator-Dispatcher die Reihenfolge einhaelt. Trotzdem
+        # OHNE harte Pflichtpruefung (kein raise) geholt, weil der Standalone-
+        # Convenience-Pfad (Legacy-Kompatibilitaet + Tests, siehe
+        # _execute_generation()) auch ohne echten Biome-Generator laufen
+        # koennen muss - fehlt sie hier trotzdem, meldet das
+        # TerrainSuitabilityAnalyzer.evaluate_biome_suitability() laut per
+        # Pipeline-Logger, statt still mit neutralem Faktor weiterzurechnen.
+        biome_map = self.data_lod_manager.get_calculator_output(
+            "biome.integrate_layers", "biome_map", lod_level)
+
         return {"heightmap": heightmap, "slopemap": slopemap, "water_map": water_map,
-                "region_map": region_map, "seegrad": seegrad}
+                "region_map": region_map, "seegrad": seegrad, "biome_map": biome_map}
 
     def _calc_suitability(self, calculator_id: str, lod_level: int) -> None:
         """
@@ -5152,7 +5264,7 @@ class SettlementGenerator:
         inputs = self._get_prepared_settlement_inputs(lod_level)
         suitability_map = self.calculate_terrain_suitability(
             inputs["heightmap"], inputs["slopemap"], inputs["water_map"], lod_level,
-            region_map=inputs.get("region_map"))
+            region_map=inputs.get("region_map"), biome_map=inputs.get("biome_map"))
         self.data_lod_manager.set_calculator_output(
             calculator_id, lod_level, {"combined_suitability_map": suitability_map})
 
@@ -5461,11 +5573,17 @@ class SettlementGenerator:
              "potential_field": plot_system.potential_field})
 
     def calculate_terrain_suitability(self, heightmap, slopemap, water_map, lod,
-                                       reachability_map=None, region_map=None):
+                                       reachability_map=None, region_map=None,
+                                       biome_map=None):
         """
         Fuenf-Faktor-Eignungsfeld (docs/SIEDLUNGEN_ENTWURF.md §2). `reachability_map`
         bleibt None fuer die erste Platzierungsrunde (Faktor neutral) - siehe
         TerrainSuitabilityAnalyzer.create_combined_suitability().
+
+        `biome_map` seit Ticket #34 (2026-09-21) - fehlt sie, faellt
+        create_combined_suitability() auf einen neutralen Faktor zurueck UND
+        schreibt eine laute Warnung (Pipeline-Logger), statt still ohne
+        Biom-Einfluss weiterzurechnen.
 
         Multipliziert danach mit `_randfaktor()` (docs/OFFENE_PUNKTE.md 5.14) -
         eine weiche Absenkung nahe der Kastengrenze des 3x3-Ausschnittsgitters,
@@ -5474,7 +5592,7 @@ class SettlementGenerator:
         analyzer = TerrainSuitabilityAnalyzer(self.terrain_factor_villages, heightmap.shape[0])
         combined_suitability = analyzer.create_combined_suitability(
             heightmap, slopemap, water_map, reachability_map=reachability_map,
-            progress_callback=self._update_progress)
+            biome_map=biome_map, progress_callback=self._update_progress)
         randfaktor = self._randfaktor(heightmap.shape[0], region_map)
         if randfaktor is not None:
             combined_suitability = combined_suitability * randfaktor
