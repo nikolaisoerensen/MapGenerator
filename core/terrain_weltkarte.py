@@ -37,6 +37,9 @@ aufdrueckt. Nur ringsum zieht ein Randabfall die aeusseren 1.5 km ins Meer.
 """
 
 import logging
+import tomllib
+from pathlib import Path
+
 import numpy as np
 from scipy import ndimage
 
@@ -218,23 +221,17 @@ SPREIZUNG = 1.5
 # schlechter statt besser (4 statt 3 Regionen daneben). Direkt auf das Ziel zu
 # normieren macht die Eichung ueberfluessig; die Morobora stand zwischenzeitlich
 # auf 79 mm, damit 600 ankamen.
-NIEDERSCHLAG_ZIEL = {
-    "Clonagh": 1200.0, "Skerrheim": 2250.0, "Morobora": 600.0,
-    "Estrande": 780.0, "Nevadin": 850.0, "Nebelrode": 640.0,
-    "Samarcia": 430.0, "Macchia": 800.0, "Thalassia": 480.0,
-}
-
-KLIMA_ZIEL = {
-    "Clonagh": (10.9, 9.5),
-    "Skerrheim": (8.6, 13.0),
-    "Morobora": (3.8, 29.0),
-    "Estrande": (13.6, 14.0),
-    "Nevadin": (12.8, 18.5),
-    "Nebelrode": (11.2, 18.5),
-    "Samarcia": (20.0, 19.0),
-    "Macchia": (16.9, 17.5),
-    "Thalassia": (19.7, 14.0),
-}
+# NIEDERSCHLAG_ZIEL und KLIMA_ZIEL SIND HIER NICHT MEHR ALS LITERAL
+# EINGETRAGEN (Ticket #29, 2026-09-19). Sie deckten sich schon vorher
+# ZAHLENGLEICH mit REGIONEN[...]["niederschlag_mm"] bzw. den Paaren
+# (temp_mittel_m0, temp_spanne) - siehe die Begruendung oben ("Die
+# Eingabewerte sind dadurch nicht mehr als 'Klima von Bergen' lesbar") und
+# tests/smoke_test_weather_temperature_direktnormierung.py ("Die
+# Eingabewerte in REGIONEN sind seither die lesbaren KLIMA_ZIEL-Werte
+# selbst."). Ein zweites Mal denselben Wert im Code stehen zu haben war
+# genau die Art von Duplikat, die Ticket #29 beheben sollte - deshalb
+# werden beide jetzt AUS REGIONEN abgeleitet, direkt nachdem REGIONEN aus
+# core/daten/regionen.toml geladen ist (siehe unten, kurz vor REGLER).
 
 # KLIMA JE REGION (2026-08-07). Drei Werte, alle auf MEERESHOEHE:
 #
@@ -273,86 +270,116 @@ KLIMA_ZIEL = {
 # tests/smoke_test_regionen_fairness.py - sie sind eine Entscheidung ueber
 # das Zielbild (Nevadin und Skerrheim 0.80, alle anderen 1.00), nicht
 # ueber die Rechnung.
-REGIONEN = [
-    [   # ---------------------------------------------------------- NORD
-        dict(name="Clonagh", farbe="#8ab661", volk="Kelten",
-             bemerkung="sanfte Wellen, breite Sohlen, dichtes Bachnetz",
-             hoehe_m=165.3, relief_m=79.5, formgroesse_m=1600.0,
-             rauheit=0.52, potenz=1.0, wasser_soll=0.0, flaeche_soll=1.11, kuestenform=1.45,
-             temp_mittel_m0=10.9, temp_spanne=9.5,
-             niederschlag_mm=1200, wind_mittel_ms=4.5,
-             hang_trockenheit=0.15,
-             talform=1.3),
-        dict(name="Skerrheim", farbe="#5fa8a0", volk="Wikinger",
-             bemerkung="EIN Hauptfjord, Hochflaeche, steile Waende",
-             hoehe_m=-52.0, relief_m=484.9, formgroesse_m=1400.0,
-             rauheit=0.45, potenz=0.55, wasser_soll=20.0, flaeche_soll=1.09, kuestenform=1.90,
-             temp_mittel_m0=8.6, temp_spanne=13.0,
-             niederschlag_mm=2250, wind_mittel_ms=3.0,
-             hang_trockenheit=0.1,
-             talform=2.6),
-        dict(name="Morobora", farbe="#3f6b4a", volk="Slawen",
-             bemerkung="flaches Hochland, weite Mulden, traege Maeander",
-             hoehe_m=293.6, relief_m=118.1, formgroesse_m=3000.0,
-             rauheit=0.42, potenz=0.9, wasser_soll=0.0, flaeche_soll=1.00, kuestenform=0.45,
-             temp_mittel_m0=3.8, temp_spanne=29.0,
-             niederschlag_mm=600, wind_mittel_ms=3.2,
-             hang_trockenheit=0.2,
-             talform=2.0),
-    ],
-    [   # ---------------------------------------------------------- MITTE
-        dict(name="Estrande", farbe="#9b5fb5", volk="Franken",
-             bemerkung="Kuestenebene mit Aestuar, Kliff im Norden",
-             hoehe_m=-80.9, relief_m=147.1, formgroesse_m=2400.0,
-             rauheit=0.50, potenz=1.3, wasser_soll=45.0, flaeche_soll=1.44, kuestenform=1.00,
-             temp_mittel_m0=13.6, temp_spanne=14.0,
-             niederschlag_mm=780, wind_mittel_ms=4.5,
-             hang_trockenheit=0.12,
-             talform=1.5),
-        dict(name="Nevadin", farbe="#b5aca0", volk="Alemannen",
-             bemerkung="Trogtaeler, scharfe Grate, grosse Massive",
-             hoehe_m=1000.0, relief_m=1050.0, formgroesse_m=3800.0,
-             rauheit=0.68, potenz=1.5, wasser_soll=0.0, flaeche_soll=1.21, kuestenform=1.00,
-             temp_mittel_m0=12.8, temp_spanne=18.5,
-             niederschlag_mm=850, wind_mittel_ms=2.2,
-             hang_trockenheit=0.3,
-             talform=0.8),
-        dict(name="Nebelrode", farbe="#8a5a33", volk="Sachsen",
-             bemerkung="dichte dendritische Zertalung",
-             hoehe_m=350.0, relief_m=134.7, formgroesse_m=1400.0,
-             rauheit=0.62, potenz=1.0, wasser_soll=0.0, flaeche_soll=1.09, kuestenform=0.45,
-             temp_mittel_m0=11.2, temp_spanne=18.5,
-             niederschlag_mm=640, wind_mittel_ms=3.0,
-             hang_trockenheit=0.2,
-             talform=1.3),
-    ],
-    [   # ---------------------------------------------------------- SUED
-        dict(name="Samarcia", farbe="#d9a05b", volk="Andalusier",
-             bemerkung="Trockentaeler, weite Flaechen, wenig Netz",
-             hoehe_m=230.0, relief_m=109.4, formgroesse_m=2600.0,
-             rauheit=0.48, potenz=1.4, wasser_soll=0.0, flaeche_soll=0.92, kuestenform=1.10,
-             temp_mittel_m0=20.0, temp_spanne=19.0,
-             niederschlag_mm=430, wind_mittel_ms=3.0,
-             hang_trockenheit=0.45,
-             talform=1.1),
-        dict(name="Macchia", farbe="#d1603d", volk="Italiener",
-             bemerkung="Kuestengebirge direkt am Meer, kurze steile Laeufe",
-             hoehe_m=0.6, relief_m=312.9, formgroesse_m=1800.0,
-             rauheit=0.60, potenz=1.2, wasser_soll=40.0, flaeche_soll=1.39, kuestenform=1.00,
-             temp_mittel_m0=16.9, temp_spanne=17.5,
-             niederschlag_mm=800, wind_mittel_ms=3.5,
-             hang_trockenheit=0.35,
-             talform=0.9),
-        dict(name="Thalassia", farbe="#a8447e", volk="Byzantiner",
-             bemerkung="Archipel, viel Wasser, kleine steile Inseln",
-             hoehe_m=-67.8, relief_m=403.6, formgroesse_m=1100.0,
-             rauheit=0.58, potenz=1.1, wasser_soll=65.0, flaeche_soll=1.22, kuestenform=1.00,
-             temp_mittel_m0=19.7, temp_spanne=14.0,
-             niederschlag_mm=480, wind_mittel_ms=4.5,
-             hang_trockenheit=0.3,
-             talform=0.9),
-    ],
-]
+# DIE WERTE SELBST STEHEN NICHT MEHR HIER (Ticket #29, 2026-09-19), SONDERN
+# IN core/daten/regionen.toml.
+#
+# Vorher standen REGIONEN und KUESTEN_ARCHETYPEN als Python-Literale in
+# dieser Datei: nicht diffbar (jede Aenderung verschwand im Rauschen eines
+# Python-Diffs), nicht ohne Import lesbar, nicht ohne Codeaenderung
+# verstellbar. `_lade_regionsdaten()` liest jetzt stattdessen die
+# TOML-Datei und baut daraus dasselbe 3x3-Gitter - byte- und wertgleich zu
+# vorher, siehe tests/smoke_test_regionen_welt.py (unveraendertes Ergebnis)
+# und tests/smoke_test_regionsdaten_vollstaendig.py (Vollstaendigkeit aller
+# neun Saetze).
+#
+# KEIN STILLER RUECKFALL: fehlt die Datei, fehlt ein Pflichtfeld, oder
+# fehlt eine der neun Gitterpositionen, bricht der Import mit einer klaren
+# Fehlermeldung ab - CLAUDE.md nennt genau das die teuerste wiederkehrende
+# Fehlerklasse dieses Projekts (stille Rueckfaelle nach Pfad-/Werteumzuegen).
+_REGIONENDATEI = Path(__file__).resolve().parent / "daten" / "regionen.toml"
+
+_REGION_PFLICHTFELDER = (
+    "name", "farbe", "volk", "bemerkung", "hoehe_m", "relief_m",
+    "formgroesse_m", "rauheit", "potenz", "wasser_soll", "flaeche_soll",
+    "kuestenform", "temp_mittel_m0", "temp_spanne", "niederschlag_mm",
+    "wind_mittel_ms", "hang_trockenheit", "talform")
+
+_ARCHETYP_PFLICHTFELDER = (
+    "name", "hoehe_faktor", "winkel_grad", "kantig", "strand_anteil",
+    "max_anteil", "reichweite_km")
+
+
+def _lade_regionsdaten(pfad=None):
+    """
+    Laedt REGIONEN (3x3-Gitter) und KUESTEN_ARCHETYPEN (je Regionsname drei
+    Eintraege) aus core/daten/regionen.toml.
+
+    Prueft dabei genau das, was tests/smoke_test_regionsdaten_vollstaendig.py
+    von aussen noch einmal nachprueft: neun Regionen, jede mit allen
+    Pflichtfeldern und genau drei Kuestenarchetypen, jede Gitterposition
+    (zeile, spalte) genau einmal belegt. Fehlt etwas, gibt es KEINEN
+    Vorgabewert, der das Loch still fuellt - der Import bricht ab.
+    """
+    pfad = Path(pfad) if pfad is not None else _REGIONENDATEI
+    if not pfad.exists():
+        raise RuntimeError(
+            "Regionsparameter-Datei fehlt: %s. Ohne sie kann "
+            "core.terrain_weltkarte keine Welt rechnen (Ticket #29)." % pfad)
+    with open(pfad, "rb") as datei:
+        rohdaten = tomllib.load(datei)
+
+    eintraege = rohdaten.get("region", [])
+    if len(eintraege) != 9:
+        raise RuntimeError(
+            "%s enthaelt %d Regionen, erwartet werden genau neun "
+            "(3x3-Gitter)." % (pfad, len(eintraege)))
+
+    gitter = [[None, None, None] for _ in range(3)]
+    kuesten_archetypen = {}
+    namen = set()
+    for eintrag in eintraege:
+        name = eintrag.get("name", "<ohne Namen>")
+        fehlend = [f for f in _REGION_PFLICHTFELDER if f not in eintrag]
+        if fehlend:
+            raise RuntimeError(
+                "Region %r in %s fehlt Feld(er): %s"
+                % (name, pfad, fehlend))
+        zeile, spalte = eintrag.get("zeile"), eintrag.get("spalte")
+        if zeile not in (0, 1, 2) or spalte not in (0, 1, 2):
+            raise RuntimeError(
+                "Region %r in %s hat keine gueltige Gitterposition "
+                "(zeile=%r, spalte=%r)." % (name, pfad, zeile, spalte))
+        if gitter[zeile][spalte] is not None:
+            raise RuntimeError(
+                "Gitterposition (%d, %d) in %s doppelt belegt (%r und %r)."
+                % (zeile, spalte, pfad, gitter[zeile][spalte]["name"], name))
+
+        archetypen = eintrag.get("kuesten_archetypen", [])
+        if len(archetypen) != 3:
+            raise RuntimeError(
+                "Region %r in %s hat %d Kuestenarchetypen, erwartet werden "
+                "drei." % (name, pfad, len(archetypen)))
+        for archetyp in archetypen:
+            fehlend_a = [f for f in _ARCHETYP_PFLICHTFELDER
+                        if f not in archetyp]
+            if fehlend_a:
+                raise RuntimeError(
+                    "Ein Kuestenarchetyp der Region %r in %s fehlt "
+                    "Feld(er): %s" % (name, pfad, fehlend_a))
+
+        gitter[zeile][spalte] = {k: eintrag[k] for k in _REGION_PFLICHTFELDER}
+        kuesten_archetypen[name] = tuple(dict(a) for a in archetypen)
+        namen.add(name)
+
+    if len(namen) != 9:
+        raise RuntimeError("%s enthaelt doppelte Regionsnamen." % pfad)
+    for zeile in gitter:
+        for zelle in zeile:
+            if zelle is None:
+                raise RuntimeError(
+                    "%s deckt nicht alle neun Gitterpositionen ab." % pfad)
+
+    return gitter, kuesten_archetypen
+
+
+REGIONEN, KUESTEN_ARCHETYPEN = _lade_regionsdaten()
+
+# Abgeleitet aus REGIONEN, nicht verdoppelt - siehe die Begruendung weiter
+# oben bei der (jetzt entfernten) literalen Fassung dieser beiden Dicts.
+NIEDERSCHLAG_ZIEL = {r["name"]: float(r["niederschlag_mm"])
+                     for zeile in REGIONEN for r in zeile}
+KLIMA_ZIEL = {r["name"]: (float(r["temp_mittel_m0"]), float(r["temp_spanne"]))
+             for zeile in REGIONEN for r in zeile}
 
 REGLER = ("hoehe_m", "relief_m", "formgroesse_m", "rauheit",
           "potenz", "kuestenform",
@@ -1914,60 +1941,11 @@ def randabfall(size, seed=0, unruhe_m=1100.0, shader_manager=None):
 # eigenen Zone, der als Strand-Luecke ausgespart wird (nie eine
 # durchgehende Klippenwand), max_anteil die Obergrenze am gesamten
 # Kuestenumfang der Region - garantiert per Quote, nicht nur wahrscheinlich.
-KUESTEN_ARCHETYPEN = {
-    "Clonagh": (
-        dict(name="Moher-Klippen", hoehe_faktor=1.4, winkel_grad=82, kantig=False, strand_anteil=0.10, max_anteil=0.25, reichweite_km=0.60),
-        dict(name="West-Cork-Buchten", hoehe_faktor=0.8, winkel_grad=65, kantig=False, strand_anteil=0.35, max_anteil=0.40, reichweite_km=0.40),
-        dict(name="Luce-Bay-Straende", hoehe_faktor=0.4, winkel_grad=45, kantig=False, strand_anteil=0.55, max_anteil=0.35, reichweite_km=0.22),
-    ),
-    "Skerrheim": (
-        dict(name="Fjordwand", hoehe_faktor=1.8, winkel_grad=78, kantig=True, strand_anteil=0.05, max_anteil=0.30, reichweite_km=0.70),
-        dict(name="Schaerenkueste", hoehe_faktor=0.5, winkel_grad=55, kantig=True, strand_anteil=0.30, max_anteil=0.40, reichweite_km=0.30),
-        dict(name="Fjordbucht", hoehe_faktor=0.3, winkel_grad=40, kantig=False, strand_anteil=0.60, max_anteil=0.30, reichweite_km=0.20),
-    ),
-    "Morobora": (
-        dict(name="Kola-Steilkueste", hoehe_faktor=1.1, winkel_grad=70, kantig=True, strand_anteil=0.15, max_anteil=0.30, reichweite_km=0.45),
-        dict(name="Weissmeer-Flachkueste", hoehe_faktor=0.25, winkel_grad=30, kantig=False, strand_anteil=0.65, max_anteil=0.40, reichweite_km=0.15),
-        dict(name="Labrador-Buchten", hoehe_faktor=0.7, winkel_grad=55, kantig=False, strand_anteil=0.35, max_anteil=0.30, reichweite_km=0.35),
-    ),
-    "Estrande": (
-        dict(name="Bretagne-Klippen", hoehe_faktor=0.9, winkel_grad=72, kantig=False, strand_anteil=0.20, max_anteil=0.25, reichweite_km=0.42),
-        dict(name="Vendee-Straende", hoehe_faktor=0.3, winkel_grad=35, kantig=False, strand_anteil=0.70, max_anteil=0.45, reichweite_km=0.18),
-        dict(name="Ile-de-Re-Watt", hoehe_faktor=0.35, winkel_grad=30, kantig=False, strand_anteil=0.60, max_anteil=0.30, reichweite_km=0.20),
-    ),
-    "Nevadin": (
-        dict(name="Kotor-Steilfjord", hoehe_faktor=1.7, winkel_grad=80, kantig=False, strand_anteil=0.05, max_anteil=0.25, reichweite_km=0.68),
-        dict(name="Dalmatien-Klippen", hoehe_faktor=1.2, winkel_grad=75, kantig=False, strand_anteil=0.20, max_anteil=0.40, reichweite_km=0.50),
-        dict(name="Alpine-Flussmuendung", hoehe_faktor=0.4, winkel_grad=40, kantig=False, strand_anteil=0.55, max_anteil=0.35, reichweite_km=0.24),
-    ),
-    "Nebelrode": (
-        dict(name="Ruegen-Kreidekueste", hoehe_faktor=0.85, winkel_grad=70, kantig=False, strand_anteil=0.25, max_anteil=0.25, reichweite_km=0.40),
-        dict(name="Ostsee-Flachkueste", hoehe_faktor=0.3, winkel_grad=30, kantig=False, strand_anteil=0.65, max_anteil=0.50, reichweite_km=0.18),
-        dict(name="Foerdenkueste", hoehe_faktor=0.35, winkel_grad=35, kantig=False, strand_anteil=0.60, max_anteil=0.25, reichweite_km=0.22),
-    ),
-    "Samarcia": (
-        dict(name="Algarve-Klippen", hoehe_faktor=1.3, winkel_grad=80, kantig=False, strand_anteil=0.15, max_anteil=0.30, reichweite_km=0.58),
-        dict(name="Costa-Brava-Buchten", hoehe_faktor=0.9, winkel_grad=68, kantig=True, strand_anteil=0.35, max_anteil=0.35, reichweite_km=0.42),
-        dict(name="San-Sebastian-Bucht", hoehe_faktor=0.5, winkel_grad=40, kantig=False, strand_anteil=0.55, max_anteil=0.35, reichweite_km=0.28),
-    ),
-    "Macchia": (
-        dict(name="Amalfi-Steilkueste", hoehe_faktor=1.6, winkel_grad=82, kantig=False, strand_anteil=0.10, max_anteil=0.30, reichweite_km=0.65),
-        dict(name="Cinque-Terre-Buchten", hoehe_faktor=1.0, winkel_grad=70, kantig=False, strand_anteil=0.30, max_anteil=0.35, reichweite_km=0.45),
-        dict(name="Toskana-Straende", hoehe_faktor=0.4, winkel_grad=35, kantig=False, strand_anteil=0.60, max_anteil=0.35, reichweite_km=0.24),
-    ),
-    "Thalassia": (
-        # hoehe_faktor 2026-08-13 von 1.7 auf 1.15 gesenkt (Nutzer-Vorgabe:
-        # "das ist viel zu extrem an der stelle") - 1.7 ergibt 765 m Zielhoehe,
-        # deutlich ueber jeder anderen Klippe der Tabelle (naechsthoechste
-        # Fjordwand 810m*1.8 raeumt aber ueber die volle Fjordlaenge auf, nicht
-        # in einer 0.68km-Kuestenzone). 1.15 ergibt rund 520 m - immer noch die
-        # hoechste Steilkueste der Samarcia/Griechische-Inseln-Gruppe, aber ohne
-        # den Ausreisser gegenueber dem Rest der Tabelle.
-        dict(name="Santorini-Kliff", hoehe_faktor=1.15, winkel_grad=84, kantig=False, strand_anteil=0.05, max_anteil=0.25, reichweite_km=0.68),
-        dict(name="Kreta-Buchten", hoehe_faktor=0.8, winkel_grad=65, kantig=False, strand_anteil=0.35, max_anteil=0.40, reichweite_km=0.38),
-        dict(name="Kykladen-Strand", hoehe_faktor=0.45, winkel_grad=40, kantig=False, strand_anteil=0.55, max_anteil=0.35, reichweite_km=0.25),
-    ),
-}
+# Die Werte selbst (27 Archetypen, 9 Regionen zu je 3) stehen nicht mehr hier,
+# sondern in core/daten/regionen.toml, geladen ueber _lade_regionsdaten() ganz
+# oben in dieser Datei (Ticket #29, 2026-09-19) - inklusive der
+# Thalassia-Santorini-Kliff-Korrektur vom 2026-08-13, wertgleich uebernommen.
+# KUESTEN_ARCHETYPEN ist ab hier bereits gefuellt (siehe oben).
 
 MAX_KLIPPENWINKEL_GRAD = 85.0   # nie eine reine 90-Grad-Wand
 KUESTEN_ARCHETYP_PUNKTE_JE_REGION = 24  # Saatpunkte laengs der Kueste je Region

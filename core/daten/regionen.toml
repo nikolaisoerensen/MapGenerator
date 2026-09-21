@@ -1,0 +1,524 @@
+# Die neun Regionsparametersaetze (Ticket #29).
+#
+# Frueher standen diese Werte als Modulkonstanten (REGIONEN,
+# KUESTEN_ARCHETYPEN) in core/terrain_weltkarte.py: nicht diffbar, nicht von
+# Tests lesbar ohne Import, nicht ohne Codeaenderung verstellbar. Der Umzug
+# hierher ist WERTNEUTRAL - keine Zahl hat sich dabei geaendert, siehe die
+# Gegenprobe in tests/smoke_test_regionen_welt.py (unveraendertes Ergebnis)
+# und tests/smoke_test_regionsdaten_vollstaendig.py (alle neun vollstaendig).
+#
+# core/terrain_weltkarte.py laedt diese Datei beim Import (_lade_regionsdaten)
+# und baut daraus REGIONEN (3x3-Gitter, per zeile/spalte) und
+# KUESTEN_ARCHETYPEN (je Regionsname 3 Eintraege). NIEDERSCHLAG_ZIEL und
+# KLIMA_ZIEL werden daraus abgeleitet, nicht hier verdoppelt - sie deckten
+# sich schon vor dem Umzug exakt mit niederschlag_mm/temp_mittel_m0/
+# temp_spanne (siehe tests/smoke_test_weather_temperature_direktnormierung.py:
+# "Die Eingabewerte in REGIONEN sind seither die lesbaren KLIMA_ZIEL-Werte
+# selbst.").
+#
+# Die GUI (gui/tabs/region_tab.py) zeigt diese Werte NUR LESEND an - kein
+# Regler, kein Eingabefeld schreibt in diese Datei. Die vorhandenen Regler im
+# Regionsreiter ueberschreiben nur die aktuelle Kartenerzeugung
+# (self.ueberschreibungen), nie den Katalog hier.
+#
+# Bedeutung der Felder je Region, ausfuehrlich begruendet (Eichgeschichte,
+# Messwerte, Nutzerzitate) im Kopf von core/terrain_weltkarte.py unter
+# "DIE NEUN REGIONEN" - das bleibt dort stehen, weil es Begruendung ist,
+# keine Zahl:
+#
+#   zeile, spalte     Position im 3x3-Gitter (Nord/Mitte/Sued x West/Ost)
+#   farbe             Kartenfarbe (Terrain-Reiter, Regional-Reiter, Legende)
+#   volk              Kultur-Schluessel fuer den Siedlungsgenerator
+#   bemerkung         Kurzcharakteristik, nur lesbar, keine Rechengroesse
+#   hoehe_m           mittlere Hoehe der Region (negativ = ueberwiegend Wasser)
+#   relief_m          Hoehenspanne um diese Mitte
+#   formgroesse_m     Groesse der groessten Gelaendeform
+#   rauheit           wie stark die feinen Oktaven mitreden (0.4 glatt .. 0.75 rau)
+#   potenz            <1 hebt an (Hochflaeche), >1 drueckt herunter (Ebene+Gipfel)
+#   wasser_soll       Zielwasseranteil in Prozent
+#   flaeche_soll      Grundflaechen-Ausgleichsfaktor (tools/flaeche_eichen.py)
+#   kuestenform       Kuestenform-Regionswert (kuestenform() in terrain_weltkarte.py)
+#   temp_mittel_m0    Jahresmittel in Grad, auf Meereshoehe zurueckgerechnet
+#   temp_spanne       Jahresspanne (Juli minus Januar) in Kelvin
+#   niederschlag_mm   Jahresniederschlag in mm
+#   wind_mittel_ms    mittlere Windgeschwindigkeit in m/s
+#   hang_trockenheit  wie stark ein voller Suedhang austrocknet (Nordhang: feuchter)
+#   talform           Exponent der Taeler-Querschnittskurve (klein=V, gross=U)
+#
+# Je Region folgen drei [[region.kuesten_archetypen]] - die an realen
+# Kuesten orientierten Auspraegungen aus core/terrain_weltkarte.py,
+# Abschnitt "KUESTEN-ARCHETYPEN":
+#
+#   name              Anzeigename des Archetyps
+#   hoehe_faktor      Skaliert KUESTENHOEHE_M (450 m)
+#   winkel_grad       Zielwinkel der Klippenfront (nie 90, siehe MAX_KLIPPENWINKEL_GRAD)
+#   kantig            bricht die glatte Anstiegskurve in Facetten auf (Fjord/Schaeren)
+#   strand_anteil     Anteil INNERHALB der eigenen Zone als Strand-Luecke
+#   max_anteil        Obergrenze am gesamten Kuestenumfang der Region
+#   reichweite_km     wie weit der Archetyp landeinwaerts/seewaerts wirkt
+
+# =============================================================================
+# NORD
+# =============================================================================
+
+[[region]]
+zeile = 0
+spalte = 0
+name = "Clonagh"
+farbe = "#8ab661"
+volk = "Kelten"
+bemerkung = "sanfte Wellen, breite Sohlen, dichtes Bachnetz"
+hoehe_m = 165.3
+relief_m = 79.5
+formgroesse_m = 1600.0
+rauheit = 0.52
+potenz = 1.0
+wasser_soll = 0.0
+flaeche_soll = 1.11
+kuestenform = 1.45
+temp_mittel_m0 = 10.9
+temp_spanne = 9.5
+niederschlag_mm = 1200
+wind_mittel_ms = 4.5
+hang_trockenheit = 0.15
+talform = 1.3
+
+[[region.kuesten_archetypen]]
+name = "Moher-Klippen"
+hoehe_faktor = 1.4
+winkel_grad = 82
+kantig = false
+strand_anteil = 0.10
+max_anteil = 0.25
+reichweite_km = 0.60
+
+[[region.kuesten_archetypen]]
+name = "West-Cork-Buchten"
+hoehe_faktor = 0.8
+winkel_grad = 65
+kantig = false
+strand_anteil = 0.35
+max_anteil = 0.40
+reichweite_km = 0.40
+
+[[region.kuesten_archetypen]]
+name = "Luce-Bay-Straende"
+hoehe_faktor = 0.4
+winkel_grad = 45
+kantig = false
+strand_anteil = 0.55
+max_anteil = 0.35
+reichweite_km = 0.22
+
+
+[[region]]
+zeile = 0
+spalte = 1
+name = "Skerrheim"
+farbe = "#5fa8a0"
+volk = "Wikinger"
+bemerkung = "EIN Hauptfjord, Hochflaeche, steile Waende"
+hoehe_m = -52.0
+relief_m = 484.9
+formgroesse_m = 1400.0
+rauheit = 0.45
+potenz = 0.55
+wasser_soll = 20.0
+flaeche_soll = 1.09
+kuestenform = 1.90
+temp_mittel_m0 = 8.6
+temp_spanne = 13.0
+niederschlag_mm = 2250
+wind_mittel_ms = 3.0
+hang_trockenheit = 0.1
+talform = 2.6
+
+[[region.kuesten_archetypen]]
+name = "Fjordwand"
+hoehe_faktor = 1.8
+winkel_grad = 78
+kantig = true
+strand_anteil = 0.05
+max_anteil = 0.30
+reichweite_km = 0.70
+
+[[region.kuesten_archetypen]]
+name = "Schaerenkueste"
+hoehe_faktor = 0.5
+winkel_grad = 55
+kantig = true
+strand_anteil = 0.30
+max_anteil = 0.40
+reichweite_km = 0.30
+
+[[region.kuesten_archetypen]]
+name = "Fjordbucht"
+hoehe_faktor = 0.3
+winkel_grad = 40
+kantig = false
+strand_anteil = 0.60
+max_anteil = 0.30
+reichweite_km = 0.20
+
+
+[[region]]
+zeile = 0
+spalte = 2
+name = "Morobora"
+farbe = "#3f6b4a"
+volk = "Slawen"
+bemerkung = "flaches Hochland, weite Mulden, traege Maeander"
+hoehe_m = 293.6
+relief_m = 118.1
+formgroesse_m = 3000.0
+rauheit = 0.42
+potenz = 0.9
+wasser_soll = 0.0
+flaeche_soll = 1.00
+kuestenform = 0.45
+temp_mittel_m0 = 3.8
+temp_spanne = 29.0
+niederschlag_mm = 600
+wind_mittel_ms = 3.2
+hang_trockenheit = 0.2
+talform = 2.0
+
+[[region.kuesten_archetypen]]
+name = "Kola-Steilkueste"
+hoehe_faktor = 1.1
+winkel_grad = 70
+kantig = true
+strand_anteil = 0.15
+max_anteil = 0.30
+reichweite_km = 0.45
+
+[[region.kuesten_archetypen]]
+name = "Weissmeer-Flachkueste"
+hoehe_faktor = 0.25
+winkel_grad = 30
+kantig = false
+strand_anteil = 0.65
+max_anteil = 0.40
+reichweite_km = 0.15
+
+[[region.kuesten_archetypen]]
+name = "Labrador-Buchten"
+hoehe_faktor = 0.7
+winkel_grad = 55
+kantig = false
+strand_anteil = 0.35
+max_anteil = 0.30
+reichweite_km = 0.35
+
+
+# =============================================================================
+# MITTE
+# =============================================================================
+
+[[region]]
+zeile = 1
+spalte = 0
+name = "Estrande"
+farbe = "#9b5fb5"
+volk = "Franken"
+bemerkung = "Kuestenebene mit Aestuar, Kliff im Norden"
+hoehe_m = -80.9
+relief_m = 147.1
+formgroesse_m = 2400.0
+rauheit = 0.50
+potenz = 1.3
+wasser_soll = 45.0
+flaeche_soll = 1.44
+kuestenform = 1.00
+temp_mittel_m0 = 13.6
+temp_spanne = 14.0
+niederschlag_mm = 780
+wind_mittel_ms = 4.5
+hang_trockenheit = 0.12
+talform = 1.5
+
+[[region.kuesten_archetypen]]
+name = "Bretagne-Klippen"
+hoehe_faktor = 0.9
+winkel_grad = 72
+kantig = false
+strand_anteil = 0.20
+max_anteil = 0.25
+reichweite_km = 0.42
+
+[[region.kuesten_archetypen]]
+name = "Vendee-Straende"
+hoehe_faktor = 0.3
+winkel_grad = 35
+kantig = false
+strand_anteil = 0.70
+max_anteil = 0.45
+reichweite_km = 0.18
+
+[[region.kuesten_archetypen]]
+name = "Ile-de-Re-Watt"
+hoehe_faktor = 0.35
+winkel_grad = 30
+kantig = false
+strand_anteil = 0.60
+max_anteil = 0.30
+reichweite_km = 0.20
+
+
+[[region]]
+zeile = 1
+spalte = 1
+name = "Nevadin"
+farbe = "#b5aca0"
+volk = "Alemannen"
+bemerkung = "Trogtaeler, scharfe Grate, grosse Massive"
+hoehe_m = 1000.0
+relief_m = 1050.0
+formgroesse_m = 3800.0
+rauheit = 0.68
+potenz = 1.5
+wasser_soll = 0.0
+flaeche_soll = 1.21
+kuestenform = 1.00
+temp_mittel_m0 = 12.8
+temp_spanne = 18.5
+niederschlag_mm = 850
+wind_mittel_ms = 2.2
+hang_trockenheit = 0.3
+talform = 0.8
+
+[[region.kuesten_archetypen]]
+name = "Kotor-Steilfjord"
+hoehe_faktor = 1.7
+winkel_grad = 80
+kantig = false
+strand_anteil = 0.05
+max_anteil = 0.25
+reichweite_km = 0.68
+
+[[region.kuesten_archetypen]]
+name = "Dalmatien-Klippen"
+hoehe_faktor = 1.2
+winkel_grad = 75
+kantig = false
+strand_anteil = 0.20
+max_anteil = 0.40
+reichweite_km = 0.50
+
+[[region.kuesten_archetypen]]
+name = "Alpine-Flussmuendung"
+hoehe_faktor = 0.4
+winkel_grad = 40
+kantig = false
+strand_anteil = 0.55
+max_anteil = 0.35
+reichweite_km = 0.24
+
+
+[[region]]
+zeile = 1
+spalte = 2
+name = "Nebelrode"
+farbe = "#8a5a33"
+volk = "Sachsen"
+bemerkung = "dichte dendritische Zertalung"
+hoehe_m = 350.0
+relief_m = 134.7
+formgroesse_m = 1400.0
+rauheit = 0.62
+potenz = 1.0
+wasser_soll = 0.0
+flaeche_soll = 1.09
+kuestenform = 0.45
+temp_mittel_m0 = 11.2
+temp_spanne = 18.5
+niederschlag_mm = 640
+wind_mittel_ms = 3.0
+hang_trockenheit = 0.2
+talform = 1.3
+
+[[region.kuesten_archetypen]]
+name = "Ruegen-Kreidekueste"
+hoehe_faktor = 0.85
+winkel_grad = 70
+kantig = false
+strand_anteil = 0.25
+max_anteil = 0.25
+reichweite_km = 0.40
+
+[[region.kuesten_archetypen]]
+name = "Ostsee-Flachkueste"
+hoehe_faktor = 0.3
+winkel_grad = 30
+kantig = false
+strand_anteil = 0.65
+max_anteil = 0.50
+reichweite_km = 0.18
+
+[[region.kuesten_archetypen]]
+name = "Foerdenkueste"
+hoehe_faktor = 0.35
+winkel_grad = 35
+kantig = false
+strand_anteil = 0.60
+max_anteil = 0.25
+reichweite_km = 0.22
+
+
+# =============================================================================
+# SUED
+# =============================================================================
+
+[[region]]
+zeile = 2
+spalte = 0
+name = "Samarcia"
+farbe = "#d9a05b"
+volk = "Andalusier"
+bemerkung = "Trockentaeler, weite Flaechen, wenig Netz"
+hoehe_m = 230.0
+relief_m = 109.4
+formgroesse_m = 2600.0
+rauheit = 0.48
+potenz = 1.4
+wasser_soll = 0.0
+flaeche_soll = 0.92
+kuestenform = 1.10
+temp_mittel_m0 = 20.0
+temp_spanne = 19.0
+niederschlag_mm = 430
+wind_mittel_ms = 3.0
+hang_trockenheit = 0.45
+talform = 1.1
+
+[[region.kuesten_archetypen]]
+name = "Algarve-Klippen"
+hoehe_faktor = 1.3
+winkel_grad = 80
+kantig = false
+strand_anteil = 0.15
+max_anteil = 0.30
+reichweite_km = 0.58
+
+[[region.kuesten_archetypen]]
+name = "Costa-Brava-Buchten"
+hoehe_faktor = 0.9
+winkel_grad = 68
+kantig = true
+strand_anteil = 0.35
+max_anteil = 0.35
+reichweite_km = 0.42
+
+[[region.kuesten_archetypen]]
+name = "San-Sebastian-Bucht"
+hoehe_faktor = 0.5
+winkel_grad = 40
+kantig = false
+strand_anteil = 0.55
+max_anteil = 0.35
+reichweite_km = 0.28
+
+
+[[region]]
+zeile = 2
+spalte = 1
+name = "Macchia"
+farbe = "#d1603d"
+volk = "Italiener"
+bemerkung = "Kuestengebirge direkt am Meer, kurze steile Laeufe"
+hoehe_m = 0.6
+relief_m = 312.9
+formgroesse_m = 1800.0
+rauheit = 0.60
+potenz = 1.2
+wasser_soll = 40.0
+flaeche_soll = 1.39
+kuestenform = 1.00
+temp_mittel_m0 = 16.9
+temp_spanne = 17.5
+niederschlag_mm = 800
+wind_mittel_ms = 3.5
+hang_trockenheit = 0.35
+talform = 0.9
+
+[[region.kuesten_archetypen]]
+name = "Amalfi-Steilkueste"
+hoehe_faktor = 1.6
+winkel_grad = 82
+kantig = false
+strand_anteil = 0.10
+max_anteil = 0.30
+reichweite_km = 0.65
+
+[[region.kuesten_archetypen]]
+name = "Cinque-Terre-Buchten"
+hoehe_faktor = 1.0
+winkel_grad = 70
+kantig = false
+strand_anteil = 0.30
+max_anteil = 0.35
+reichweite_km = 0.45
+
+[[region.kuesten_archetypen]]
+name = "Toskana-Straende"
+hoehe_faktor = 0.4
+winkel_grad = 35
+kantig = false
+strand_anteil = 0.60
+max_anteil = 0.35
+reichweite_km = 0.24
+
+
+[[region]]
+zeile = 2
+spalte = 2
+name = "Thalassia"
+farbe = "#a8447e"
+volk = "Byzantiner"
+bemerkung = "Archipel, viel Wasser, kleine steile Inseln"
+hoehe_m = -67.8
+relief_m = 403.6
+formgroesse_m = 1100.0
+rauheit = 0.58
+potenz = 1.1
+wasser_soll = 65.0
+flaeche_soll = 1.22
+kuestenform = 1.00
+temp_mittel_m0 = 19.7
+temp_spanne = 14.0
+niederschlag_mm = 480
+wind_mittel_ms = 4.5
+hang_trockenheit = 0.3
+talform = 0.9
+
+# hoehe_faktor 2026-08-13 von 1.7 auf 1.15 gesenkt (Nutzer-Vorgabe: "das ist
+# viel zu extrem an der stelle") - 1.7 ergibt 765 m Zielhoehe, deutlich ueber
+# jeder anderen Klippe der Tabelle. 1.15 ergibt rund 520 m - immer noch die
+# hoechste Steilkueste der Samarcia/Griechische-Inseln-Gruppe, aber ohne den
+# Ausreisser gegenueber dem Rest der Tabelle.
+[[region.kuesten_archetypen]]
+name = "Santorini-Kliff"
+hoehe_faktor = 1.15
+winkel_grad = 84
+kantig = false
+strand_anteil = 0.05
+max_anteil = 0.25
+reichweite_km = 0.68
+
+[[region.kuesten_archetypen]]
+name = "Kreta-Buchten"
+hoehe_faktor = 0.8
+winkel_grad = 65
+kantig = false
+strand_anteil = 0.35
+max_anteil = 0.40
+reichweite_km = 0.38
+
+[[region.kuesten_archetypen]]
+name = "Kykladen-Strand"
+hoehe_faktor = 0.45
+winkel_grad = 40
+kantig = false
+strand_anteil = 0.55
+max_anteil = 0.35
+reichweite_km = 0.25

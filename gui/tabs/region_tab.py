@@ -306,8 +306,72 @@ class RegionTab(QWidget):
         self.status.setWordWrap(True)
         self.status.setAlignment(Qt.AlignmentFlag.AlignTop)
         spalte.addWidget(self.status)
+
+        # NUR-LESEN-ANZEIGE DES KATALOGS (Ticket #29): die neun
+        # Regionsparametersaetze samt Kuestenarchetypen kommen jetzt aus
+        # core/daten/regionen.toml. Damit man sie ueberhaupt sieht, ohne die
+        # Datei von Hand zu oeffnen, zeigt dieses Label den vollstaendigen
+        # Datensatz der gewaehlten Region - als reiner Text, KEIN Regler und
+        # KEIN Eingabefeld, denn genau das verlangt das Ticket: die Werte
+        # sind hier nur zu LESEN. Aendern kann man sie nur in der TOML-Datei
+        # selbst; die fuenf Regler oben in "Gelaende" bleiben, was sie schon
+        # vorher waren, eine Ueberschreibung fuer den aktuellen Kartenlauf,
+        # die den Katalog nicht anfasst.
+        katalog_kasten = QGroupBox("Katalogwerte (nur lesend)")
+        katalog_spalte = QVBoxLayout(katalog_kasten)
+        self.katalog_anzeige = QLabel("")
+        self.katalog_anzeige.setWordWrap(True)
+        self.katalog_anzeige.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.katalog_anzeige.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        katalog_spalte.addWidget(self.katalog_anzeige)
+        spalte.addWidget(katalog_kasten)
+
         spalte.addStretch(1)
         return seite
+
+    def _katalog_text(self, name: str) -> str:
+        """Baut den reinen Lesetext fuer den vollstaendigen Katalogeintrag."""
+        katalog = self._katalog(name)
+        if not katalog:
+            return "Keine Katalogdaten gefunden."
+        zeilen = [
+            "Volk: {}".format(katalog.get("volk", "-")),
+            "{}".format(katalog.get("bemerkung", "")),
+            "",
+            "Wasseranteil-Ziel: {:.0f} %".format(
+                float(katalog.get("wasser_soll", 0.0))),
+            "Flaechenfaktor: {:.2f}".format(
+                float(katalog.get("flaeche_soll", 0.0))),
+            "Kuestenform: {:.2f}".format(
+                float(katalog.get("kuestenform", 0.0))),
+            "Julitemperatur: {:.1f} C, Jahresspanne {:.1f} K".format(
+                float(katalog.get("temp_mittel_m0", 0.0)),
+                float(katalog.get("temp_spanne", 0.0))),
+            "Niederschlag: {:.0f} mm/Jahr".format(
+                float(katalog.get("niederschlag_mm", 0.0))),
+            "Wind (Mittel): {:.1f} m/s".format(
+                float(katalog.get("wind_mittel_ms", 0.0))),
+            "Hangtrockenheit: {:.2f}".format(
+                float(katalog.get("hang_trockenheit", 0.0))),
+            "Talform: {:.2f}".format(float(katalog.get("talform", 0.0))),
+        ]
+        archetypen = rw.KUESTEN_ARCHETYPEN.get(name, ())
+        if archetypen:
+            zeilen.append("")
+            zeilen.append("Kuestenarchetypen:")
+            for a in archetypen:
+                zeilen.append(
+                    "  - {}: Hoehenfaktor {:.2f}, Winkel {:.0f} Grad, "
+                    "{}, Strandanteil {:.0f} %, max. {:.0f} % der Kueste, "
+                    "Reichweite {:.2f} km".format(
+                        a.get("name", "-"), float(a.get("hoehe_faktor", 0.0)),
+                        float(a.get("winkel_grad", 0.0)),
+                        "kantig" if a.get("kantig") else "glatt",
+                        float(a.get("strand_anteil", 0.0)) * 100.0,
+                        float(a.get("max_anteil", 0.0)) * 100.0,
+                        float(a.get("reichweite_km", 0.0))))
+        return "\n".join(zeilen)
 
     # ------------------------------------------------------------------
     def _ansicht_wechseln(self, index: int):
@@ -329,6 +393,7 @@ class RegionTab(QWidget):
         """Die Regler auf die Werte der gewaehlten Region setzen."""
         name = self._regionsname()
         katalog = self._katalog(name)
+        self.katalog_anzeige.setText(self._katalog_text(name))
         eigene = self.ueberschreibungen.get(name, {})
         self._sperre = True
         try:
