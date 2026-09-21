@@ -28,3 +28,52 @@
 # Erzeugungslauf Terrain -> Weather -> Hydrology. Siehe
 # tests/smoke_test_wasserbilanz_toleranz.py fuer die genaue Rechnung.
 toleranz_prozent = 10.0
+
+[wegenetz]
+# Ticket #41 ("Wegekostenstaffelung nach Wegart kalibrieren"). Das Band haelt
+# fest, dass der Rueckkopplungs-Regelkreis in core/settlement_generator.py::
+# calculate_road_network() (Benutzung verbilligt ein Wegstueck, das billigere
+# Stueck zieht mehr Benutzung an, core/wegarten.py) NICHT auslaeuft - weder
+# zu einem Stern aus lauter Einzelverbindungen (kein Wegart-Aufstieg, jedes
+# Pixel nur einmal benutzt) noch zu einer einzigen alles verschlingenden
+# Trasse (fast alles "strasse", kaum noch "pfad").
+#
+# GEMESSEN 2026-09-21 (dieser Nachtlauf, Ticket #41): 9 Laeufe, Kartengroessen
+# 128/256/512 x Seeds 1/2/3, je 16 zufaellig platzierte Siedlungen auf
+# synthetischem Huegelgelaende, ueber calculate_road_network() direkt (siehe
+# tests/smoke_test_wegarten_kalibrierung.py). Rohwerte:
+#   laenge_je_knoten / kartengroesse:  0.35 .. 0.47
+#   anteil "pfad"                      0.53 .. 0.74
+#   anteil "weg"                       0.23 .. 0.35
+#   anteil "strasse"                   0.02 .. 0.15
+#   mittlerer Umwegfaktor              1.10 .. 1.16
+# Die Bandgrenzen unten liegen mit Sicherheitsabstand um diese Messung -
+# eng genug, um ein echtes Auslaufen zu fangen, weit genug, um bei anderen
+# Seeds/Siedlungszahlen nicht grundlos rot zu werden. Verschiebt sich das
+# Ziel wirklich (z.B. weil Ticket #42 dieselbe Kostenlogik mitveraendert),
+# ist das eine Tagentscheidung mit neuer Messung, kein Nachtlauf-Nachziehen.
+
+# Gesamtlaenge des Netzes geteilt durch Anzahl Knoten (Siedlungen), nochmals
+# geteilt durch die Kartengroesse - macht die Kennzahl unabhaengig davon, ob
+# 128, 256 oder 512 Pixel Kantenlaenge gemessen werden.
+laenge_je_knoten_je_kartengroesse_min = 0.20
+laenge_je_knoten_je_kartengroesse_max = 0.70
+
+# Anteil der BENUTZTEN Wegflaeche je Wegart (core.wegarten.wegekennzahlen()).
+anteil_pfad_min = 0.30
+anteil_pfad_max = 0.95
+anteil_weg_min = 0.0
+anteil_weg_max = 0.55
+anteil_strasse_min = 0.0
+anteil_strasse_max = 0.35
+
+# Pfadlaenge / Luftlinie, gemittelt ueber alle Wege. 1.0 waere die reine
+# Gerade; deutlich darueber waere ein Zeichen fuer einen entgleisten Regler
+# (A* faende dann systematisch absurde Umwege).
+umwegfaktor_min = 1.0
+umwegfaktor_max = 1.6
+
+# Mindestanteil an "weg"+"strasse" zusammen, ueber MINDESTENS EINEN der neun
+# Laeufe - der Beleg, dass ueberhaupt Buendelung stattfindet (sonst waere das
+# Netz ein Stern: jedes Pixel nur einmal benutzt, nie eine hoehere Wegart).
+buendelung_mindestanteil = 0.05

@@ -1,0 +1,49 @@
+# Wegarten und ihre Kostenfaktoren fuer den Wegebau, Ticket #41
+# ("Wegekostenstaffelung nach Wegart kalibrieren").
+#
+# DER REGELKREIS: ein Pixel, das oft Teil eines gebauten Weges war, gilt als
+# staerker benutzt und wird dadurch selbst billiger - ein neuer Weg, der ein
+# Stueck eines bestehenden mitbenutzt ("Wegersparnis"), buendelt sich also
+# eher an ihn an, statt eine eigene Trasse auf der gruenen Wiese zu suchen.
+# Genau darin liegt das Risiko: ein Regelkreis kann weglaufen, wenn die
+# Zahlen falsch stehen (zu billig -> ein einziger Weg saugt alles an sich;
+# zu teuer -> keine Buendelung, das Netz sieht aus wie ein Igel aus lauter
+# Einzelverbindungen). tests/smoke_test_wegarten_kalibrierung.py haelt das
+# Ergebnis gegen das Band in tests/toleranzen.toml, Abschnitt [wegenetz].
+#
+# NAMEN "pfad"/"weg"/"strasse" bewusst identisch zu den bereits bestehenden
+# Strassen-Tiers der Plot-Physik (PlotEdge.classification,
+# core/settlement_generator.py::_classify_road_tiers(), TIER_STRASSE_THRESHOLD
+# etc.) - das ist ein ANDERES Netz (staedtische Bloecke, ueber eine
+# Verkehrs-Feder-Simulation), aber dieselbe Begriffswelt: ein duenner
+# Trampelpfad, ein ausgefahrener Karrenweg, eine ausgebaute Strasse.
+#
+# mindestnutzung: wie oft ein Pixel schon Teil einer TATSAECHLICH GEBAUTEN
+# Route war (ein einfacher, deterministischer Zaehler - nicht Meter, nicht
+# Fahrzeuge). Aufsteigend sortiert gelesen von core/wegarten.py::lade_wegarten().
+# kostenfaktor: multipliziert das Grundkostenfeld aus bau_kostenfeld() (ebener,
+# unbenutzter Grund = 1.0). Kleiner = billiger, staerkerer Sog auf spaetere
+# Routen.
+#
+# ABSICHTLICH GETRENNT von core/settlement_generator.py::WEGERABATT (0.4):
+# WEGERABATT bedient weiterhin calculate_landmark_roads() (die Landmark-
+# Anbindung, ein zweites, sekundaeres Wegenetz) und bleibt dort unveraendert -
+# Ticket #42 ("Bruecken und Uferwege in die Wegekosten") aendert in derselben
+# Nacht moeglicherweise bau_kostenfeld() selbst (Furt-/Bruecken-Kosten). Diese
+# Datei und core/wegarten.py fassen bau_kostenfeld() NICHT an, um eine
+# spaetere Handzusammenfuehrung der beiden Tickets nicht zu erschweren.
+
+[[wegart]]
+name = "pfad"
+mindestnutzung = 1
+kostenfaktor = 0.75
+
+[[wegart]]
+name = "weg"
+mindestnutzung = 2
+kostenfaktor = 0.45
+
+[[wegart]]
+name = "strasse"
+mindestnutzung = 4
+kostenfaktor = 0.25

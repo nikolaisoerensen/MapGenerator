@@ -105,6 +105,7 @@ import heapq
 import logging
 
 from core.wegsuche_schnell import NUMBA_DA as _NUMBA_WEGSUCHE_DA
+from core.wegarten import lade_wegarten, rabattfeld_und_stufen
 
 # GEWICHTETE HEURISTIK (Punkt 2.4 der Leistungsliste, docs/PERFORMANCE_2026-08-23.md).
 #
@@ -6070,14 +6071,33 @@ class SettlementGenerator:
         with _s(_ts, "kostenfeld", "Kostenfeld"):
             basis_kostenfeld = bau_kostenfeld(heightmap, slopemap, self.road_slope_to_distance_ratio,
                                               water_map=water_map)
-        weg_maske = np.zeros(basis_kostenfeld.shape, dtype=bool)
+
+        # Wegarten-Staffelung (Ticket #41, docs siehe core/wegarten.py). Statt
+        # des einen WEGERABATT-Schritts (0.4, sobald ein Pixel UEBERHAUPT
+        # schon einmal benutzt wurde) zaehlt wegnutzung, WIE OFT ein Pixel
+        # schon Teil einer GEBAUTEN Route war, und rabattfeld_und_stufen()
+        # uebersetzt das in eine Staffel Pfad->Weg->Strasse mit sinkenden
+        # Kosten (core/daten/wegarten.toml). Das ist der eigentliche
+        # Regelkreis: eine oft benutzte Verbindung wird selbst billiger, was
+        # sie fuer weitere Routen noch attraktiver macht (bereitschaft_von()
+        # vergleicht die BEREITSCHAFT direkt gegen diese Wegkosten, der
+        # Rabatt wirkt also schon auf die Bau-Entscheidung, nicht erst auf
+        # die Geometrie). self._wegarten/self.letzte_wegnutzung bleiben nach
+        # dem Lauf abrufbar, fuer core.wegarten.wegekennzahlen(). weg_maske
+        # (bool, aus Ticket #42 fuer Bruecken/Uferweg-Messung gebraucht) wird
+        # nach der Bereitschaftspruefung aus wegnutzung abgeleitet.
+        self._wegarten = lade_wegarten()
+        wegnutzung = np.zeros(basis_kostenfeld.shape, dtype=np.int32)
 
         def route(a, b):
-            """(Pfad, Pfadkosten) fuer ein Ortspaar - nutzt den aktuellen Wegerabatt."""
+            """(Pfad, Pfadkosten) fuer ein Ortspaar - nutzt die aktuelle Wegarten-Staffel."""
             import time as _t
             _t0 = _t.perf_counter()
-            feld = (np.where(weg_maske, basis_kostenfeld * WEGERABATT, basis_kostenfeld)
-                   if np.any(weg_maske) else basis_kostenfeld)
+            if np.any(wegnutzung):
+                rabatt, _stufe = rabattfeld_und_stufen(wegnutzung, self._wegarten)
+                feld = basis_kostenfeld * rabatt
+            else:
+                feld = basis_kostenfeld
             pathfinder = PathfindingSystem(feld, slopemap.shape[0],
                                            edge_distance_map=edge_distance_map)
             pfad, erreicht = pathfinder.find_least_resistance_path(
@@ -6093,16 +6113,17 @@ class SettlementGenerator:
 
         def merke(pf, pfad):
             """Einen bereits gerouteten Pfad tatsaechlich bauen: glaetten,
-            in die Wegemaske eintragen (kuenftige Routen guenstiger machen),
-            der Ausgabeliste hinzufuegen. Nimmt Pfad/Pathfinder ENTGEGEN statt
-            selbst neu zu routen - der Aufrufer hat sie fuer die
-            Bereitschaftspruefung ohnehin schon berechnet."""
+            im Nutzungs-Zaehler hochzaehlen (kuenftige Routen guenstiger
+            machen und ggf. eine Wegart-Stufe hoeherstufen), der Ausgabeliste
+            hinzufuegen. Nimmt Pfad/Pathfinder ENTGEGEN statt selbst neu zu
+            routen - der Aufrufer hat sie fuer die Bereitschaftspruefung
+            ohnehin schon berechnet."""
             geglaettet = pf.apply_spline_smoothing(
                 pfad, smoothing_factor=3, progress_callback=self._update_progress)
             for x, y in pfad:
                 xi, yi = int(round(x)), int(round(y))
-                if 0 <= yi < weg_maske.shape[0] and 0 <= xi < weg_maske.shape[1]:
-                    weg_maske[yi, xi] = True
+                if 0 <= yi < wegnutzung.shape[0] and 0 <= xi < wegnutzung.shape[1]:
+                    wegnutzung[yi, xi] += 1
             roads.append(geglaettet)
             return geglaettet
 
@@ -6176,6 +6197,12 @@ class SettlementGenerator:
                 progress = 25 + (road_count * 12) // total_roads
                 self._update_progress("Road Building", progress,
                                       f"Bewertet {road_count}/{total_roads} Kandidaten")
+
+        # weg_maske (bool) fuer die Bruecken-/Uferweg-Logik unten (Ticket #42)
+        # aus dem Nutzungszaehler ableiten - "irgendeine Route lief hier
+        # durch" ist unabhaengig davon, ob dieser Pixel bereits Pfad, Weg
+        # oder Strasse ist (Ticket #41).
+        weg_maske = wegnutzung > 0
 
         # -------------------------------------------------------- 3.5: Bruecken
         #
@@ -6359,6 +6386,11 @@ class SettlementGenerator:
             "      %-38s %8.3fs  %d Laeufe, %.1f ms je Lauf",
             "[davon A*-Routen]", dauer, anzahl,
             1000.0 * dauer / max(anzahl, 1))
+
+        # Fuer core.wegarten.wegekennzahlen() - derselbe Zaehler, der eben
+        # noch die Rabatte steuerte, bleibt nach dem Lauf abrufbar (Ticket
+        # #41, Abnahmekriterium 3: Kennzahlen messen).
+        self.letzte_wegnutzung = wegnutzung
 
         return roads, sea_roads
 
