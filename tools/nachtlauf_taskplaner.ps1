@@ -36,9 +36,29 @@ $morgenberichtDatei = Join-Path $logVerzeichnis "morgenbericht.md"
 
 # Sicherheitsgrenzen der AEUSSEREN Schleife (nicht zu verwechseln mit der
 # Zeitgrenze JE TICKET aus tools/nachtlauf.py grenze):
-$maxDurchlaeufe = 20
+#
+# BEFUND 2026-09-22: drei Naechte in Folge (20./21./22.09.) brach die
+# Schleife sofort ab, OHNE dass die 7 Stunden Zeitbudget je genutzt wurden.
+# Grund: claude.exe meldet ein erschoepftes Nutzungskontingent (Sitzungs-
+# oder Wochenlimit) und beendet sich sofort - zwei Durchlaeufe ohne
+# Fortschritt waren damit innerhalb von SEKUNDEN erreicht (00:00:02 und
+# 00:00:05 in taskplaner_2026-09-22_000002.log), lange bevor ein Reset um
+# 00:10 (Sitzungslimit) oder 06:00 Europe/Berlin (Wochenlimit) ueberhaupt
+# denkbar war. Der Task startet taeglich um 00:00 Uhr; bis zum Ende des
+# Zeitbudgets um 07:00 Uhr waere fuer beide beobachteten Reset-Zeiten genug
+# Luft gewesen - sie wurde nur nie abgewartet.
+#
+# Fix: zwischen Durchlaeufen OHNE Fortschritt eine echte Pause einlegen
+# (siehe $verzoegerungOhneFortschrittSekunden) statt sofort erneut zu
+# versuchen, und die Anzahl erlaubter Fehlversuche so hoch setzen, dass
+# nicht sie, sondern weiterhin $maxDauerStunden die eigentliche Grenze ist.
+# Ein echt haengender Agent (kein Limit, sondern ein Bug) ist dadurch nicht
+# schutzlos: er kostet im schlimmsten Fall die vollen 7 Stunden statt vorher
+# wenigen Sekunden - das ist nachts kein Schaden, nur ungenutzte Zeit.
+$maxDurchlaeufe = 30
 $maxDauerStunden = 7
-$maxOhneFortschritt = 2
+$maxOhneFortschritt = 30
+$verzoegerungOhneFortschrittSekunden = 900
 
 $erstAufrufPrompt = @'
 Du fuehrst heute Nacht den Nachtbetrieb dieses Projekts eigenstaendig durch.
@@ -161,6 +181,12 @@ for ($i = 1; $i -le $maxDurchlaeufe; $i++) {
             "Kein Fortschritt in $maxOhneFortschritt aufeinanderfolgenden Durchlaeufen - Schleife abgebrochen, damit sie sich nicht sinnlos wiederholt." | Add-Content $logDatei
             break
         }
+        if (((Get-Date) - $start).TotalHours -ge $maxDauerStunden) {
+            "Zeitbudget ($maxDauerStunden h) waere durch die Wartepause ueberschritten - Schleife beendet." | Add-Content $logDatei
+            break
+        }
+        "Warte $verzoegerungOhneFortschrittSekunden Sekunden vor dem naechsten Versuch (haeufigster Grund fuer Fortschrittslosigkeit: ein erschoepftes Nutzungskontingent mit bekanntem Reset-Zeitpunkt, nicht ein haengender Agent)." | Add-Content $logDatei
+        Start-Sleep -Seconds $verzoegerungOhneFortschrittSekunden
     } else {
         $ohneFortschritt = 0
     }
