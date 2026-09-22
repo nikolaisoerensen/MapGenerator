@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import time
+from typing import Any, Dict
 
 import numpy as np
 from PIL import Image
@@ -559,6 +560,75 @@ def _normalize_to_16bit(values, vmin, vmax):
     else:
         normalized = np.clip((values - vmin) / span, 0.0, 1.0)
     return (normalized * 65535.0).round().astype(np.uint16)
+
+
+# --- Einzelne Bausteine, die OverviewTab UND core/welt_io.py teilen --------
+#
+# Diese drei Funktionen sassen bis Ticket #38 als Instanzmethoden in
+# gui/tabs/overview_tab.py (OverviewTab.export_single_map_png/
+# export_material_file/export_world_statistics_txt), obwohl ihr Rumpf nie
+# `self` benutzt hat - reine Funktionen mit einem `self`-Parameter, der nie
+# gelesen wurde. Hierher verschoben, damit core/welt_io.py sie ohne eine
+# volle Qt-GUI (OverviewTab-Instanz mit data_lod_manager/parameter_manager/
+# Widgets) aufrufen kann. OverviewTab behaelt duenne Wrapper-Methoden mit
+# denselben Namen (ruft nur noch diese Funktionen auf), damit ihr bisheriges
+# internes `self.export_single_map_png(...)` etc. unveraendert weiterlaeuft.
+
+def export_single_map_png(map_data: np.ndarray, map_name: str, output_dir: str, dpi: int):
+    """Exportiert einzelne Map als PNG (Matplotlib-Vorschau mit Colorbar/Titel,
+    NICHT die verlustfreie/normierte Godot-Variante aus export_all_layers)."""
+    import matplotlib.pyplot as plt
+
+    plt.figure(figsize=(12, 12))
+
+    if len(map_data.shape) == 3:  # RGB Map
+        plt.imshow(map_data)
+    else:  # 2D Map
+        plt.imshow(map_data, cmap='viridis')
+        plt.colorbar(label=map_name.replace('_', ' ').title())
+
+    plt.title(f"{map_name.replace('_', ' ').title()}")
+    plt.axis('off')
+
+    output_path = os.path.join(output_dir, f"{map_name}.png")
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0.1)
+    plt.close()
+
+
+def export_material_file(mtl_file: str):
+    """Erstellt ein einfaches Material-File fuer OBJ-Export."""
+    with open(mtl_file, 'w') as f:
+        f.write("# Material File for Generated World\n")
+        f.write("newmtl world_material\n")
+        f.write("Ka 0.2 0.2 0.2\n")  # Ambient
+        f.write("Kd 0.8 0.8 0.8\n")  # Diffuse
+        f.write("Ks 0.1 0.1 0.1\n")  # Specular
+        f.write("Ns 10.0\n")  # Shininess
+
+
+def export_world_statistics_txt(stats: Dict[str, Any], output_file: str):
+    """Exportiert ein Statistik-dict (Kategorie -> {Feld: Wert}) als lesbares
+    Text-File."""
+    with open(output_file, 'w') as f:
+        f.write("WORLD GENERATION STATISTICS\n")
+        f.write("=" * 50 + "\n\n")
+
+        for category, category_stats in stats.items():
+            if not category_stats:
+                continue
+
+            f.write(f"{category.upper()}\n")
+            f.write("-" * 20 + "\n")
+
+            for key, value in category_stats.items():
+                if isinstance(value, tuple):
+                    f.write(f"{key}: {value[0]:.2f} - {value[1]:.2f}\n")
+                elif isinstance(value, float):
+                    f.write(f"{key}: {value:.3f}\n")
+                else:
+                    f.write(f"{key}: {value}\n")
+
+            f.write("\n")
 
 
 def export_all_layers(data_lod_manager, parameter_manager, output_root, filename_prefix):

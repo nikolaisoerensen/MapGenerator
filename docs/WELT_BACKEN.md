@@ -1,18 +1,19 @@
 # Die Welt-Naht: `welt_backen()` und `welt_laden()`
 
-Ticket #38, 2026-09-22 (Nachtbetrieb). Status: erste Fassung, headless
-verifiziert per Rundgang-Test, visuell NICHT bestätigt (siehe "Was fehlt"
-unten).
+Ticket #38. Erste Fassung 2026-09-22 (Nachtbetrieb), am selben Tag mit der
+zweiten, unabhängig entstandenen Fassung zusammengeführt (siehe
+"Zusammenführung zweier Fassungen" unten). Status: headless verifiziert,
+visuell NICHT bestätigt, und noch an keinen Knopf in der Oberfläche
+angeschlossen (siehe "Was fehlt").
 
 ## Warum
 
 Der Karteneditor konnte bislang eine Welt erzeugen, aber nicht wieder
 finden - jede generierte Welt ging beim Schließen des Programms verloren.
-Es gab kein Format, das für Godot/Terrain3D gedacht war, und die sechs
-bestehenden Export-Funktionen in `gui/tabs/overview_tab.py` (PNG-Export,
-JSON-Export, OBJ-Export, Layer-Export, Parameter-Export) waren einzeln
-aufrufbar, aber keine davon deckt "alles, was zu einer Welt gehört, an
-einem Ort" ab, und keine hat einen Ladeweg zurück.
+Es gab kein Format, das für Godot/Terrain3D gedacht war, und die
+bestehenden Export-Funktionen (PNG-, OBJ-, Layer-, Parameter-Export) waren
+einzeln aufrufbar, aber keine davon deckt "alles, was zu einer Welt gehört,
+an einem Ort" ab, und keine hat einen Ladeweg zurück.
 
 ## Die Naht
 
@@ -21,87 +22,163 @@ später ein Godot-Import - dieselbe, vollständige Auskunft über eine
 generierte Welt abholt, statt dass jede Stelle im Code sich ihre eigene
 Teilmenge zusammensucht.
 
-Zwei Methoden auf `OverviewTab` (`gui/tabs/overview_tab.py`):
+Die Naht ist **`core/welt_io.py`**:
 
 ```python
-manifest = reiter.welt_backen(pfad)   # schreibt die Welt nach `pfad`
-daten     = reiter.welt_laden(pfad)   # liest sie zurück
+from core.welt_io import welt_backen, welt_laden
+
+manifest = welt_backen(pfad, data_lod_manager, parameter_manager)
+manifest = welt_laden(pfad, data_lod_manager, parameter_manager)
 ```
 
-Beide rufen ausschließlich schon bestehende Bausteine auf:
+Sie liegt in `core/`, nicht in einem Reiter, und ist damit **Qt-frei**: ein
+Skript, ein Test oder ein späterer Kommandozeilen-Export kann eine Welt
+schreiben und lesen, ohne dass eine Oberfläche läuft.
 
-| Baustein | Herkunft | Rolle in `welt_backen` |
+`gui/tabs/overview_tab.py` behält zwei gleichnamige Methoden, die aber nur
+noch **weiterleiten**:
+
+```python
+manifest = reiter.welt_backen(pfad)   # -> core.welt_io.welt_backen(...)
+daten    = reiter.welt_laden(pfad)    # -> core.welt_io.welt_laden(...)
+```
+
+Der einzige Unterschied: `OverviewTab.welt_laden()` gibt zusätzlich die
+Antwortform `{kategorie: {feld: wert}}` zurück, die seine bisherigen
+Aufrufer kannten - und liest sie dafür **aus dem Manager zurück**
+(`get_all_data()`), nicht neben ihm zusammengebaut. Was dort ankommt, ist
+also genau das, was das laufende Programm danach auch sieht.
+
+`WeltLadenFehler` und `WeltBackenFehler` sind weiterhin aus
+`gui/tabs/overview_tab.py` importierbar - als Re-Export derselben Klasse,
+nicht als Nachbau. Ein bestehendes `except WeltLadenFehler` fängt also auch
+das, was `core/welt_io.py` wirft.
+
+### Woher die Daten kommen
+
+| Baustein | Herkunft | Rolle |
 |---|---|---|
-| `collect_all_available_data()` | bereits vorhanden, Zeile 188 | sammelt alle Generator-Daten - dieselbe Sammlung, die auch `check_world_completeness()` und `export_world_data()` benutzen |
-| `ParameterSummaryWidget.get_all_parameters()` | bereits vorhanden, Zeile ~1105 | sammelt die tatsächlich eingestellten Regler-Werte aller sieben Generator-Tabs |
-| `export_all_layers()` | `gui/utils/map_export.py`, bereits vorhanden | der Godot/Terrain3D-Export (siehe unten) - unverändert in einen `godot/`-Unterordner aufgerufen |
+| `DataLODManager.get_all_data(kategorie)` | in `managers/data_lod_manager.py` für dieses Ticket ergänzt | liefert den vollständigen Schnappschuss einer Kategorie beim aktuellen LOD |
+| `DataLODManager.set_all_data(kategorie, daten, lod_level)` | ebenda | schreibt ihn zurück, Feld für Feld über den bestehenden `_set_data_lod()`-Pfad |
+| `ParameterManager.get_all_parameters()` / `set_tab_parameters()` | bereits vorhanden | sichert und stellt die eingestellten Regler-Werte wieder her |
+| `export_all_layers()` | `gui/utils/map_export.py`, bereits vorhanden | der Godot/Terrain3D-Export, unverändert in einen `godot/`-Unterordner aufgerufen |
+| `export_single_map_png()` / `export_world_statistics_txt()` | `gui/utils/map_export.py` | die Vorschaubilder und die Textstatistik |
 
-Keine dieser drei wird verändert oder dupliziert (Akzeptanzkriterium 6).
-Was `welt_backen` NEU hinzufügt, ist nur die Verteilung der gesammelten
-Daten auf drei Dateien plus das Manifest, das beschreibt, wo was liegt.
+Keine dieser Funktionen wird verändert oder dupliziert
+(Akzeptanzkriterium 6).
+
+**Warum `get_all_data()` und keine Feldliste:** die frühere Fassung führte
+eine von Hand gepflegte Liste aller Felder je Generator mit. Ergänzt ein
+Generator einen neuen Data-Key, fällt er aus einer solchen Liste heraus -
+lautlos, denn die Welt wird ja weiterhin erfolgreich geschrieben, nur ohne
+dieses Feld. Genau der Fehlertyp, vor dem CLAUDE.md warnt.
+`get_all_data()` fragt statt dessen den Speicher selbst, und was darin
+liegt, kommt mit.
 
 ## Was auf der Platte liegt
 
 ```
 <pfad>/
-  welt_manifest.json   - die Feldliste selbst (siehe unten)
-  welt_arrays.npz       - jedes numpy-Array, bit-genau (numpy.savez_compressed)
-  welt_zustand.json     - Listen/Skalare + alle Generator-Parameter
-  godot/welt/           - der bestehende Terrain3D-Export (siehe unten)
+  welt_manifest.json          - was in dieser Welt steckt, je Kategorie mit LOD
+  zustand/
+    terrain.pkl               - ein Schnappschuss je Kategorie (pickle, verlustfrei)
+    geology.pkl
+    settlement.pkl
+    weather.pkl
+    erosion.pkl
+    water.pkl
+    biome.pkl
+    globals.json              - map_seed, map_distance_km, map_latitude
+    parameter.json            - die Regler-Werte aller Tabs (optional)
+  godot/                      - der bestehende Terrain3D-Export
+  vorschau/                   - Einbahnstraße: PNGs, statistik.txt,
+                                zustand_lesbar.json
 ```
 
-Zwei getrennte Formate für zwei getrennte Zwecke:
+Drei Ordner für drei Zwecke:
 
-- **`welt_arrays.npz` + `welt_zustand.json`**: verlustfrei, für den
-  Rundgang bake→load. `numpy.savez_compressed`/`numpy.load` ist bit-genau -
-  im Unterschied zur 16-Bit-normierten PNG, die für den Godot-Export
-  benutzt wird und die (bewusst, siehe dort) nicht bit-genau ist.
+- **`zustand/`**: verlustfrei, für den Rundgang backen→laden. `pickle`
+  bringt auch die `Location`-Dataclasses als **Objekte** zurück, nicht als
+  Wörterbücher - der Manager bekommt beim Laden also genau das, was er beim
+  Speichern hatte. Je Kategorie eine Datei, damit eine beschädigte oder
+  fehlende Kategorie beim Laden **namentlich** benannt werden kann.
 - **`godot/`**: die Godot/Terrain3D-Ansicht derselben Welt, absichtlich in
   einem anderen, verlustbehafteten Format (siehe "Godot-Bedarf" unten).
+- **`vorschau/`**: für Menschen, nicht fürs Programm. `welt_laden()` liest
+  hier **nichts** zurück. Höhen-, Hang- und Biomkarte als PNG, eine
+  Textstatistik, und `zustand_lesbar.json` - der Nicht-Array-Zustand
+  (Siedlungs-/Landmark-/Roadsite-Listen, Skalare) im Klartext, mit Arrays
+  nur als `{"array": true, "shape": ..., "dtype": ...}` vermerkt. Diese
+  lesbare Fassung ist aus der zweiten Fassung übernommen, die sie als
+  `welt_zustand.json` führte; ohne sie wäre beim Umstieg auf pickle die
+  einzige außerhalb von Python lesbare Form der Siedlungsdaten verloren
+  gegangen (`docs/SIEDLUNGEN_ENTWURF.md` §6).
 
-## Die Feldliste
+## Das LOD gehört ins Manifest
 
-Pro Generator, wie von `collect_all_available_data()` gesammelt:
+`get_all_data()` liefert immer den Schnappschuss des **aktuellen**, also
+höchsten gespeicherten LOD einer Kategorie. Deshalb hält das Manifest je
+Kategorie fest, welches LOD das war:
 
-| Generator | Felder | Anmerkung |
-|---|---|---|
-| `terrain` | `heightmap`, `slopemap`, `shadowmap` | Arrays |
-| `geology` | `rock_map`, `hardness_map` | Arrays |
-| `settlement` | `settlement_list`, `landmark_list`, `roadsite_list`, `plot_map`, `civ_map` | Listen enthalten `Location`-Objekte (siehe Siedlungsnaht unten), `plot_map`/`civ_map` sind Arrays |
-| `weather` | `wind_map`, `temp_map`, `precip_map`, `humid_map` | Arrays |
-| `water` | `water_map`, `flow_map`, `flow_speed`, `cross_section`, `soil_moist_map`, `erosion_map`, `sedimentation_map`, `rock_map_updated`, `evaporation_map`, `ocean_outflow`, `water_biomes_map` | überwiegend Arrays, `ocean_outflow` ein Skalar |
-| `biome` | `biome_map`, `biome_map_super`, `super_biome_mask` | Arrays |
-| `erosion` | **keine** | vorbestehende Lücke, siehe unten - nicht durch dieses Ticket verursacht |
+```json
+"kategorien": {
+  "terrain": {"vorhanden": true, "keys": ["heightmap", "slopemap"], "lod": 3}
+}
+```
 
-Jedes Feld, das tatsächlich vorhanden war, landet im Manifest unter
-`felder.<generator>__<feld>` mit `ablage` (`"arrays"` oder `"zustand"`) und
-bei Arrays zusätzlich `shape`/`dtype`. `welt_laden()` geht diese Liste durch
-und prüft jeden Eintrag gegen die Datei - fehlt einer, kommt
-`WeltLadenFehler` mit dem genauen Feldnamen (siehe "Kein stiller
-Ersatzwert" unten).
+`welt_laden()` stellt genau dieses LOD wieder her und **verlangt** den
+Eintrag: eine Welt aus einer älteren Fassung ohne `lod` wird laut
+abgelehnt, statt auf LOD 1 zurückzufallen. Der Grund ist kein Formalismus -
+läge die geladene Welt unterhalb eines schon vorhandenen höheren LOD, dann
+lieferte `get_all_data()` weiterhin die alten Daten unter denselben
+Schlüsselnamen: das Programm zeigte die alte Welt und meldete "geladen".
 
-### Vorbestehende Lücke: `erosion` ist immer leer
+## Zurückgeschrieben: alle sieben
 
-`collect_all_available_data()` legt den Schlüssel `"erosion": {}` an, aber
-keine Schleife befüllt ihn - dieser Bug existierte schon vor Ticket #38 und
-wird hier nur sichtbar gemacht (im Manifest als `hinweis_erosion`
-vermerkt), nicht behoben. Wer ihn beheben will, muss in
-`collect_all_available_data()` eine Schleife über
-`self.data_lod_manager.get_erosion_data(key)` ergänzen - das ist bewusst
-NICHT Teil dieses Tickets, weil es außerhalb des Naht-Auftrags liegt.
+`welt_laden()` schreibt **alle sieben** Kategorien in den laufenden
+`DataLODManager` zurück (`terrain`, `geology`, `settlement`, `weather`,
+`erosion`, `water`, `biome`). Die zweite Fassung dieser Naht schrieb nur
+`terrain` und `geology` zurück und gab die übrigen fünf bloß aus der
+Methode heraus - eine geladene Welt war im Programm damit halb unsichtbar.
 
-### Siedlungsnaht (Verweis, nicht Neuerfindung)
+Dazu gehört ein Sonderfall: das zusammengesetzte **`terrain_data_object`**.
+Von den sieben `lod_{n}_<kategorie>_data_object`-Schlüsseln des Managers
+wird genau einer je wieder gelesen - der von `terrain`, über
+`get_terrain_data("complete")`, woran der `GenerationOrchestrator` hängt.
+Die anderen sechs werden geschrieben und nie abgefragt. `set_all_data()`
+setzt das Terrain-Objekt deshalb aus den Einzelfeldern neu zusammen, wenn
+es im Schnappschuss nicht mitkam (`_terrain_objekt_nachziehen()`), und
+**loggt jeden Ausgang** - auch den Fall "konnte nicht gebaut werden, weil
+keine heightmap da ist".
 
-`docs/SIEDLUNGEN_ENTWURF.md` §6 dokumentiert bereits, welche 8 Felder das
-Spiel aus Siedlungsdaten liest (`city_id`, `city_center`,
-`city_boundary_polygons`, `road_entry_points`, `city_size`/`house_count`,
-`city_size`/`radius`, `city_type`, `rank`, `culture`). 6 davon liefert die
-`Location`-Dataclass (`core/settlement_generator.py`) bereits, 2 sind noch
-offen (`city_boundary_polygons` → Ticket #72, `road_entry_points` →
-Ticket #73). `welt_backen`/`welt_laden` transportieren einfach die
-komplette `Location`-Liste (`settlement_list`/`landmark_list`/
-`roadsite_list`) über `dataclasses.asdict()` verlustfrei - sie erfinden
-keine eigene Siedlungs-Feldliste, sondern reichen §6 unverändert durch.
+## Kein stiller Ersatzwert
+
+`welt_laden()` bricht mit `WeltLadenFehler` ab, sobald eine dieser fünf
+Prüfungen anschlägt:
+
+1. es gibt kein `welt_manifest.json` unter dem Pfad;
+2. das Manifest nennt eine Kategorie als vorhanden, deren `zustand/*.pkl`
+   fehlt oder nicht lesbar ist;
+3. eine Datei enthält nicht alle Schlüssel, die das Manifest für sie nennt;
+4. der Manager hat beim Zurückschreiben Schlüssel **abgelehnt** -
+   `set_all_data()` überspringt ungültige Einzelfelder nur mit einer
+   Logzeile (bestehender Vertrag von `_set_data_lod()`, an dem über 40
+   Aufrufer hängen), deshalb liest `welt_laden()` danach zurück und
+   vergleicht die Schlüsselmenge;
+5. der Manager liefert nach dem Schreiben zwar dieselben Schlüssel, aber
+   **andere Werte** (Identitätsprüfung, nicht nur Namensgleichheit) - das
+   ist der Verschattungsfall aus dem LOD-Abschnitt oben. Die Meldung nennt
+   die betroffenen Felder und sagt, was zu tun ist
+   (`invalidate_cache_lod()` oder ein frischer Manager).
+
+Es gibt keinen Pfad, der ein fehlendes Feld durch `None`, `0` oder eine
+leere Struktur ersetzt. Prüfung 5 ist dabei genau die Lehre aus CLAUDE.md
+("zwei Enden der Kette gegeneinander messen"): die Prüfungen 1-4 waren
+einzeln grün, während die geladene Welt unsichtbar blieb.
+
+Nicht hart geprüft wird, was **Einbahnstraße** ist: scheitert der Godot-
+oder Vorschau-Export, ist das kein Abbruch - der Misserfolg steht aber mit
+Meldung im Manifest und im Log, nicht nur "irgendwie nicht da".
 
 ## Godot-Bedarf: was Terrain3D konkret erwartet
 
@@ -136,51 +213,78 @@ eine solche Kontrollkarte zu bauen - das eigentliche Umrechnen in das
 `welt_backen`/`welt_laden` verlangt, nicht einen neuen Godot-Export) und
 wird hier nur benannt, nicht umgesetzt.
 
-## Kein stiller Ersatzwert
+## Siedlungsnaht (Verweis, nicht Neuerfindung)
 
-`welt_laden()` prüft jedes im Manifest gelistete Feld gegen die
-tatsächlichen Dateien. Fehlt eines - Datei fehlt ganz, oder ein einzelnes
-Feld darin - bricht `WeltLadenFehler` (definiert in `overview_tab.py`,
-direkt neben `OverviewTab`) mit dem genauen Feldnamen ab. Es gibt keinen
-Pfad, der ein fehlendes Feld durch `None`, `0` oder eine leere Struktur
-ersetzt. Das folgt derselben Regel, die in CLAUDE.md mehrfach mit
-konkreten, teuren Fehlern begründet wird (der Shader-Pfad-Bug, der
-adaptive-Mesh-Bug) - ein stiller Rückfall sieht im Log wie Erfolg aus.
+`docs/SIEDLUNGEN_ENTWURF.md` §6 dokumentiert bereits, welche 8 Felder das
+Spiel aus Siedlungsdaten liest (`city_id`, `city_center`,
+`city_boundary_polygons`, `road_entry_points`, `city_size`/`house_count`,
+`city_size`/`radius`, `city_type`, `rank`, `culture`). 6 davon liefert die
+`Location`-Dataclass (`core/settlement_generator.py`) bereits, 2 sind noch
+offen (`city_boundary_polygons` → Ticket #72, `road_entry_points` →
+Ticket #73). `welt_backen`/`welt_laden` transportieren einfach die
+komplette `Location`-Liste über den Kategorie-Schnappschuss - sie erfinden
+keine eigene Siedlungs-Feldliste, sondern reichen §6 unverändert durch.
 
-## Nicht zurückgeschrieben
+## Die `erosion`-Lücke ist geschlossen
 
-`welt_laden()` gibt ALLE geladenen Daten zurück (`{generator: {feld:
-wert}}`), schreibt aber nur `terrain` und `geology` in den laufenden
-`data_lod_manager` zurück (über `set_terrain_data_lod`/
-`set_geology_data_lod`). Grund: nur diese beiden Generatoren haben einen
-einfachen Pro-Feld-Setter. Die übrigen fünf (`weather`, `erosion`, `water`,
-`biome`, `settlement`) haben nur
-`set_<generator>_data_complete_lod(<typisiertes Dataclass-Objekt>, ...)` -
-das für alle fünf Generatoren korrekt aus rohen Arrays/Listen
-zusammenzubauen (`WeatherData`, `ErosionData`, `WaterData`, `BiomeData`,
-`SettlementData` - die genauen Klassennamen stehen in
-`managers/data_lod_manager.py`) wäre ein eigenständiger, riskanter Umbau
-für fünf verschiedene Verträge gewesen und ist bewusst außerhalb des
-Zeitrahmens dieses Nachtbetrieb-Tickets geblieben.
+Die frühere Fassung sammelte ihre Felder über
+`OverviewTab.collect_all_available_data()`. Diese Methode legt den
+Schlüssel `"erosion": {}` an, befüllt ihn aber nie - die Erosionsdaten
+fehlten in jeder gebackenen Welt, ohne dass etwas warnte. Über
+`get_all_data("erosion")` kommen sie jetzt mit; der Bug in
+`collect_all_available_data()` selbst besteht unverändert weiter und
+betrifft weiterhin die Anzeige der Weltstatistik, aber nicht mehr das
+Speichern.
 
-Das ist eine **bewusste Scope-Grenze**, kein übersehener Fall: `welt_laden`
-loggt eine WARNING mit den Namen der betroffenen Generatoren, sobald einer
-von ihnen geladene, aber nicht zurückgeschriebene Daten hat - nichts wird
-verschwiegen.
+## Zusammenführung zweier Fassungen (2026-09-22)
+
+Ticket #38 wurde versehentlich zweimal gelöst: einmal als `core/welt_io.py`
+(Commit `651c927`, Nachtbranch) und einmal direkt in
+`gui/tabs/overview_tab.py` (Commit `c571db4`, auf `main`). Behalten wurde
+`core/welt_io.py`, weil die andere Fassung nur zwei von sieben Kategorien
+zurückschrieb und ihre Begründung dafür - die übrigen fünf bräuchten
+typisierte Dataclasses - nicht trägt: `set_weather_data_complete_lod()`
+zerlegt das Dataclass-Objekt seinerseits nur in Einzelfelder, und
+`get_weather_data_lod()` liest genau diese Einzelfelder wieder.
+
+Aus der verworfenen Fassung übernommen wurden:
+
+- die lesbare Klartextfassung des Nicht-Array-Zustands (jetzt
+  `vorschau/zustand_lesbar.json`, dort `welt_zustand.json`);
+- die Antwortform `{kategorie: {feld: wert}}` von `welt_laden()`;
+- ihr Test, der auf die neue Naht umgebaut wurde
+  (`tests/smoke_test_welt_backen_laden.py`).
+
+Der Godot-Export lag dort unter `godot/welt/`, hier liegt er flach unter
+`godot/`.
+
+## Prüfung
+
+Zwei Tests, absichtlich getrennt:
+
+| Test | prüft | braucht |
+|---|---|---|
+| `tests/smoke_test_welt_io_roundtrip.py` | `core/welt_io.py` für sich: bitgenauer Rundlauf, LOD-Erhalt, die lauten Fehlerfälle | kein Qt, Manager als Test-Double |
+| `tests/smoke_test_welt_backen_laden.py` | die GUI-Weiterleitung **gegen den echten `DataLODManager`**: alle sieben Kategorien kommen an, `get_terrain_data("complete")` ist gefüllt, Godot-Ordner entsteht, Verschattung schlägt laut fehl | Qt (offscreen) |
+
+Beide laufen mit echten Kartengrößen (128), nicht mit ausgedachten -
+CLAUDE.md, "Gruene Tests koennen eine tote Funktion verdecken".
 
 ## Was fehlt (für eine spätere Sitzung)
 
-1. **Visuell nicht bestätigt.** Der Rundgang-Test läuft headless mit einer
-   erfundenen `FakeDataLODManager`. Ob `welt_laden()` in der echten,
-   laufenden App tatsächlich sichtbar ein Terrain wiederherstellt (Reiter
-   neu zeichnet o.ä.), wurde nicht getestet - das bräuchte die laufende
-   Qt-App und eine echte generierte Welt.
-2. **Terrain3D-Kontrollkarte** existiert noch nicht - nur die Höhenkarte
+1. **Kein Knopf in der Oberfläche.** Nichts in `gui/` oder `main.py` ruft
+   `welt_backen()`/`welt_laden()` auf - die Naht ist gebaut und geprüft,
+   aber nur aus Skripten und Tests erreichbar. Ein Menüeintrag
+   "Welt speichern"/"Welt laden" fehlt.
+2. **Visuell nicht bestätigt.** Ob eine geladene Welt in der laufenden App
+   auch tatsächlich sichtbar wird (Reiter neu zeichnen, 3D-Netz neu
+   aufbauen), wurde nicht getestet - das braucht die laufende Qt-App und
+   eine echte generierte Welt.
+3. **Terrain3D-Kontrollkarte** existiert noch nicht - nur die Höhenkarte
    ist im terrain3d-gerechten Format vorhanden (siehe "Godot-Bedarf").
-3. **Rückschreiben für weather/erosion/water/biome/settlement** fehlt
-   (siehe "Nicht zurückgeschrieben") - wer eine geladene Welt vollständig
-   in die laufende Pipeline zurückspielen will (nicht nur Terrain/Geologie),
-   muss die fünf `*Data`-Dataclasses aus den geladenen rohen Feldern bauen.
-4. **`erosion`-Lücke** in `collect_all_available_data()` (siehe oben) -
-   unabhängig von #38, aber jeder künftige Aufruf von `welt_backen()`
-   erbt sie.
+4. **`pickle` ist kein Austauschformat.** `zustand/*.pkl` ist an Python und
+   an die aktuellen Klassendefinitionen gebunden; eine umbenannte
+   `Location`-Dataclass macht alte Welten unlesbar. Für den Rundlauf
+   innerhalb dieses Programms ist das richtig (verlustfrei, Objekte bleiben
+   Objekte), für einen Austausch mit Godot ist es das nicht - dafür ist
+   `godot/` da.

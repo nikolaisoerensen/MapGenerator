@@ -30,25 +30,33 @@ from gui.widgets.widgets import (
 )
 
 
-class WeltLadenFehler(Exception):
-    """
-    Funktionsweise: Wird von OverviewTab.welt_laden() ausgeloest, wenn ein
-    Feld, das das Manifest verlangt, in den Dateien unter dem geladenen
-    Pfad fehlt. Bewusst KEIN stiller Ersatzwert (CLAUDE.md-Regel "kein
-    stiller Ruecksfall") - mehrere teure Fehler in diesem Projekt gingen
-    genau aus einem `.get(key, default)` oder einer still uebersprungenen
-    Bedingung hervor, siehe CLAUDE.md-Abschnitte zu Pfad- und Mesh-Bugs.
-    """
+# Ticket #38 "welt_backen und welt_laden als Naht": die Naht selbst steht in
+# core/welt_io.py - Naht = die eine Stelle, an der alle Aufrufer (App-Neustart,
+# spaeter ein Godot-Import) dieselbe, vollstaendige Auskunft ueber eine
+# generierte Welt abholen, statt dass jede Stelle sich ihre eigene Teilmenge
+# baut. Dieser Reiter leitet nur noch dorthin weiter (welt_backen()/
+# welt_laden() weiter unten).
+#
+# WeltLadenFehler und WeltBackenFehler werden hier unter ihrem Namen
+# weitergereicht, weil bestehende Aufrufer sie aus diesem Modul importieren.
+# Es ist DIESELBE Klasse, kein Nachbau - ein `except WeltLadenFehler` faengt
+# also auch, was core/welt_io.py wirft.
+from core.welt_io import (  # noqa: F401  (bewusster Re-Export)
+    WeltBackenFehler,
+    WeltLadenFehler,
+)
+from core.welt_io import _MANIFEST_DATEI as _WELT_MANIFEST_DATEI  # noqa: F401
+from core.welt_io import _GODOT_ORDNER as _WELT_GODOT_ORDNER  # noqa: F401
 
-
-# Ticket #38 "welt_backen und welt_laden als Naht": Dateinamen der Welt-Naht.
-# Naht = die eine Stelle, an der alle Aufrufer (App-Neustart, spaeter ein
-# Godot-Import) dieselbe, vollstaendige Auskunft ueber eine generierte Welt
-# abholen - statt dass jede Stelle im Code sich ihre eigene Teilmenge baut.
-_WELT_MANIFEST_DATEI = "welt_manifest.json"
-_WELT_ARRAYS_DATEI = "welt_arrays.npz"
-_WELT_ZUSTAND_DATEI = "welt_zustand.json"
-_WELT_GODOT_ORDNER = "godot"
+# _WELT_ARRAYS_DATEI ("welt_arrays.npz") und _WELT_ZUSTAND_DATEI
+# ("welt_zustand.json") gibt es nicht mehr. Die zweite Fassung dieser Naht
+# (Commit c571db4) legte alle Arrays aller sieben Kategorien in EINE npz-Datei
+# und alles Nicht-Array in EINE json-Datei. core/welt_io.py schreibt statt
+# dessen je Kategorie eine Datei unter zustand/ - dadurch kann welt_laden()
+# Kategorie fuer Kategorie zurueckschreiben und beim Fehlen einer einzelnen
+# Kategorie genau sagen, welche fehlt. Wer die alten Namen importiert,
+# bekommt jetzt einen lauten ImportError statt einer Datei, die es nicht
+# gibt.
 
 
 class OverviewTab(BaseMapTab):
@@ -560,23 +568,11 @@ class OverviewTab(BaseMapTab):
             return False
 
     def export_single_map_png(self, map_data: np.ndarray, map_name: str, output_dir: str, dpi: int):
-        """Exportiert einzelne Map als PNG"""
-        import matplotlib.pyplot as plt
-
-        plt.figure(figsize=(12, 12))
-
-        if len(map_data.shape) == 3:  # RGB Map
-            plt.imshow(map_data)
-        else:  # 2D Map
-            plt.imshow(map_data, cmap='viridis')
-            plt.colorbar(label=map_name.replace('_', ' ').title())
-
-        plt.title(f"{map_name.replace('_', ' ').title()}")
-        plt.axis('off')
-
-        output_path = os.path.join(output_dir, f"{map_name}.png")
-        plt.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0.1)
-        plt.close()
+        """Duenner Wrapper - Logik liegt in gui/utils/map_export.py (Ticket #38:
+        von core/welt_io.py ohne Qt-GUI wiederverwendbar, siehe dortige
+        Begruendung)."""
+        from gui.utils.map_export import export_single_map_png as _impl
+        _impl(map_data, map_name, output_dir, dpi)
 
     def export_complete_json(self, available_data: Dict[str, Dict[str, Any]],
                              all_parameters: Dict[str, Any], options: dict) -> bool:
@@ -686,255 +682,74 @@ class OverviewTab(BaseMapTab):
             return False
 
     def export_material_file(self, mtl_file: str):
-        """Erstellt Material-File für OBJ-Export"""
-        with open(mtl_file, 'w') as f:
-            f.write("# Material File for Generated World\n")
-            f.write("newmtl world_material\n")
-            f.write("Ka 0.2 0.2 0.2\n")  # Ambient
-            f.write("Kd 0.8 0.8 0.8\n")  # Diffuse
-            f.write("Ks 0.1 0.1 0.1\n")  # Specular
-            f.write("Ns 10.0\n")  # Shininess
+        """Duenner Wrapper - siehe export_single_map_png() oben."""
+        from gui.utils.map_export import export_material_file as _impl
+        _impl(mtl_file)
 
     def export_world_statistics_txt(self, stats: Dict[str, Any], output_file: str):
-        """Exportiert World-Statistics als Text-File"""
-        with open(output_file, 'w') as f:
-            f.write("WORLD GENERATION STATISTICS\n")
-            f.write("=" * 50 + "\n\n")
-
-            for category, category_stats in stats.items():
-                if not category_stats:
-                    continue
-
-                f.write(f"{category.upper()}\n")
-                f.write("-" * 20 + "\n")
-
-                for key, value in category_stats.items():
-                    if isinstance(value, tuple):
-                        f.write(f"{key}: {value[0]:.2f} - {value[1]:.2f}\n")
-                    elif isinstance(value, float):
-                        f.write(f"{key}: {value:.3f}\n")
-                    else:
-                        f.write(f"{key}: {value}\n")
-
-                f.write("\n")
+        """Duenner Wrapper - siehe export_single_map_png() oben."""
+        from gui.utils.map_export import export_world_statistics_txt as _impl
+        _impl(stats, output_file)
 
     def welt_backen(self, pfad: str) -> Dict[str, Any]:
         """
-        Funktionsweise: Ticket #38, die Bake-Haelfte der Welt-Naht. Schreibt
-        ALLES, was zu einer generierten Welt gehoert, nach `pfad`:
+        Funktionsweise: Weiterleitung an core/welt_io.welt_backen() - die eine
+        Stelle, an der eine Welt auf Platte geschrieben wird (Ticket #38).
+        Dieser Reiter haelt die Methode nur weiterhin unter ihrem Namen bereit,
+        weil Aufrufer (Datei-Menue, Tests) sie hier erwarten; die Logik selbst
+        steht Qt-frei in core/welt_io.py und ist damit auch ohne laufende GUI
+        aufrufbar.
 
-          - <pfad>/welt_arrays.npz    - jedes numpy-Array verlustfrei
-                                        (numpy.savez_compressed) - bit-genau,
-                                        anders als der verlustbehaftete
-                                        16-Bit-PNG-Weg im Godot-Export unten.
-          - <pfad>/welt_zustand.json  - Listen (Siedlungs-/Landmark-/
-                                        Roadsite-Listen als Klartext-Dicts via
-                                        dataclasses.asdict, siehe
-                                        docs/SIEDLUNGEN_ENTWURF.md §6) und
-                                        Skalare, plus alle Generator-Parameter.
-          - <pfad>/welt_manifest.json - die Feldliste selbst: wo jedes Feld
-                                        liegt (arrays/zustand), mit Form und
-                                        Datentyp. welt_laden() prueft jedes
-                                        hier gelistete Feld gegen die Dateien
-                                        und bricht laut mit WeltLadenFehler
-                                        ab, wenn eines fehlt.
-          - <pfad>/godot/             - der bereits bestehende Terrain3D-
-                                        Export (gui/utils/map_export.py,
-                                        export_all_layers()): Hoehenkarte,
-                                        Kontrollkarte/Texturzuordnung,
-                                        Vektordaten fuer Siedlungen/Wege.
+        Frueher stand hier eine zweite, eigenstaendige Fassung (welt_arrays.npz
+        + welt_zustand.json, Commit c571db4). Sie schrieb beim Laden nur
+        terrain und geology in den lebenden DataLODManager zurueck - die
+        uebrigen fuenf Kategorien waren geladen, aber im laufenden Programm
+        nicht vorhanden. core/welt_io.py schreibt alle sieben zurueck
+        (DataLODManager.get_all_data()/set_all_data()); alles, was die alte
+        Fassung sonst konnte, ist dort uebernommen (siehe Moduldocstring
+        "ZUSAMMENFUEHRUNG MIT DER ZWEITEN FASSUNG").
 
-        Wiederverwendung (Akzeptanzkriterium 6): ruft ausschliesslich schon
-        bestehende Methoden dieser Klasse bzw. des Parameter-Widgets auf
-        (collect_all_available_data, parameter_summary.get_all_parameters,
-        export_all_layers) - keine der sechs bestehenden Export-Funktionen
-        wird hier neu geschrieben oder dupliziert.
-
-        Return: das geschriebene Manifest (dict), zur Pruefung durch
-            Aufrufer und Tests.
+        Parameter: pfad - Zielordner fuer die Welt
+        Return: das geschriebene Manifest (dict)
+        Raises: core.welt_io.WeltBackenFehler, wenn die Welt nicht
+            vollstaendig geschrieben werden konnte.
         """
-        import dataclasses
-        import json
-
-        from gui.utils.map_export import export_all_layers
-
-        os.makedirs(pfad, exist_ok=True)
-
-        # Baustein 1: dieselbe Datensammlung, die auch export_world_data()
-        # und check_world_completeness() benutzen - keine zweite Sammlung.
-        available_data = self.collect_all_available_data()
-        # Baustein 2: dieselbe Parametersammlung wie export_world_data().
-        all_parameters = self.parameter_summary.get_all_parameters()
-
-        arrays: Dict[str, np.ndarray] = {}
-        zustand: Dict[str, Dict[str, Any]] = {}
-        manifest_felder: Dict[str, Dict[str, Any]] = {}
-
-        for generator, maps in available_data.items():
-            zustand.setdefault(generator, {})
-            for key, wert in maps.items():
-                npz_schluessel = f"{generator}__{key}"
-                if isinstance(wert, np.ndarray):
-                    arrays[npz_schluessel] = wert
-                    manifest_felder[npz_schluessel] = {
-                        "generator": generator, "feld": key, "ablage": "arrays",
-                        "shape": list(wert.shape), "dtype": str(wert.dtype),
-                    }
-                elif isinstance(wert, list):
-                    # Location-Instanzen (Siedlungen/Landmarks/Roadsites,
-                    # docs/SIEDLUNGEN_ENTWURF.md §6) sind Dataclasses und
-                    # damit NICHT json-serialisierbar - im Unterschied zur
-                    # bestehenden export_complete_json() (die das nicht
-                    # abfaengt) wird das hier korrekt aufgeloest, ohne jene
-                    # Funktion anzufassen.
-                    zustand[generator][key] = [
-                        dataclasses.asdict(eintrag) if dataclasses.is_dataclass(eintrag) else eintrag
-                        for eintrag in wert
-                    ]
-                    manifest_felder[npz_schluessel] = {
-                        "generator": generator, "feld": key, "ablage": "zustand",
-                        "anzahl": len(wert),
-                    }
-                else:
-                    zustand[generator][key] = wert
-                    manifest_felder[npz_schluessel] = {
-                        "generator": generator, "feld": key, "ablage": "zustand",
-                    }
-
-        np.savez_compressed(os.path.join(pfad, _WELT_ARRAYS_DATEI), **arrays)
-
-        with open(os.path.join(pfad, _WELT_ZUSTAND_DATEI), "w", encoding="utf-8") as f:
-            json.dump({"parameter": all_parameters, "daten": zustand}, f,
-                      indent=2, ensure_ascii=False)
-
-        manifest = {
-            "version": 1,
-            "felder": manifest_felder,
-            "generatoren_ohne_daten": [g for g, maps in available_data.items() if not maps],
-            "hinweis_erosion": (
-                "'erosion' ist in collect_all_available_data() als Kategorie "
-                "vorgesehen, wird aber von keiner Schleife befuellt - eine "
-                "vorbestehende Luecke, nicht durch Ticket #38 eingefuehrt. "
-                "Siehe docs/WELT_BACKEN.md."
-            ),
-            "siedlungsnaht_verweis": "docs/SIEDLUNGEN_ENTWURF.md #6",
-        }
-        with open(os.path.join(pfad, _WELT_MANIFEST_DATEI), "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2, ensure_ascii=False)
-
-        # Godot-/Terrain3D-Bedarf: der bereits bestehende Exporter deckt das
-        # ab (Hoehenkarte + Kontrollkarte/Texturzuordnung + Vektordaten,
-        # siehe docs/WELT_BACKEN.md Abschnitt "Godot-Bedarf"). Ein Fehlschlag
-        # hier ist NICHT fatal fuer welt_backen als Ganzes (die eigentliche
-        # Welt-Sicherung oben ist bereits geschrieben), wird aber laut
-        # geloggt statt verschluckt.
-        godot_ordner = os.path.join(pfad, _WELT_GODOT_ORDNER)
-        os.makedirs(godot_ordner, exist_ok=True)
-        try:
-            erfolg, meldung, _ = export_all_layers(
-                self.data_lod_manager, self.parameter_manager, godot_ordner, "welt")
-            if not erfolg:
-                self.logger.warning(f"welt_backen: Godot-Export unvollstaendig: {meldung}")
-        except Exception as e:
-            self.logger.warning(f"welt_backen: Godot-Export fehlgeschlagen: {e}")
-
-        return manifest
+        from core.welt_io import welt_backen as _welt_backen
+        return _welt_backen(pfad, self.data_lod_manager, self.parameter_manager)
 
     def welt_laden(self, pfad: str) -> Dict[str, Dict[str, Any]]:
         """
-        Funktionsweise: Ticket #38, die Load-Haelfte der Welt-Naht. Liest
-        zurueck, was welt_backen() unter `pfad` abgelegt hat, und prueft
-        dabei JEDES im Manifest gelistete Feld gegen die tatsaechlich
-        vorhandenen Dateien. Fehlt eines, bricht WeltLadenFehler laut ab -
-        kein stiller Ersatzwert (CLAUDE.md, "kein stiller Ruecksfall").
+        Funktionsweise: Weiterleitung an core/welt_io.welt_laden() - siehe
+        welt_backen() oben. Nach dem Zurueckschreiben stellt diese Methode
+        zusaetzlich die Antwortform her, die ihre Aufrufer bisher kannten:
+        {kategorie: {feld: wert}}, dieselbe Form wie
+        collect_all_available_data().
 
-        Rueckschreiben in den LEBENDEN data_lod_manager: nur fuer terrain
-        und geology, weil nur dort einfache Pro-Feld-Setter existieren
-        (set_terrain_data_lod/set_geology_data_lod). Die uebrigen fuenf
-        Generatoren (weather/erosion/water/biome/settlement) haben nur
-        set_<generator>_data_complete_lod(), das ein fertiges, typisiertes
-        Dataclass-Objekt verlangt - dieses fuer alle fuenf Generatoren
-        korrekt nachzubauen wurde fuer dieses Ticket als zu riskant
-        eingeschaetzt (siehe docs/WELT_BACKEN.md, Abschnitt "Nicht
-        zurueckgeschrieben"). Ihre Daten werden trotzdem VOLLSTAENDIG
-        zurueckgegeben - nur nicht in den Manager geschrieben, und das wird
-        laut geloggt, nicht verschwiegen.
+        Der Unterschied zur frueheren Fassung: diese Antwort wird jetzt AUS
+        DEM MANAGER gelesen (get_all_data()), nicht neben ihm aufgebaut. Was
+        hier zurueckkommt, ist also genau das, was das laufende Programm
+        danach auch sieht - vorher konnten beide auseinanderlaufen, weil fuenf
+        der sieben Kategorien zwar zurueckgegeben, aber nie zurueckgeschrieben
+        wurden.
 
-        Return: {generator: {feld: wert}} - dieselbe Form wie
-            collect_all_available_data().
-        Raises: WeltLadenFehler, wenn eine der drei Dateien fehlt oder ein
-            im Manifest gelistetes Feld darin nicht vorhanden ist.
+        Parameter: pfad - Ordner einer zuvor mit welt_backen() erzeugten Welt
+        Return: {kategorie: {feld: wert}} fuer alle sieben Kategorien, die die
+            geladene Welt enthielt
+        Raises: WeltLadenFehler (dieselbe Klasse wie core.welt_io.
+            WeltLadenFehler, siehe Import oben im Modul), sobald ein laut
+            Manifest vorhandenes Feld fehlt oder nicht zurueckgeschrieben
+            werden konnte.
         """
-        import json
+        from core.welt_io import KATEGORIEN
+        from core.welt_io import welt_laden as _welt_laden
 
-        manifest_pfad = os.path.join(pfad, _WELT_MANIFEST_DATEI)
-        arrays_pfad = os.path.join(pfad, _WELT_ARRAYS_DATEI)
-        zustand_pfad = os.path.join(pfad, _WELT_ZUSTAND_DATEI)
-
-        for datei, name in ((manifest_pfad, _WELT_MANIFEST_DATEI),
-                            (arrays_pfad, _WELT_ARRAYS_DATEI),
-                            (zustand_pfad, _WELT_ZUSTAND_DATEI)):
-            if not os.path.isfile(datei):
-                raise WeltLadenFehler(f"{name} fehlt unter {pfad!r}")
-
-        with open(manifest_pfad, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
-        with open(zustand_pfad, "r", encoding="utf-8") as f:
-            zustand_datei = json.load(f)
-
-        arrays_datei = np.load(arrays_pfad, allow_pickle=False)
-        zustand_daten = zustand_datei.get("daten", {})
+        _welt_laden(pfad, self.data_lod_manager, self.parameter_manager)
 
         ergebnis: Dict[str, Dict[str, Any]] = {}
-        for npz_schluessel, eintrag in manifest.get("felder", {}).items():
-            generator = eintrag["generator"]
-            feld = eintrag["feld"]
-            ergebnis.setdefault(generator, {})
-            if eintrag["ablage"] == "arrays":
-                if npz_schluessel not in arrays_datei.files:
-                    raise WeltLadenFehler(
-                        f"Feld fehlt in {_WELT_ARRAYS_DATEI}: {generator}.{feld} "
-                        f"(Manifest verlangt es)")
-                ergebnis[generator][feld] = arrays_datei[npz_schluessel]
-            else:
-                if generator not in zustand_daten or feld not in zustand_daten[generator]:
-                    raise WeltLadenFehler(
-                        f"Feld fehlt in {_WELT_ZUSTAND_DATEI}: {generator}.{feld} "
-                        f"(Manifest verlangt es)")
-                ergebnis[generator][feld] = zustand_daten[generator][feld]
-
-        # Rueckschreiben in den lebenden Manager - nur terrain/geology,
-        # siehe Docstring oben.
-        from managers.data_lod_manager import calculate_max_lod_for_size
-        parameter = zustand_datei.get("parameter", {})
-        fehlende_setter = []
-        for generator, setter_name in (
-            ("terrain", "set_terrain_data_lod"),
-            ("geology", "set_geology_data_lod"),
-        ):
-            setter = getattr(self.data_lod_manager, setter_name, None)
-            if setter is None:
-                if ergebnis.get(generator):
-                    fehlende_setter.append(generator)
-                continue
-            for feld, wert in ergebnis.get(generator, {}).items():
-                if not isinstance(wert, np.ndarray):
-                    continue
-                lod_level = calculate_max_lod_for_size(wert.shape[0])
-                setter(feld, wert, lod_level, parameter.get(generator, {}))
-
-        nicht_geschrieben = sorted(set(fehlende_setter) | {
-            g for g in ("weather", "erosion", "water", "biome", "settlement")
-            if ergebnis.get(g)
-        })
-        if nicht_geschrieben:
-            self.logger.warning(
-                "welt_laden: Daten fuer " + ", ".join(nicht_geschrieben) +
-                " wurden geladen und werden zurueckgegeben, aber NICHT in "
-                "den laufenden data_lod_manager zurueckgeschrieben (kein "
-                "einfacher Pro-Feld-Setter fuer diese Generatoren vorhanden, "
-                "siehe docs/WELT_BACKEN.md 'Nicht zurueckgeschrieben').")
-
+        for kategorie in KATEGORIEN:
+            daten = self.data_lod_manager.get_all_data(kategorie)
+            if daten:
+                ergebnis[kategorie] = daten
         return ergebnis
 
 
