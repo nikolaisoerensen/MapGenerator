@@ -152,6 +152,34 @@ Siedlungen komplett durchgehen, danach Erosion, danach Wasser.*
 | 3 | **Erosion, DANN Wasser** (Abschnitt 4, dann 9.1/9.3/12.6) | Reihenfolge vom Nutzer vorgegeben (siehe 9.3): die Wasserwege entstehen auf der erodierten Form, andersherum waere die Arbeit doppelt. | 5 |
 | 4 | 1.5 / 1.6 Atmosphaere | Letzter grosser Rechenposten. Braucht eine eigene Sitzung (siehe Text). | 3 |
 | 5 | 10.x Altlasten | Kleinteilig, kein Risiko, macht den Kopf frei. | 3 |
+
+
+## Aufraeum- und Effizienzfunde aus dem Code-Review 2026-09-22 (2026-09-22)
+
+Herkunft: Code-Review des Nachtbranches `nacht/2026-09-19` gegen `main` (16
+Commits, 101 Dateien, ~7000 Zeilen) beim Abschluss dieses Branches. Acht
+Pruefwinkel liefen parallel; von zehn Funden war einer ein echter, wenn auch
+noch folgenloser Fehler und wurde direkt behoben (`gui/tabs/overview_tab.py`,
+`welt_laden()`, Commit `2ed2bd6` — siehe Morgenbericht). Die folgenden neun
+sind Aufraeum- und Effizienzhinweise, keiner davon ein akuter Fehler, und
+wurden bewusst NICHT in der Nachtsitzung selbst behoben (zu gross fuer
+"klein und sicher" in einem unbeaufsichtigten Lauf). Kein Issue existiert
+bisher zu diesen Punkten.
+
+| | # | Sache | Aufwand | Issue |
+|---|---|---|---|---|
+| [ ] | 15.1 | **`core/fluss_export.py`: Gaettungs- und Breitenformel doppelt geschrieben.** Zwei Codestellen berechnen dieselbe Fluss-Glaettung bzw. dieselbe Breitenformel unabhaengig voneinander statt ueber einen gemeinsamen Helfer. Aendert sich eine Formel, muss man beide Stellen finden und synchron halten — sonst laufen sie unbemerkt auseinander. | 0.5 | – |
+| [ ] | 15.2 | **`core/settlement_generator.py`: `BIOME_SIEDLUNGSEIGNUNG` von Hand abgeschrieben.** Die Tabelle dupliziert Werte, die eigentlich aus der Biom-Matrix stammen, statt von dort abgeleitet zu werden. Aendert sich die Biom-Matrix, faellt `BIOME_SIEDLUNGSEIGNUNG` stillschweigend zurueck und zeigt veraltete Werte. | 1 | – |
+| [ ] | 15.3 | **`core/settlement_generator.py`: `evaluate_biome_suitability()` iteriert 27x biomweise statt Lookup-Tabelle.** Bei jedem Aufruf wird ueber alle 27 Biome per Schleife gegangen, obwohl das Ergebnis ein reiner Tabellenwert ist. Effizienzfund, kein Fehler — ein Dictionary-Lookup ersetzt die Schleife. | 0.5 | – |
+| [ ] | 15.4 | **`gui/utils/map_export.py`: Normalisierung dreifach dupliziert.** Dieselbe Normalisierungsrechnung (Werte auf einen festen Bereich skalieren) steht an drei Stellen der Datei separat, statt einmal als Funktion. | 0.5 | – |
+| [ ] | 15.5 | **`core/erosion_generator.py`: CPU-Groessen-Waechter doppelt vorhanden.** Die Pruefung, ob eine Kartengroesse noch auf der CPU gerechnet werden darf (Performance-Grenze), steht zweimal im selben Modul statt einmal. | 0.5 | – |
+| [ ] | 15.6 | **`core/settlement_generator.py`: `platziere_bruecken()` mit dreifach verschachtelter Schleife.** Fuer jede Bruecke wird ueber drei ineinander verschachtelte Schleifen gesucht, wo eine raeumliche Vorfilterung (z.B. ueber ein Gitter) die meisten Kombinationen von vornherein ausschliessen wuerde. Effizienzfund bei groesseren Kartengroessen relevant. | 1 | – |
+| [ ] | 15.7 | **`gui/tabs/overview_tab.py`: `welt_backen()` macht Datei-Ein-/Ausgabe sequenziell blockierend.** Mehrere unabhaengige Schreib-/Lesevorgaenge laufen nacheinander statt parallel bzw. asynchron, was die Wartezeit beim Speichern einer Welt unnoetig verlaengert. | 1 | – |
+| [ ] | 15.8 | **`core/settlement_generator.py`: `apply_spline_smoothing()` als eigenstaendige Funktion dupliziert.** Es gibt bereits eine vergleichbare Gaettungsfunktion an anderer Stelle im Code (vermutlich in der Fluss- oder Wegeverarbeitung); diese Funktion baut dieselbe Logik erneut nach, statt sie wiederzuverwenden. | 0.5 | – |
+| [ ] | 15.9 | **`gui/tabs/overview_tab.py`: `welt_laden()` behandelt nur 2 von 7 Generatoren ueber einen eigenen Setter-Pfad.** Terrain und Geologie laufen (auch nach dem Fix in Commit `2ed2bd6`) ueber eine eigene, benannte Setter-Pruefung, die uebrigen fuenf Generatoren (Weather, Erosion, Water, Biome, Settlement) generisch. Das ist eine strukturelle Unwucht, keine falsche Berechnung — der tiefere Fix waere EIN gemeinsamer Ruecksschreibe-Mechanismus fuer alle sieben Generatoren statt zwei Sonderfaellen plus einem generischen Pfad. | 1 | – |
+
+**Bilanz-Hinweis:** diese neun Punkte sind in der Zaehlung oben (Abschnitt
+"Bilanz") noch nicht mitgezaehlt — die naechste Nachzaehlung erfasst sie.
 | 6 | 8.x LOD entfernen | Grosser Umbau, hohes Risiko — bewusst zuletzt. | 7 |
 
 ---
