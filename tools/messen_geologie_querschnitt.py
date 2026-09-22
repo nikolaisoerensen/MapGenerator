@@ -6,7 +6,7 @@ Misst die Rechenzeit von MapDisplay2D._render_geology_cross_section() bei
 512 und 1024 px, mit synthetischen aber realistisch geformten Daten
 (N_LAYERS=13 Schichtgrenzen, Terrainhoehe, Intrusions-Abstandskarte), und
 vergleicht sie mit einer auf "ziel_punkte" Stuetzstellen reduzierten
-Variante. Ergebnis und Interpretation stehen in docs/AUFRAEUMPLAN.md
+Variante. Ergebnis und Interpretation stehen in docs/archiv/2026-08-25_AUFRAEUMPLAN.md
 Abschnitt 4.6.
 
 Laeuft OHNE QApplication: _render_geology_cross_section() benutzt aus

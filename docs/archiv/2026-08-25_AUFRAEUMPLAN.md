@@ -218,7 +218,7 @@ geprüft:
    Differenz > 10 — optisch nicht unterscheidbar, aber das ist bei einem
    Messeffekt von 0 ms auch kein Verkaufsargument mehr.
 
-   Skript: `.scratch/geologie-querschnitt-messung/messen_querschnitt.py`
+   Skript: `tools/messen_geologie_querschnitt.py`
    (Wegwerf-Messskript, nicht Teil des Programms).
 
 **Ergebnis: keine Änderung.** Weder Backend noch Anzeige haben eine
