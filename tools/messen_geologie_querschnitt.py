@@ -17,7 +17,7 @@ dazu: die betrifft nur GPUWorker/QOffscreenSurface/QOpenGLContext, die
 hier gar nicht beteiligt sind - reines matplotlib, kein Shader-Dispatch).
 
 Aufruf (aus der Projektwurzel):
-    .venv/Scripts/python.exe .scratch/geologie-querschnitt-messung/messen_querschnitt.py
+    .venv/Scripts/python.exe tools/messen_geologie_querschnitt.py
 """
 import os
 import sys
