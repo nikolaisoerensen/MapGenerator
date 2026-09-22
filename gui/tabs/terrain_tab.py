@@ -110,19 +110,23 @@ class TerrainTab(BaseMapTab):
         Rausch-Parameter, die miteinander interagieren - siehe
         [[project-terrain-review]] 5.3) statt einer einzigen flachen Liste.
         """
+        # ENTFERNT (nicht nur gesperrt), Stand 2026-09-22: `map_distance_km`,
+        # `amplitude`, `redistribute_power` sowie die komplette "Noise
+        # Detail"-Gruppe (`octaves`, `feature_size_m`, `persistence`,
+        # `lacunarity`) wirken bei aktiver Weltkarte nicht - siehe
+        # gui/config/value_default.stillgelegte_regler() und
+        # core/terrain_generator.py._calc_redistribution(): bei aktivem
+        # WELTKARTE_AKTIV liefert _weltkarte_heightmap() die Heightmap direkt
+        # und die gesamte Noise->Amplitude->Redistribution-Kette (die diese
+        # Regler lesen wuerde) wird gar nicht mehr durchlaufen. Vorher waren
+        # sie per ParameterSlider.stilllegen() nur deaktiviert+ausgegraut,
+        # jetzt fehlen die Widgets ganz. Schaltet WELTKARTE_AKTIV wieder auf
+        # False, muessten sie hier wieder eingefuegt werden.
         shape_configs = [
             ("map_size", "Map Size", TERRAIN.MAPSIZE),
-            ("map_distance_km", "Map Distance (km)", TERRAIN.MAP_DISTANCE_KM),
-            ("amplitude", "Height Amplitude", TERRAIN.AMPLITUDE),
-            ("redistribute_power", "Height Redistribution", TERRAIN.REDISTRIBUTE_POWER),
             ("map_seed", "Map Seed", TERRAIN.MAP_SEED),
         ]
-        noise_detail_configs = [
-            ("octaves", "Detail Octaves", TERRAIN.OCTAVES),
-            ("feature_size_m", "Feature Size (m)", TERRAIN.FEATURE_SIZE_M),
-            ("persistence", "Detail Persistence", TERRAIN.PERSISTENCE),
-            ("lacunarity", "Frequency Scaling", TERRAIN.LACUNARITY),
-        ]
+        noise_detail_configs = []
         # ATEF-Erosionsfilter (SPEZIFIKATION §9). Die Parameter-Keys tragen den
         # Praefix erosion_filter_, damit sie in _apply_erosion_filter() eindeutig
         # von den Reglern der Feld-Erosion (class EROSION) zu unterscheiden sind.
@@ -160,28 +164,33 @@ class TerrainTab(BaseMapTab):
         #
         # Hier bleiben die zwei, die den LAUF verschieben statt die
         # Landschaft zu formen - einmal einzustellen, nicht zum Gestalten.
+        #
+        # ENTFERNT (nicht nur gesperrt), Stand 2026-09-22: `river_plateau_
+        # flatten`, `river_meander`, `river_divide_blend`, `river_border_
+        # outflow` beschreiben Dinge, die es im Weltflussnetz nicht gibt
+        # (core/terrain_weltfluesse.py) - sie wurden nur vom alten,
+        # abgeloesten `_apply_river_network()`/carve_river_network()-Pfad
+        # gelesen, der bei aktivem WELTKARTE_AKTIV nie mehr aufgerufen wird
+        # (siehe gui/config/value_default.stillgelegte_regler()). Die
+        # verbleibenden zwei (`river_mouth_depth_m`, `river_inherit_cost`)
+        # wirken weiterhin - sie gehen in core/terrain_weltfluesse.flussnetz().
         river_configs = [
-            # Seit dem 2026-08-06 wirken die ersten fuenf wieder - sie sind an
-            # core/terrain_weltfluesse.py angeschlossen. "Valley Spacing" ist
-            # jetzt der MAKRO-Knotenabstand; Meso und Mikro folgen daraus.
             ("river_mouth_depth_m", "Mouth Depth (m)",
              RIVER_NETWORK.MOUTH_DEPTH_M),
             ("river_inherit_cost", "Trunk Continuity",
              RIVER_NETWORK.INHERIT_COST),
-            ("river_plateau_flatten", "Plateau Flattening",
-             RIVER_NETWORK.PLATEAU_FLATTEN),
-            ("river_meander", "Meander", RIVER_NETWORK.MEANDER),
-            ("river_divide_blend", "Divide Softness",
-             RIVER_NETWORK.DIVIDE_BLEND),
-            ("river_border_outflow", "Border Outflow Cost",
-             RIVER_NETWORK.BORDER_OUTFLOW),
         ]
 
         shape_group = self._build_parameter_group("Shape", shape_configs)
         self.control_panel.layout().addWidget(shape_group)
 
-        noise_detail_group = self._build_parameter_group("Noise Detail", noise_detail_configs)
-        self.control_panel.layout().addWidget(noise_detail_group)
+        # "Noise Detail" faellt komplett weg (siehe Kommentar oben bei
+        # noise_detail_configs) - eine Gruppe ohne Regler waere eine leere
+        # Box mit Titel, kein Nutzen.
+        if noise_detail_configs:
+            noise_detail_group = self._build_parameter_group(
+                "Noise Detail", noise_detail_configs)
+            self.control_panel.layout().addWidget(noise_detail_group)
 
         river_group = self._build_parameter_group(
             "River Network", river_configs,
