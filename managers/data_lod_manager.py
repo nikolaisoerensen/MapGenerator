@@ -3992,6 +3992,167 @@ class DataLODManager(QObject):
         """Legacy-Methode"""
         return self.get_settlement_data_lod(data_key)
 
+    # Kategorie-Name -> zugehöriges internes Speicher-Dict. Dieselben sieben
+    # Kategorien wie in self._current_lods (Ticket #38: welt_backen/welt_laden
+    # brauchen einen vollständigen, selbstbeschreibenden Schnappschuss statt
+    # einer von Hand gepflegten Feldliste, die bei jedem neuen Data-Key extra
+    # nachgezogen werden müsste).
+    _KATEGORIE_SPEICHER = {
+        "terrain": "_terrain_data", "geology": "_geology_data",
+        "settlement": "_settlement_data", "weather": "_weather_data",
+        "erosion": "_erosion_data", "water": "_water_data", "biome": "_biome_data",
+    }
+
+    def get_all_data(self, category: str) -> Dict[str, Any]:
+        """
+        Funktionsweise: Verallgemeinert die Alle-Keys-Sonderbehandlung, die
+        get_terrain_data(None) bisher exklusiv für "terrain" anbot, auf alle
+        sieben Generator-Kategorien (siehe _KATEGORIE_SPEICHER) - inklusive
+        "erosion", das bisher GAR KEINEN No-Arg-Zugriff hatte.
+        Aufgabe: Einzige Stelle, die einen vollständigen Snapshot einer
+        Kategorie beim jeweils aktuellen (höchsten gespeicherten) LOD liefert -
+        Grundlage für core/welt_io.py (Ticket #38, welt_backen/welt_laden).
+        Ohne diese Methode müsste jeder Aufrufer die Data-Keys jeder Kategorie
+        von Hand auflisten; das wäre genau der stille Ersatzpfad-Fehler, vor
+        dem CLAUDE.md warnt, sobald ein Generator einen neuen Key ergänzt und
+        die Liste anderswo nicht mitgepflegt wird.
+        Parameter: category - einer der sieben Schlüssel aus _KATEGORIE_SPEICHER
+        Return: dict {data_key: data} aller unter dem aktuellen LOD dieser
+        Kategorie abgelegten Produkte (leeres dict, wenn noch nichts generiert
+        wurde). Wirft ValueError bei unbekannter Kategorie - kein stilles
+        leeres dict, das mit "nichts generiert" verwechselbar wäre.
+        """
+        speicher_attr = self._KATEGORIE_SPEICHER.get(category)
+        if speicher_attr is None:
+            raise ValueError(
+                f"Unbekannte Daten-Kategorie '{category}', erwartet eine von "
+                f"{sorted(self._KATEGORIE_SPEICHER)}")
+
+        store = getattr(self, speicher_attr)
+        current_lod = self._current_lods.get(category, 0)
+        if current_lod < 1:
+            return {}
+
+        prefix = f"lod_{current_lod}_"
+        return {key[len(prefix):]: data for key, data in store.items()
+                if key.startswith(prefix)}
+
+    def set_all_data(self, category: str, data: Dict[str, Any], lod_level: int = 1,
+                     parameters: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Funktionsweise: Schreibseitiges Gegenstück zu get_all_data() - legt einen
+        kompletten Kategorie-Snapshot (wie ihn get_all_data() liefert) unter einem
+        LOD-Level ab, einen Key nach dem anderen über den bestehenden
+        _set_data_lod()-Pfad (also mit derselben Validierung wie jeder reguläre
+        Generator-Setter).
+        Aufgabe: Grundlage für core/welt_io.py welt_laden() (Ticket #38). Diese
+        Methode selbst bleibt beim bestehenden Vertrag von _set_data_lod(): ein
+        einzelner ungültiger Key wird geloggt und übersprungen, nicht als
+        Exception geworfen (das würde 40+ bestehende Aufrufer dieses Vertrags
+        an anderer Stelle überraschen). Die für welt_laden() geforderte LAUTE
+        Fehlermeldung bei fehlenden Feldern gehört deshalb in den Aufrufer:
+        welt_laden() ruft nach set_all_data() get_all_data() erneut auf und
+        vergleicht die Key-Menge - fehlt dort ein Key, der in der Manifest-Liste
+        stand, wirft ERST DAS eine WeltLadenFehler. Kein stiller Ersatzpfad
+        (siehe Ticket #54 zur Begründung dieser Aufteilung).
+
+        ZUSAMMENGESETZTES TERRAIN-OBJEKT (Ticket #38, Zusammenführung 2026-09-22):
+        Die Einzelfelder allein genügen nicht. Von den sieben
+        `lod_{n}_<kategorie>_data_object`-Schlüsseln wird genau EINER je wieder
+        gelesen: `terrain_data_object`, über get_terrain_data_lod("complete")
+        (und darüber get_terrain_data("complete"), das der
+        GenerationOrchestrator benutzt). Die anderen sechs werden geschrieben
+        und nie abgefragt - für sie ist hier deshalb nichts zu tun. Enthält der
+        Snapshot bereits ein `terrain_data_object` (Normalfall: es steht selbst
+        als Key im Speicher und kommt über get_all_data() mit), wird es von der
+        Schleife unten ohnehin abgelegt. Fehlt es, wird es hier aus den
+        Einzelfeldern neu zusammengesetzt - andernfalls hätte eine geladene
+        Welt heightmap/slopemap, aber "complete" wäre None, und genau das wäre
+        der stille Teilzustand, den dieses Ticket verhindern soll.
+
+        Parameter:
+            category   - einer der sieben Schlüssel aus _KATEGORIE_SPEICHER
+            data       - dict {data_key: wert}, wie von get_all_data() geliefert
+            lod_level  - Ziel-LOD-Level (Default 1 - ein geladener Snapshot ist
+                         immer "das aktuell einzige LOD" aus Sicht von welt_laden)
+            parameters - Cache-Metadaten für _set_data_lod(); leeres dict, wenn
+                         nicht mitgegeben
+        """
+        speicher_attr = self._KATEGORIE_SPEICHER.get(category)
+        if speicher_attr is None:
+            raise ValueError(
+                f"Unbekannte Daten-Kategorie '{category}', erwartet eine von "
+                f"{sorted(self._KATEGORIE_SPEICHER)}")
+
+        store = getattr(self, speicher_attr)
+        params = parameters if parameters is not None else {}
+        for data_key, value in data.items():
+            require_array = isinstance(value, np.ndarray)
+            self._set_data_lod(category, store, data_key, value, lod_level, params,
+                               require_array=require_array)
+
+        if category == "terrain":
+            self._terrain_objekt_nachziehen(data, lod_level)
+
+    def _terrain_objekt_nachziehen(self, data: Dict[str, Any], lod_level: int) -> None:
+        """
+        Funktionsweise: Stellt sicher, dass nach set_all_data("terrain", ...)
+        auch `lod_{lod_level}_terrain_data_object` im Speicher liegt - der
+        einzige der sieben `*_data_object`-Schlüssel, der irgendwo wieder
+        gelesen wird (get_terrain_data_lod("complete")).
+        Aufgabe: Schliesst die Lücke zwischen "alle Einzelfelder sind wieder
+        da" und "das Programm findet auch das zusammengesetzte Objekt"
+        (Ticket #38).
+        Parameter: data - derselbe Snapshot wie in set_all_data(); lod_level -
+            dasselbe Ziel-LOD.
+        Jeder Ausgang dieser Methode loggt, welcher Weg genommen wurde - ein
+        stilles "kein Objekt gebaut" wäre von Erfolg nicht zu unterscheiden
+        (CLAUDE.md, "Jeder stille Rueckfall braucht eine laute Logzeile").
+        """
+        lod_key = f"lod_{lod_level}_terrain_data_object"
+        if lod_key in self._terrain_data:
+            self.logger.info(
+                f"set_all_data(terrain): '{lod_key}' war im Snapshot enthalten "
+                f"und wurde unveraendert uebernommen")
+            return
+
+        heightmap = data.get("heightmap")
+        if not isinstance(heightmap, np.ndarray):
+            self.logger.warning(
+                f"set_all_data(terrain): kein '{lod_key}' im Snapshot UND keine "
+                f"heightmap zum Nachbauen - get_terrain_data('complete') bleibt "
+                f"fuer LOD {lod_level} None. Vorhandene Keys: {sorted(data)}")
+            return
+
+        # Lokaler Import: core/terrain_generator.py importiert selbst nichts aus
+        # managers/, ein Zirkelbezug ist also ausgeschlossen; der Import steht
+        # trotzdem hier unten, damit das Laden dieses Moduls nicht am Import des
+        # gesamten Terrain-Generators haengt.
+        from core.terrain_generator import TerrainData
+
+        terrain_data = TerrainData()
+        uebernommen = []
+        for feld, wert in data.items():
+            if feld == "terrain_data_object":
+                continue
+            # callable() schliesst die Methoden von TerrainData aus (is_valid,
+            # invalidate, ...) - ein Data-Key mit demselben Namen wuerde sie
+            # sonst ueberschreiben.
+            if hasattr(terrain_data, feld) and not callable(getattr(terrain_data, feld)):
+                setattr(terrain_data, feld, wert)
+                uebernommen.append(feld)
+
+        terrain_data.lod_level = lod_level
+        if not isinstance(data.get("actual_size"), int):
+            terrain_data.actual_size = int(heightmap.shape[0])
+
+        self._terrain_data[lod_key] = terrain_data
+        self._current_lods["terrain"] = max(self._current_lods.get("terrain", 0), lod_level)
+        self.logger.info(
+            f"set_all_data(terrain): '{lod_key}' aus {len(uebernommen)} Einzelfeldern "
+            f"neu zusammengesetzt ({sorted(uebernommen)}), actual_size="
+            f"{terrain_data.actual_size}")
+
     def check_dependencies(self, generator_type: str, required_dependencies: list) -> tuple:
         """
         Funktionsweise: Prüft Verfügbarkeit aller Required Dependencies eines Generators
