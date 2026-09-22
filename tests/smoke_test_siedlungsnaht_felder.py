@@ -1,6 +1,7 @@
 """
 Ticket #35: Die Feldliste der Siedlungsnaht festschreiben.
 Ticket #72: Kontur der Stadtgrenze als Polygon exportieren.
+Ticket #73: Anschlusspunkte der Wege an der Stadtgrenze berechnen.
 
 Prueft die "Naht" aus docs/SIEDLUNGEN_ENTWURF.md §6 - die eine Stelle, an
 der das Spiel Siedlungsdaten abholt. Entschieden in Issue #19 (Fragen 19.2
@@ -12,18 +13,16 @@ Von den sechs Feldern liefert `settlement_list` VIER (Kultur, Rang,
 Stadtgroesse ueber house_count, Stadttyp) auf jedem `Location`-Eintrag mit
 `location_type == 'settlement'`. Seit Ticket #72 liefert der Calculator-
 Knoten `settlement.city_boundary` zusaetzlich `city_boundary_polygons`
-(Kontur der Stadtgrenze, dict location_id -> Liste Polygone). Nur die
-Anschlusspunkte der Wege (Ticket #73) fehlen noch nachweislich komplett -
-das ist keine Test-Luecke, sondern der dokumentierte, mit eigenem Ticket
-versehene IST-Zustand (§6.3). Dieser Test haelt genau das fest: schlaegt
-fehl, wenn eines der FUENF gelieferten Felder verschwindet, seinen
-Typ/Wertebereich verlaesst oder (bei der Kontur) keine gueltige Geometrie
-mehr liefert, UND schlaegt fehl, wenn ploetzlich eine
-Anschlusspunkte-Ausgabe auftaucht, OHNE dass dieser Test (und §6 der
-Entwurfsdatei) aktualisiert wurde - das waere ein Signal, dass Ticket #73
-committet wurde, ohne die Naht-Doku nachzuziehen.
+(Kontur der Stadtgrenze, dict location_id -> Liste Polygone). Seit Ticket
+#73 liefert `settlement.pathfinding` zusaetzlich `road_entry_points`, ein
+Dict {settlement_id: [(x, y), ...]} mit den Schnittpunkten des
+ueberregionalen Wegenetzes (`roads`) mit derselben Stadtgrenzen-Kontur -
+NICHT als Attribut auf `Location` oder in `s.properties`, sondern als
+eigener Calculator-Output (siehe §6.1/§6.2). Damit sind alle sechs Felder
+aus §6.1 geliefert; dieser Test haelt fest, dass alle sechs
+typ-/wertebereichsgeprueft bleiben.
 
-Faehrt die echte Pipeline (Terrain bis settlement.city_boundary) bei kleiner
+Faehrt die echte Pipeline (Terrain bis settlement.pathfinding) bei kleiner
 Kartengroesse, ein Seed reicht - hier geht es um Feldvorhandensein/-typ,
 nicht um statistische Verteilung (die deckt smoke_test_settlement_placement.py
 ab).
@@ -40,17 +39,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import smoke_test_pipeline_outputs as sp
 
-# smoke_test_pipeline_outputs.py setzt selbst `sys.path.insert(0, r"...MapGenerator")`
-# FEST VERDRAHTET auf den Haupt-Checkout (ihre Zeile, nicht von __file__
-# abgeleitet). Laeuft dieser Test aus einem Git-Worktree (siehe CLAUDE.md
-# "Git worktrees: changes are invisible until merged or tested in-place"),
-# landet dieser Pfad NACH unseren beiden Inserts oben auf Position 0 und
-# ueberdeckt sie - jedes spaetere `import core...`/`import managers...`
-# (z.B. in sp._generatoren(), Ticket #72 gefunden beim Debuggen von
-# city_boundary_polygons) liefert dann leise den Hauptcheckout statt den
-# Worktree-Stand, ohne jede Fehlermeldung. Deshalb hier NACH dem sp-Import
-# erneut einfuegen, um den Worktree-Pfad wieder vor den Hauptcheckout zu
-# schieben. Im Hauptcheckout selbst ist das ein wirkungsloses Duplikat.
+# smoke_test_pipeline_outputs.py setzt seinerseits die Projektwurzel an
+# Position 0 von sys.path. Sie wird dort aus __file__ abgeleitet, zeigt
+# also auf denselben Baum wie hier - der Insert unten ist damit ein
+# wirkungsloses Duplikat und steht nur, damit die Reihenfolge auch dann
+# stimmt, wenn dieser Import spaeter einmal anders geloest wird.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 SIZE = 96
@@ -90,25 +83,26 @@ def _lauf(seed):
         if methode is None:
             continue
         methode(knoten, LOD)
-        # settlement.city_boundary haengt an settlement.settlements (siehe
-        # calculator_graph.py) - Abbruch danach reicht, um beide Ausgaben
-        # (settlement_list UND city_boundary_polygons, Ticket #72) zu haben,
-        # ohne die restliche, fuer diesen Test unnoetige Pipeline (Wege,
-        # Plot-Physik) mitzurechnen.
-        if knoten == "settlement.city_boundary":
+        # settlement.pathfinding haengt an settlement.city_boundary (siehe
+        # calculator_graph.py, Ticket #73) - Abbruch danach reicht, um alle
+        # drei Ausgaben (settlement_list, city_boundary_polygons,
+        # road_entry_points) zu haben, ohne die restliche, fuer diesen Test
+        # unnoetige Pipeline (Plot-Physik) mitzurechnen.
+        if knoten == "settlement.pathfinding":
             break
 
     settlement_list = manager.get_calculator_output("settlement.settlements", "settlement_list", LOD)
     city_boundary_polygons = manager.get_calculator_output(
         "settlement.city_boundary", "city_boundary_polygons", LOD)
-    return settlement_list, city_boundary_polygons
+    road_entry_points = manager.get_calculator_output("settlement.pathfinding", "road_entry_points", LOD)
+    return settlement_list, city_boundary_polygons, road_entry_points
 
 
 def main():
     fehler = []
 
-    print("Pipeline bis settlement.city_boundary, Seed %d, %dpx" % (SEED, SIZE))
-    siedlungen, city_boundary_polygons = _lauf(SEED)
+    print("Pipeline bis settlement.pathfinding, Seed %d, %dpx" % (SEED, SIZE))
+    siedlungen, city_boundary_polygons, road_entry_points = _lauf(SEED)
     if not siedlungen:
         print("FEHLER: settlement_list ist leer - kann Naht-Felder nicht pruefen")
         return 1
@@ -150,7 +144,7 @@ def main():
             fehler.append("Siedlung %d: settlement_type=%r ist keiner von %s"
                            % (s.location_id, s.settlement_type, sorted(STADTTYPEN)))
 
-    # ---------- Feld 5: Kontur der Stadtgrenze (Ticket #72, jetzt echt geprueft) ----------
+    # ---------- Feld 5: Kontur der Stadtgrenze (Ticket #72) ----------
     print("5. Kontur der Stadtgrenze (city_boundary_polygons: dict location_id -> "
           "Liste[Polygon], Polygon = Liste von (x, y)-Punkten in Karten-Pixel-Koordinaten)")
     if city_boundary_polygons is None:
@@ -203,15 +197,36 @@ def main():
                             "%dpx-Karte" % (s.location_id, punkt, SIZE))
                         break
 
-    # ---------- Feld 6: Anschlusspunkte der Wege - bewusst als IST-Zustand pruefen (Ticket #73) ----------
-    print("6. Anschlusspunkte der Wege: dokumentiert FEHLEND")
-    for s in orte:
-        if hasattr(s, "road_entry_points") or (s.properties and "road_entry_points" in (s.properties or {})):
-            fehler.append(
-                "Siedlung %d traegt jetzt Anschlusspunkte (road_entry_points) - "
-                "docs/SIEDLUNGEN_ENTWURF.md §6 und dieser Test muessen "
-                "aktualisiert werden (Folge-Ticket #73 wurde offenbar "
-                "umgesetzt)" % s.location_id)
+    # ---------- Feld 6: Anschlusspunkte der Wege (Ticket #73) ----------
+    print("6. Anschlusspunkte der Wege (road_entry_points: dict je Siedlung, "
+          "Liste von (x, y) im Kartenraster)")
+    if not isinstance(road_entry_points, dict):
+        fehler.append("road_entry_points ist kein dict (%r)" % (type(road_entry_points),))
+    else:
+        orte_ids = {s.location_id for s in orte}
+        fehlende_ids = orte_ids - set(road_entry_points)
+        if fehlende_ids:
+            fehler.append("road_entry_points fehlt fuer Siedlungs-IDs %s" % sorted(fehlende_ids))
+        gesamt_punkte = 0
+        for sid, punkte in road_entry_points.items():
+            if sid not in orte_ids:
+                continue
+            if not isinstance(punkte, list):
+                fehler.append("Siedlung %d: road_entry_points-Eintrag ist keine Liste (%r)"
+                               % (sid, type(punkte)))
+                continue
+            for punkt in punkte:
+                if not (isinstance(punkt, tuple) and len(punkt) == 2
+                        and all(isinstance(k, (int, float, np.floating)) for k in punkt)):
+                    fehler.append("Siedlung %d: Anschlusspunkt %r ist kein (x, y)-Zahlenpaar"
+                                  % (sid, punkt))
+                    continue
+                px, py = punkt
+                if not (0.0 <= px <= SIZE and 0.0 <= py <= SIZE):
+                    fehler.append("Siedlung %d: Anschlusspunkt (%.1f, %.1f) liegt ausserhalb "
+                                   "des %dpx-Kartenrasters" % (sid, px, py, SIZE))
+                gesamt_punkte += 1
+        print("   %d Anschlusspunkte insgesamt ueber %d Siedlungen" % (gesamt_punkte, len(orte_ids)))
 
     print()
     if fehler:
