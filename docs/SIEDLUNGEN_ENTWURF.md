@@ -189,20 +189,22 @@ Spiel rechnet um, wenn es seine eigene Kartenaufloesung kennt.
 |---|---|---|---|---|
 | `city_id` | int | — (eindeutige Kennung) | **JA** | `core/settlement_generator.py:441` (`Location.location_id`), gesetzt in `calculate_settlements()` Zeile 5639-5643 |
 | `city_center` | (float, float) | Pixel im `map_size`-Raster | **JA** | `Location.x`/`Location.y` (Zeile 442-443), gesetzt Zeile 5640 |
-| `city_boundary_polygons` | Liste von Polygonen, je Polygon eine Liste von (x,y)-Punkten (Pixel) | Pixel | **NEIN** | Vorstufe existiert nur INTERN: `PlotPhysicsSystem._city_polygons` (Zeile 2519), gebaut von `_build_city_boundary_polygons()` (Zeile 2738-2767) per Marching-Squares ueber `city_mask`. Wird nirgends auf `SettlementData` durchgereicht. → **Ticket #72** |
-| `road_entry_points` | Liste von (x,y)-Punkten je Stadt (Pixel), an denen eine Wegverbindung `city_boundary_polygons` schneidet | Pixel | **NEIN** | `SettlementData.roads`/`sea_roads`/`landmark_roads` (Zeile 144-150, befuellt in `calculate_road_network()` ab Zeile 5705) enthalten nur die volle Pfad-Polylinie von Ortszentrum zu Ortszentrum — keinen gesonderten Schnittpunkt mit der Stadtgrenze. → **Ticket #73** |
+| `city_boundary_polygons` | Liste von Polygonen, je Polygon eine Liste von (x,y)-Punkten (Pixel) | Pixel | **JA** (seit Ticket #72) | `core/settlement_generator.py:2443` (`_polygonize_settlement_mask()`, Marching-Squares ueber `city_mask`), ausgegeben von `_calc_city_boundary()` Zeile 5438-5446 als Ausgabe `city_boundary_polygons` des Knotens `settlement.city_boundary`. Dieselbe Funktion bedient auch `PlotPhysicsSystem._build_city_boundary_polygons()` (Zeile 3075), damit Innenleben und Naht garantiert dieselbe Kontur sehen. |
+| `road_entry_points` | Liste von (x,y)-Punkten je Stadt (Pixel), an denen eine Wegverbindung `city_boundary_polygons` schneidet | Pixel | **JA** (seit Ticket #73) | `core/settlement_generator.py:2595` (`_wege_anschlusspunkte()`), gerufen in `_calc_pathfinding()` Zeile 5495-5501, ausgegeben Zeile 5505 als Ausgabe `road_entry_points` des Knotens `settlement.pathfinding`. |
 | `city_size` (als `house_count`) | int | Haeuser, Bereich 15-50 | **JA** | `Location.house_count` (Zeile 450), gesetzt Zeile 5696 nach §1-Rangspanne |
 | `city_size` (als `radius`, ergaenzend) | float | Pixel | **JA** | `Location.radius` (Zeile 445), gesetzt Zeile 5700 aus `house_count` abgeleitet |
 | `city_type` | str, einer von `bergdorf`/`marktstadt`/`agrarstadt`/`sonstige` | — | **JA** | `Location.settlement_type` (Zeile 456), zugewiesen Zeile 5485-5500 (siehe auch `docs/OFFENE_PUNKTE.md` 5.16) |
 | `rank` | str, einer von `dorf`/`siedlung`/`stadt` | — | **JA** | `Location.rank` (Zeile 449), gesetzt Zeile 5695 |
 | `culture` | str, Name aus `core/terrain_weltkarte.py` REGIONEN-`volk`-Feld | — | **JA** | `Location.culture` (Zeile 448), gesetzt Zeile 5642 |
 
-**Befund in einem Satz:** von acht Feldern liefert der Editor heute sechs
-(`city_id`, `city_center`, `city_size` in beiden Auspraegungen, `city_type`,
-`rank`, `culture`) direkt aus der `Location`-Dataclass. Die zwei fehlenden
-Felder sind keine Ueberraschung, sondern der genaue Gegenstand der beiden
-parallel laufenden Tickets #72 und #73 — dieses Ticket (#35) legt nur fest,
-WIE die Felder heissen und WAS sie tragen sollen, es baut sie nicht.
+**Befund in einem Satz:** seit den Tickets #72 und #73 liefert der Editor
+alle acht Felder. Sechs (`city_id`, `city_center`, `city_size` in beiden
+Auspraegungen, `city_type`, `rank`, `culture`) kommen direkt aus der
+`Location`-Dataclass; `city_boundary_polygons` liefert der Knoten
+`settlement.city_boundary`, `road_entry_points` der Knoten
+`settlement.pathfinding`. Dieses Ticket (#35) hat nur festgelegt, WIE die
+Felder heissen und WAS sie tragen — gebaut wurden die beiden letzten in
+#72 und #73.
 
 ### 6.2 Was NICHT zur Naht gehoert
 
