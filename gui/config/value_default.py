@@ -44,8 +44,8 @@ class TERRAIN:
     # verdeckte den Fehler).
     #
     # Mit 0.0 ist das ausgeschlossen, weil AMPLITUDE bei 30 beginnt und damit
-    # immer über der Talsohle liegt. §1 und 02_INVARIANTEN.md 7: kein
-    # Reglerstand darf ein unbrauchbares Ergebnis erzeugen.
+    # immer über der Talsohle liegt. 01_ZIEL.md §2 und 02_INVARIANTEN.md 7:
+    # kein Reglerstand darf ein unbrauchbares Ergebnis erzeugen.
     #
     # Der Meeresspiegel liegt entsprechend ebenfalls bei 0 m (siehe
     # BIOME.SEA_LEVEL) - die Karte bleibt damit landseitig, ohne dass die
@@ -69,7 +69,7 @@ class TERRAIN:
     MAPSIZE = {
         # Vorgabe 2026-07-30 von 128 auf 256 angehoben: unter 30 Pixeln je Tal
         # bricht die Entwaesserung des Flussnetzes ein (gemessen 17 % bei
-        # 128 px gegen 87 % bei 256 px, SPEZIFIKATION §13). Bei 2500 m
+        # 128 px gegen 87 % bei 256 px, 90_MESSPROTOKOLLE.md §13). Bei 2500 m
         # Talabstand und 15 km Karte sind 256 px die untere brauchbare Grenze.
         # 2026-08-06 von 256 auf 1024. Gemessen an der 21-km-Weltkarte:
         #
@@ -126,9 +126,9 @@ class TERRAIN:
     # Ergebnis mehr erzeugt - er hat ab diesem Punkt nur schlicht keine
     # sichtbare Wirkung mehr, siehe Beschreibung unten.
     # Default 2026-07-30 von 4 auf 2 GESENKT, zusammen mit der Einführung des
-    # ATEF-Erosionsfilters (siehe EROSION_FILTER und SPEZIFIKATION §9). Der
-    # Filter erwartet einen GLATTEN Untergrund und liefert das Detail selbst;
-    # gemessen: mit 5 Oktaven Untergrund ist sein Ergebnis feinkörniges
+    # ATEF-Erosionsfilters (siehe EROSION_FILTER und 90_MESSPROTOKOLLE.md
+    # §9). Der Filter erwartet einen GLATTEN Untergrund und liefert das Detail
+    # selbst; gemessen: mit 5 Oktaven Untergrund ist sein Ergebnis feinkörniges
     # Gekrissel, mit 1 Oktave ein zusammenhängendes verästeltes Netz. Ein
     # detailreicher Untergrund macht den Filter also nicht besser, sondern
     # wirkungslos. 02_INVARIANTEN.md 7: abhängige Defaults ziehen mit.
@@ -682,7 +682,7 @@ class WEATHER:
 # HAUPTSCHALTER Flussnetz
 # =============================================================================
 # Legt ein Flussnetz-Skelett in das Gelände und blendet zwischen Talsohle und
-# umgebender Fläche (core/terrain_river_network.py, SPEZIFIKATION §12).
+# umgebender Fläche (core/terrain_river_network.py, 90_MESSPROTOKOLLE.md §12).
 # Läuft in BaseTerrainGenerator._calc_redistribution() NACH dem Erosionsfilter,
 # weil dessen Ergebnis die Fläche P ist, in die eingeschnitten wird.
 #
@@ -704,7 +704,8 @@ def flussnetz_auslaesse(map_distance_km: float) -> int:
 
     Mehrere Auslaesse bleiben wichtig, wo es sie gibt: mit nur einem muss JEDER
     Punkt der Karte dorthin entwaessern, das Netz ueberquert also jeden Ruecken
-    dazwischen (§16). Auf kleinen Karten gibt es solche Ruecken selten.
+    dazwischen (90_MESSPROTOKOLLE.md §16). Auf kleinen Karten gibt es solche
+    Ruecken selten.
     """
     if map_distance_km >= 50.0:
         return 3
@@ -715,7 +716,7 @@ def flussnetz_auslaesse(map_distance_km: float) -> int:
 
 class RIVER_NETWORK:
     """
-    Regler des Flussnetzes (SPEZIFIKATION §12).
+    Regler des Flussnetzes (90_MESSPROTOKOLLE.md §12).
 
     Drei davon tragen den Charakter einer Landschaft:
         SPACING_M        Abstand der Täler
@@ -821,7 +822,7 @@ class RIVER_NETWORK:
     # VALLEY_STEPS (Klippenbänder) 2026-07-30 ENTFERNT. Der Nutzer: "cliff
     # bands allgemein loeschen. das funktioniert nicht wie ich es haben will."
     # Die Treppenfunktion erzeugte ebene Absätze, die zusätzlich die
-    # Entwässerung brachen (§17).
+    # Entwässerung brachen (90_MESSPROTOKOLLE.md §17).
     MEANDER = {
         "min": 0.0, "max": 0.5, "default": 0.18, "step": 0.02,
         "description": "Seitliche Auslenkung der Flussläufe zwischen zwei "
@@ -888,7 +889,7 @@ class RIVER_NETWORK:
 # Der Filter aus shaders/terrain/ATEF_*.comp, portiert in
 # core/terrain_erosion_filter.py, angewandt in
 # BaseTerrainGenerator._calc_redistribution(). Ein Durchgang pro Pixel, keine
-# Iteration - siehe SPEZIFIKATION §9.
+# Iteration - siehe 90_MESSPROTOKOLLE.md §9.
 #
 # False laesst die Heightmap genau das, was die Power-Redistribution liefert.
 # =============================================================================
@@ -954,7 +955,7 @@ EROSION_FILTER_AKTIV = True
 
 class EROSION_FILTER:
     """
-    Regler des ATEF-Erosionsfilters (SPEZIFIKATION §9).
+    Regler des ATEF-Erosionsfilters (90_MESSPROTOKOLLE.md §9).
 
     Alle Werte sind RELATIV zur Karte und zu ihrer Hoehenspanne, keine
     Meterwerte - nach 02_INVARIANTEN.md 4 der wichtigste Punkt an diesem
@@ -1065,9 +1066,10 @@ class EROSION_FILTER:
 # liefert, ist der Weg, der das nicht wieder auslöst.
 #
 # Absichtlich AUS seit 2026-07-30: die Erosion wird durch den Skelett-Ansatz
-# ersetzt (Struktur vor Noise, SPEZIFIKATION §8) und soll später nur noch als
-# Feinschliff auf einem bereits entwässerten Gelände laufen. Bis dahin ist ihr
-# Beitrag laut §7 negativ - sie ERZEUGT die Becken, die sie auflösen soll.
+# ersetzt (Struktur vor Noise, 90_MESSPROTOKOLLE.md §8) und soll später nur
+# noch als Feinschliff auf einem bereits entwässerten Gelände laufen. Bis
+# dahin ist ihr Beitrag laut 90_MESSPROTOKOLLE.md §7 negativ - sie ERZEUGT die
+# Becken, die sie auflösen soll.
 #
 # 2026-07-30 wieder auf False (Nutzer-Entscheidung): die Erosion ist pausiert
 # und reicht Nullkarten durch, alles DAHINTER muss weiterlaufen.
@@ -1463,9 +1465,16 @@ class BIOME:
     # Default 2026-07-30 von 10 auf 0 gesenkt, zusammen mit
     # TERRAIN.BASE_ELEVATION_M = 0.0 (siehe dort). Die Talsohle liegt jetzt
     # exakt bei 0 m; bliebe der Meeresspiegel bei 10 m, würde der untere Teil
-    # jeder Karte als Ozean klassifiziert - SPEZIFIKATION §1 führt die Karten
-    # aber ausdrücklich OHNE Meer. 02_INVARIANTEN.md 7: abhängige Defaults
-    # ziehen mit.
+    # jeder Karte als Ozean klassifiziert. 02_INVARIANTEN.md 7: abhängige
+    # Defaults ziehen mit.
+    #
+    # Die ursprüngliche Begründung berief sich darauf, dass das Oberziel die
+    # Karten "ohne Meer" führe. Das gilt seit der Weltkarte nicht mehr -
+    # 01_ZIEL.md §2 hat den Zusatz ausdrücklich gestrichen, sechs der neun
+    # Regionen haben einen Wasseranteil größer null. Der Wert 0 bleibt
+    # trotzdem richtig, denn die Küstenlinie der Weltkarte ist genau die
+    # Nullhöhe (11_GELAENDE.md 2) - Meeresspiegel und Küste fallen damit
+    # zusammen, statt sich um 10 m zu verfehlen.
     SEA_LEVEL = {
         "min": 0, "max": 200, "default": 0, "step": 5, "suffix": "m",
         "description": "Höhe des Meeresspiegels - alles darunter wird als "

@@ -127,14 +127,15 @@ class TerrainTab(BaseMapTab):
             ("map_seed", "Map Seed", TERRAIN.MAP_SEED),
         ]
         noise_detail_configs = []
-        # ATEF-Erosionsfilter (SPEZIFIKATION §9). Die Parameter-Keys tragen den
-        # Praefix erosion_filter_, damit sie in _apply_erosion_filter() eindeutig
-        # von den Reglern der Feld-Erosion (class EROSION) zu unterscheiden sind.
+        # ATEF-Erosionsfilter (90_MESSPROTOKOLLE.md §9). Die Parameter-Keys
+        # tragen den Praefix erosion_filter_, damit sie in
+        # _apply_erosion_filter() eindeutig von den Reglern der Feld-Erosion
+        # (class EROSION) zu unterscheiden sind.
         #
         # Wichtig fuer die Bedienung: dieser Filter erzeugt das Detail. Steht
         # "Detail Octaves" oben hoch, ist der Untergrund schon detailreich und
-        # der Filter wirkt kaum noch - gemessen, siehe §9. 1-2 Oktaven sind hier
-        # richtig.
+        # der Filter wirkt kaum noch - gemessen, siehe 90_MESSPROTOKOLLE.md §9.
+        # 1-2 Oktaven sind hier richtig.
         erosion_filter_configs = [
             ("erosion_filter_strength", "Erosion Strength", EROSION_FILTER.STRENGTH),
             ("erosion_filter_gully_size_m", "Gully Size (m)",
@@ -149,7 +150,7 @@ class TerrainTab(BaseMapTab):
             ("erosion_filter_octaves", "Gully Octaves", EROSION_FILTER.OCTAVES),
         ]
 
-        # Flussnetz-Skelett (SPEZIFIKATION §12). Laeuft NACH dem
+        # Flussnetz-Skelett (90_MESSPROTOKOLLE.md §12). Laeuft NACH dem
         # Erosionsfilter - dessen Ergebnis ist die Flaeche, in die die Taeler
         # geschnitten werden.
         # DIE FUENF WICHTIGSTEN STEHEN SEIT 2026-08-26 IM FLUSSREITER.

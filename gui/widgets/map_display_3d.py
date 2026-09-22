@@ -1333,9 +1333,10 @@ class MapDisplay3D(QOpenGLWidget):
         # das bisherige Gleichmaessig-Gitter unten.
         adaptives_ergebnis = None
 
-        # KUESTENSCHNITT (gui/widgets/kuesten_schnitt.py, docs/spezifikation/11_GELAENDE.md
-        # §8): das Gitter zellweise entlang der Nullkontur schneiden, damit die
-        # Kuestenlinie eine echte Dreieckskante wird statt einer Rastertreppe.
+        # KUESTENSCHNITT (gui/widgets/kuesten_schnitt.py,
+        # docs/spezifikation/11_GELAENDE.md 10): das Gitter zellweise entlang
+        # der Nullkontur schneiden, damit die Kuestenlinie eine echte
+        # Dreieckskante wird statt einer Rastertreppe.
         #
         # Gemessen bei 384 px: 4240 Konturvertices, davon 99.7 % NICHT auf
         # einer Pixelecke (Median-Versatz 0.164 px); das Quadtree liegt bei

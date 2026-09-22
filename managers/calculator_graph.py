@@ -43,14 +43,15 @@ _CALCULATOR_SPECS = [
     # --- Terrain (#1-#4) ---
     CalculatorSpec("terrain.noise", "terrain", [], ["noise_grid"]),
     # ridge_map (-1 in Kerben, +1 auf Kaemmen) kommt seit 2026-07-30 aus dem
-    # ATEF-Erosionsfilter, der in _calc_redistribution() mitlaeuft (SPEZIFIKATION
-    # §9). Bewusst kein eigener Knoten: der Filter liefert die endgueltige
-    # Gelaendeform, und 20+ Lesestellen holen die Heightmap von hier - sie alle
-    # umzuhaengen ist das Risiko aus 02_INVARIANTEN.md 5. Noch von niemandem
-    # gelesen.
+    # ATEF-Erosionsfilter, der in _calc_redistribution() mitlaeuft
+    # (90_MESSPROTOKOLLE.md §9). Bewusst kein eigener Knoten: der Filter
+    # liefert die endgueltige Gelaendeform, und 20+ Lesestellen holen die
+    # Heightmap von hier - sie alle umzuhaengen ist das Risiko aus
+    # 02_INVARIANTEN.md 5. Noch von niemandem gelesen.
     # river_mask/river_order kommen seit 2026-07-30 aus dem Flussnetz-Skelett,
-    # das ebenfalls in _calc_redistribution() mitlaeuft (SPEZIFIKATION §12).
-    # Noch von niemandem gelesen und nicht als Anzeige-Layer registriert.
+    # das ebenfalls in _calc_redistribution() mitlaeuft
+    # (90_MESSPROTOKOLLE.md §12). Noch von niemandem gelesen und nicht als
+    # Anzeige-Layer registriert.
     # river_generation seit 2026-08-05: 3 = Makro (Strom), 2 = Meso, 1 = Mikro
     # (Bach), 0 = kein Fluss. Ein NEUER Output statt einer geaenderten
     # Bedeutung von river_order - Water und Biome sollen einen Trog von einem
@@ -405,12 +406,13 @@ _CALCULATOR_SPECS = [
                    # settlement, der Graph nicht. Die Handtabelle hatte recht.
                    #
                    # settlement.city_boundary ergaenzt (Ticket #73, Anschluss-
-                   # punkte der Wege an der Stadtgrenze, docs/spezifikation/14_SIEDLUNGEN.md
-                   # §6.1): _calc_pathfinding schneidet die geroutete `roads`-
-                   # Liste gegen city_mask, braucht city_mask also als
-                   # deklarierte Eingabe statt sie ungefragt vom Data-LOD-
-                   # Manager zu holen - siehe die Lehre zu biome_map oben, die
-                   # sich hier fast wortgleich wiederholt haette.
+                   # punkte der Wege an der Stadtgrenze,
+                   # docs/spezifikation/14_SIEDLUNGEN.md 7):
+                   # _calc_pathfinding schneidet die geroutete `roads`-Liste
+                   # gegen city_mask, braucht city_mask also als deklarierte
+                   # Eingabe statt sie ungefragt vom Data-LOD-Manager zu holen
+                   # - siehe die Lehre zu biome_map oben, die sich hier fast
+                   # wortgleich wiederholt haette.
                    ["settlement.settlements", "settlement.city_boundary", "erosion.slope",
                     "biome.integrate_layers"], ["roads", "sea_roads", "road_entry_points"]),
     # settlement.outer_roads ENTFERNT (2026-08-10, OFFENE_PUNKTE 5.11): verband
