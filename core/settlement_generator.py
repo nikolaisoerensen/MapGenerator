@@ -629,6 +629,18 @@ BIOME_SIEDLUNGSEIGNUNG = {
     26: 0.00,  # sea_ice - kein Land
 }
 
+# Lookup-Array statt Dictionary (Ticket #15.3, 2026-09-23): einmal beim
+# Modulimport gebaut, damit evaluate_biome_suitability() den Wert je Pixel
+# per Fancy-Indexing liest statt bei JEDEM Aufruf 27x eine volle
+# Bild-Maske (biome_ids == biome_id) zu bilden - reiner Tabellenwert, keine
+# Schleife noetig. NaN markiert eine ID ohne Eintrag (siehe "unbekannt"
+# unten).
+_SIEDLUNGSEIGNUNG_MAXID = max(BIOME_SIEDLUNGSEIGNUNG)
+_SIEDLUNGSEIGNUNG_TABELLE = np.full(_SIEDLUNGSEIGNUNG_MAXID + 1, np.nan, dtype=np.float64)
+for _biome_id, _faktor in BIOME_SIEDLUNGSEIGNUNG.items():
+    _SIEDLUNGSEIGNUNG_TABELLE[_biome_id] = _faktor
+
+
 class TerrainSuitabilityAnalyzer:
     """
     Eignungsfeld nach docs/SIEDLUNGEN_ENTWURF.md Abschnitt 2 - fuenf Faktoren:
@@ -796,13 +808,12 @@ class TerrainSuitabilityAnalyzer:
             return None
 
         biome_ids = biome_map.astype(np.int32)
-        eignung = np.ones(biome_ids.shape, dtype=np.float32)
 
-        bekannt = np.zeros(biome_ids.shape, dtype=bool)
-        for biome_id, faktor in BIOME_SIEDLUNGSEIGNUNG.items():
-            maske = biome_ids == biome_id
-            eignung[maske] = faktor
-            bekannt |= maske
+        im_tabellenbereich = (biome_ids >= 0) & (biome_ids <= _SIEDLUNGSEIGNUNG_MAXID)
+        index = np.where(im_tabellenbereich, biome_ids, 0)
+        werte = _SIEDLUNGSEIGNUNG_TABELLE[index]
+        bekannt = im_tabellenbereich & ~np.isnan(werte)
+        eignung = np.where(bekannt, werte, 1.0).astype(np.float32)
 
         unbekannt = ~bekannt
         if np.any(unbekannt):
