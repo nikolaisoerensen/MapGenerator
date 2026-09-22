@@ -16,6 +16,35 @@ Ergebnis ist eine MESSUNG, keine Korrektur (Ticket-Vorgabe): der Test hat
 keine Zusicherung gegen ein Zielband, sondern druckt die Zahlen aus, die
 dann von Hand ins Ticket und in docs/TESTBERICHT.md uebernommen werden.
 
+DER IRRWEG, DER ZU DER 0,0-%-MELDUNG GEFUEHRT HAT - NICHT WIEDERHOLEN
+=====================================================================
+Die urspruengliche Messung fragte `(seegrad > 0) & (heightmap > 0)` ab,
+also "Seegrad ueber null UND Land". Diese Bedingung ist nicht knapp
+danebengegangen, sie ist LEER - und zwar fuer jede Karte, jeden Seed und
+jede Groesse. Deshalb kam immer exakt 0,0 % heraus, was wie ein echter
+Befund aussah und als solcher in docs/TESTBERICHT.md landete.
+
+Der Grund steht in einer einzigen Zeile, core/terrain_weltkarte.py:
+
+    seegrad_roh = np.where(maske, 0, grad[etikett]).astype(np.int16)
+
+`maske` ist die LANDmaske. Auf Land wird `seegrad` also per Konstruktion
+auf 0 gesetzt; `seegrad > 0` kann nur auf Wasser wahr sein. Die beiden
+Haelften der Und-Verknuepfung schliessen einander damit aus.
+
+Dazu kommt, dass `seegrad` das Gesuchte ohnehin nicht kennt: es ist die
+Zahl der Ringschritte von der naechsten landberuehrenden Zelle nach
+aussen (Breitensuche ueber den Voronoi-Nachbarschaftsgraphen, ebd.), und
+sie laeuft ueber ALLES Wasser - offenes Meer eingeschlossen. Ein
+Binnensee ist daran nicht zu erkennen. `seegrad` beschreibt, wie weit
+draussen ein Wasserpixel liegt, nicht, ob es zu einem See gehoert.
+
+Zustaendig ist `water.lake_detection`: dessen `lake_map` traegt je
+Seepixel eine Seenummer und -1 ueberall sonst. Das Kriterium unten
+(`(lake_map >= 0) & land`) ist deshalb das richtige - `>= 0`, nicht
+`> 0`, weil die Nummerierung bei null anfaengt und ein `> 0` still den
+ersten See verschluckt.
+
 Aufruf:
     .venv/Scripts/python.exe tests/smoke_test_seenflaeche_messung.py
 """
