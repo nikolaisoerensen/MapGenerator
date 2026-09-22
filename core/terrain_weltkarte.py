@@ -974,6 +974,12 @@ def kuestengebiete(H, felder, zell_etikett, seed):
     size = H.shape[0]
     mpp = WELT_KM * 1000.0 / size
     land = H > 0
+    # NUR GEGEN DAS HAUPTMEER, NICHT GEGEN BINNENSEEN (Bugfix, dieselbe
+    # Vorgabe 2026-08-13 wie in _kuesten_umformen(): ein Binnensee ist keine
+    # Meereskueste). `_hauptmeer_maske()` liefert nur die mit dem Kartenrand
+    # verbundene Wasserflaeche; ein abgeschlossener Binnensee faellt heraus.
+    hauptmeer = _hauptmeer_maske(H)
+    binnensee = (~land) & (~hauptmeer)
     delta = np.zeros((size, size), dtype=np.float64)
     archetyp = felder.get("kuesten_archetyp")
     region_map = felder.get("regionen")
@@ -1009,7 +1015,14 @@ def kuestengebiete(H, felder, zell_etikett, seed):
             nachbarn[q].add(p)
 
     # --- Saat: welcher Archetyp beruehrt welche Zelle ------------------------
-    kueste = land & ~ndimage.binary_erosion(land, iterations=1)
+    #
+    # NUR GEGEN DAS HAUPTMEER, NICHT GEGEN BINNENSEEN. Vorher markierte
+    # `kueste` jedes Landpixel, das an IRGENDEIN Wasser grenzte - ein
+    # Seeufer im Landesinneren zaehlte damit genauso als Kueste wie das
+    # Hauptmeer und lieferte Saat-Stimmen fuer einen Kuesten-Archetyp, den
+    # es fachlich nicht hat (derselbe Fehler, den _kuesten_umformen() schon
+    # gegen `distanz_m` behoben hat - hier die zellbasierte Entsprechung).
+    kueste = land & ndimage.binary_dilation(hauptmeer, iterations=1)
     zell_saat = np.full(n_zellen, -1, dtype=np.int32)
     for z in np.flatnonzero(zell_region >= 0):
         pix = kueste & (zell_etikett == z) & (archetyp >= 0)
@@ -1017,6 +1030,22 @@ def kuestengebiete(H, felder, zell_etikett, seed):
             continue
         werte, anzahl = np.unique(archetyp[pix], return_counts=True)
         zell_saat[z] = int(werte[np.argmax(anzahl)])
+
+    # Zellen, deren Land NUR an einen Binnensee grenzt (nicht ans
+    # Hauptmeer), bekommen unten keine gewachsene Gebietszuordnung - ohne
+    # eigene Saat wuerden sie sonst trotzdem den naechstgelegenen Archetyp
+    # per Breitensuche ERBEN, und ein Seeufer waere optisch weiterhin
+    # "Kueste", nur ohne eigene Saatstimme. Eine Zelle, die BEIDES beruehrt
+    # (z.B. eine schmale Landenge zwischen Meer und See), bleibt regulaer -
+    # sie ist echte Kueste.
+    kueste_see = land & ndimage.binary_dilation(binnensee, iterations=1)
+    zell_hauptmeer_kontakt = np.zeros(n_zellen, dtype=bool)
+    if kueste.any():
+        zell_hauptmeer_kontakt[np.unique(zell_etikett[kueste])] = True
+    zell_binnensee_kontakt = np.zeros(n_zellen, dtype=bool)
+    if kueste_see.any():
+        zell_binnensee_kontakt[np.unique(zell_etikett[kueste_see])] = True
+    zell_nur_binnensee = zell_binnensee_kontakt & ~zell_hauptmeer_kontakt
 
     # --- Gebiete wachsen lassen, je Region -----------------------------------
     zell_gebiet = np.full(n_zellen, -1, dtype=np.int32)
@@ -1132,6 +1161,12 @@ def kuestengebiete(H, felder, zell_etikett, seed):
         zell_gebiet[in_region] = fuehrt
         zell_tiefe[in_region] = d[fuehrt, np.arange(len(in_region))]
 
+        # BINNENSEEN SIND KEINE KUESTE: hier erzwungen statt nur ueber die
+        # fehlende Saat gehofft - ohne diese Zeile wuerden reine Seeufer-
+        # Zellen trotzdem den Archetyp der naechsten echten Kuestenzelle
+        # per Breitensuche erben (siehe zell_nur_binnensee oben).
+        zell_gebiet[in_region[zell_nur_binnensee[in_region]]] = -1
+
         # LAUT MELDEN, WAS HERAUSKAM. Eine Quote, die ihr Ziel verfehlt,
         # liefert trotzdem ein plausibles Gelaende - sie waere von Erfolg
         # nicht zu unterscheiden (CLAUDE.md, "jeder stille Rueckfall
@@ -1232,6 +1267,16 @@ def kuestengebiete(H, felder, zell_etikett, seed):
     # Pruefversuch griff mangels Raster auf `kuesten_archetyp` zurueck und
     # mass damit das Kuesten-Voronoi statt der Gebiete.
     gebiet_raster = np.where(land, zell_gebiet[zell_etikett], -1).astype(np.int16)
+    # PIXELGENAUER NACHSCHLAG (Bugfix, zusaetzlich zur Zellen-Sperre oben):
+    # eine Zelle, die BEIDES beruehrt - echtes Hauptmeer irgendwo an ihrem
+    # Rand UND einen Binnensee naeher am Seeufer -, behaelt zu Recht ihren
+    # Archetyp (sie IST teilweise echte Kueste). Aber die paar Pixel, die
+    # UNMITTELBAR am Binnensee liegen, sollen den Archetyp dieser Zelle
+    # trotzdem nicht tragen - sonst waere GENAU DAS Seeufer optisch wieder
+    # "Kueste", nur weil es zufaellig in derselben grossen Zelle wie ein
+    # Stueck echter Kueste liegt. Die Zellen-Granularitaet kann das nicht
+    # ausdruecken, ein direkter Pixel-Ueberschreib schon.
+    gebiet_raster = np.where(kueste_see, -1, gebiet_raster).astype(np.int16)
 
     # DIE HOEHENFAKTOR-KARTE (2026-08-26). Nutzerwunsch: *"ich will den
     # hoehenfaktor sehen koennen (3d und 2D)"*. Je Pixel die gemessene
