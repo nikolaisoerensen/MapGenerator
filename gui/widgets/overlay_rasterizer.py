@@ -4,7 +4,7 @@ grenzen, Siedlungen, Regionen, Fluesse, Kuestenarchetypen) plus ihre
 gemeinsame Bucketing-Logik und Farbtabellen.
 Aufgabe: Neutrales Modul, das MapDisplay2D und MapDisplay3D gleichberechtigt
 importieren, ohne dass die 3D-Ansicht dafuer an das 2D-Anzeigemodul haengt
-(Ticket #4, Vorarbeit fuer das Overlay-Register aus Ticket #5/`docs/SPEC_OVERLAYS.md`).
+(Ticket #4, Vorarbeit fuer das Overlay-Register aus Ticket #5/`docs/spezifikation/15_ANZEIGE.md`).
 """
 import numpy as np
 from scipy.ndimage import zoom

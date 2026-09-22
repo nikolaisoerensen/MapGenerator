@@ -390,7 +390,7 @@ class SettlementTab(BaseMapTab):
         [[project-settlement-physics-lab-parity]]): DAMALS war `roads` die
         alte, straßengerade Pfadfindung von vor dem PlotPhysicsSystem-Umbau
         ("das ist alles noch alter Kram"). Seit 2026-08-10
-        (docs/SIEDLUNGEN_ENTWURF.md §4) ist es ein echtes Gabriel-Graph/
+        (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5) ist es ein echtes Gabriel-Graph/
         Kostenfeld/Bereitschafts-Netz - kein Grund mehr, es zu verstecken.
         """
         layout = QHBoxLayout()
@@ -712,7 +712,7 @@ class SettlementTab(BaseMapTab):
         self.apply_3d_overlays()
 
         # Siedlungspunkte (Staedte/Landmarken/Roadsites) UEBER DAS REGISTER
-        # (Ticket #10, docs/SPEC_OVERLAYS.md): ersetzt die bisherige
+        # (Ticket #10, docs/spezifikation/15_ANZEIGE.md): ersetzt die bisherige
         # Verdopplung aus `overlay_settlements()` in _apply_settlement_overlays()
         # (nur 2D, current_view-gated) und der `uebersicht`-Textur in
         # apply_3d_overlays() (nur 3D, ohne Fingerabdruck-Cache) durch einen
@@ -761,7 +761,7 @@ class SettlementTab(BaseMapTab):
         # #10 NICHT mehr hier, sondern gemeinsam mit dem 3D-Weg ueber
         # self._push_overlays() in update_settlement_display() - siehe dort.
 
-        # Verbindungsstrassen (docs/SIEDLUNGEN_ENTWURF.md §4): Landwege
+        # Verbindungsstrassen (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5): Landwege
         # durchgezogen orange, Seewege gestrichelt in eigenem Blau (§4.4
         # "anders gezeichnet - gestrichelt, in einem eigenen Blau").
         if hasattr(display, 'overlay_roads') and self.show_roads_cb.isChecked():

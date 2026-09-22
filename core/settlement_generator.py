@@ -143,7 +143,7 @@ class SettlementData:
         self.plot_nodes = []  # List[PlotNode] - Alle PlotNodes
         self.plots = []  # List[Plot] - Alle Plots
         self.roads = []  # List[List[Tuple]] - Alle Road-Pfade (Land)
-        self.sea_roads = []  # List[List[Tuple]] - Seewege, docs/SIEDLUNGEN_ENTWURF.md §4.4
+        self.sea_roads = []  # List[List[Tuple]] - Seewege, docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.4
         self.city_mask = None  # (height, width) - Settlement-ID pro Pixel, -1 = ausserhalb jeder Stadt
         self.voronoi_cell_map = None  # (height, width) - Landschafts-Plot-Zell-ID pro Pixel, -1 = Stadt/Wilderness
         self.street_mask = None  # (height, width) bool - innerstaedtisches Strassenraster
@@ -253,21 +253,21 @@ class SettlementData:
         return status
 
 
-# Drei Raenge, alle klein (docs/SIEDLUNGEN_ENTWURF.md §1) - Unterscheidung ist
+# Drei Raenge, alle klein (docs/spezifikation/14_SIEDLUNGEN.md §1) - Unterscheidung ist
 # eine der Rang-Spanne, nicht Stadt gegen Metropole.
 RANG_HAEUSER = {"dorf": (15, 25), "siedlung": (25, 35), "stadt": (35, 50)}
 RANG_REIHENFOLGE = ("dorf", "siedlung", "stadt")
 
 
 # =============================================================================
-# KULTURKATALOGE - docs/KULTUREN_UND_ORTE.md, Abschnitt "AUSWAHL DES NUTZERS"
+# KULTURKATALOGE - docs/spezifikation/14_SIEDLUNGEN.md, Abschnitt "AUSWAHL DES NUTZERS"
 # =============================================================================
 #
 # Der verbindliche Satz: 5 Roadsite- und 5 Landmark-Arten je der neun Kulturen
 # (45 + 45). Kulturnamen sind exakt die `volk`-Werte aus
 # core/terrain_weltkarte.py REGIONEN.
 #
-# JEDE ART TRAEGT EINE PLATZIERUNGSVORLIEBE (docs/SIEDLUNGEN_ENTWURF.md §4.6
+# JEDE ART TRAEGT EINE PLATZIERUNGSVORLIEBE (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.6
 # fuer Roadsites, §4.7 fuer Landmarks nennt nur die KATEGORIEN, nicht die
 # Zuordnung je Art - die folgt hier aus dem Namen selbst: "Furtstein an der
 # Flussquerung" will an eine Furt, "Warte auf dem Kamm" auf einen Passpunkt,
@@ -431,7 +431,7 @@ class Location:
     Funktionsweise: Datenstruktur für alle Arten von Locations (Settlements, Landmarks, Roadsites)
     Aufgabe: Einheitliche Repräsentation aller Siedlungs-Objekte
 
-    `culture`/`rank`/`house_count` (2026-08-10, docs/SIEDLUNGEN_ENTWURF.md §1+3):
+    `culture`/`rank`/`house_count` (2026-08-10, docs/spezifikation/14_SIEDLUNGEN.md §1+3):
     nur fuer location_type == 'settlement' belegt. `culture` ist der Name aus
     core.terrain_weltkarte (`volk`-Feld je Region), `rank` einer von
     'dorf'/'siedlung'/'stadt' (15-25/25-35/35-50 Haeuser), `house_count` die
@@ -560,7 +560,7 @@ class Plot:
 
 # Referenzhoehe der Hoehen-Daempfung (Meter). Ab hier ist der Standortwert auf
 # die Haelfte gefallen; oberhalb von rund 1800 m ist praktisch nichts mehr
-# uebrig. Frei gewaehlt, kein Regler (docs/SIEDLUNGEN_ENTWURF.md nennt keinen) -
+# uebrig. Frei gewaehlt, kein Regler (docs/spezifikation/14_SIEDLUNGEN.md nennt keinen) -
 # passt zu den Regionshoehen der Weltkarte (Nevadin reicht nach der
 # Neueichung vom 2026-08-10 bis rund 1000 m ueber die Reliefspanne).
 ELEVATION_DAEMPFUNG_M = 600.0
@@ -587,14 +587,14 @@ KUeSTE_GEWICHT = 0.75
 # gelesen, stehen hier trotzdem korrekt fuer den Fall, dass sie es doch tun.
 #
 # Werte sind eine gutachterliche Einschaetzung (keine Messreihe, kein Regler
-# in docs/SIEDLUNGEN_ENTWURF.md) - fruchtbares Offenland/Laubwald hoch,
+# in docs/spezifikation/14_SIEDLUNGEN.md) - fruchtbares Offenland/Laubwald hoch,
 # Nadel-/Bergwald mittel, Moor/Bruch/Steilheit/Hochlage niedrig.
 #
 # GEPRUEFT, NICHT AUS DER BIOM-MATRIX ABGELEITET (Ticket #15.2, 2026-09-23):
 # `BaseBiomeClassifier.biome_definitions` (core/biome_generator.py) haelt nur
 # Klima-/Feuchtigkeitsgrenzen (temp/precip/elevation/moisture,
 # moisture_capacity, evaporation_factor) - keinen Siedlungseignungswert, aus
-# dem sich diese Tabelle ableiten liesse. `docs/BIOME_MATRIX.md` enthaelt
+# dem sich diese Tabelle ableiten liesse. `docs/spezifikation/13_KLIMA_UND_BIOME.md` enthaelt
 # ebenfalls keinen solchen Wert. Diese Tabelle ist die EINZIGE Quelle fuer
 # Siedlungseignung je Biom, keine Abschrift einer anderswo gepflegten Zahl -
 # eine Biom-Matrix-Aenderung kann sie deshalb nicht stillschweigend veralten
@@ -643,7 +643,7 @@ for _biome_id, _faktor in BIOME_SIEDLUNGSEIGNUNG.items():
 
 class TerrainSuitabilityAnalyzer:
     """
-    Eignungsfeld nach docs/SIEDLUNGEN_ENTWURF.md Abschnitt 2 - fuenf Faktoren:
+    Eignungsfeld nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 2 - fuenf Faktoren:
 
         Wasser am Ort         staerkster Einzelfaktor (Wassertyp x Naehe)
         Ebener Grund          stark
@@ -753,7 +753,7 @@ class TerrainSuitabilityAnalyzer:
         UNABHAENGIG von der absoluten Hoehe; auf einer flachen Karte war damit
         auch der hoechste Punkt "optimal". Jetzt eine feste, physikalisch
         gemeinte Kurve: je hoeher ueber dem Meer, desto kuerzer die
-        Wachstumszeit, desto weniger Ertrag (docs/SIEDLUNGEN_ENTWURF.md §2).
+        Wachstumszeit, desto weniger Ertrag (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 2).
         """
         if progress_callback:
             progress_callback("Terrain Analysis", 15, "Evaluating elevation fitness...")
@@ -765,7 +765,7 @@ class TerrainSuitabilityAnalyzer:
         """
         Ackerland im Umkreis: Anteil an flacher, tiefer Flaeche im Radius um
         jeden Punkt - bestimmt, WIEVIELE Menschen der Ort ernaehren kann,
-        waehrend Wasser die LAGE traegt (docs/SIEDLUNGEN_ENTWURF.md §2).
+        waehrend Wasser die LAGE traegt (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 2).
 
         Ein Boxfilter statt eines echten Kreises: bei den hier ueblichen
         Radien (wenige Pixel) ist der Unterschied zur Kreisscheibe gering,
@@ -977,7 +977,7 @@ def _voronoi_edge_distance_map(cell_map):
     return distance_transform_edt(~edge_mask).astype(np.float32)
 
 
-# Wasserkosten-Stufen fuer das Kostenfeld, docs/SIEDLUNGEN_ENTWURF.md §4.1.
+# Wasserkosten-Stufen fuer das Kostenfeld, docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.1.
 # Furt/kurze Bruecke bis zur Muendungstiefe-Groessenordnung bleibt machbar,
 # aber teuer; tieferes Wasser ist fuer LANDwege gesperrt (Seewege siehe
 # calculate_road_network()).
@@ -1047,7 +1047,7 @@ WEGEBAU_UNMOEGLICH = 500.0
 def bau_kostenfeld(heightmap, slopemap, slope_distance_ratio, weg_maske=None,
                     water_map=None, bruecken_maske=None):
     """
-    Das Kostenfeld EINMAL bauen, docs/SIEDLUNGEN_ENTWURF.md §4.1 ("Kostenfeld
+    Das Kostenfeld EINMAL bauen, docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.1 ("Kostenfeld
     zuerst") - nicht wie in der Vorlage je A*-Schritt neu aus slopemap
     ausrechnen (`calculate_movement_cost` tat das bei jedem einzelnen
     Nachbarn). Ebener Grund kostet 1.0, Wasser in drei Stufen, ein bereits
@@ -1214,7 +1214,7 @@ def platziere_bruecken(weg_maske, roads, fluss_land, water_map,
     return bruecken_maske, bruecken_liste
 
 
-# Seeweg-Kostenfeld, docs/SIEDLUNGEN_ENTWURF.md §4.4 - das SPIEGELBILD des
+# Seeweg-Kostenfeld, docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.4 - das SPIEGELBILD des
 # Landkostenfelds: Land ist gesperrt, Flachwasser teuer (an der Kueste
 # entlangtasten soll sich nicht lohnen), richtiges tiefes Wasser billig.
 SEEWEG_KOSTEN_FLACH = 3.0     # 0 bis SEEWEG_TIEFE_ZIEL_M
@@ -1294,7 +1294,7 @@ def _seeweg_anteil_tief(pfad, heightmap, seegrad=None):
     return tief / len(pfad)
 
 
-# Rang als Zahl fuer die Bereitschaftsformel (docs/SIEDLUNGEN_ENTWURF.md §4.3):
+# Rang als Zahl fuer die Bereitschaftsformel (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.3):
 # Bereitschaft = Rang(A) * Rang(B) * (gleiche Kultur ? 1.0 : 0.45). Zwei
 # Staedte (3*3=9) verbinden sich damit praktisch immer, zwei Doerfer
 # verschiedener Kultur (1*1*0.45=0.45) fast nie.
@@ -1810,7 +1810,7 @@ def kanten_nach_bedarf(direkt_C, handel_W, bestehende, kandidaten,
 def _gabriel_kandidaten(punkte):
     """
     Gabriel-Graph ueber `punkte` (N,2): Kandidatenpaare fuer das Wegenetz,
-    docs/SIEDLUNGEN_ENTWURF.md §4.2. Zwei Punkte A,B sind Kandidaten, wenn im
+    docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.2. Zwei Punkte A,B sind Kandidaten, wenn im
     Kreis mit Durchmesser AB kein dritter Punkt liegt - ergibt ein sparse,
     zusammenhaengendes Netz mit typisch 2-3 Nachbarn je Ort statt eines Sterns
     oder einer Vollverknuepfung.
@@ -1841,7 +1841,7 @@ def _gabriel_kandidaten(punkte):
 
 def kreuzungen_finden(roads, sea_roads, settlements, shape, mindestabstand_siedlung=None):
     """
-    Kreuzungen NACH dem Routing, docs/SIEDLUNGEN_ENTWURF.md §4.5: "alle
+    Kreuzungen NACH dem Routing, docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.5: "alle
     Wegepixel, an denen sich zwei Strecken treffen und die NICHT auf einem
     Ort liegen". Sie entstehen von selbst durch den Wegerabatt aus §4.1 -
     dort, wo zwei Strecken ein Stueck gemeinsam gehen und sich wieder trennen.
@@ -2482,7 +2482,7 @@ def _polygonize_settlement_mask(id_mask, settlement_ids, min_area):
     Gemeinsam genutzt von PlotPhysicsSystem._build_city_boundary_polygons()
     (interne Plot-Knoten-Verteilung, siehe _gen_step_city_boundary_distribute)
     und SettlementGenerator._calc_city_boundary() (externe Ausgabe
-    'city_boundary_polygons', Ticket #72/docs/SIEDLUNGEN_ENTWURF.md §6.1) -
+    'city_boundary_polygons', Ticket #72/docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 7) -
     EIN Algorithmus mit zwei Aufrufern, damit beide garantiert dieselbe Kontur
     sehen statt zweier Implementierungen, die auseinanderlaufen koennten.
 
@@ -2625,7 +2625,7 @@ def _polygon_area(vertices):
 
 
 def _wege_anschlusspunkte(roads, stadtgrenzen_polygone):
-    """Schnittpunkte des ueberregionalen Wegenetzes (docs/SIEDLUNGEN_ENTWURF.md
+    """Schnittpunkte des ueberregionalen Wegenetzes (docs/spezifikation/14_SIEDLUNGEN.md
     §4, `roads` aus settlement.pathfinding - geroutete Land-Verbindungen
     zwischen den Orten, NICHT die spaeteren Innenstadt-Strassen aus
     settlement.plot_nodes) mit der Stadtgrenzen-Kontur jeder Siedlung
@@ -5319,7 +5319,7 @@ class SettlementGenerator:
         self.scale_factor = heightmap.shape[0] / 128.0
         self.area_scale_factor = self.scale_factor ** 2
 
-        # Kulturregionen (2026-08-10, docs/SIEDLUNGEN_ENTWURF.md §3). OHNE
+        # Kulturregionen (2026-08-10, docs/spezifikation/14_SIEDLUNGEN.md §3). OHNE
         # Pflichtpruefung: terrain.redistribution ist zwar bereits eine echte
         # Abhaengigkeit von settlement.settlements (calculator_graph.py), aber
         # nur im WELTKARTE_AKTIV-Pfad liefert sie ueberhaupt region_map -
@@ -5433,7 +5433,7 @@ class SettlementGenerator:
         Stadtgrenze je Settlement, Grundlage fuer die Trennung Stadt-Innen (spaeteres
         Block-System) vs. Landschaft (LandscapeVoronoiSystem). Siehe _is_final_lod().
 
-        Seit Ticket #72 (docs/SIEDLUNGEN_ENTWURF.md §6.1, Siedlungsnaht aus
+        Seit Ticket #72 (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 7, Siedlungsnaht aus
         Ticket #35) liefert dieser Knoten zusaetzlich 'city_boundary_polygons':
         dict Location.location_id (int) -> Liste von Polygonen; jedes Polygon
         eine Liste von (x, y)-Punkten in Karten-Pixel-Koordinaten (dieselbe
@@ -5490,14 +5490,14 @@ class SettlementGenerator:
         zwangsläufig NACH civ_influence laufen muss (Zirkelbezug sonst).
         Seit 2026-08-10 liefert calculate_road_network() zwei Listen: `roads`
         (Land, Gabriel-Graph + Kostenfeld + Bereitschaftstest,
-        docs/SIEDLUNGEN_ENTWURF.md §4) und `sea_roads` (§4.4, fuer
+        docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5) und `sea_roads` (§4.4, fuer
         Kulturpaare ohne endlichen Landweg).
         voronoi_cell_map (früher aus settlement.landscape_voronoi, jetzt
         entfernt) entfällt ersatzlos - calculate_road_network() fällt dafür
         bereits dokumentiert auf reines Slope-Cost-Pathfinding zurück.
         Siehe _is_final_lod().
 
-        Liefert seit Ticket #73 (docs/SIEDLUNGEN_ENTWURF.md §6.1,
+        Liefert seit Ticket #73 (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 7,
         "Anschlusspunkte der Wege") zusaetzlich `road_entry_points`: je
         Siedlung die Schnittpunkte von `roads` mit ihrer Stadtgrenzen-Kontur,
         in Karten-Pixel-Koordinaten. Dafuer haengt dieser Knoten jetzt auch an
@@ -5539,7 +5539,7 @@ class SettlementGenerator:
     def _calc_roadsites(self, calculator_id: str, lod_level: int) -> None:
         """
         Calculator-Node 'settlement.roadsites' (#31) - siehe _is_final_lod().
-        Braucht seit dem Umbau auf den 45-Arten-Katalog (docs/SIEDLUNGEN_ENTWURF.md
+        Braucht seit dem Umbau auf den 45-Arten-Katalog (docs/spezifikation/14_SIEDLUNGEN.md
         §4.6) zusaetzlich heightmap (Furt-/Passerkennung) und settlement_list
         (Kulturzuordnung je Standort ueber _naechste_kultur()) - ruft dafuer
         jetzt selbst _get_prepared_settlement_inputs() statt sich wie zuvor
@@ -5731,7 +5731,7 @@ class SettlementGenerator:
                                        reachability_map=None, region_map=None,
                                        biome_map=None):
         """
-        Fuenf-Faktor-Eignungsfeld (docs/SIEDLUNGEN_ENTWURF.md §2). `reachability_map`
+        Fuenf-Faktor-Eignungsfeld (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 2). `reachability_map`
         bleibt None fuer die erste Platzierungsrunde (Faktor neutral) - siehe
         TerrainSuitabilityAnalyzer.create_combined_suitability().
 
@@ -5807,7 +5807,7 @@ class SettlementGenerator:
 
     def _rang_zuweisen(self, werte_mit_rauschen):
         """
-        Rang je Settlement EINER Kultur, docs/SIEDLUNGEN_ENTWURF.md §3.
+        Rang je Settlement EINER Kultur, docs/spezifikation/14_SIEDLUNGEN.md §3.
 
         Der beste Wert wird immer 'stadt' - das ist genau "mindestens ein Ort
         je Kultur ist Stadt". Vom Rest (r = n-1 Orte) wird die obere Haelfte
@@ -5938,7 +5938,7 @@ class SettlementGenerator:
     def calculate_settlements(self, suitability_map, heightmap, lod, region_map=None,
                                typ_eignungen=None, kostenfeld=None):
         """
-        Platziert Settlements je Kultur (docs/SIEDLUNGEN_ENTWURF.md §2+3).
+        Platziert Settlements je Kultur (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 2+3).
 
         ANZAHL JE KULTUR: 2 bis 5, abgeleitet aus der Eignungssumme der
         Kulturregion verglichen mit der bestausgestatteten Region ("die Summe
@@ -6127,7 +6127,7 @@ class SettlementGenerator:
     def calculate_road_network(self, settlements, heightmap, slopemap, lod, voronoi_cell_map=None,
                                seegrad=None, water_map=None):
         """
-        Wegenetz nach docs/SIEDLUNGEN_ENTWURF.md §4.1-§4.3. Ablauf, in dieser
+        Wegenetz nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.1-5.3. Ablauf, in dieser
         Reihenfolge:
 
           1. KOSTENFELD (§4.1) - einmal, ueber bau_kostenfeld(). Wasser in drei
@@ -6385,7 +6385,7 @@ class SettlementGenerator:
                     len(bruecken_liste), BRUECKEN_MIN_VERKEHR)
 
         # Messung fuer Abnahmekriterium 4: Anteil der Wegepixel, die im
-        # Uferweg-Rabattbereich liegen (docs/SIEDLUNGEN_ENTWURF.md-Anhang,
+        # Uferweg-Rabattbereich liegen (docs/spezifikation/14_SIEDLUNGEN.md,
         # Ticket #42) - "folgen Wege tatsaechlich dem Ufer, nicht nur
         # zufaellig". Reine Zaehlung, veraendert nichts mehr am Netz.
         if fluss_land is not None and np.any(weg_maske):
@@ -6694,11 +6694,11 @@ class SettlementGenerator:
 
     def calculate_roadsites(self, roads, sea_roads, settlements, heightmap, lod, region_map=None):
         """
-        Roadsites nach docs/SIEDLUNGEN_ENTWURF.md §4.6: "bevorzugt an
+        Roadsites nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.6: "bevorzugt an
         Kreuzungen (ein Gasthof lebt vom Verkehr), an Furten und
         Passhoehen, auf langen Zwischenstuecken ohne Ort". Typ kommt aus dem
         45-Arten-Katalog der naechstgelegenen Kultur (ROADSITE_KATALOG,
-        docs/KULTUREN_UND_ORTE.md), nach Platzierungskategorie passend
+        docs/spezifikation/14_SIEDLUNGEN.md), nach Platzierungskategorie passend
         gewaehlt - eine Kreuzung bei den Kelten wird eher "Zollringwall" als
         "Bardenlager", eine Passhoehe bei den Alemannen eher "Passhospiz".
 
@@ -6891,11 +6891,11 @@ class SettlementGenerator:
 
     def calculate_landmarks(self, civ_map, heightmap, slopemap, water_map, settlements, lod, region_map=None):
         """
-        Landmarks nach docs/SIEDLUNGEN_ENTWURF.md §4.7: "unabhaengig vom Netz,
+        Landmarks nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.7: "unabhaengig vom Netz,
         nach eigenen Kriterien: Gipfel, Kliffs, Quellen, abgelegene Stellen -
         duerfen ausdruecklich weitab jedes Weges liegen". Typ kommt aus dem
         45-Arten-Katalog der naechstgelegenen Kultur (LANDMARK_KATALOG,
-        docs/KULTUREN_UND_ORTE.md), nach Kategorie passend gewaehlt.
+        docs/spezifikation/14_SIEDLUNGEN.md), nach Kategorie passend gewaehlt.
 
         VIER KATEGORIEN, VIER MASKEN. Die alte Fassung hatte eine einzige
         pauschale Hoehen-Obergrenze (unterste 70%) - das schloss Gipfel-Arten
@@ -7220,7 +7220,7 @@ class SettlementGenerator:
     # calculate_outer_connections() ENTFERNT (2026-08-10, OFFENE_PUNKTE 5.11).
     # Verband Siedlungen mit 2-3 Punkten am KARTENRAND - eine Annahme, die zu
     # keiner Insel/Region passt: es gibt kein sinnvolles "Draussen", zu dem
-    # eine Strasse fuehren sollte. docs/SIEDLUNGEN_ENTWURF.md kennt nur
+    # eine Strasse fuehren sollte. docs/spezifikation/14_SIEDLUNGEN.md kennt nur
     # Siedlung-Siedlung-, Siedlung-See- (Seewege) und Roadsite/Landmark-
     # Anbindungen - keine Kartenrand-Anbindung. War ein Leftover aus einer
     # frueheren Konzeptphase.

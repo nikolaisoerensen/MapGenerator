@@ -1,6 +1,6 @@
 """
 Siedlungen je Kultur - Eignungsfeld und Platzierung nach
-docs/SIEDLUNGEN_ENTWURF.md §2+3 (Umbau 2026-08-10).
+docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 2+3 (Umbau 2026-08-10).
 
 Vorher: `TerrainSuitabilityAnalyzer` kannte drei Faktoren (Slope/Wasser-Naehe/
 Hoehen-Wohlfuehlzone, je als Python-Doppelschleife), `calculate_settlements`

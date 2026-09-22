@@ -76,7 +76,7 @@ error_handler = get_error_handler()
 @dataclass(frozen=True)
 class Overlay:
     """
-    Ein Vektor-Overlay als WERT, kein Aufruf (docs/SPEC_OVERLAYS.md Punkt 2).
+    Ein Vektor-Overlay als WERT, kein Aufruf (docs/spezifikation/15_ANZEIGE.md Punkt 2).
     Ein Reiter meldet nur Name/Sichtbarkeit/Daten an BaseMapTab._push_overlays();
     WIE gezeichnet wird (2D per overlay_*(), 3D per RGBA-Skin), entscheidet
     ausschliesslich das Register unten - der Reiter kennt den Unterschied
@@ -92,7 +92,7 @@ class Overlay:
 
 
 # ---------------------------------------------------------------------------
-# Overlay-Register (docs/SPEC_OVERLAYS.md Punkt 3): "privat zur implementation
+# Overlay-Register (docs/spezifikation/15_ANZEIGE.md Punkt 3): "privat zur implementation
 # von BaseMapTab, aber mit eigenen Tests" - deshalb hier als Modulfunktionen
 # statt als Methoden, unabhaengig von jedem Reiter pruefbar (siehe
 # tests/smoke_test_push_overlays.py), aber nicht als oeffentliches Interface
@@ -829,7 +829,7 @@ class BaseMapTab(QWidget):
         """
         Geschwistermethode zu _push_data_to_current_display(), aber fuer
         Vektor-Overlays (Siedlungen, Fluesse, ...) statt Skalarlayer
-        (docs/SPEC_OVERLAYS.md).
+        (docs/spezifikation/15_ANZEIGE.md).
 
         Ein Reiter meldet nur noch WAS gezeigt werden soll (siehe Overlay-
         Werttyp oben); WIE - per overlay_*()-Aufruf in 2D, per RGBA-Skin in
@@ -855,7 +855,7 @@ class BaseMapTab(QWidget):
                 raise ValueError(
                     f"Unbekanntes Overlay '{overlay.name}' - nicht in "
                     f"_OVERLAY_REGISTER (gui/tabs/base_tab.py) angemeldet. "
-                    f"Siehe docs/SPEC_OVERLAYS.md, Implementation Decisions 3+5."
+                    f"Siehe docs/spezifikation/15_ANZEIGE.md, Implementation Decisions 3+5."
                 )
             if self.map_display_2d is not None:
                 eintrag["2d"](self.map_display_2d.display, overlay)

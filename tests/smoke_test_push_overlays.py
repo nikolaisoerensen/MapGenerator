@@ -2,12 +2,12 @@
 Path: tests/smoke_test_push_overlays.py
 
 Prueft BaseMapTab._push_overlays() und das Overlay-Register aus
-gui/tabs/base_tab.py (Ticket #8, docs/SPEC_OVERLAYS.md) - den Nachfolger der
+gui/tabs/base_tab.py (Ticket #8, docs/spezifikation/15_ANZEIGE.md) - den Nachfolger der
 alten `hasattr`-Weichen, an denen viermal derselbe Fehler passierte (siehe
 CLAUDE.md "STEHENDE REGEL: was in 2D sichtbar ist, gehoert auch in 3D"):
 ein Overlay-Haken wirkte in 2D, aber lautlos nicht in 3D.
 
-WAS HIER GEPRUEFT WIRD (docs/SPEC_OVERLAYS.md, Testing Decisions):
+WAS HIER GEPRUEFT WIRD (docs/spezifikation/15_ANZEIGE.md, Testing Decisions):
 
 1. Das Register, gegen mitschreibende Attrappen-Anzeigen (kein Qt, kein
    OpenGL) - je angemeldetem Overlay erzeugt sichtbar=True einen Aufruf in
@@ -99,7 +99,7 @@ class FakeDisplay3D:
         self.calls.append(("clear_river_overlay",))
 
 
-# Echte Kartengroessen (docs/SPEC_OVERLAYS.md Testing Decisions Punkt 5, die
+# Echte Kartengroessen (docs/spezifikation/15_ANZEIGE.md Testing Decisions Punkt 5, die
 # Lehre aus dem adaptiven 3D-Netz: eine ausgedachte Groesse testet eine
 # ausgedachte Situation).
 _ECHTE_KARTENGROESSE = 256
@@ -209,7 +209,7 @@ def run_unbekannter_name_wirft():
 
 def run_register_vollstaendig():
     """Jeder Registereintrag braucht BEIDE Seiten - ein Eintrag mit nur einem
-    Adapter waere genau der Fall, den docs/SPEC_OVERLAYS.md Punkt 5 als
+    Adapter waere genau der Fall, den docs/spezifikation/15_ANZEIGE.md Punkt 5 als
     Fehler beim Start verlangt, nicht als spaeteres Nichtstun."""
     ok = True
     for name, eintrag in _OVERLAY_REGISTER.items():
@@ -237,7 +237,7 @@ def _ohne_docstring(quelltext: str) -> str:
 
 
 def run_current_view_kommt_nicht_vor():
-    """Quelltexttest (docs/SPEC_OVERLAYS.md Testing Decisions Punkt 2): trifft
+    """Quelltexttest (docs/spezifikation/15_ANZEIGE.md Testing Decisions Punkt 2): trifft
     grob, aber genau die Ursache aller vier Vorfaelle aus CLAUDE.md - jeder
     davon war eine current_view-Weiche, die den 3D-Zweig nie erreichte."""
     quellen = {

@@ -85,7 +85,7 @@ LINIEN_ABSTAND_M = 60.0
 MESH_MINDEST_SKALA_M = 8.0
 
 # Wieviel Zielhoehe je Meter groesster Kuestenentfernung hoechstens zulaessig
-# ist - der Deckel aus docs/KUESTENMODELL.md §3. An echten Inseln gemessen
+# ist - der Deckel aus docs/spezifikation/11_GELAENDE.md Abschnitt 5. An echten Inseln gemessen
 # liegt das Verhaeltnis zwischen 0.08 (Aran, flache Kalkinsel) und 0.83
 # (Capri); 1.0 laesst also alles Reale durch und faengt nur die Faelle ab,
 # in denen ein Archetyp mehr Hoehe verlangt, als die Landmasse traegt.
@@ -1848,7 +1848,7 @@ class VektorKueste:
     def _tiefenfeld_bauen(self):
         """
         Je Landmasse ihre groesste Kuestenentfernung (`d_max`) - die Zahl, mit
-        der zur Inselmitte hin geschlossen wird (docs/KUESTENMODELL.md §4).
+        der zur Inselmitte hin geschlossen wird (docs/spezifikation/11_GELAENDE.md Abschnitt 6).
 
         Gemessen am Inseltest: ohne dieses Schliessen waechst eine 500-m-Insel
         von 179 m auf 271 m Hoehe, weil das Kuestenprofil die Mitte hochschiebt

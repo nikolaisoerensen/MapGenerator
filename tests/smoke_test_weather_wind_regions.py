@@ -1,5 +1,5 @@
 """
-Wind trifft die Regionsziele aus docs/archiv/2026-07-29_SPEZIFIKATION.md §3.5.
+Wind trifft die Regionsziele aus docs/spezifikation/10_REGIONEN.md B.5.
 
 ANLASS (2026-08-11). Nutzer bestaetigte Windziele je Region (Referenzorte wie
 bei Temperatur/Niederschlag: Cork, Bergen, Wologda, ...), danach Auftrag:
@@ -21,7 +21,7 @@ Antriebskraft), zeigte praktisch KEINEN Effekt (0.16 gegen 0.71 Faktor:
 additiven Antrieben und dominiert die Endgeschwindigkeit nicht. Die direkte
 Normierung des ERGEBNISSES wirkt dagegen garantiert.
 
-LUV/LEE (docs/archiv/2026-07-29_SPEZIFIKATION.md §3.5, 1.5-2x Kontrast): ein multiplikativer Term
+LUV/LEE (docs/spezifikation/10_REGIONEN.md B.5, 1.5-2x Kontrast): ein multiplikativer Term
 (`_wind_luv_lee_faktor`) ist eingebaut, aber NICHT verifizierbar als
 verlaesslicher Gruppenkontrast - gemessen im Nevadin: die vorhandene
 Simulation hat selbst schon eine terraingetriebene Windstruktur, die mit
@@ -88,7 +88,7 @@ def main():
     namen = [r["name"] for _z, _s, r in rw.alle_regionen()]
     ziele = {r["name"]: r["wind_mittel_ms"] for _z, _s, r in rw.alle_regionen()}
 
-    print("1. Regionsmittel gegen docs/archiv/2026-07-29_SPEZIFIKATION.md §3.5")
+    print("1. Regionsmittel gegen docs/spezifikation/10_REGIONEN.md B.5")
     print("%-20s %8s %8s %10s" % ("Region", "ist", "ziel", "Abweichung"))
     TOLERANZ_MS = 0.6
     for i, name in enumerate(namen):

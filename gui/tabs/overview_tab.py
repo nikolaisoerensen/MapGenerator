@@ -12,7 +12,7 @@ Kein Composite-View-Rendering (Ticket #6, 2026-09-16): die frühere
 Multi-Panel/Composite-Ansicht rief ausschließlich Methoden auf
 `self.map_display` auf, das in dieser Klasse nirgends zugewiesen wird -
 vollständig toter Code seit jeher, siehe docs/SITZUNGSLOG.md und
-docs/SPEC_OVERLAYS.md (Out of Scope).
+docs/spezifikation/15_ANZEIGE.md (Out of Scope).
 """
 
 import os

@@ -158,7 +158,7 @@ NUR_EINE_ANZEIGE = {
     "draw_plot_physics_snapshot": "Diagnosebild des Plot-Physik-Labors, "
                                   "bewusst nur 2D.",
     "overlay_settlements": "2D-ZWEIG EINES PAARES, kein Loch. Seit Ticket #8-#11 "
-                           "(docs/SPEC_OVERLAYS.md) ruft KEIN Reiter mehr direkt "
+                           "(docs/spezifikation/15_ANZEIGE.md) ruft KEIN Reiter mehr direkt "
                            "auf; BaseMapTab._push_overlays() ruft ueber das "
                            "Register \"siedlungen\" fuer 3D stattdessen "
                            "`update_overlay_data(\"settlement\", \"uebersicht\", "

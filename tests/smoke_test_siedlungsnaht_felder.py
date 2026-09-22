@@ -3,7 +3,7 @@ Ticket #35: Die Feldliste der Siedlungsnaht festschreiben.
 Ticket #72: Kontur der Stadtgrenze als Polygon exportieren.
 Ticket #73: Anschlusspunkte der Wege an der Stadtgrenze berechnen.
 
-Prueft die "Naht" aus docs/SIEDLUNGEN_ENTWURF.md §6 - die eine Stelle, an
+Prueft die "Naht" aus docs/spezifikation/14_SIEDLUNGEN.md §6 - die eine Stelle, an
 der das Spiel Siedlungsdaten abholt. Entschieden in Issue #19 (Fragen 19.2
 und 19.3): der Editor liefert genau sechs Felder (Kontur der Stadtgrenze,
 Anschlusspunkte der Wege, Stadtgroesse, Stadttyp, Rang, Kultur) und NICHT
@@ -51,7 +51,7 @@ LOD = 3
 KM = 15.0
 SEED = 20260804
 
-# Aus docs/SIEDLUNGEN_ENTWURF.md §6.1 - die vier heute gelieferten Naht-Felder.
+# Aus docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 7 - die vier heute gelieferten Naht-Felder.
 KULTUREN_PLATZHALTER_ANZAHL = 9  # Issue #19.5: ausdruecklich vorlaeufig, Anzahl pruefen reicht
 RAENGE = {"dorf", "siedlung", "stadt"}
 STADTTYPEN = {"bergdorf", "marktstadt", "agrarstadt", "sonstige"}

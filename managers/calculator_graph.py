@@ -404,7 +404,7 @@ _CALCULATOR_SPECS = [
                    # settlement, der Graph nicht. Die Handtabelle hatte recht.
                    #
                    # settlement.city_boundary ergaenzt (Ticket #73, Anschluss-
-                   # punkte der Wege an der Stadtgrenze, docs/SIEDLUNGEN_ENTWURF.md
+                   # punkte der Wege an der Stadtgrenze, docs/spezifikation/14_SIEDLUNGEN.md
                    # §6.1): _calc_pathfinding schneidet die geroutete `roads`-
                    # Liste gegen city_mask, braucht city_mask also als
                    # deklarierte Eingabe statt sie ungefragt vom Data-LOD-
@@ -414,7 +414,7 @@ _CALCULATOR_SPECS = [
                     "biome.integrate_layers"], ["roads", "sea_roads", "road_entry_points"]),
     # settlement.outer_roads ENTFERNT (2026-08-10, OFFENE_PUNKTE 5.11): verband
     # Siedlungen mit dem KARTENRAND - eine Insel/Region hat kein sinnvolles
-    # "Draussen". docs/SIEDLUNGEN_ENTWURF.md kennt diese Anbindung nicht.
+    # "Draussen". docs/spezifikation/14_SIEDLUNGEN.md kennt diese Anbindung nicht.
     CalculatorSpec("settlement.roadsites", "settlement", ["settlement.pathfinding"], ["roadsite_list"]),
     CalculatorSpec("settlement.civ_influence", "settlement",
                    ["terrain.redistribution", "erosion.slope", "settlement.settlements",
@@ -460,7 +460,7 @@ CALCULATOR_GRAPH: Dict[str, CalculatorSpec] = {spec.calculator_id: spec for spec
 # der Erosion, siehe dortiger Kommentar - ein ZWEITER Slope-Knoten, weil ein
 # verschobener terrain.slope einen Zyklus ueber geology.layer_thickness
 # ergaebe) = netto +1 -> 39 aktive Knoten. Wegenetz-Umbau 2026-08-10
-# (docs/SIEDLUNGEN_ENTWURF.md, OFFENE_PUNKTE 5.11) entfernte
+# (docs/spezifikation/14_SIEDLUNGEN.md, OFFENE_PUNKTE 5.11) entfernte
 # settlement.outer_roads (Anbindung an den Kartenrand - eine Insel/Region hat
 # kein sinnvolles "Draussen") = netto -1 -> 38 aktive Knoten.
 assert len(CALCULATOR_GRAPH) == 38, f"Erwartet 38 aktive Calculators, gefunden {len(CALCULATOR_GRAPH)}"

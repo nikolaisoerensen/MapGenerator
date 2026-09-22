@@ -54,7 +54,7 @@ def _netz(size):
         # wird. `weltfeld()` legt das Objekt deshalb in
         # `felder["vektor_kueste"]` ab: EIN Objekt je Karte, von Raster und
         # Mesh gemeinsam benutzt - genau die Bauart aus
-        # docs/KUESTENMODELL.md §7.
+        # docs/spezifikation/11_GELAENDE.md Abschnitt 9.
         vk = felder.get("vektor_kueste")
         if vk is None:
             vk = VektorKueste(H, felder["regionen"], SEED)

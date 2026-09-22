@@ -288,7 +288,7 @@ class SettlementRegionalTab(BaseMapTab):
             self.apply_3d_overlays()
 
             # Siedlungspunkte (Staedte/Landmarken/Roadsites) UEBER DAS REGISTER
-            # (Ticket #11, docs/SPEC_OVERLAYS.md): frueher lief das ueber
+            # (Ticket #11, docs/spezifikation/15_ANZEIGE.md): frueher lief das ueber
             # `ziel.overlay_settlements(...)` in _overlays_zeichnen(), eine
             # Methode, die es NUR auf MapDisplay2D gibt. Genau wie bei den
             # anderen vier hasattr-Weichen dort griff das in der 3D-Ansicht

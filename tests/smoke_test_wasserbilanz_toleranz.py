@@ -58,8 +58,8 @@ markiert ist, nicht wegerklaert"). DIES IST DIE MARKIERUNG. Eine tatsaechliche
 Korrektur der Bilanz selbst ist NICHT Teil von Ticket #70 (das baut nur die
 Zusicherung) und braucht ein eigenes Folge-Ticket.
 
-WICHTIGER GEGENBEFUND ZUR DOKUMENTIERTEN +10,7-%-ZAHL. `docs/archiv/2026-07-29_SPEZIFIKATION.md`
-§3.6 nennt "+10.7 % ungeklärt" als Stand der Wasserbilanz. Bei ECHTEN 512 px
+WICHTIGER GEGENBEFUND ZUR DOKUMENTIERTEN +10,7-%-ZAHL. `docs/spezifikation/10_REGIONEN.md`
+B.6 nennt "+10.7 % ungeklärt" als Stand der Wasserbilanz. Bei ECHTEN 512 px
 (map_size=512 UND LOD passend zu 512 px, siehe unten) reproduziert sich diese
 Zahl NICHT - gemessen wurden +34.6 %, stabil ueber zwei Wiederholungen
 (+34.63 % / +34.62 %). Ein erster Messversuch mit map_size=512 aber LOD=3

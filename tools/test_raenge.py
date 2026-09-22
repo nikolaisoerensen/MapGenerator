@@ -261,7 +261,7 @@ EINSTUFUNG = {
         "#1) und mit 47.5 s zu teuer fuers Waechterbudget."),
     "smoke_test_erosion_realismus.py": (EICHUNG,
         "Haelt das Slope-Area-Gesetz gegen einen Zielkorridor aus "
-        "docs/SPEZIFIKATION.md - Kalibrierung, aktuell ROT (siehe "
+        "docs/spezifikation/10_REGIONEN.md - Kalibrierung, aktuell ROT (siehe "
         "'Neue Befunde' #2) und mit 102.8 s die teuerste Einzeldatei "
         "der ganzen Suite."),
     "smoke_test_erosionsfilter_baender.py": (EICHUNG,

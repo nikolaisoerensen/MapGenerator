@@ -101,7 +101,7 @@ class TerrainData:
         # (3, H, W): Jahresmittel, Jahresspanne, Niederschlag - siehe
         # _weltkarte_heightmap. Weich ueber die Regionsgrenzen gemischt.
         self.klima_map: Optional[np.ndarray] = None
-        # Seegliederung (2026-08-11, docs/KLIMA_UND_SEE.md §2): seegrad 0 auf
+        # Seegliederung (2026-08-11, docs/spezifikation/12_WASSER.md Abschnitt 7): seegrad 0 auf
         # Land, 1..4+ auf See; ufer_region_a/b die bis zu zwei naechstgelegenen
         # Regionen je Seezelle (core.terrain_weltkarte.seegliederung()).
         self.seegrad: Optional[np.ndarray] = None
@@ -1952,7 +1952,7 @@ class BaseTerrainGenerator:
             "voronoi_map": felder.get("voronoi"),
             "region_map": felder["regionen"].astype(np.int16),
             "klima_map": klima,
-            # Seegliederung (docs/KLIMA_UND_SEE.md §2, docs/OFFENE_PUNKTE.md
+            # Seegliederung (docs/spezifikation/12_WASSER.md Abschnitt 7, docs/OFFENE_PUNKTE.md
             # 3.1/3.2/3.6): seegrad 0 auf Land, 1..4+ auf See (Breitensuche
             # ueber den See-Voronoi-Zellgraphen); ufer_region_a/b die bis zu
             # zwei naechstgelegenen Regionen je Seezelle.
@@ -1976,7 +1976,7 @@ class BaseTerrainGenerator:
             # Kostet rund 1 s bei 1024 px (gemessen), gegenueber den ~33 s
             # dieses Knotens vernachlaessigbar.
             "spielkarte": self._weltkarte_spielkarten(heightmap, felder, seed),
-            # Regionsziel fuer die Windgeschwindigkeit (docs/archiv/2026-07-29_SPEZIFIKATION.md §3.5),
+            # Regionsziel fuer die Windgeschwindigkeit (docs/spezifikation/10_REGIONEN.md B.5),
             # weich ueber die Regionsgrenzen gemischt wie klima_map - siehe
             # weather_generator.py._run_coupled_atmosphere_simulation fuer die
             # Verwendung als raeumlicher wind_speed_factor.
@@ -2067,12 +2067,12 @@ class BaseTerrainGenerator:
                                          -MUENDUNGSTIEFE_M)),
             erbe_kosten=regler("river_inherit_cost", ERBE_KOSTEN),
             # WASSERMENGE STATT KNOTENZAHL (Block 1.1,
-            # docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md). `felder` liegt hier seit jeher
+            # docs/spezifikation/12_WASSER.md). `felder` liegt hier seit jeher
             # vollstaendig vor - der Niederschlag wurde nur nie
             # weitergereicht, und das Flussnetz zaehlte deshalb Knoten
             # statt Wasser.
             niederschlag_mm=felder.get("niederschlag_mm"),
-            # Fuer die Hauptstrom-Quote (Block 2, docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md).
+            # Fuer die Hauptstrom-Quote (Block 2, docs/spezifikation/12_WASSER.md).
             region_map=felder.get("regionen"))
         if netz is None:
             leer = np.zeros((size, size), dtype=np.float32)

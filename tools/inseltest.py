@@ -15,7 +15,7 @@ Hier geht es um die FORM: sieht eine kleine Insel wie eine kleine Insel aus
 oder wie ein abgeschnittener Kegel? Was passiert in der Mitte, wo sich die
 Kuesten aller Seiten treffen? Was passiert im Hals einer Halbinsel?
 
-Das sind genau die Stellen, an denen docs/KUESTENMODELL.md Abschnitt 4 und 5
+Das sind genau die Stellen, an denen docs/docs/spezifikation/11_GELAENDE.md Abschnitt 6 und 7
 Luecken benennt. Der Test ist also bewusst so gebaut, dass er sie ZEIGT statt
 sie zu umgehen.
 

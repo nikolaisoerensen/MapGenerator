@@ -514,7 +514,7 @@ class BiomeTab(BaseMapTab):
         set_contour_overlay())
         Aufgabe: Settlements, Rivers basierend auf Checkboxes
 
-        Ticket #9 (docs/SPEC_OVERLAYS.md): ersetzt die bisherige, tab-eigene
+        Ticket #9 (docs/spezifikation/15_ANZEIGE.md): ersetzt die bisherige, tab-eigene
         hasattr-Weiche (die nur DIE EINE gerade sichtbare Anzeige bediente und
         deshalb schon dreimal denselben lautlosen Ausfall hatte, siehe
         CLAUDE.md "STEHENDE REGEL") durch self._push_overlays() aus

@@ -1,5 +1,5 @@
 """
-Wegenetz nach docs/SIEDLUNGEN_ENTWURF.md §4 (Umbau 2026-08-10).
+Wegenetz nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5 (Umbau 2026-08-10).
 
 Vorher: `calculate_road_network` verband Siedlungen ueber ein einfaches
 Minimum-Spanning-Tree (naechster unverbundener Nachbar), Wegkosten kannten nur

@@ -164,7 +164,7 @@ SPREIZUNG = 1.5
 # andere Nachbarn. Weniger als vier Seeds eichen auf eine Form, nicht auf die
 # Regel.
 
-# DREI KULTURNAMEN GEAENDERT AM 2026-08-06 (docs/KULTUREN_UND_ORTE.md):
+# DREI KULTURNAMEN GEAENDERT AM 2026-08-06 (docs/spezifikation/14_SIEDLUNGEN.md):
 #
 #   Nevadin           "-"          -> Alemannen    hatte gar keine Kultur und
 #                                                    bekam damit keine Siedlungen
@@ -241,7 +241,7 @@ SPREIZUNG = 1.5
 #
 # Abgeleitet aus Bezugsorten, die der Nutzer vorgegeben hat: Cork, Bergen,
 # Wologda, La Rochelle, Chur, Bamberg, Madrid, Rom, Iraklio. Die Rueckrechnung
-# auf Meereshoehe benutzt 0.6 K je 100 m; Herleitung in docs/BIOME_MATRIX.md.
+# auf Meereshoehe benutzt 0.6 K je 100 m; Herleitung in docs/spezifikation/13_KLIMA_UND_BIOME.md.
 #
 # WARUM MEERESHOEHE UND NICHT REGIONSHOEHE. Eine Regionshoehe ist ein
 # GEEICHTER Wert - `hoehe_m` wurde in dieser Woche zweimal nachgezogen. Waere
@@ -1597,7 +1597,7 @@ def regionsfeld(regionsname, breite_px, hoehe_px=None, seed=0,
     r["see_anteil"] = see_anteil
     return H, r
 
-# Zieltiefe je Seegrad, docs/KLIMA_UND_SEE.md §2 - eine TABELLE statt einer
+# Zieltiefe je Seegrad, docs/spezifikation/12_WASSER.md Abschnitt 7 - eine TABELLE statt einer
 # Formel (§0: "keine Simulationskreise mehr, sondern in jedem Kreis
 # Festlegungen"). 4+ ist der Meeresboden.
 #
@@ -1636,7 +1636,7 @@ SEETYP_TIEFENTABELLE = {
 # faellt darauf zurueck) - dort verlaufen Seewege, die frei bleiben sollen.
 # NOCH OFFEN, vom Nutzer selbst vertagt: "es wird spaeter im spiel nur im
 # winter erscheinen" - diese Karte hier bleibt EIN statischer Schnappschuss
-# ohne Jahreszeit (siehe KLIMA_UND_SEE.md §0), die Saisonalitaet gehoert in
+# ohne Jahreszeit (siehe docs/spezifikation/13_KLIMA_UND_BIOME.md Abschnitt 1), die Saisonalitaet gehoert in
 # das spaetere Zeitmodell, nicht in diese Funktion.
 EISWAHRSCHEINLICHKEIT_JE_SEEGRAD = {0: 1.0, 1: 0.75, 2: 0.5, 3: 0.25}
 
@@ -1644,7 +1644,7 @@ EISWAHRSCHEINLICHKEIT_JE_SEEGRAD = {0: 1.0, 1: 0.75, 2: 0.5, 3: 0.25}
 def seegliederung(maske, gewichte, seed, punktzahl_land=200, punktzahl_see=400,
                   glaettung_m=260.0, shader_manager=None):
     """
-    Die See als EIGENE Voronoi-Gliederung, docs/KLIMA_UND_SEE.md §2. Nutzer:
+    Die See als EIGENE Voronoi-Gliederung, docs/spezifikation/12_WASSER.md Abschnitt 7. Nutzer:
     "wenn wir das inland als voronoi kacheln haben, dann koennen wir ja auch
     das gleiche bei der see machen ... aber auch zB dass die voronois an der
     kueste nicht staerker vertieft werden, aber dass die voronois mit dem
@@ -1652,7 +1652,7 @@ def seegliederung(maske, gewichte, seed, punktzahl_land=200, punktzahl_see=400,
 
     SEEGRAD per Breitensuche ueber den Zellnachbarschaftsgraphen: Grad 0 sind
     alle Zellen, die Land enthalten, Grad 1 grenzt an eine Grad-0-Zelle, Grad 2
-    an Grad 1, und so weiter (docs/KLIMA_UND_SEE.md §2). Ersetzt den alten
+    an Grad 1, und so weiter (docs/spezifikation/12_WASSER.md Abschnitt 7). Ersetzt den alten
     Kuestenschelf `-t*(1-exp(-d/L))`, der rein auf dem EUKLIDISCHEN Abstand zur
     Kueste beruhte (an der Aufloesung der Distanztransformation haengend) durch
     eine Zellstruktur, die spaeter auch fuer Seewege/Seemonster/Fischgruende
@@ -1817,7 +1817,7 @@ def seegliederung(maske, gewichte, seed, punktzahl_land=200, punktzahl_see=400,
     # NOCH OFFEN, vom Nutzer selbst vertagt ("es wird spaeter im spiel nur im
     # winter erscheinen ... aber geh erstmal so rein"): diese Karte bleibt EIN
     # statischer Schnappschuss ohne Jahreszeit - die Saisonalitaet gehoert ins
-    # spaetere Zeitmodell (KLIMA_UND_SEE.md §0), nicht in diese Funktion.
+    # spaetere Zeitmodell (docs/spezifikation/13_KLIMA_UND_BIOME.md Abschnitt 1), nicht in diese Funktion.
     try:
         taiga_index = regionsnamen.index("Morobora")
         ist_taiga_ufer = region_a_je_zelle == taiga_index
@@ -2655,7 +2655,7 @@ def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=Non
     felder["regionen"] = np.argmax(gewichte, axis=0).astype(np.int16)
     _p_ctx.__exit__(None, None, None)
 
-    # SEEGLIEDERUNG (docs/KLIMA_UND_SEE.md §2) - braucht `maske` (Kontinentform)
+    # SEEGLIEDERUNG (docs/spezifikation/12_WASSER.md Abschnitt 7) - braucht `maske` (Kontinentform)
     # und `gewichte` (fuer die Uferregionen), beide stehen jetzt. Das Ergebnis
     # (seegrad_tiefe) wird weiter unten anstelle des alten Kuestenschelfs
     # angewandt - siehe "SEEGRAD-SCHELF" dort.
@@ -2846,7 +2846,7 @@ def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=Non
     # Tiefe: formt die Kuestenzone lokal nach realen Vorbildern um
     # (Klippenhoehe/-winkel/Kantigkeit/Strandhaeufigkeit wechseln laengs der
     # Kueste), ohne dass die Seegrad-Tabelle gleich danach uebersteuert wird.
-    # DIE KUESTENFORMUNG - Raster oder Vektor (docs/KUESTENMODELL.md).
+    # DIE KUESTENFORMUNG - Raster oder Vektor (docs/spezifikation/11_GELAENDE.md).
     #
     # `_kuesten_umformen()` arbeitet auf Pixelmasken und zieht seine
     # Saatpunkte per Index aus einer Pixelliste; dadurch haengt das Ergebnis

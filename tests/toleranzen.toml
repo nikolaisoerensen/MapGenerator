@@ -18,7 +18,7 @@
 # Gelesen von: tests/smoke_test_wasserbilanz_toleranz.py
 
 [wasserbilanz]
-# Nutzer-Entscheidung zu Ticket #18 (docs/SOLLBESCHREIBUNG.md), woertlich:
+# Nutzer-Entscheidung zu Ticket #18 (docs/spezifikation/01_ZIEL.md), woertlich:
 # "Ja, mit einem Toleranzband von zehn Prozent. Wichtig ist nur, dass es nicht
 # ausufert; auf zwei Prozent genau muss es nicht sein." Ticket #70 verlangt,
 # dass genau diese Zahl versioniert im Repo steht statt hart im Test.

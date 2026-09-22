@@ -21,7 +21,7 @@ Sieben Zusicherungen:
    ueberwiegend mit der tatsaechlich naechstgelegenen Landregion ueberein
    (Kreuzpruefung gegen eine unabhaengige Distanztransformation je Region).
 4. Die Karte bleibt tiling-frei genug fuers Auge - die Zellgroesse (See vs.
-   Land) liegt in vergleichbarer Groessenordnung (docs/KLIMA_UND_SEE.md
+   Land) liegt in vergleichbarer Groessenordnung (docs/spezifikation/12_WASSER.md
    Vorbehalt: "das sollte man messen, bevor man es festschreibt").
 5. FJORDLAND-Ufer faellt STEILER ab als die Standardtabelle (3.6, Nutzer
    2026-08-07: "das faellt vor dem fjordland steil ab").

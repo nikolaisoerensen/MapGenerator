@@ -484,7 +484,7 @@ class BiomeClassificationSystem:
             # kalibriert - mit dem Jahresmittel verglichen liegt jeder Wert um
             # etwa die halbe Jahresspanne zu kalt. Gemessen am Beispiel
             # Macchia (Jahresmittel/Spanne 16.9/17.5, Juli-Referenz laut
-            # docs/BIOME_MATRIX.md 25.6 Grad): der Median-Landpixel kam mit
+            # docs/spezifikation/13_KLIMA_UND_BIOME.md 25.6 Grad): der Median-Landpixel kam mit
             # dem Jahresmittel auf 16.4 Grad statt Juli, wodurch Steineichen-
             # wald (Bereich 21-28 Grad) fast ueberall ausserhalb seines
             # Bereichs lag und komplett aus den Top-Biomen verschwand, waehrend
@@ -1120,7 +1120,7 @@ class BaseBiomeClassifier:
         # 2026-08-07 als Festlegung: die Temperatur trifft ihre Regionsziele
         # auf 1 K, der Niederschlag auf rund 5 %.
         #
-        # Herleitung und Bezugsorte: docs/BIOME_MATRIX.md.
+        # Herleitung und Bezugsorte: docs/spezifikation/13_KLIMA_UND_BIOME.md.
         self.biome_definitions = {
             0: {'name': 'hochmoor', 'temp': (10, 17), 'precip': (1000, 3000),
                 'elevation': (0, 900), 'moisture': (800, 1500),
@@ -1186,7 +1186,7 @@ class BaseBiomeClassifier:
         # auseinander, sollen aber Nadel- gegen Buchenwald sein. Ueber
         # Temperatur und Niederschlag allein sind sie nicht zu trennen.
         #
-        # Die Liste je Region ist die Erwartung aus docs/BIOME_MATRIX.md
+        # Die Liste je Region ist die Erwartung aus docs/spezifikation/13_KLIMA_UND_BIOME.md
         # Abschnitt 3 - dieselbe, gegen die auch geprueft wird.
         self.regions_biome_affinitaet = {
             "Clonagh":         ("hochmoor", "grasland", "feuchtwiese",

@@ -380,7 +380,7 @@ def baue_stufe(punkte, H, mpp, kosten_staerke, erbe=None, stufe_index=0,
         tiefe[i] = d
     reihenfolge = np.argsort(tiefe, kind="stable")
 
-    # WASSERMENGE STATT KNOTENZAHL (Block 1.1, docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md).
+    # WASSERMENGE STATT KNOTENZAHL (Block 1.1, docs/spezifikation/12_WASSER.md).
     #
     # Hier stand `flaeche = np.ones(n)`: jeder Knoten trug 1 bei, egal ob
     # dort 471 mm oder 1967 mm im Jahr fallen. Was das Modell
@@ -454,7 +454,7 @@ def flussnetz(H, seed, kosten_staerke=6.0, abstand_makro_m=None,
     size = H.shape[0]
     mpp = rw.WELT_KM * 1000.0 / size
     abstaende = stufenabstaende(abstand_makro_m)
-    # WASSERGEWICHT JE PIXEL (Block 1.1, docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md).
+    # WASSERGEWICHT JE PIXEL (Block 1.1, docs/spezifikation/12_WASSER.md).
     #
     # Der Niederschlag, bezogen auf den Mittelwert ueber LAND - nicht ueber
     # die ganze Karte. Ueber See faellt zwar auch Regen, aber er speist
@@ -521,7 +521,7 @@ def flussnetz(H, seed, kosten_staerke=6.0, abstand_makro_m=None,
 # wachsen, trockene schrumpfen (Skerrheim 123 -> 215, Samarcia 374 -> 226).
 # Das Skerrheim fuehrt trotzdem nicht - 215 gegen 737 an der
 # Estrande - und die Ursache ist ungeklaert. Drei Hypothesen wurden
-# gemessen und widerlegt (docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md 1.1).
+# gemessen und widerlegt (docs/spezifikation/12_WASSER.md Abschnitt 1).
 #
 # Diese Regel ist deshalb eine bewusste SETZUNG, kein Modell: sie behebt
 # nicht die unbekannte Ursache, sie ueberstimmt sie an genau den drei

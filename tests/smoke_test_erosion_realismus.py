@@ -19,7 +19,7 @@ Simulators, unabhaengig vom Pipeline-Schalter.
 Drei Tests:
 
   A) Slope-Area-Gesetz   Hangneigung ~ Einzugsgebiet^beta. Zielkorridor
-                         -0.4 .. -0.7 aus docs/archiv/2026-07-29_SPEZIFIKATION.md §3.2 (dort
+                         -0.4 .. -0.7 aus docs/spezifikation/10_REGIONEN.md B.2 (dort
                          gemessen: -0.638) - eine externe, nicht aus diesem
                          Test zurueckgerechnete Quelle.
   B) Monotonie           steilere Abschnitte tragen mehr ab als flachere -
@@ -62,7 +62,7 @@ def run_slope_area_law_matches_target_corridor():
     wirklich gerechnet wird statt vorzeitig als "fertig" gemeldet zu werden).
 
     Der Zielkorridor -0.4 .. -0.7 kommt NICHT aus einer Neuberechnung in
-    diesem Test, sondern aus docs/archiv/2026-07-29_SPEZIFIKATION.md §3.2 - dort unabhaengig als
+    diesem Test, sondern aus docs/spezifikation/10_REGIONEN.md B.2 - dort unabhaengig als
     die Standard-Signatur fluvial geformter Landschaften begruendet und mit
     -0.638 als erreichten Wert dokumentiert.
     """
@@ -85,7 +85,7 @@ def run_slope_area_law_matches_target_corridor():
 
     return check(
         "beta liegt im fluvialen Zielkorridor -0.4 .. -0.7 "
-        "(docs/archiv/2026-07-29_SPEZIFIKATION.md Paragraph 3.2, gemessen {:.3f})".format(beta),
+        "(docs/spezifikation/10_REGIONEN.md B.2, gemessen {:.3f})".format(beta),
         -0.7 <= beta <= -0.4)
 
 

@@ -360,7 +360,7 @@ class GEOLOGY:
 
 class SETTLEMENT:
     """Parameter für core/settlement_generator.py"""
-    # 2026-08-10 NEUE BEDEUTUNG: seit docs/SIEDLUNGEN_ENTWURF.md wird die Zahl
+    # 2026-08-10 NEUE BEDEUTUNG: seit docs/spezifikation/14_SIEDLUNGEN.md wird die Zahl
     # der Siedlungen NICHT mehr direkt vorgegeben, sondern je Kultur aus der
     # Eignungssumme ihrer Region abgeleitet (2 bis 5, verglichen mit den
     # anderen acht Regionen - core/settlement_generator.py.calculate_settlements()).
@@ -914,7 +914,7 @@ class RIVER_NETWORK:
 WELTKARTE_AKTIV = True
 
 # Kuestenformung ueber die VEKTORBESCHREIBUNG statt ueber Pixelmasken
-# (core/vektor_kueste.py, docs/KUESTENMODELL.md).
+# (core/vektor_kueste.py, docs/spezifikation/11_GELAENDE.md).
 #
 # Aus bei True bleibt `_kuesten_umformen()` in core/terrain_weltkarte.py
 # unbenutzt. Der Vektorweg ist aufloesungsunabhaengig (Stationen in Metern
@@ -930,7 +930,7 @@ VEKTOR_KUESTE_AKTIV = True
 
 # Das 3D-Netz entlang der Kuestenlinie SCHNEIDEN, damit sie eine echte
 # Dreieckskante wird statt einer Rastertreppe
-# (gui/widgets/kuesten_schnitt.py, docs/KUESTENMODELL.md §8).
+# (gui/widgets/kuesten_schnitt.py, docs/spezifikation/11_GELAENDE.md Abschnitt 10).
 #
 # Gemessen bei 384 px: 99.7 % der Konturvertices liegen NICHT auf einer
 # Pixelecke (Quadtree: 0 %). Naht dicht, Konturhoehen exakt 0.

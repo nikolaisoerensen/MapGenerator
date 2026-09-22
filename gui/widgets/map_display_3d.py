@@ -1333,7 +1333,7 @@ class MapDisplay3D(QOpenGLWidget):
         # das bisherige Gleichmaessig-Gitter unten.
         adaptives_ergebnis = None
 
-        # KUESTENSCHNITT (gui/widgets/kuesten_schnitt.py, docs/KUESTENMODELL.md
+        # KUESTENSCHNITT (gui/widgets/kuesten_schnitt.py, docs/spezifikation/11_GELAENDE.md
         # §8): das Gitter zellweise entlang der Nullkontur schneiden, damit die
         # Kuestenlinie eine echte Dreieckskante wird statt einer Rastertreppe.
         #

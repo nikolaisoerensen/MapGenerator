@@ -1,6 +1,6 @@
 """
 Seewege, Kreuzungen, Roadsite-/Landmark-Kataloge nach
-docs/SIEDLUNGEN_ENTWURF.md §4.4-§4.7 (Umbau 2026-08-10).
+docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.4-§4.7 (Umbau 2026-08-10).
 
 Vorher: kein Seeweg-Konzept ueberhaupt; Kreuzungen wurden nicht erkannt;
 Roadsites kamen aus einer flachen 7-Typen-Liste ohne Kulturbezug, zufaellig
