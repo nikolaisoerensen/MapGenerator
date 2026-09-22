@@ -1160,6 +1160,15 @@ def platziere_bruecken(weg_maske, roads, fluss_land, water_map,
     Rueckgabe: (bruecken_maske (H,W) bool, bruecken_liste), wobei
     bruecken_liste eine Liste von (x, y, wassertyp, verkehr)-Tupeln ist - der
     Schwerpunkt jeder Bruecke plus die Messdaten fuer Abnahmekriterium 4.
+
+    VERKEHRSZAEHLUNG (Ticket #15.6, 2026-09-23): frueher fuer JEDE
+    Furt-Komponente ALLE Wege samt ihrer Punkte erneut durchsucht
+    (Komponenten x Wege x Wegpunkte verschachtelt) - bei mehreren Furten
+    wurden dieselben Wegpunkte mehrfach abgetastet. Jetzt wird jeder
+    Wegpunkt genau einmal gegen `furt_maske`/`komponenten` geprueft (Wege x
+    Wegpunkte, ohne die Komponenten-Schleife darum) und die Treffer je
+    Komponente in `verkehr_je_komponente` gesammelt - gleiches Ergebnis,
+    weil weiterhin nur EIN Treffer pro (Weg, Komponente)-Paar zaehlt.
     """
     from scipy.ndimage import binary_dilation
 
@@ -1174,30 +1183,33 @@ def platziere_bruecken(weg_maske, roads, fluss_land, water_map,
     geglaettet = binary_dilation(furt_maske, iterations=2)
     komponenten, anzahl = label(geglaettet)
 
+    hoehe, breite = fluss_land.shape
+    verkehr_je_komponente = np.zeros(anzahl + 1, dtype=int)
+    for pfad in roads:
+        getroffene_komponenten = set()
+        for (px, py) in pfad:
+            xi = int(round(px))
+            yi = int(round(py))
+            if 0 <= xi < breite and 0 <= yi < hoehe and furt_maske[yi, xi]:
+                getroffene_komponenten.add(int(komponenten[yi, xi]))
+        for kid in getroffene_komponenten:
+            verkehr_je_komponente[kid] += 1
+
     bruecken_maske = leer.copy()
     bruecken_liste = []
-    hoehe, breite = fluss_land.shape
     for komponenten_id in range(1, anzahl + 1):
+        verkehr = int(verkehr_je_komponente[komponenten_id])
+        if verkehr < mindest_verkehr:
+            continue
         komponente = (komponenten == komponenten_id) & furt_maske
         if not np.any(komponente):
             continue
         ys, xs = np.nonzero(komponente)
-
-        verkehr = 0
-        for pfad in roads:
-            for (px, py) in pfad:
-                xi = int(round(px))
-                yi = int(round(py))
-                if 0 <= xi < breite and 0 <= yi < hoehe and komponente[yi, xi]:
-                    verkehr += 1
-                    break
-
-        if verkehr >= mindest_verkehr:
-            bruecken_maske[komponente] = True
-            typ = int(round(float(np.median(water_map[ys, xs]))))
-            cx = int(round(float(xs.mean())))
-            cy = int(round(float(ys.mean())))
-            bruecken_liste.append((cx, cy, typ, verkehr))
+        bruecken_maske[komponente] = True
+        typ = int(round(float(np.median(water_map[ys, xs]))))
+        cx = int(round(float(xs.mean())))
+        cy = int(round(float(ys.mean())))
+        bruecken_liste.append((cx, cy, typ, verkehr))
 
     return bruecken_maske, bruecken_liste
 
