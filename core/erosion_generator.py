@@ -572,6 +572,43 @@ class HydraulicFieldSimulator:
             return False
         return self.GPU_OPERATION in DISPATCH_TABLE
 
+    def _pruefe_cpu_groesse(self, size, nach_gpu_fehlschlag):
+        """
+        Gemeinsamer Waechter fuer die zwei Stellen in simulate(), die denselben
+        CPU-Groessencheck durchfuehren (Ticket #15.5, 2026-09-23): einmal VOR
+        dem GPU-Versuch (Ticket #30, verhindert einen Lauf, der Stunden
+        dauern wuerde), einmal DANACH, wenn der GPU-Pfad mitten im Lauf
+        ausgefallen ist und sonst still auf denselben zu langsamen CPU-Pfad
+        durchfallen wuerde. Die Bedingung war an beiden Stellen wortgleich
+        dupliziert, nur die Fehlermeldung unterscheidet sich je nach Kontext.
+
+        `nach_gpu_fehlschlag` unterscheidet die zwei Faelle bewusst: VOR dem
+        GPU-Versuch zaehlt has_gpu_path() (kein Pfad -> CPU-Grenze greift).
+        DANACH ist has_gpu_path() bereits True (sonst waere man nicht in
+        diesem Zweig) und trotzdem mitten im Lauf gescheitert - hier zaehlt
+        nur noch die Groesse, has_gpu_path() erneut zu pruefen waere sinnlos.
+        """
+        if nach_gpu_fehlschlag:
+            zu_gross = size > self.MAX_CPU_RESOLUTION
+        else:
+            zu_gross = not self.has_gpu_path() and size > self.MAX_CPU_RESOLUTION
+        if not zu_gross:
+            return
+        if nach_gpu_fehlschlag:
+            raise ValueError(
+                f"HydraulicFieldSimulator: GPU-Lauf bei {size}x{size} ist mitten "
+                f"im Lauf fehlgeschlagen (siehe WARNING oben) und der CPU-Pfad "
+                f"verweigert diese Groesse oberhalb {self.MAX_CPU_RESOLUTION}x"
+                f"{self.MAX_CPU_RESOLUTION} - ein Weiterrechnen wuerde Stunden "
+                f"dauern statt den Fehler sichtbar zu machen."
+            )
+        raise ValueError(
+            f"HydraulicFieldSimulator (CPU) verweigert {size}x{size}: oberhalb "
+            f"{self.MAX_CPU_RESOLUTION}x{self.MAX_CPU_RESOLUTION} dauert ein Lauf "
+            f"Stunden. Für diese Auflösung wird der GPU-Pfad gebraucht "
+            f"(siehe MAX_CPU_RESOLUTION)."
+        )
+
     # ==================================================================
     # Öffentlicher Einstieg
     # ==================================================================
@@ -612,13 +649,7 @@ class HydraulicFieldSimulator:
         einzigen bekannten Verlustpfad des Modells.
         """
         size = int(heightmap.shape[0])
-        if not self.has_gpu_path() and size > self.MAX_CPU_RESOLUTION:
-            raise ValueError(
-                f"HydraulicFieldSimulator (CPU) verweigert {size}x{size}: oberhalb "
-                f"{self.MAX_CPU_RESOLUTION}x{self.MAX_CPU_RESOLUTION} dauert ein Lauf "
-                f"Stunden. Für diese Auflösung wird der GPU-Pfad gebraucht "
-                f"(siehe MAX_CPU_RESOLUTION)."
-            )
+        self._pruefe_cpu_groesse(size, nach_gpu_fehlschlag=False)
 
         cfg = self._resolve_parameters(parameters)
         state = self._initial_state(heightmap, hardness_map, cfg, meters_per_pixel)
@@ -640,14 +671,7 @@ class HydraulicFieldSimulator:
             # von vornherein False war), waere das ein stiller Rueckfall auf
             # einen Lauf, der Stunden dauert, mit nur einer Logzeile statt einem
             # Fehler. Ticket #30: genau dieser Fall blieb bislang ungeprueft.
-            if size > self.MAX_CPU_RESOLUTION:
-                raise ValueError(
-                    f"HydraulicFieldSimulator: GPU-Lauf bei {size}x{size} ist mitten "
-                    f"im Lauf fehlgeschlagen (siehe WARNING oben) und der CPU-Pfad "
-                    f"verweigert diese Groesse oberhalb {self.MAX_CPU_RESOLUTION}x"
-                    f"{self.MAX_CPU_RESOLUTION} - ein Weiterrechnen wuerde Stunden "
-                    f"dauern statt den Fehler sichtbar zu machen."
-                )
+            self._pruefe_cpu_groesse(size, nach_gpu_fehlschlag=True)
         max_steps = cfg["max_steps"]
         interval = self.CONVERGENCE_CHECK_INTERVAL
         reference = state["terrain"].copy()

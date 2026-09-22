@@ -738,6 +738,44 @@ TALBREITE_UNTERGRENZE = 0.12
 TALBREITE_EXPONENT = 0.55
 
 
+def gebiet_je_knoten(eltern: np.ndarray, flaeche: np.ndarray, iterationen: int = 4) -> np.ndarray:
+    """
+    Funktionsweise: Einzugsgebiet entlang des Baumes glaetten (je Iteration
+        Mittel aus sich selbst und dem Elternknoten) - sonst springt die
+        Breite an jedem Zusammenfluss und der Trog sieht aus wie eine
+        Wurstkette. Gemeinsamer Helfer fuer taeler_eingraben() (hier) und
+        core/fluss_export.py (Ticket #37/#15.1) - beide brauchten bis
+        2026-09-23 dieselbe Rechnung als eigene Kopie.
+    Aufgabe: liefert das normierte Einzugsgebiet (0..1) je Knoten, aus dem
+        talbreite_anteil() den Breitenanteil ableitet.
+    Parameter: eltern - Elternindex je Knoten (-1 = Muendung/Wurzel)
+    Parameter: flaeche - akkumulierte Wasser-/Einzugsflaeche je Knoten
+    Parameter: iterationen - Anzahl Glaettungsschritte (Default 4, wie im Original)
+    Returns: np.ndarray - normiertes Einzugsgebiet je Knoten, Werte in [0, 1]
+    """
+    eltern = np.asarray(eltern)
+    glatt = np.asarray(flaeche, dtype=np.float64).copy()
+    for _ in range(iterationen):
+        neu = glatt.copy()
+        for i in range(len(glatt)):
+            if eltern[i] >= 0:
+                neu[i] = 0.5 * glatt[i] + 0.5 * glatt[eltern[i]]
+        glatt = neu
+    spitze = float(glatt.max()) if len(glatt) else 0.0
+    return glatt / max(spitze, 1.0)
+
+
+def talbreite_anteil(gebiet: np.ndarray):
+    """
+    Funktionsweise: Breitenanteil aus dem normierten Einzugsgebiet, siehe
+        Kommentarblock "KONTRAST ZWISCHEN DICKEN UND DUENNEN LAEUFEN" oben.
+        Gemeinsamer Helfer fuer taeler_eingraben() und fluss_export.py.
+    Parameter: gebiet - normiertes Einzugsgebiet (0..1), aus gebiet_je_knoten()
+    Returns: Anteil zwischen TALBREITE_UNTERGRENZE und 1
+    """
+    return TALBREITE_UNTERGRENZE + (1.0 - TALBREITE_UNTERGRENZE) * gebiet ** TALBREITE_EXPONENT
+
+
 # ---------------------------------------------------------------------------
 # FLUSSLAEUFE ALS SPLINE STATT ALS STRECKENZUG
 #
@@ -905,14 +943,7 @@ def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
 
     # Einzugsgebiet entlang des Baumes glaetten, sonst springt die Breite an
     # jedem Zusammenfluss und der Trog sieht aus wie eine Wurstkette.
-    glatt_fl = fl.astype(np.float64).copy()
-    for _ in range(4):
-        neu = glatt_fl.copy()
-        for i in range(len(glatt_fl)):
-            if el[i] >= 0:
-                neu[i] = 0.5 * glatt_fl[i] + 0.5 * glatt_fl[el[i]]
-        glatt_fl = neu
-    gebiet = glatt_fl / max(float(glatt_fl.max()), 1.0)
+    gebiet = gebiet_je_knoten(el, fl)
 
     # Ortsabhaengige Talbreite und -tiefe aus dem Regionenfeld. Der Massstab
     # der Breite ist der Knotenabstand des Netzes, `formgroesse_m` moduliert
@@ -927,7 +958,6 @@ def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
 
     sohle = np.full((size, size), np.nan)
     breite = np.zeros((size, size))
-    untergrenze = TALBREITE_UNTERGRENZE
     uebersprungen = 0
     for i in np.argsort(-fl):
         e = el[i]
@@ -940,7 +970,7 @@ def taeler_eingraben(H, netz, felder, breite_faktor=0.35, tiefe_anteil=0.30,
             continue
         strecke = float(np.linalg.norm(pk[i] - pk[e]))
         schritte = max(int(strecke * 3.0), 3)
-        anteil = untergrenze + (1.0 - untergrenze) * gebiet[i] ** TALBREITE_EXPONENT
+        anteil = talbreite_anteil(gebiet[i])
         # DIE STUETZSTELLEN AUF EINMAL, nicht einzeln (2026-08-23).
         #
         # Hier stand eine Schleife ueber `schritte` Stuetzstellen je Kante,

@@ -22,17 +22,22 @@ WIEDERVERWENDUNG ("keine vierte Wahrheit"):
     Kurve, die auch die Anzeige-Maske, river_water und taeler_eingraben()
     zeichnen. Kein eigener Kurvenalgorithmus hier.
 
-WARUM DIE BREITENFORMEL TROTZDEM DUPLIZIERT IST:
-  taeler_eingraben() (core/terrain_weltfluesse.py) berechnet dieselbe
-  Formel (Glaettung -> gebiet -> anteil -> breite_feld), gibt aber nur ein
-  fertig gemaltes Pixel-Raster zurueck, keine Zwischenwerte je Knoten/Kante.
-  taeler_eingraben() selbst NICHT anzufassen (regressionsempfindlich, siehe
-  CLAUDE.md "Gelaendeaenderungen verstimmen zuerst die Regionseichung").
-  Deshalb rechnet dieses Modul dieselbe Formel eigenstaendig, aber MIT
-  den importierten Konstanten (TALBREITE_UNTERGRENZE, TALBREITE_EXPONENT,
-  BEZUGSFORM_M) statt eigener Kopien - Drift zwischen Talform und
-  exportierter Breite ist damit ausgeschlossen, auch wenn die Konstanten
-  sich spaeter aendern.
+GLAETTUNG UND ANTEILFORMEL SIND EIN GEMEINSAMER HELFER (Ticket #15.1,
+2026-09-23):
+  taeler_eingraben() (core/terrain_weltfluesse.py) brauchte dieselbe
+  Formel (Glaettung -> gebiet -> anteil), lieferte aber nur ein fertig
+  gemaltes Pixel-Raster zurueck, keine Zwischenwerte je Knoten/Kante. Bis
+  2026-09-23 stand die Glaettung deshalb hier UND dort als eigene Kopie.
+  Jetzt teilen sich beide Module `gebiet_je_knoten()`/`talbreite_anteil()`
+  aus core/terrain_weltfluesse.py - reiner Bezeichner-Umzug, keine
+  Rechnung geaendert (taeler_eingraben() bleibt sonst unangetastet,
+  regressionsempfindlich, siehe CLAUDE.md "Gelaendeaenderungen verstimmen
+  zuerst die Regionseichung").
+  NICHT gemeinsam: `breite_feld` selbst. taeler_eingraben() braucht ein
+  volles Pixel-Raster in Pixeln (`/ mpp`, dort an jedem Spline-Punkt
+  abgetastet), dieses Modul nur den Wert an den Knotenpositionen in
+  METERN (kein `/ mpp`) fuer die Export-Metadaten - verschiedene Einheiten
+  und Traeger, deshalb bleibt das je eine eigene Zeile.
 
 ABSICHTLICH NICHT verwendet: die Anzeige-Breite aus _weltfluesse()
 (FLUSS_BREITE_GRUND_PX/FLUSS_BREITE_JE_DEKADE_PX, log-skaliert auf
@@ -50,37 +55,12 @@ from core.fluss_sinuositaet import fluss_segmente
 from core.terrain_weltfluesse import (
     hauptkinder,
     kantenpunkte,
-    TALBREITE_UNTERGRENZE,
-    TALBREITE_EXPONENT,
+    gebiet_je_knoten,
+    talbreite_anteil,
     BEZUGSFORM_M,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def gebiet_je_knoten(eltern: np.ndarray, flaeche: np.ndarray, iterationen: int = 4) -> np.ndarray:
-    """
-    Funktionsweise: dieselbe 4-Iterationen-Glaettung des Einzugsgebiets wie
-        taeler_eingraben() (core/terrain_weltfluesse.py, glatt_fl), hier
-        eigenstaendig berechnet, weil taeler_eingraben() keine
-        Zwischenwerte herausgibt (siehe Moduldocstring).
-    Aufgabe: liefert je Knoten den normierten Flaechenanteil (0..1), aus
-        dem breite_m_je_knoten() die Talbreite ableitet.
-    Parameter: eltern - Elternindex je Knoten (-1 = Muendung/Wurzel)
-    Parameter: flaeche - akkumulierte Wasser-/Einzugsflaeche je Knoten
-    Parameter: iterationen - Anzahl Glaettungsschritte (Default 4, wie im Original)
-    Returns: np.ndarray - normiertes Einzugsgebiet je Knoten, Werte in [0, 1]
-    """
-    eltern = np.asarray(eltern)
-    glatt = np.asarray(flaeche, dtype=np.float64).copy()
-    for _ in range(iterationen):
-        neu = glatt.copy()
-        for i in range(len(glatt)):
-            if eltern[i] >= 0:
-                neu[i] = 0.5 * glatt[i] + 0.5 * glatt[eltern[i]]
-        glatt = neu
-    spitze = float(glatt.max()) if len(glatt) else 0.0
-    return glatt / max(spitze, 1.0)
 
 
 def breite_m_je_knoten(netz: Dict[str, Any], felder: Dict[str, Any], mpp: float,
@@ -108,7 +88,7 @@ def breite_m_je_knoten(netz: Dict[str, Any], felder: Dict[str, Any], mpp: float,
     formgroesse_m = formgroesse[yi, xi]
 
     gebiet = gebiet_je_knoten(eltern, flaeche)
-    anteil = TALBREITE_UNTERGRENZE + (1.0 - TALBREITE_UNTERGRENZE) * gebiet ** TALBREITE_EXPONENT
+    anteil = talbreite_anteil(gebiet)
     breite_feld_m = float(breite_faktor) * float(abstand_makro_m) * (formgroesse_m / BEZUGSFORM_M)
     return np.maximum(anteil * breite_feld_m, 2.5 * float(mpp))
 

@@ -589,6 +589,16 @@ KUeSTE_GEWICHT = 0.75
 # Werte sind eine gutachterliche Einschaetzung (keine Messreihe, kein Regler
 # in docs/SIEDLUNGEN_ENTWURF.md) - fruchtbares Offenland/Laubwald hoch,
 # Nadel-/Bergwald mittel, Moor/Bruch/Steilheit/Hochlage niedrig.
+#
+# GEPRUEFT, NICHT AUS DER BIOM-MATRIX ABGELEITET (Ticket #15.2, 2026-09-23):
+# `BaseBiomeClassifier.biome_definitions` (core/biome_generator.py) haelt nur
+# Klima-/Feuchtigkeitsgrenzen (temp/precip/elevation/moisture,
+# moisture_capacity, evaporation_factor) - keinen Siedlungseignungswert, aus
+# dem sich diese Tabelle ableiten liesse. `docs/BIOME_MATRIX.md` enthaelt
+# ebenfalls keinen solchen Wert. Diese Tabelle ist die EINZIGE Quelle fuer
+# Siedlungseignung je Biom, keine Abschrift einer anderswo gepflegten Zahl -
+# eine Biom-Matrix-Aenderung kann sie deshalb nicht stillschweigend veralten
+# lassen, weil es nichts gibt, wovon sie abweichen koennte.
 BIOME_SIEDLUNGSEIGNUNG = {
     0: 0.30,   # hochmoor - nass, sauer, kaum tragfaehiger Baugrund (Moor)
     1: 0.40,   # bruchwald - Sumpfwald, staendig vernaesst
@@ -618,6 +628,17 @@ BIOME_SIEDLUNGSEIGNUNG = {
     25: 0.20,  # alpine_level - Hochlage oberhalb der Waldgrenze
     26: 0.00,  # sea_ice - kein Land
 }
+
+# Lookup-Array statt Dictionary (Ticket #15.3, 2026-09-23): einmal beim
+# Modulimport gebaut, damit evaluate_biome_suitability() den Wert je Pixel
+# per Fancy-Indexing liest statt bei JEDEM Aufruf 27x eine volle
+# Bild-Maske (biome_ids == biome_id) zu bilden - reiner Tabellenwert, keine
+# Schleife noetig. NaN markiert eine ID ohne Eintrag (siehe "unbekannt"
+# unten).
+_SIEDLUNGSEIGNUNG_MAXID = max(BIOME_SIEDLUNGSEIGNUNG)
+_SIEDLUNGSEIGNUNG_TABELLE = np.full(_SIEDLUNGSEIGNUNG_MAXID + 1, np.nan, dtype=np.float64)
+for _biome_id, _faktor in BIOME_SIEDLUNGSEIGNUNG.items():
+    _SIEDLUNGSEIGNUNG_TABELLE[_biome_id] = _faktor
 
 
 class TerrainSuitabilityAnalyzer:
@@ -787,13 +808,12 @@ class TerrainSuitabilityAnalyzer:
             return None
 
         biome_ids = biome_map.astype(np.int32)
-        eignung = np.ones(biome_ids.shape, dtype=np.float32)
 
-        bekannt = np.zeros(biome_ids.shape, dtype=bool)
-        for biome_id, faktor in BIOME_SIEDLUNGSEIGNUNG.items():
-            maske = biome_ids == biome_id
-            eignung[maske] = faktor
-            bekannt |= maske
+        im_tabellenbereich = (biome_ids >= 0) & (biome_ids <= _SIEDLUNGSEIGNUNG_MAXID)
+        index = np.where(im_tabellenbereich, biome_ids, 0)
+        werte = _SIEDLUNGSEIGNUNG_TABELLE[index]
+        bekannt = im_tabellenbereich & ~np.isnan(werte)
+        eignung = np.where(bekannt, werte, 1.0).astype(np.float32)
 
         unbekannt = ~bekannt
         if np.any(unbekannt):
@@ -1140,6 +1160,15 @@ def platziere_bruecken(weg_maske, roads, fluss_land, water_map,
     Rueckgabe: (bruecken_maske (H,W) bool, bruecken_liste), wobei
     bruecken_liste eine Liste von (x, y, wassertyp, verkehr)-Tupeln ist - der
     Schwerpunkt jeder Bruecke plus die Messdaten fuer Abnahmekriterium 4.
+
+    VERKEHRSZAEHLUNG (Ticket #15.6, 2026-09-23): frueher fuer JEDE
+    Furt-Komponente ALLE Wege samt ihrer Punkte erneut durchsucht
+    (Komponenten x Wege x Wegpunkte verschachtelt) - bei mehreren Furten
+    wurden dieselben Wegpunkte mehrfach abgetastet. Jetzt wird jeder
+    Wegpunkt genau einmal gegen `furt_maske`/`komponenten` geprueft (Wege x
+    Wegpunkte, ohne die Komponenten-Schleife darum) und die Treffer je
+    Komponente in `verkehr_je_komponente` gesammelt - gleiches Ergebnis,
+    weil weiterhin nur EIN Treffer pro (Weg, Komponente)-Paar zaehlt.
     """
     from scipy.ndimage import binary_dilation
 
@@ -1154,30 +1183,33 @@ def platziere_bruecken(weg_maske, roads, fluss_land, water_map,
     geglaettet = binary_dilation(furt_maske, iterations=2)
     komponenten, anzahl = label(geglaettet)
 
+    hoehe, breite = fluss_land.shape
+    verkehr_je_komponente = np.zeros(anzahl + 1, dtype=int)
+    for pfad in roads:
+        getroffene_komponenten = set()
+        for (px, py) in pfad:
+            xi = int(round(px))
+            yi = int(round(py))
+            if 0 <= xi < breite and 0 <= yi < hoehe and furt_maske[yi, xi]:
+                getroffene_komponenten.add(int(komponenten[yi, xi]))
+        for kid in getroffene_komponenten:
+            verkehr_je_komponente[kid] += 1
+
     bruecken_maske = leer.copy()
     bruecken_liste = []
-    hoehe, breite = fluss_land.shape
     for komponenten_id in range(1, anzahl + 1):
+        verkehr = int(verkehr_je_komponente[komponenten_id])
+        if verkehr < mindest_verkehr:
+            continue
         komponente = (komponenten == komponenten_id) & furt_maske
         if not np.any(komponente):
             continue
         ys, xs = np.nonzero(komponente)
-
-        verkehr = 0
-        for pfad in roads:
-            for (px, py) in pfad:
-                xi = int(round(px))
-                yi = int(round(py))
-                if 0 <= xi < breite and 0 <= yi < hoehe and komponente[yi, xi]:
-                    verkehr += 1
-                    break
-
-        if verkehr >= mindest_verkehr:
-            bruecken_maske[komponente] = True
-            typ = int(round(float(np.median(water_map[ys, xs]))))
-            cx = int(round(float(xs.mean())))
-            cy = int(round(float(ys.mean())))
-            bruecken_liste.append((cx, cy, typ, verkehr))
+        bruecken_maske[komponente] = True
+        typ = int(round(float(np.median(water_map[ys, xs]))))
+        cx = int(round(float(xs.mean())))
+        cy = int(round(float(ys.mean())))
+        bruecken_liste.append((cx, cy, typ, verkehr))
 
     return bruecken_maske, bruecken_liste
 
