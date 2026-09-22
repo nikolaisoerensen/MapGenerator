@@ -233,8 +233,10 @@ denselben Ablauf zweimal und meldet jeden Unterschied — dieselbe Form wie
 **Nur am laufenden Programm prüfbar bleibt, ob die Textur richtig *aussieht*.**
 Die Tests belegen, dass beide adapter mit vergleichbaren Daten gerufen werden;
 ob die RGBA-Haut im 3D an der richtigen Stelle sitzt, sieht nur der Nutzer —
-dafür je umgestelltem Reiter ein Eintrag in
-`docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md`.
+dafür je umgestelltem Reiter ein Eintrag in `docs/OFFENE_PUNKTE.md`, markiert
+als nur live prüfbar. (Die frühere `docs/PRUEFLISTE_LIVE.md` liegt seit dem
+2026-08-27 im Archiv und wird nicht mehr fortgeschrieben — ein Eintrag dorthin
+wäre ein Eintrag ins Nichts.)
 
 *Herkunft: `docs/archiv/2026-09-21_SPEC_OVERLAYS.md` (Stand 2026-09-14), Abschnitt „Testing
 Decisions".*

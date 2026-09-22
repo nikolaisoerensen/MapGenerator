@@ -1,21 +1,17 @@
 # MapGenerator — Project Notes for Claude Code
 
-## Wegweiser durch die Dokumentation (Stand 2026-08-12)
+## Wegweiser durch die Dokumentation (Stand 2026-09-23)
 
 | Datei | Wofuer |
 |---|---|
+| `docs/spezifikation/README.md` | **Das Soll des Programms — vor der Arbeit lesen (siehe unten).** Seit 2026-09-23 ein Baum aus zehn Themendateien statt einer Datei: Ziel, Invarianten, Arbeitsregeln, dazu je eine fuer Regionen, Gelaende, Wasser, Klima/Biome, Siedlungen, Anzeige und die Messprotokolle. Der Index dort sagt, welche Datei welche Frage beantwortet. |
+| `docs/HANDBUCH.md` | **Was das Programm IST** — die Spezifikation sagt, was es soll. Aufbau, Rechenkette, die neun Regionen, was jeder Reiter tut, was die Tests pruefen. Jede Behauptung mit Quelle belegt. |
 | `docs/SITZUNGSLOG.md` | **Fortlaufendes Protokoll aller Sitzungen, neueste oben. Hier anfangen.** Was gemacht, was gemessen, was NICHT funktioniert hat. |
-| `docs/UEBERGABE_SITZUNG_2026-08-24.md` | **JÜNGSTE SITZUNG — HIER ANFANGEN.** 88 uncommittete Dateien, drei größere Fehler behoben (8 von 27 Küstentypen fehlten, keine großen Flüsse, Flächeneichung), nächste Schritte, offene Nutzerentscheidung. |
-| `docs/UEBERGABE_SITZUNG_2026-08-16.md` | Sitzung davor (Remesh): zwei behobene App-Bugs, offene Zustimmung zu `fast-simplification`. |
-| `docs/ANZEIGE_UND_SEEN.md` | Anzeige im 3D und Binnenseen — Blöcke A/B/C mit Reihenfolge. |
-| `docs/UEBERGABE.md` | Umgebung und Gesamtstand (Stand 2026-08-12). |
-| `docs/SPEZIFIKATION.md` | Ziele und Invarianten — vor der Arbeit lesen (siehe unten) |
-| `docs/FLUESSE_UND_WASSER.md` | **Fluesse und Wasserverteilung — die Ordnung dieses Themas.** Befund, geklaerte Fakten, Bloecke 1-5 mit Reihenfolge. Was dort nicht steht, ist nicht beschlossen. |
-| `docs/AUFRAEUMPLAN.md` | **Aufbau des Programms und die naechsten Ziele.** Wo die GUI-Regler und die neun Regionsparameter auseinanderlaufen, der gemessene Nevadin-Spitzenbefund, acht Ziele mit empfohlener Reihenfolge. |
+| `docs/UEBERGABE_SITZUNG_2026-09-23.md` | **JÜNGSTE SITZUNG.** Was auf `main` gemergt ist (Tickets 3/7/9/11 und #86–#91), der geloeschte naechtliche Trigger, drei nur besprochene Ideen ohne Freigabe. Der dort noch als offen vermerkte Punkt #44 (Aufteilung der Spezifikation) ist inzwischen erledigt. |
+| `docs/spezifikation/12_WASSER.md` | **Fluesse, Erosion und Seen — die Ordnung dieses Themas.** Woher ein Flussknoten sein Wasser bekommt, welche Region einen Hauptstrom hat, wie die See in Seegrade und Zieltiefen gegliedert ist. Was dort nicht steht, ist nicht beschlossen. |
 | `docs/OFFENE_PUNKTE.md` | **Die einzige Aufgabenliste.** `docs/TODO.md` gibt es nicht mehr, sie ist dort in Abschnitt 12 aufgegangen. |
 | `docs/NACHTBETRIEB.md` | **Wer nachts allein arbeitet, liest zuerst das.** Sperrliste (wo nicht hingefasst wird, mit Begruendung), Nachtbranch, ein Commit je Ticket, Morgenbericht, Ruecknahme einzelner Tickets. |
 | `docs/TESTBERICHT.md` | Was gerade gruen ist und was nicht, mit Erklaerung je Fehlschlag |
-| `docs/PRUEFLISTE_LIVE.md` | Was am laufenden Programm zu pruefen ist — alles, was headless nicht geht |
 | `docs/archiv/` | Historisch, gilt nicht mehr — nicht als Beschreibung des Ist-Zustands lesen |
 
 
@@ -68,17 +64,25 @@ beiden Klassen gibt, muss dort namentlich eingetragen sein:
   schrumpfen; kommt etwas Neues dazu, schlaegt der Test fehl.
 
 
-## ZUERST LESEN: docs/SPEZIFIKATION.md
+## ZUERST LESEN: docs/spezifikation/README.md
 
-Sie enthaelt das Oberziel, die Zielwerte je Komponente und die Invarianten, die
-bei JEDER Aenderung geprueft werden (CPU/GPU-Paritaet, Massenbilanz, Zeitbasen,
-Reihenfolge im Graph, Anzeige und Skalen, Reglerverhalten).
+Der Baum enthaelt das Oberziel (`01_ZIEL.md`), die Zielwerte je Komponente
+(`10_REGIONEN.md` bis `15_ANZEIGE.md`) und die Invarianten, die bei JEDER
+Aenderung geprueft werden (`02_INVARIANTEN.md`: CPU/GPU-Paritaet, Massenbilanz,
+Zeitbasen, Reihenfolge im Graph, Anzeige und Skalen, Reglerverhalten). Der
+Index im README sagt, welche Datei welche Frage beantwortet - man liest genau
+eine davon, nicht alles.
 
-Sie ist am 2026-07-29 entstanden, weil die Arbeit reaktiv geworden war: jeweils
-dem letzten Befund nachlaufend, ohne Zielbild pro Komponente. Ergebnis waren
-drei Messungen am falschen Codepfad an einem Tag und Aenderungen, die anderswo
-etwas kaputt machten, ohne dass es auffiel. Die Spezifikation ist das
-Gegenmittel - vor der Arbeit lesen, nach der Arbeit die Prueflisten abgehen.
+Die Spezifikation ist am 2026-07-29 entstanden, weil die Arbeit reaktiv
+geworden war: jeweils dem letzten Befund nachlaufend, ohne Zielbild pro
+Komponente. Ergebnis waren drei Messungen am falschen Codepfad an einem Tag und
+Aenderungen, die anderswo etwas kaputt machten, ohne dass es auffiel. Die
+Spezifikation ist das Gegenmittel - vor der Arbeit lesen, nach der Arbeit die
+Prueflisten abgehen.
+
+Am 2026-09-23 (Ticket #44) ist sie aus neun Dokumenten zu diesem Baum
+zusammengefuehrt worden - die alte `docs/SPEZIFIKATION.md` und die acht
+Themendokumente daneben liegen seither in `docs/archiv/` und gelten nicht mehr.
 
 
 ## Git worktrees: changes are invisible until merged or tested in-place
