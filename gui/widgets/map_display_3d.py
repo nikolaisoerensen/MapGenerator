@@ -1959,10 +1959,29 @@ class MapDisplay3D(QOpenGLWidget):
             if height_scale_location >= 0:
                 gl.glUniform1f(height_scale_location, self.terrain_height_scale)
 
+            # Feste Skala statt np.max(self.heightmap) (bis 2026-09-22): die
+            # 2D-Ansicht (map_display_2d.py ueber
+            # CanvasSettings.CANVAS_2D["elevation_vmin"/"elevation_vmax"])
+            # nutzt eine FESTE Hoehenspanne, damit z.B. ein 200m-Huegel und
+            # ein 3500m-Berg nicht dieselbe volle Farbspanne bekommen. Die
+            # dynamische Berechnung hier liess die 3D-Farbskala mit der
+            # jeweiligen Karte "atmen" statt fest zu stehen wie in 2D -
+            # dieselbe Karte konnte je nach Kartenmaximum unterschiedlich
+            # eingefaerbt wirken. getTerrainColor() in terrain.frag normiert
+            # FragPos.y (Renderraum = Rohmeter * heightScale) durch
+            # maxHeight, daher hier ebenfalls in Renderraum skalieren.
             max_height_location = gl.glGetUniformLocation(self.shader_program, "maxHeight")
             if max_height_location >= 0:
-                max_height = np.max(self.heightmap) * self.terrain_height_scale
+                max_height = CanvasSettings.CANVAS_2D["elevation_vmax"] * self.terrain_height_scale
                 gl.glUniform1f(max_height_location, max_height)
+
+            # Tiefsee-Gegenstueck zu maxHeight, siehe getTerrainColor() im
+            # Fragment-Shader: dort in Rohmetern verglichen (FragPos.y/
+            # heightScale), deshalb hier OHNE terrain_height_scale.
+            min_height_location = gl.glGetUniformLocation(self.shader_program, "minHeight")
+            if min_height_location >= 0:
+                min_height = CanvasSettings.CANVAS_2D["elevation_vmin"]
+                gl.glUniform1f(min_height_location, min_height)
 
             # Overlay-Parameter (falls verfügbar)
             use_overlay_location = gl.glGetUniformLocation(self.shader_program, "useOverlay")

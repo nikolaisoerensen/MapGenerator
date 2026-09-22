@@ -12,6 +12,12 @@ in vec3 LightPos;
 // Terrain Parameters
 uniform float heightScale;
 uniform float maxHeight;
+// Feste Tiefsee-Grenze in Rohmetern (negativ, z.B. -400.0) - entspricht
+// CanvasSettings.CANVAS_2D["elevation_vmin"] in gui/config/gui_default.py.
+// Ersetzt seit 2026-09-22 eine hartkodierte 400.0 hier im Shader, die nicht
+// mit der 2D-Farbskala mitgezogen wurde, wenn elevation_vmin dort geaendert
+// wurde.
+uniform float minHeight;
 uniform int renderMode;  // 0=terrain, 1=geology, 2=weather, 3=water, 4=biome,
                          // 5=settlement, 6=Wasseroberflaeche (die Platte auf 0 m)
 
@@ -59,9 +65,12 @@ vec3 getTerrainColor() {
     // Tiefe in ROHMETERN, damit er nicht von der Landamplitude abhaengt.
     float rohHoehe = FragPos.y / max(heightScale, 1e-9);
     if (rohHoehe < 0.0) {
-        // 0 m Flachwasser -> 400 m Tiefsee, dieselben Stuetzstellen wie die
-        // 2D-Colormap in map_display_2d._hoehenfarben().
-        float tiefe = clamp(-rohHoehe / 400.0, 0.0, 1.0);
+        // 0 m Flachwasser -> minHeight (Betrag) Tiefsee, dieselben
+        // Stuetzstellen wie die 2D-Colormap in
+        // map_display_2d._hoehenfarben(). minHeight ist negativ (z.B.
+        // -400.0), also ist rohHoehe/minHeight bei gleichem Vorzeichen
+        // positiv.
+        float tiefe = clamp(rohHoehe / min(minHeight, -1e-9), 0.0, 1.0);
         vec3 flach = vec3(0.290, 0.608, 0.831);
         vec3 mittel = vec3(0.114, 0.373, 0.620);
         vec3 tief = vec3(0.024, 0.165, 0.322);
