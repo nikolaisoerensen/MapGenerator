@@ -64,9 +64,6 @@ NUR_2D = {
     "spielkarte": "Die neun Vielecke sind eine reine Zerlegungsansicht - als "
                   "Skin auf dem 3D-Netz ohne Nutzen, weil ihre Grenzen gerade "
                   "Schnitte sind, keine Gelaendeform.",
-    "__overlay__": "Laeuft nicht ueber das Layer-Register, sondern ueber eine "
-                   "eigene Methode, die es auf BEIDEN Anzeigeklassen gibt "
-                   "(z.B. overlay_river_generations()).",
 }
 
 # Reiter -> (generator_type, ((Modusname, gepushter layer_type), ...)).
@@ -76,7 +73,6 @@ REITER_MODI = {
     "river": ("terrain", (
         ("height", "heightmap"),
         ("river_water", "river_water"),
-        ("rivers", "__overlay__"),
         ("river_order", "river_order"),
     )),
     "terrain": ("terrain", (

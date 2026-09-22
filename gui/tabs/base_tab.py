@@ -170,8 +170,12 @@ def _fluesse_zeichnen(display, overlay: "Overlay") -> None:
 
     `overlay.daten` ist entweder direkt die Generationskarte (Baeche/Mikro
     immer aus, so ruft es BiomeTab - dort gibt es keinen Mikro-Haken) oder
-    ein Tupel `(generation_map, zeige_mikro)` (so ruft es RiverTab, Ticket
-    #11 - dort steuert `mikro_checkbox` das mit).
+    ein Tupel `(generation_map, zeige_mikro)` - diese zweite Form nutzte bis
+    2026-09-23 RiverTab (Ticket #11, `mikro_checkbox`); dessen eigene Ansicht
+    "Flussnetz (Generationen)" ist seither entfernt, BiomeTab ist der einzige
+    verbliebene Aufrufer und ruft ausschliesslich die erste Form. Die
+    Tupel-Form bleibt hier stehen, weil sie harmlos allgemein ist und ein
+    zukuenftiger Aufrufer sie wieder nutzen kann.
     """
     if overlay.sichtbar:
         daten = overlay.daten

@@ -11,19 +11,20 @@ Eigene Regler hat er nicht - das Netz haengt an denselben Groessen wie das
 Gelaende, und eine zweite Stelle mit denselben Reglern waere eine zweite
 Wahrheit.
 
-    Flussnetz           das Gelaende mit den Laeufen darueber, nach
-                        GENERATION gefaerbt: Makro rot, Meso gruen
-    Gelaende            dasselbe ohne Laeufe, zum Vergleich
+    Gelaende            das Gelaende ohne Ueberlagerung, die Grundkarte
+    Wassermenge         Niederschlag mal Flaeche, flussabwaerts akkumuliert
     Ordnung (Strahler)  wie gross ein Lauf gemessen an seinen Zufluessen ist
 
-DIE FARBE IST DAS EIGENTLICHE WERKZEUG. An ihr sieht man auf einen Blick, ob
-ein Strom durchgehend Strom bleibt oder unterwegs zum Bach wird - der Nutzer
-hat genau daran am 2026-08-04 einen echten Fehler entdeckt, als ein roter Lauf
-mitten in der Karte abriss.
-
-Die Mikrostufe ist zuschaltbar und standardmaessig AUS: auf 21 km Kartenbreite
-sind das Rinnsale von wenigen hundert Metern, die das Bild fuellen, ohne etwas
-auszusagen.
+2026-09-23: die vierte Ansicht "Flussnetz (Generationen)" (Faerbung nach
+Makro/Meso/Mikro-Generation: Makro rot, Meso gruen, Mikro gelb) und die
+zugehoerige Checkbox "Baeche (Mikro)" sind entfernt - nicht mehr gebraucht,
+seit "Wassermenge" die Leitansicht ist (Begruendung im Kommentar bei
+_create_display_mode_controls() unten). Dieselbe Generationsfaerbung gibt es
+weiterhin als eigenstaendiges Overlay im Biome-Reiter
+(BiomeTab.apply_overlays(), Checkbox "rivers_overlay") - dort unveraendert,
+inklusive der gemeinsamen 3D-Anbindung in gui/tabs/base_tab.py
+(_fluesse_zeichnen()) und gui/widgets/map_display_2d.py bzw. map_display_3d.py
+(overlay_river_generations()).
 """
 
 import logging
@@ -31,10 +32,9 @@ import logging
 import numpy as np
 
 from PyQt6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton, QButtonGroup, QLabel,
-    QCheckBox)
+    QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton, QButtonGroup, QLabel)
 
-from gui.tabs.base_tab import BaseMapTab, Overlay
+from gui.tabs.base_tab import BaseMapTab
 
 
 # LIVE-VORSCHAU DES FLUSSNETZES (docs/archiv/2026-08-25_AUFRAEUMPLAN.md 4.10)
@@ -86,7 +86,6 @@ class RiverTab(BaseMapTab):
         self.current_display_mode = "height"
         self._display_modes_by_id = {}
         self.river_stats = None
-        self.mikro_checkbox = None
 
         self.logger = logging.getLogger("RiverTab")
 
@@ -291,9 +290,8 @@ class RiverTab(BaseMapTab):
         Die Knopfleiste ueber der Karte.
 
         Die Basisklasse ruft GENAU DIESE Methode - `_create_display_mode_controls`
-        allein genuegt nicht. Ohne sie wurden die Radio-Knoepfe nie gebaut, und
-        `mikro_checkbox` blieb None; aufgefallen erst beim Aufbau des Fensters,
-        nicht beim Import.
+        allein genuegt nicht. Ohne sie wurden die Radio-Knoepfe nie gebaut;
+        aufgefallen erst beim Aufbau des Fensters, nicht beim Import.
         """
         from PyQt6.QtWidgets import QWidget
         behaelter = QWidget()
@@ -307,43 +305,42 @@ class RiverTab(BaseMapTab):
         layout = QHBoxLayout()
         self.display_mode_group = QButtonGroup()
 
-        # DREI ANSICHTEN, NICHT VIER.
-        #
-        # "Flussnetz" ist die Zweitansicht: Gelaende mit den Laeufen darueber,
-        # nach Generation gefaerbt - Makro rot, Meso gruen. Die Mikrostufe ist
-        # abschaltbar und standardmaessig AUS, weil sie auf 21 km Kartenbreite
-        # nur Rinnsale zeigt.
-        #
-        # "Ordnung" und "Generation" als rohe Zahlenkarten sind entfallen: sie
-        # zeigten dieselbe Information als graue Flecken, aus denen sich nichts
-        # ablesen liess.
+        # DREI ANSICHTEN.
         #
         # "Gelaende" (reine Heightmap, ohne Laeufe) STEHT ZUERST (2026-08-11,
         # Nutzer-Vorgabe): der erste Radioknopf eines Reiters soll die
-        # Grundkarte zeigen, nicht schon eine Ueberlagerung - "Flussnetz" baut
-        # als Vergleichsansicht darauf auf, nicht umgekehrt.
-        # 2026-08-26: "Wassermenge" ist die neue LEITANSICHT.
+        # Grundkarte zeigen, nicht schon eine Ueberlagerung.
         #
-        # Nutzervorgabe: *"ich verstehe noch immer nicht die mehrteilung mit
-        # roten und gruenen fluessen, jetzt wo wir quasi wassermengen und so
-        # haben. koennen wir nur eine karte haben die darstellt wie viel
-        # wasser fuer die fluesse berechnet wurde? und dann soll alles gut
-        # darstellbar auf der karte zu sehen sein."*
+        # 2026-08-26: "Wassermenge" ist die LEITANSICHT. `river_water` ist
+        # `netz["flaeche"]`, also Niederschlag mal Flaeche flussabwaerts
+        # akkumuliert, aufs Raster gelegt - eine gewoehnliche Skalarkarte, die
+        # denselben Weg wie "Gelaende" geht, also ohne Sonderbehandlung durch
+        # 2D UND 3D.
         #
-        # `river_water` ist genau das: `netz["flaeche"]`, also Niederschlag
-        # mal Flaeche flussabwaerts akkumuliert, aufs Raster gelegt. Sie
-        # ersetzt die Rot/Gruen-Faerbung nach Generation als Leitbild.
+        # Nutzervorgabe (damals Anlass fuer "Wassermenge"): *"ich verstehe
+        # noch immer nicht die mehrteilung mit roten und gruenen fluessen,
+        # jetzt wo wir quasi wassermengen und so haben. koennen wir nur eine
+        # karte haben die darstellt wie viel wasser fuer die fluesse
+        # berechnet wurde? und dann soll alles gut darstellbar auf der karte
+        # zu sehen sein."*
         #
-        # NEBENBEI EINE 3D-SCHULD GETILGT: "Flussnetz" laeuft ueber
-        # `overlay_river_generations()`, und die gibt es nur auf
-        # MapDisplay2D - in der 3D-Ansicht traf die hasattr-Weiche nie zu und
-        # es passierte lautlos nichts (CLAUDE.md, stehende Regel). Die
-        # Wassermenge ist eine gewoehnliche Skalarkarte und geht denselben
-        # Weg wie "Gelaende", also durch beide Ansichten.
+        # 2026-09-23: DESHALB SIND DIE FRUEHERE VIERTE ANSICHT
+        # "Flussnetz (Generationen)" (Faerbung nach Makro/Meso/Mikro) UND DIE
+        # CHECKBOX "Baeche (Mikro)" JETZT GANZ ENTFERNT, nicht nur
+        # ausgeblendet - "Wassermenge" hatte sie laengst als Leitbild
+        # abgeloest, nicht mehr gebraucht. Dieselbe Faerbung bleibt
+        # unveraendert im Biome-Reiter als eigenes Overlay erhalten
+        # (BiomeTab.apply_overlays(), Checkbox "rivers_overlay") - der laeuft
+        # weiterhin ueber denselben "fluesse"-Registereintrag in
+        # gui/tabs/base_tab.py und dieselbe overlay_river_generations() auf
+        # MapDisplay2D/MapDisplay3D; RiverTab ruft davon nichts mehr auf.
+        #
+        # "Ordnung" und "Generation" als rohe Zahlenkarten sind schon vorher
+        # entfallen: sie zeigten dieselbe Information als graue Flecken, aus
+        # denen sich nichts ablesen liess.
         modi = [
             ("height", "Gelaende"),
             ("river_water", "Wassermenge"),
-            ("rivers", "Flussnetz (Generationen)"),
             ("river_order", "Ordnung (Strahler)"),
         ]
         for nummer, (schluessel, beschriftung) in enumerate(modi):
@@ -353,19 +350,13 @@ class RiverTab(BaseMapTab):
             self.display_mode_group.addButton(knopf, nummer)
             layout.addWidget(knopf)
 
-        # Die Mikrostufe zuschaltbar - abgeschaltet ist die Vorgabe.
-        self.mikro_checkbox = QCheckBox("Baeche (Mikro)")
-        self.mikro_checkbox.setChecked(False)
-        self.mikro_checkbox.toggled.connect(lambda _an: self.update_display_mode())
-        layout.addWidget(self.mikro_checkbox)
-
         self._display_modes_by_id = {n: k for n, (k, _b) in enumerate(modi)}
         # idClicked statt toggled: toggled feuert beim Umschalten zweimal.
         self.display_mode_group.idClicked.connect(self._on_display_mode_selected)
         return layout
 
     def _on_display_mode_selected(self, nummer: int):
-        self.current_display_mode = self._display_modes_by_id.get(nummer, "rivers")
+        self.current_display_mode = self._display_modes_by_id.get(nummer, "height")
         self.update_display_mode()
 
     # ------------------------------------------------------------------
@@ -400,46 +391,28 @@ class RiverTab(BaseMapTab):
 
     # ------------------------------------------------------------------
     def update_display_mode(self):
-        """Die gewaehlte Ansicht aufbauen."""
+        """
+        Die gewaehlte Ansicht aufbauen.
+
+        Nur noch EIN Pfad: bis 2026-09-23 gab es hier zusaetzlich den Zweig
+        "rivers" (Faerbung nach Generation ueber das "fluesse"-Overlay-
+        Register, Ticket #11), der beim Verlassen ausdruecklich wieder
+        abgeschaltet werden musste - sonst blieb die Textur ueber jeder
+        anderen Ansicht dieses Reiters liegen (Nutzerbefund 2026-08-24:
+        *"wenn man auf Ordnung geht dann aendert sich nichts und wenn man
+        wieder auf gelaende geht aendert sich auch nichts"*). Mit dem Zweig
+        entfaellt auch diese Notwendigkeit: RiverTab schaltet das
+        "fluesse"-Overlay nirgends mehr ein, die eigene Vorgabe (aus) gilt
+        unveraendert. Das Overlay selbst lebt unveraendert weiter - es
+        bedient jetzt ausschliesslich BiomeTab.apply_overlays().
+        """
         try:
-            if self.current_display_mode == "rivers":
-                hoehe = self.data_lod_manager.get_terrain_data("heightmap")
-                generation = self.data_lod_manager.get_terrain_data("river_generation")
-                if hoehe is None:
-                    return
-                self._show_data(hoehe, "heightmap")
-                # UEBER DAS OVERLAY-REGISTER (Ticket #11,
-                # docs/SPEC_OVERLAYS.md): frueher lief das per
-                # `ziel.overlay_river_generations(...)` NUR auf dem gerade
-                # sichtbaren Display - `overlay_river_generations` gibt es
-                # nur auf MapDisplay2D UND (seit 2026-08-24) auf
-                # MapDisplay3DWidget, aber der alte Code fragte per hasattr
-                # nur DAS AKTUELLE Ziel ab und liess die jeweils andere
-                # Ansicht komplett aus. In 3D fehlten die Fluesse deshalb
-                # unbemerkt (nur eine laute, aber wirkungslose Warnung).
-                # `_push_overlays()` bedient IMMER beide Anzeigen aus
-                # demselben Register-Eintrag "fluesse" (siehe
-                # BiomeTab.apply_overlays()) und behebt das damit wirklich,
-                # statt es nur zu protokollieren.
-                zeige_mikro = bool(self.mikro_checkbox and self.mikro_checkbox.isChecked())
-                self._push_overlays([
-                    Overlay("fluesse", sichtbar=generation is not None,
-                            daten=(generation, zeige_mikro) if generation is not None else None),
-                ])
-            else:
-                # DAS FLUSSNETZ ABSCHALTEN, sonst liegt es ueber jeder
-                # anderen Ansicht dieses Reiters (Nutzerbefund 2026-08-24:
-                # *"wenn man auf Ordnung geht dann aendert sich nichts und
-                # wenn man wieder auf gelaende geht aendert sich auch
-                # nichts"*). `_push_overlays()` raeumt jetzt BEIDE Anzeigen
-                # ab, nicht nur die gerade sichtbare (siehe Kommentar oben).
-                self._push_overlays([Overlay("fluesse", sichtbar=False)])
-                art = ("heightmap" if self.current_display_mode == "height"
-                       else self.current_display_mode)
-                daten = self.data_lod_manager.get_terrain_data(art)
-                if daten is None:
-                    return
-                self._show_data(daten, art)
+            art = ("heightmap" if self.current_display_mode == "height"
+                   else self.current_display_mode)
+            daten = self.data_lod_manager.get_terrain_data(art)
+            if daten is None:
+                return
+            self._show_data(daten, art)
             self._statistik_auffrischen()
         except Exception as fehler:                      # pragma: no cover
             self.logger.error("Anzeige fehlgeschlagen: %s", fehler)
