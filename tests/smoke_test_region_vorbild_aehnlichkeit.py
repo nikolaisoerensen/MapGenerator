@@ -57,7 +57,9 @@ import sys
 import numpy as np
 from scipy import ndimage, stats
 
-_WURZEL = r"C:\Lokale Dateien\Projects\Python\MapGenerator"
+import os as _os
+_PROJEKTWURZEL = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+_WURZEL = _PROJEKTWURZEL
 sys.path.insert(0, _WURZEL)
 sys.path.insert(0, os.path.join(_WURZEL, "tools"))
 

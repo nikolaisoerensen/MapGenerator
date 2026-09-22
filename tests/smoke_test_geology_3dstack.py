@@ -8,7 +8,9 @@ import traceback
 
 import numpy as np
 
-sys.path.insert(0, r"C:\Lokale Dateien\Projects\Python\MapGenerator")
+import os as _os
+_PROJEKTWURZEL = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _PROJEKTWURZEL)
 
 from managers.data_lod_manager import DataLODManager
 from core.geology_generator import GeologySystemGenerator, N_LAYERS

@@ -39,7 +39,9 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, r"C:\Lokale Dateien\Projects\Python\MapGenerator")
+import os as _os
+_PROJEKTWURZEL = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _PROJEKTWURZEL)
 
 # Die Qt-Anwendung MUSS modulweit gehalten werden - als lokale Variable raeumt
 # Python sie ab, waehrend der GL-Kontext noch lebt (Segfault ohne Meldung).

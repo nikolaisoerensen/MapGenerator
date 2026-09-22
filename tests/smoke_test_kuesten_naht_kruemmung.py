@@ -48,7 +48,9 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, r"C:\Lokale Dateien\Projects\Python\MapGenerator")
+import os as _os
+_PROJEKTWURZEL = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _PROJEKTWURZEL)
 
 from core.terrain_weltkarte import weltfeld
 from core.vektor_kueste import VektorKueste, MESH_MINDEST_SKALA_M

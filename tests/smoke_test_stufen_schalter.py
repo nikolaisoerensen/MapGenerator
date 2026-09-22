@@ -28,7 +28,9 @@ Aufruf:
     .venv/Scripts/python.exe tests/smoke_test_stufen_schalter.py
 """
 import os, sys, logging
-sys.path.insert(0, r"C:\Lokale Dateien\Projects\Python\MapGenerator")
+import os as _os
+_PROJEKTWURZEL = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _PROJEKTWURZEL)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 from core.terrain_generator import BaseTerrainGenerator

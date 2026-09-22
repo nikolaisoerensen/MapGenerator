@@ -38,7 +38,9 @@ import io
 import os
 import sys
 
-sys.path.insert(0, r"C:\Lokale Dateien\Projects\Python\MapGenerator")
+import os as _os
+_PROJEKTWURZEL = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _PROJEKTWURZEL)
 
 PROJEKT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QUELLE = os.path.join(PROJEKT, "managers", "shader_manager.py")

@@ -26,7 +26,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-_WURZEL = r"C:\Lokale Dateien\Projects\Python\MapGenerator\.claude\worktrees\agent-af1fe1d683e85a11c"
+import os as _os
+_PROJEKTWURZEL = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+_WURZEL = _PROJEKTWURZEL
 sys.path.insert(0, _WURZEL)
 
 from core import terrain_weltkarte as rw

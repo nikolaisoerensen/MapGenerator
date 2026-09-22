@@ -33,7 +33,9 @@ import sys
 import numpy as np
 from scipy.ndimage import gaussian_filter, label, minimum_filter
 
-sys.path.insert(0, r"C:\Lokale Dateien\Projects\Python\MapGenerator")
+import os as _os
+_PROJEKTWURZEL = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _PROJEKTWURZEL)
 
 from core.water_generator import (DropletErosionSystem, HydrologySystemGenerator,
                                    _NEIGHBOR_FOOTPRINT_8, fill_depressions)

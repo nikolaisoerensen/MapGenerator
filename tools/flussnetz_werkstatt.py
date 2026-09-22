@@ -42,7 +42,9 @@ import sys
 import numpy as np
 from scipy import ndimage
 
-sys.path.insert(0, r"C:\Lokale Dateien\Projects\Python\MapGenerator")
+import os as _os
+_PROJEKTWURZEL = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, _PROJEKTWURZEL)
 
 SIZE = 256
 KM = 15.0
