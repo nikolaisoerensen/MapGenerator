@@ -10,6 +10,117 @@ gekennzeichnet; alles andere ist geprueft.
 
 ---
 
+# 2026-09-22 — Zusammenfuehrung der Nachtbranches: acht fertige Tickets lagen unbemerkt neben main
+
+## Befund
+
+`nacht/2026-09-17` und `nacht/2026-09-18` waren nie nach `main` geflossen.
+Auf ihnen lagen **acht abgeschlossene Tickets** (#49, #53, #61, #62, #72,
+#73, #74 und Teile von #39/#55/#64), deren GitHub-Issues teils noch offen
+standen, teils bereits geschlossen waren, obwohl ihre Arbeit `main` nie
+erreicht hatte.
+
+Die Folge war doppelte Arbeit: spaetere Naechte haben #53, #62, #72, #73
+und #74 **ein zweites Mal gebaut**, weil das Ticket offen aussah.
+
+## Warum ein einfacher `git merge` nicht ging
+
+Weil beide Seiten dasselbe Ticket mit **unterschiedlich benannten neuen
+Dateien** geloest haben. Zwei neue Dateien mit verschiedenen Namen
+kollidieren nie - git nimmt beide. Danach ruft der Zweig-Code sein eigenes
+Modul gegen die Datendatei von `main` auf, und niemand merkt es.
+
+Konkret bei Ticket #38 (Welt speichern/laden):
+
+| Seite | Umsetzung |
+|---|---|
+| `main` (`c571db4`) | Methoden direkt auf `OverviewTab` |
+| `nacht/2026-09-18` (`651c927`) | neues Modul `core/welt_io.py`, 468 Zeilen |
+
+Ein Voll-Merge liefert einen Baum, in dem `gui/map_editor.py:42`
+`core.welt_io` importiert, das Modul aber neben der `main`-Loesung steht.
+`python -c "import gui.map_editor"` scheitert mit `ModuleNotFoundError`.
+
+## Was gemacht wurde: Rosinenpicken statt Voll-Merge
+
+**Rosinenpicken** (`git cherry-pick -x`) heisst: einzelne Commits aus einem
+Zweig herausgreifen, statt den ganzen Zweig zu nehmen. 21 Commits wurden so
+auf `main` gehoben. Danach wurden beide Nachtbranches mit `git merge -s ours`
+**buchhalterisch** abgeschlossen - das schreibt einen Merge-Commit, der den
+Zweig als Vorfahr eintraegt, aber **keine einzige Datei aendert**. Erst
+dadurch meldet `git branch --merged` sie als erledigt und sie koennen
+geloescht werden.
+
+Geprueft: `git diff 84800b1 HEAD --stat` ist leer - die beiden
+Buchhaltungs-Merges haben tatsaechlich nichts veraendert.
+
+### Zwei Commits wurden bewusst NICHT genommen
+
+* `1f7247f` "5 tote Wrapper-Methoden entfernen" - auf `main` sind diese
+  fuenf Methoden **keine Wrapper, sondern die Implementierung**, mit
+  lebenden Aufrufern (`overview_tab.py:401, 410, 550, 554, 680`). Der
+  Cherry-Pick loeschte 97 statt 20 Zeilen und wurde zurueckgenommen.
+* `39fa75a` (#40, Datei-Menue) - haengt an `core/welt_io.py`, also an der
+  offenen #38-Entscheidung. Bleibt liegen, bis der Nutzer entschieden hat.
+
+## Weitere Aufraeumarbeit, die dabei anfiel
+
+* **53 Dateien** unter `tests/`, `tools/` und `scratch/` hatten den
+  Projektpfad hartkodiert. In einem Worktree testeten sie damit
+  **stillschweigend den Hauptcheckout** statt der eigenen Aenderung.
+  Ersetzt durch eine Ableitung aus `__file__` (Commit `047d769`). Das ist
+  die Lektion "gruene Tests koennen eine tote Funktion verdecken" in neuer
+  Form.
+* `_stadtgrenzen_polygone_aus_maske` war doppelt vorhanden (einmal aus
+  jeder Loesung von #72) - entfernt (`dbf9746`).
+* Das Messskript des Geologie-Querschnitts wanderte von `.scratch/` nach
+  `tools/` (#62).
+
+## Messung nach der Zusammenfuehrung: keine Gelaenderegression
+
+`smoke_test_regionen_welt.py` liefert **bitgleich dieselben Zahlen wie vor
+der Zusammenfuehrung**:
+
+| | ist / soll |
+|---|---|
+| Macchia Hang | 18.6 / 14.5 |
+| Macchia Wasser | 37.3 / 40 |
+| Thalassia Hang | 14.5 / 11.5 |
+| Thalassia Wasser | 48.9 / 65 |
+| Naht gegen Inneres | 1.624 gegen 0.891 |
+| Groessenunabhaengigkeit | r = +0.9400 |
+
+Alle vier Befunde sind **vorbestehend** und haben eigene Tickets (#76,
+#77, #78). Die Zusammenfuehrung hat sie weder verursacht noch verschlimmert.
+
+Gruen nach der Zusammenfuehrung: `smoke_test_dokumentbehauptungen`,
+`smoke_test_testbericht_keine_rohbefunde`, `smoke_test_siedlungsnaht_felder`
+(107 Anschlusspunkte ueber 36 Siedlungen), `smoke_test_display_methoden_existieren`,
+`smoke_test_wegarten_kalibrierung` (9/9).
+
+## Ticketbuchhaltung
+
+Geschlossen mit Verweis auf den neuen `main`-Commit: **#49, #53, #61, #62,
+#72, #73, #74**. Kommentiert, warum sie offen bleiben bzw. verspaetet
+ankamen: **#40** (haengt an #38), **#39, #55, #64** (waren geschlossen,
+obwohl die Arbeit erst am 22.09. auf `main` ankam).
+
+## Was offen bleibt
+
+1. **`main` ist nicht gepusht.** `origin/main` steht auf `4cd7efe`, lokal
+   liegen 23 Commits darueber.
+2. **Ticket #38 ist unentschieden**: `main`-Variante (Methoden auf
+   `OverviewTab`) oder Zweig-Variante (`core/welt_io.py`, 468 Zeilen plus
+   491 Zeilen Tests). #40 haengt daran.
+3. **Branches nicht geloescht.** Sechs Worktrees tragen unversionierte
+   Arbeit; `sicherung-vor-drop-40`, `worktree-agent-aa475a08ecaa1b1c7` und
+   `worktree-agent-ae7882f665b569133` sind nicht in `main` enthalten.
+4. Drei Tickets haben auf `main` eine **duennere** Fassung als auf dem
+   Zweig: #32 (+224 gegen +319 Zeilen), #35 (+295 gegen +657), #38 (+744
+   gegen +1190). Nicht geprueft, ob dabei Substanz fehlt.
+
+---
+
 # 2026-09-16 — Testbericht behauptete einen laengst behobenen Befund (Fund beim Abschluss-Testlauf)
 
 ## Befund
