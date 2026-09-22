@@ -2592,46 +2592,6 @@ def _polygon_area(vertices):
     return float(abs(np.sum(x * y2 - x2 * y)) * 0.5)
 
 
-def _stadtgrenzen_polygone_aus_maske(city_mask, settlement_ids, min_area):
-    """Baut je Siedlungs-ID ihr Stadtgrenzen-Polygon aus `city_mask` (Pixelwert
-    == settlement.location_id innerhalb der Stadt, sonst -1) via Marching-
-    Squares.
-
-    Eigenstaendige, nur auf city_mask/settlement_ids reduzierte Kopie des
-    Kerns von PlotPhysicsSystem._build_city_boundary_polygons() (Zeile
-    ~2738). Dort haengt die Berechnung an self.settlements/self.city_mask,
-    die erst existieren, wenn settlement.plot_nodes laeuft - fuer die
-    Anschlusspunkte der Wege (docs/SIEDLUNGEN_ENTWURF.md §6.1, Ticket #73)
-    wird sie schon in settlement.pathfinding gebraucht, dem fruehesten
-    Zeitpunkt, an dem sowohl die geroutete `roads`-Liste als auch city_mask
-    (aus dem bereits gelaufenen settlement.city_boundary) vorliegen."""
-    polygone = {}
-    for sid in settlement_ids:
-        mask = (city_mask == sid).astype(np.float32)
-        if not np.any(mask):
-            polygone[sid] = []
-            continue
-
-        padded = np.pad(mask, 1, mode="constant", constant_values=0.0)
-        konturen = measure.find_contours(padded, level=0.5)
-        polys = []
-        for c in konturen:
-            pts = np.column_stack([c[:, 1] - 1.0, c[:, 0] - 1.0])
-            if len(pts) < 4:
-                continue
-            poly = Polygon(pts)
-            if not poly.is_valid:
-                poly = poly.buffer(0)
-            if poly.is_empty:
-                continue
-            kandidaten = list(poly.geoms) if isinstance(poly, MultiPolygon) else [poly]
-            for cand in kandidaten:
-                if cand.is_valid and not cand.is_empty and cand.area > min_area:
-                    polys.append(cand)
-        polygone[sid] = polys
-    return polygone
-
-
 def _wege_anschlusspunkte(roads, stadtgrenzen_polygone):
     """Schnittpunkte des ueberregionalen Wegenetzes (docs/SIEDLUNGEN_ENTWURF.md
     §4, `roads` aus settlement.pathfinding - geroutete Land-Verbindungen
@@ -5537,7 +5497,7 @@ class SettlementGenerator:
             map_size = inputs["heightmap"].shape[0]
             min_area = 5.0 * (map_size / 128.0) ** 2  # dieselbe Formel wie PlotPhysicsSystem.CITY_MIN_AREA
             settlement_ids = [s.location_id for s in settlement_list if s.location_type == "settlement"]
-            stadtgrenzen = _stadtgrenzen_polygone_aus_maske(city_mask, settlement_ids, min_area)
+            stadtgrenzen = _polygonize_settlement_mask(city_mask, settlement_ids, min_area)
             road_entry_points = _wege_anschlusspunkte(roads, stadtgrenzen)
 
         self.data_lod_manager.set_calculator_output(
