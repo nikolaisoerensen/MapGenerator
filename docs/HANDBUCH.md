@@ -1,11 +1,12 @@
 # Handbuch MapGenerator
 
-**Was dieses Dokument ist und was nicht.** `docs/SPEZIFIKATION.md` sagt, was
-das Programm **soll** (Zielwerte, Invarianten). Dieses Handbuch sagt, was das
+**Was dieses Dokument ist und was nicht.** Der Spezifikationsbaum
+`docs/spezifikation/` sagt, was das Programm **soll** (Zielwerte,
+Invarianten). Dieses Handbuch sagt, was das
 Programm **ist**: wie es aufgebaut ist, wie die Rechenkette läuft, welche
 neun Regionen es kennt, was jeder Reiter tut, wie die Karte zum Spiel hin
-verlassen wird, und was die Tests prüfen. Beide Dokumente bleiben nebeneinander
-bestehen.
+verlassen wird, und was die Tests prüfen. Baum und Handbuch bleiben
+nebeneinander bestehen.
 
 **Belegregel.** Jede harte Behauptung in diesem Handbuch trägt eine Quelle
 (Datei, Zeile oder Funktionsname). Eine Behauptung ohne Beleg gilt nicht als
@@ -47,7 +48,7 @@ Verzeichnisse und ihre Rolle:
 | `tests/` | 81 Dateien, Konvention `smoke_test_*.py` (Abschnitt 8). |
 | `docs/` | Dokumentation; `docs/archiv/` historisch, siehe `docs/archiv/README.md`. |
 
-Das Oberziel des Programms steht in `docs/SPEZIFIKATION.md` §1: reale
+Das Oberziel des Programms steht in `docs/spezifikation/01_ZIEL.md` §2: reale
 Landschaften der Erde nachbilden, über wenige verständliche Regler, ohne dass
 ein Reglerstand die Welt zerstören kann.
 
@@ -133,8 +134,9 @@ Zwei zusätzliche Naht-Stellen im Datenfluss:
 ## 5. Die neun Regionen
 
 Quelle: `core/terrain_weltkarte.py`, `REGIONEN` (Zeile 276 ff.), bestätigt
-gegen `docs/SPEZIFIKATION.md` §2 (dort am 2026-09-17 unter Ticket #43 von
-einem 20 Einzel-Landschaften umfassenden Katalog auf diese neun berichtigt).
+gegen `docs/spezifikation/10_REGIONEN.md` Teil A (dort am 2026-09-17 unter
+Ticket #43 von einem 20 Einzel-Landschaften umfassenden Katalog auf diese
+neun berichtigt).
 
 Drei Gruppen zu je drei Regionen, jede mit Namen, Zielvolk, Zielwerten
 (Höhe, Relief, Formgröße, Rauheit, Wasseranteil, Flächenfaktor,
@@ -338,7 +340,7 @@ GL-Kontext, GPU-Tests fallen dann still auf CPU zurück) stehen in
   Dokumentenstand *vor* der Archiv-Verschiebung aus #51 geschrieben, weil der
   Branch `nacht/2026-09-19` in diesem Arbeitsbaum nicht sichtbar ist. Nach
   dem Merge bitte prüfen, ob sich Dateipfade unter `docs/` geändert haben,
-  auf die dieses Handbuch verweist (aktuell: `docs/SPEZIFIKATION.md`,
+  auf die dieses Handbuch verweist (aktuell: `docs/spezifikation/`,
   `docs/OFFENE_PUNKTE.md`, `docs/TESTBESTAND_BEWERTUNG.md`,
   `docs/regionen/`, `docs/archiv/README.md`).
 - **Die 38 Rechenknoten sind hier nur mit Name und Reihenfolge erfasst,

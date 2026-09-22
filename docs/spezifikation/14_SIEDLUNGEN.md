@@ -19,7 +19,7 @@ sondern **Rang innerhalb einer sehr kleinen Spanne**:
 Auch die „Stadt" ist damit in einer Viertelstunde durchquert — 932 fast überall nördlich der
 Alpen die Wirklichkeit. Im Code: `RANG_HAEUSER`, `RANG_REIHENFOLGE`.
 
-*Herkunft: docs/SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitt „1. Drei Groessen, alle klein".*
+*Herkunft: docs/archiv/2026-09-22_SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitt „1. Drei Groessen, alle klein".*
 
 ## 2. Wo die Orte liegen — das Eignungsfeld
 
@@ -41,7 +41,7 @@ Wassertyp gestaffelt nach `WASSERTYP_GEWICHT = {4: 1.0, 3: 1.0, 2: 0.8, 1: 0.5}`
 Großfluss, Fluss, Bach); unbekannte Biom-IDs laufen mit Faktor 1.0 und melden eine WARNING.
 **Varianz ist Pflicht**: der Rang wird mit Rauschen um den Wert gezogen.
 
-*Herkunft: docs/SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitt „2. Wo die Orte liegen — und warum".*
+*Herkunft: docs/archiv/2026-09-22_SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitt „2. Wo die Orte liegen — und warum".*
 
 ## 3. Wieviele Orte je Kultur, und welchen Rang sie tragen
 
@@ -57,7 +57,7 @@ siedlung, dorf], bei 4 [stadt, 1 siedlung, 2 dorf], bei 5 [stadt, 2 sied., 2 dor
 mindestens 4 Pixel; wird das Ziel verfehlt, halbiert er sich bis zu zweimal, erst danach werden
 weniger Orte gesetzt.
 
-*Herkunft: docs/SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitt „3. Wieviele Orte je Kultur".*
+*Herkunft: docs/archiv/2026-09-22_SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitt „3. Wieviele Orte je Kultur".*
 
 ## 4. Stadttypen
 
@@ -175,7 +175,7 @@ Zufallsziehung aus einer Binärmaske. Nach jeder Wahl wird die Kategorie in der 
 Mindestabstand Kartenkante/20, mindestens 3 px. `calculate_landmark_roads()` verbindet jedes
 Landmark deterministisch per A* mit dem nächsten Punkt des Hauptnetzes.
 
-*Herkunft: docs/SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitte „4.1 Kostenfeld zuerst" bis „4.7 Landmarks"; Zahlenwerte verifiziert an `core/settlement_generator.py`.*
+*Herkunft: docs/archiv/2026-09-22_SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitte „4.1 Kostenfeld zuerst" bis „4.7 Landmarks"; Zahlenwerte verifiziert an `core/settlement_generator.py`.*
 
 ## 6. Reihenfolge im Überblick
 
@@ -198,7 +198,7 @@ Rückschritt: die erste Platzierung läuft ohne Erreichbarkeit (Faktor neutral 1
 Durchlauf.** Deshalb nimmt `create_combined_suitability()` ein optionales `reachability_map`
 entgegen, statt es selbst zu berechnen.
 
-*Herkunft: docs/SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitt „5. Reihenfolge im Ueberblick".*
+*Herkunft: docs/archiv/2026-09-22_SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitt „5. Reihenfolge im Ueberblick".*
 
 ## 7. Die Siedlungsnaht — was das Spiel vom Editor abholt
 
@@ -227,7 +227,7 @@ Koordinaten sind **Pixel im Raster** (`map_size` × `map_size`); die Umrechnung 
 `voronoi_cell_map`, `wilderness_polygons`. Offen gelassen, nicht entschieden: `landmark_list`,
 `roadsite_list`, die Weg-Polylinien (`roads`, `sea_roads`, `landmark_roads`).
 
-*Herkunft: docs/SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitt „6. Die Siedlungsnaht — was das Spiel vom Editor abholt".*
+*Herkunft: docs/archiv/2026-09-22_SIEDLUNGEN_ENTWURF.md (Stand 2026-08-06), Abschnitt „6. Die Siedlungsnaht — was das Spiel vom Editor abholt".*
 
 ## 8. Die neun Kulturen
 
@@ -252,7 +252,7 @@ statt Phönizier (deren Stadtstaaten enden rund 1500 Jahre früher), Nevadin Ale
 (hatte keine Kultur und damit keine Städte), Nebelrode Sachsen statt Franken (war doppelt mit
 der Estrande belegt). Alle neun Regionen sind unterschieden.
 
-*Herkunft: docs/KULTUREN_UND_ORTE.md (Stand 2026-08-06), Abschnitte „Drei Korrekturen an der Kulturzuordnung" und „Die neun Kulturen"; verifiziert in `core/daten/regionen.toml`.*
+*Herkunft: docs/archiv/2026-09-01_KULTUREN_UND_ORTE.md (Stand 2026-08-06), Abschnitte „Drei Korrekturen an der Kulturzuordnung" und „Die neun Kulturen"; verifiziert in `core/daten/regionen.toml`.*
 
 ## 9. Kataloge — 45 Landmarks, 45 Roadsites (umgesetzt)
 
@@ -278,7 +278,7 @@ Der Typ einer Roadsite oder eines Landmarks kommt aus dem Katalog der **nächstg
 Siedlung** (`_naechste_kultur()`); beide tragen keine eigene Kulturzuordnung, sondern führen sie
 in `properties['culture']`.
 
-*Herkunft: docs/KULTUREN_UND_ORTE.md (Stand 2026-08-06), Abschnitt „AUSWAHL DES NUTZERS — 2026-08-06"; wörtlich verifiziert gegen `LANDMARK_KATALOG` und `ROADSITE_KATALOG` in `core/settlement_generator.py`.*
+*Herkunft: docs/archiv/2026-09-01_KULTUREN_UND_ORTE.md (Stand 2026-08-06), Abschnitt „AUSWAHL DES NUTZERS — 2026-08-06"; wörtlich verifiziert gegen `LANDMARK_KATALOG` und `ROADSITE_KATALOG` in `core/settlement_generator.py`.*
 
 ## Reserve (nicht umgesetzt)
 
@@ -298,15 +298,15 @@ Namen unten tauchen nirgends im Code auf.
 | Italiener | Kuestenturm gegen Sarazenen · Verlassene Villa Rustica · Marmorbruch · Katakombe · Aquaedukt-Bogenreihe | Pilgerhospiz · Zollturm am Talausgang · Faehre unter der zerstoerten Bruecke · Ziegelei · Saumpfad zum Bergwerk |
 | Byzantiner | Kuppelkirche mit Fresken · Leuchtfeuerkette (phryktoria) · Versunkene Marmormole · Windmuehlenkuppe · Salzgaerten der Bucht | Wachturm ueber der Meerenge · Fischsalzerei · Zollstation des Themas · Kapelle am Kap · Umschlagplatz fuer Oel und Wein |
 
-*Herkunft: docs/KULTUREN_UND_ORTE.md (Stand 2026-08-06), Abschnitte „Landmarks" und „Roadsites" (die nicht gewählten Einträge).*
+*Herkunft: docs/archiv/2026-09-01_KULTUREN_UND_ORTE.md (Stand 2026-08-06), Abschnitte „Landmarks" und „Roadsites" (die nicht gewählten Einträge).*
 
 ## Offene Fragen
 
 1. **`city_type` hat fünf Werte, nicht vier.** §6.1 und der Docstring von `Location.settlement_type`
    nennen vier Typen, `STADTTYPEN` zusätzlich `fischersiedlung`. Der Text folgt dem Code.
-2. **Hangkosten quadratisch oder exponentiell?** §4.1 sagt „Quadrat der Neigung", der Code
+2. **Hangkosten quadratisch oder exponentiell?** Abschnitt 5.1 sagt „Quadrat der Neigung", der Code
    rechnet seit 2026-08-13 exponentiell im Neigungswinkel. Der Text folgt dem Code.
-3. **Seeweg-Auflage „ab 10 m Tiefe" oder „ab Seegrad 1"?** §4.4 nennt die Tiefenschwelle,
+3. **Seeweg-Auflage „ab 10 m Tiefe" oder „ab Seegrad 1"?** Abschnitt 5.3 nennt die Tiefenschwelle,
    `bau_seekostenfeld()`/`_seeweg_anteil_tief()` benutzen mit vorhandenem `seegrad` die
    See-Voronoi-Gliederung. Welche Fassung verbindlich ist, steht nicht fest.
 4. **Sechs Faktoren statt fünf.** Der Biomfaktor kam mit Ticket #34 (2026-09-21) dazu und steht

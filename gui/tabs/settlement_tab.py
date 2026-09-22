@@ -762,7 +762,7 @@ class SettlementTab(BaseMapTab):
         # self._push_overlays() in update_settlement_display() - siehe dort.
 
         # Verbindungsstrassen (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5): Landwege
-        # durchgezogen orange, Seewege gestrichelt in eigenem Blau (§4.4
+        # durchgezogen orange, Seewege gestrichelt in eigenem Blau (14_SIEDLUNGEN.md 5.3
         # "anders gezeichnet - gestrichelt, in einem eigenen Blau").
         if hasattr(display, 'overlay_roads') and self.show_roads_cb.isChecked():
             roads = self.data_lod_manager.get_settlement_data("roads")

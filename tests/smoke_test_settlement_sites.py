@@ -1,6 +1,6 @@
 """
 Seewege, Kreuzungen, Roadsite-/Landmark-Kataloge nach
-docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.4-§4.7 (Umbau 2026-08-10).
+docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.3-5.5 (Umbau 2026-08-10).
 
 Vorher: kein Seeweg-Konzept ueberhaupt; Kreuzungen wurden nicht erkannt;
 Roadsites kamen aus einer flachen 7-Typen-Liste ohne Kulturbezug, zufaellig
@@ -13,7 +13,7 @@ Geprueft wird hier:
 
   1. Seeweg: zwei Orte DERSELBEN Kultur, durch eine gesperrte Wasserflaeche
      getrennt, bekommen eine Verbindung UND die Mehrheit ihrer Laenge liegt in
-     echtem tiefen Wasser (§4.4-Auflage) - nicht nur "irgendeine Verbindung".
+     echtem tiefen Wasser (14_SIEDLUNGEN.md 5.3-Auflage) - nicht nur "irgendeine Verbindung".
   2. Roadsite-Katalog: der gewaehlte Name gehoert zur Kultur der naechsten
      Siedlung UND passt, wo verfuegbar, zur Platzierungskategorie.
   3. Landmark-Katalog: dieselbe Zusicherung, UND explizit dass eine GIPFEL-Art

@@ -58,16 +58,28 @@ macht das Programm damit ueber Nacht langsam, und niemand sieht warum.
 [[eintrag]]
 name = "Anweisungen an den Agenten"
 stufe = "sperre"
-muster = ["CLAUDE.md", "docs/SOLLBESCHREIBUNG.md", "docs/NACHTBETRIEB.md"]
+muster = [
+    "CLAUDE.md",
+    "docs/spezifikation/**",
+    "docs/archiv/2026-09-16_SOLLBESCHREIBUNG.md",
+    "docs/NACHTBETRIEB.md",
+]
 grund = """
-Diese Dateien sind Anweisung, nicht Arbeitsmaterial. Die Sollbeschreibung sagt,
+Diese Dateien sind Anweisung, nicht Arbeitsmaterial. Die Spezifikation sagt,
 was das Programm koennen soll; CLAUDE.md sagt, wie hier gearbeitet wird. Wer
 sie nachts umschreibt, aendert nicht den Code, sondern den Massstab, an dem der
 Code gemessen wird - und morgens stimmt beides wieder ueberein, ohne dass
 etwas besser geworden waere.
 
-Die Sollbeschreibung waechst ueber die Karte #13: eine geschlossene Frage wird
+Die Spezifikation waechst ueber die Karte #13: eine geschlossene Frage wird
 eingetragen, wenn ihr Entscheidungsticket geschlossen ist. Das ist Tagarbeit.
+
+Frueher stand hier `docs/SOLLBESCHREIBUNG.md`. Diese Datei ist am 2026-09-23
+nach `docs/archiv/2026-09-16_SOLLBESCHREIBUNG.md` gewandert, ihr Inhalt lebt im
+Baum `docs/spezifikation/` weiter (Ticket #44). Der Eintrag sperrt deshalb den
+GANZEN Ordner, nicht eine einzelne Datei daraus - sonst waere jede neu
+angelegte Spezifikationsdatei ungeschuetzt, und ein Muster auf einen Pfad, den
+es nicht mehr gibt, sieht aus wie Schutz und ist keiner.
 """
 
 [[eintrag]]

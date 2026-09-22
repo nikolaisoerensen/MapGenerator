@@ -1260,7 +1260,7 @@ class MapDisplay2D(QWidget):
         angezeigte Bild
         Aufgabe: Overlay für SettlementTab "Roads" - mehrfach mit
         unterschiedlicher color/linestyle aufrufbar, um Landwege und Seewege
-        optisch zu unterscheiden (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.4: Seewege
+        optisch zu unterscheiden (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.3: Seewege
         "anders gezeichnet - gestrichelt, in einem eigenen Blau", siehe
         SettlementTab._apply_settlement_overlays()).
         Parameter: roads (List[List[Tuple]]) - Liste von Pfaden, je Pfad eine

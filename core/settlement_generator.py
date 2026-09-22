@@ -143,7 +143,7 @@ class SettlementData:
         self.plot_nodes = []  # List[PlotNode] - Alle PlotNodes
         self.plots = []  # List[Plot] - Alle Plots
         self.roads = []  # List[List[Tuple]] - Alle Road-Pfade (Land)
-        self.sea_roads = []  # List[List[Tuple]] - Seewege, docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.4
+        self.sea_roads = []  # List[List[Tuple]] - Seewege, docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.3
         self.city_mask = None  # (height, width) - Settlement-ID pro Pixel, -1 = ausserhalb jeder Stadt
         self.voronoi_cell_map = None  # (height, width) - Landschafts-Plot-Zell-ID pro Pixel, -1 = Stadt/Wilderness
         self.street_mask = None  # (height, width) bool - innerstaedtisches Strassenraster
@@ -267,8 +267,8 @@ RANG_REIHENFOLGE = ("dorf", "siedlung", "stadt")
 # (45 + 45). Kulturnamen sind exakt die `volk`-Werte aus
 # core/terrain_weltkarte.py REGIONEN.
 #
-# JEDE ART TRAEGT EINE PLATZIERUNGSVORLIEBE (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.6
-# fuer Roadsites, §4.7 fuer Landmarks nennt nur die KATEGORIEN, nicht die
+# JEDE ART TRAEGT EINE PLATZIERUNGSVORLIEBE (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.4
+# fuer Roadsites, Abschnitt 5.5 fuer Landmarks nennt nur die KATEGORIEN, nicht die
 # Zuordnung je Art - die folgt hier aus dem Namen selbst: "Furtstein an der
 # Flussquerung" will an eine Furt, "Warte auf dem Kamm" auf einen Passpunkt,
 # "Osteria an der Kreuzung" ausdruecklich an eine Kreuzung; was keiner
@@ -1134,7 +1134,7 @@ def bau_kostenfeld(heightmap, slopemap, slope_distance_ratio, weg_maske=None,
 # Verkehrsschwelle fuer platziere_bruecken(): eine Furt, die nur EIN Weg je
 # benutzt, bekommt KEINE Bruecke - sie lohnt sich nicht mehr als die Furt
 # selbst. Erst wo sich mehrere Wege an derselben Furt buendeln (der
-# WEGERABATT-Effekt aus §4.1 sorgt dafuer, dass sich Wege ueberhaupt
+# WEGERABATT-Effekt aus 14_SIEDLUNGEN.md 5.1 sorgt dafuer, dass sich Wege ueberhaupt
 # buendeln), ist der Nutzen real messbar. Das ist die Antwort auf
 # Abnahmekriterium 3: "nicht zufaellig, nicht ueberall."
 BRUECKEN_MIN_VERKEHR = 2
@@ -1149,7 +1149,7 @@ def platziere_bruecken(weg_maske, roads, fluss_land, water_map,
     entsteht, wo sich das Queren tatsaechlich haeuft. Dazu wird NACH dem
     ersten Routing-Durchlauf (mit Furtkosten, aber ohne Bruecken) gezaehlt,
     wie viele VERSCHIEDENE Wege ueberhaupt ueber dieselbe Flussstelle
-    gefuehrt wurden - genau der Ort, an dem sich der WEGERABATT (§4.1) schon
+    gefuehrt wurden - genau der Ort, an dem sich der WEGERABATT (14_SIEDLUNGEN.md 5.1) schon
     zu einer gemeinsamen Furt gebuendelt hat. Eine Furt, die nur ein Weg je
     nutzt, bleibt Furt.
 
@@ -1214,7 +1214,7 @@ def platziere_bruecken(weg_maske, roads, fluss_land, water_map,
     return bruecken_maske, bruecken_liste
 
 
-# Seeweg-Kostenfeld, docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.4 - das SPIEGELBILD des
+# Seeweg-Kostenfeld, docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.3 - das SPIEGELBILD des
 # Landkostenfelds: Land ist gesperrt, Flachwasser teuer (an der Kueste
 # entlangtasten soll sich nicht lohnen), richtiges tiefes Wasser billig.
 SEEWEG_KOSTEN_FLACH = 3.0     # 0 bis SEEWEG_TIEFE_ZIEL_M
@@ -1246,7 +1246,7 @@ def _naechster_kuestenpunkt(x, y, heightmap):
     Naechstes Wasserpixel zu (x,y) - der tatsaechliche Ausgangspunkt eines
     Seewegs.
 
-    WARUM NOTWENDIG. "Land ist gesperrt" (§4.4) gilt fuer den Seeweg-Kosten-
+    WARUM NOTWENDIG. "Land ist gesperrt" (14_SIEDLUNGEN.md 5.3) gilt fuer den Seeweg-Kosten-
     feld woertlich - bau_seekostenfeld() setzt jedes Landpixel auf np.inf.
     Eine Siedlung steht aber so gut wie nie GENAU auf der Wasserlinie,
     sondern ein paar Pixel landeinwaerts. Ohne dieses Snapping haette A* am
@@ -1255,7 +1255,7 @@ def _naechster_kuestenpunkt(x, y, heightmap):
     beiderseits eines 10 Pixel breiten, tiefen Kanals bekamen 0 Seewege statt
     des erwarteten einen.
 
-    Die eigentliche Route laeuft weiterhin STRIKT durchs Wasser (§4.4 bleibt
+    Die eigentliche Route laeuft weiterhin STRIKT durchs Wasser (14_SIEDLUNGEN.md 5.3 bleibt
     woertlich gueltig); nur die kurze Verbindung Siedlung->Kueste wird separat
     als gerade Strecke angehaengt, nicht durch das Seeweg-A* selbst gesucht.
     """
@@ -1272,7 +1272,7 @@ def _naechster_kuestenpunkt(x, y, heightmap):
 
 
 def _seeweg_anteil_tief(pfad, heightmap, seegrad=None):
-    """Anteil der Pfadpunkte in echtem tiefen Wasser - die Auflage aus §4.4:
+    """Anteil der Pfadpunkte in echtem tiefen Wasser - die Auflage aus 14_SIEDLUNGEN.md 5.3:
     'der Weg muss den groessten Teil seiner Laenge in Wasser ab 10 m Tiefe
     liegen. Ein Seeweg, der sich an der Kueste entlangtastet, waere kein
     Seeweg, sondern ein schlechter Landweg.'
@@ -1294,7 +1294,7 @@ def _seeweg_anteil_tief(pfad, heightmap, seegrad=None):
     return tief / len(pfad)
 
 
-# Rang als Zahl fuer die Bereitschaftsformel (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.3):
+# Rang als Zahl fuer die Bereitschaftsformel (docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.2):
 # Bereitschaft = Rang(A) * Rang(B) * (gleiche Kultur ? 1.0 : 0.45). Zwei
 # Staedte (3*3=9) verbinden sich damit praktisch immer, zwei Doerfer
 # verschiedener Kultur (1*1*0.45=0.45) fast nie.
@@ -1841,9 +1841,9 @@ def _gabriel_kandidaten(punkte):
 
 def kreuzungen_finden(roads, sea_roads, settlements, shape, mindestabstand_siedlung=None):
     """
-    Kreuzungen NACH dem Routing, docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.5: "alle
+    Kreuzungen NACH dem Routing, docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.4: "alle
     Wegepixel, an denen sich zwei Strecken treffen und die NICHT auf einem
-    Ort liegen". Sie entstehen von selbst durch den Wegerabatt aus §4.1 -
+    Ort liegen". Sie entstehen von selbst durch den Wegerabatt aus 14_SIEDLUNGEN.md 5.1 -
     dort, wo zwei Strecken ein Stueck gemeinsam gehen und sich wieder trennen.
 
     Rein geometrisch: jeder Weg (Land wie See) rasterisiert mit seiner
@@ -1973,7 +1973,7 @@ class PathfindingSystem:
         # SUCHBUDGET DEUTLICH ANGEHOBEN (2026-08-10, Nutzer-Vorgabe: Strassen
         # sollen "moeglichst realistisch durch die taeler meandern"). Die
         # alten Budgets (500/1000/2000/5000) stammen aus der Zeit vor dem
-        # Kostenfeld-Umbau (§4.1) - ein rein linearer Hangkosten-Aufschlag
+        # Kostenfeld-Umbau (14_SIEDLUNGEN.md 5.1) - ein rein linearer Hangkosten-Aufschlag
         # liess A* fast immer zuegig zum Ziel finden. Das neue Kostenfeld ist
         # streckenweise sehr viel schaerfer (Hangkosten QUADRATISCH, Wasser
         # bis 25x, ganze Bereiche unendlich teuer): ein Weg, der einem Grat
@@ -5490,7 +5490,7 @@ class SettlementGenerator:
         zwangsläufig NACH civ_influence laufen muss (Zirkelbezug sonst).
         Seit 2026-08-10 liefert calculate_road_network() zwei Listen: `roads`
         (Land, Gabriel-Graph + Kostenfeld + Bereitschaftstest,
-        docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5) und `sea_roads` (§4.4, fuer
+        docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5) und `sea_roads` (Abschnitt 5.3, fuer
         Kulturpaare ohne endlichen Landweg).
         voronoi_cell_map (früher aus settlement.landscape_voronoi, jetzt
         entfernt) entfällt ersatzlos - calculate_road_network() fällt dafür
@@ -5540,7 +5540,7 @@ class SettlementGenerator:
         """
         Calculator-Node 'settlement.roadsites' (#31) - siehe _is_final_lod().
         Braucht seit dem Umbau auf den 45-Arten-Katalog (docs/spezifikation/14_SIEDLUNGEN.md
-        §4.6) zusaetzlich heightmap (Furt-/Passerkennung) und settlement_list
+        14_SIEDLUNGEN.md 5.4) zusaetzlich heightmap (Furt-/Passerkennung) und settlement_list
         (Kulturzuordnung je Standort ueber _naechste_kultur()) - ruft dafuer
         jetzt selbst _get_prepared_settlement_inputs() statt sich wie zuvor
         nur auf das transitiv gesetzte self.scale_factor zu verlassen.
@@ -6127,16 +6127,16 @@ class SettlementGenerator:
     def calculate_road_network(self, settlements, heightmap, slopemap, lod, voronoi_cell_map=None,
                                seegrad=None, water_map=None):
         """
-        Wegenetz nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.1-5.3. Ablauf, in dieser
+        Wegenetz nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.1-5.2. Ablauf, in dieser
         Reihenfolge:
 
-          1. KOSTENFELD (§4.1) - einmal, ueber bau_kostenfeld(). Wasser in drei
+          1. KOSTENFELD (14_SIEDLUNGEN.md 5.1) - einmal, ueber bau_kostenfeld(). Wasser in drei
              Stufen, Hangkosten quadratisch, ein bestehender Weg verbilligt
              sich selbst (WEGERABATT) - "Wege buendeln sich zu Hauptstrecken".
-          2. GABRIEL-GRAPH (§4.2) - welche Ortspaare ueberhaupt Kandidaten
+          2. GABRIEL-GRAPH (14_SIEDLUNGEN.md 5.2) - welche Ortspaare ueberhaupt Kandidaten
              sind: A-B nur, wenn im Kreis ueber ihrer Verbindungsstrecke kein
              dritter Ort liegt. Kein Stern, keine Vollverknuepfung.
-          3. BEREITSCHAFTSTEST (§4.3) je Kandidat, absteigend nach
+          3. BEREITSCHAFTSTEST (14_SIEDLUNGEN.md 5.2) je Kandidat, absteigend nach
              Bereitschaft abgearbeitet (die eifrigsten Verbindungen zuerst -
              sie werden ohnehin fast immer gebaut und damit zur Haupttrasse,
              auf die sich schwaechere Kandidaten per Wegerabatt aufbuendeln
@@ -6152,17 +6152,17 @@ class SettlementGenerator:
              sodass zwei Staedte (9.0) praktisch immer verbinden, zwei Doerfer
              verschiedener Kultur (0.45) fast nie - genau die vom Entwurf
              genannten Faelle.
-          4. KULTURZUSAMMENHANG (§4.3, Ausnahme) - je Kultur wird geprueft, ob
+          4. KULTURZUSAMMENHANG (14_SIEDLUNGEN.md 5.2, Ausnahme) - je Kultur wird geprueft, ob
              ihre Orte nach Schritt 3 EINEN zusammenhaengenden Teilgraphen
              bilden. Falls nicht, werden die guenstigsten fehlenden
              Verbindungen nachgetragen, unabhaengig von der Bereitschaft -
              "egal was sie kosten". Findet sich dabei KEIN endlich teurer
              Landweg (Wasser trennt die Komponenten vollstaendig), wird
-             stattdessen ein SEEWEG versucht (§4.4) - siehe bau_seekostenfeld().
+             stattdessen ein SEEWEG versucht (14_SIEDLUNGEN.md 5.3) - siehe bau_seekostenfeld().
 
         `voronoi_cell_map` wie bisher optional fuer den Randbias entlang von
         Landschafts-Voronoi-Zellgrenzen. `seegrad` (docs/OFFENE_PUNKTE.md 3.3)
-        steuert das Seeweg-Kostenfeld und die Tiefwasser-Auflage aus §4.4 -
+        steuert das Seeweg-Kostenfeld und die Tiefwasser-Auflage aus 14_SIEDLUNGEN.md 5.3 -
         "ab Grad 1" statt "ab 10 m Tiefe", siehe bau_seekostenfeld()/
         _seeweg_anteil_tief(). None faellt auf die alte Hoehenschwelle zurueck.
 
@@ -6187,7 +6187,7 @@ class SettlementGenerator:
 
         Returns: (roads, sea_roads) - je List[List[Tuple]]. Seewege getrennt
         zurueckgegeben, weil sie "anders gezeichnet werden - gestrichelt, in
-        einem eigenen Blau" (§4.4), nicht weil sie technisch etwas anderes
+        einem eigenen Blau" (14_SIEDLUNGEN.md 5.3), nicht weil sie technisch etwas anderes
         waeren. UNVERAENDERT 2-Tupel (Bruecken/Uferweg-Messwerte laufen ueber
         Instanzattribute, nicht ueber den Rueckgabewert - mehrere bestehende
         Aufrufer entpacken exakt `roads, sea_roads = ...`).
@@ -6459,7 +6459,7 @@ class SettlementGenerator:
             # Gruppen (2-5 Orte je Kultur) ist ein volles Routing je
             # verbleibendem Paar noch billig. Findet sich kein endlicher
             # Landweg (Wasser trennt vollstaendig), wird stattdessen ein
-            # Seeweg versucht (§4.4) - eine Union bleibt hier auch dann
+            # Seeweg versucht (14_SIEDLUNGEN.md 5.3) - eine Union bleibt hier auch dann
             # bestehen, WENN nur der Seeweg gelingt, sonst haette die naechste
             # Runde denselben unmoeglichen Landweg wieder als "billigsten"
             # gewaehlt und liefe endlos im Kreis.
@@ -6486,7 +6486,7 @@ class SettlementGenerator:
                     eltern[find(idx_a)] = find(idx_b)
                     continue
 
-                # Kein endlicher Landweg - Seeweg versuchen. §4.4 Auflage: der
+                # Kein endlicher Landweg - Seeweg versuchen. 14_SIEDLUNGEN.md 5.3 Auflage: der
                 # groesste Teil der Laenge muss in echtem tiefen Wasser liegen,
                 # sonst waere es "kein Seeweg, sondern ein schlechter Landweg".
                 # ">=" statt ">": bei kurzen Ueberfahrten (wenige Pfadpunkte)
@@ -6694,9 +6694,9 @@ class SettlementGenerator:
 
     def calculate_roadsites(self, roads, sea_roads, settlements, heightmap, lod, region_map=None):
         """
-        Roadsites nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.6: "bevorzugt an
-        Kreuzungen (ein Gasthof lebt vom Verkehr), an Furten und
-        Passhoehen, auf langen Zwischenstuecken ohne Ort". Typ kommt aus dem
+        Roadsites nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.4, in der
+        Kategorienreihenfolge "echte Wegscheide (>= 3 Wege) -> Furt ->
+        Passhoehe -> Strecke" (ein Gasthof lebt vom Verkehr). Typ kommt aus dem
         45-Arten-Katalog der naechstgelegenen Kultur (ROADSITE_KATALOG,
         docs/spezifikation/14_SIEDLUNGEN.md), nach Platzierungskategorie passend
         gewaehlt - eine Kreuzung bei den Kelten wird eher "Zollringwall" als
@@ -6707,7 +6707,7 @@ class SettlementGenerator:
         "pro region ein paar, so 1-4 jeweils") - vorher gab ein einziges
         globales Ziel (z.B. 3 bei Standard-Reglerstellung) ueber alle neun
         Regionen zusammen nur eine Handvoll Roadsites auf der gesamten
-        Weltkarte. Die Kategorie-Prioritaet aus §4.6 bleibt je Region
+        Weltkarte. Die Kategorie-Prioritaet aus 14_SIEDLUNGEN.md 5.4 bleibt je Region
         erhalten; nur die ZIELZAHL wird jetzt neun Mal statt einmal
         ausgewertet.
 
@@ -6724,7 +6724,7 @@ class SettlementGenerator:
         height, width = heightmap.shape
         size = height
 
-        # ---- Kandidatentypen sammeln, in der Prioritaet aus §4.6 ----
+        # ---- Kandidatentypen sammeln, in der Prioritaet aus 14_SIEDLUNGEN.md 5.4 ----
         kreuzungen = list(kreuzungen_finden(roads, sea_roads, settlements, (height, width)))
         # Grad JETZT bestimmen, solange die Reihenfolge noch der von
         # kreuzungen_finden() entspricht - _fern_zuerst() sortiert gleich um.
@@ -6891,7 +6891,7 @@ class SettlementGenerator:
 
     def calculate_landmarks(self, civ_map, heightmap, slopemap, water_map, settlements, lod, region_map=None):
         """
-        Landmarks nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.7: "unabhaengig vom Netz,
+        Landmarks nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5.5: "unabhaengig vom Netz,
         nach eigenen Kriterien: Gipfel, Kliffs, Quellen, abgelegene Stellen -
         duerfen ausdruecklich weitab jedes Weges liegen". Typ kommt aus dem
         45-Arten-Katalog der naechstgelegenen Kultur (LANDMARK_KATALOG,
@@ -7449,7 +7449,7 @@ class SettlementGenerator:
         Funktionsweise: Legacy-Methode für Road-Network-Erstellung. Unbenutzt
         im Rest des Projekts (kein Aufrufer gefunden) - nur der Vollstaendigkeit
         halber an die neue calculate_road_network()-Signatur angepasst
-        (heightmap fuer die Wasserkosten-Stufen, §4.1), damit sie nicht als
+        (heightmap fuer die Wasserkosten-Stufen, 14_SIEDLUNGEN.md 5.1), damit sie nicht als
         stiller Aufruf-Landmine liegen bleibt.
         """
         self.road_slope_to_distance_ratio = road_slope_to_distance_ratio

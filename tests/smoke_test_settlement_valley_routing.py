@@ -16,7 +16,7 @@ ZWEI GETRENNTE FRAGEN, ZWEI GETRENNTE BEFUNDE:
 
 DAS EIGENTLICHE PROBLEM WAR EIN DRITTES: das A*-Suchbudget
 (PathfindingSystem.max_search_nodes) stammte aus der Zeit vor dem
-Kostenfeld-Umbau (§4.1) und war fuer das neue, viel schaerfere Kostenfeld
+Kostenfeld-Umbau (14_SIEDLUNGEN.md 5.1) und war fuer das neue, viel schaerfere Kostenfeld
 (Hangkosten QUADRATISCH, Wasser bis 25x, ganze Bereiche unendlich teuer) zu
 knapp bemessen. Ergebnis: die Suche brach ab, bevor sie den Umweg zum Pass
 fand, und fiel auf den nutzlosen Geradlinien-Fallback zurueck - der dank des

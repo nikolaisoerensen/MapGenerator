@@ -8,7 +8,7 @@ kein Bereitschaftstest.
 
 Geprueft wird hier das NEUE Verhalten:
 
-  1. Kostenfeld (§4.1): die drei Wasserstufen und der Wegerabatt wirken
+  1. Kostenfeld (14_SIEDLUNGEN.md 5.1): die drei Wasserstufen und der Wegerabatt wirken
      tatsaechlich, Hangkosten wachsen EXPONENTIELL und werden ab
      MAX_WEG_STEIGUNG_GRAD gesperrt.
 
@@ -25,13 +25,13 @@ Geprueft wird hier das NEUE Verhalten:
      so etwas nicht: die Datei importiert sauber, verweist auf keine
      geloeschte Datei und sieht in jeder Hinsicht gesund aus. Veraltete
      ZUSICHERUNGEN findet man ausschliesslich, indem man sie ausfuehrt.
-  2. Gabriel-Graph (§4.2): sparse (nicht Vollverknuepfung) UND zusammenhaengend
+  2. Gabriel-Graph (14_SIEDLUNGEN.md 5.2): sparse (nicht Vollverknuepfung) UND zusammenhaengend
      (Eigenschaft von Gabriel-Graphen fuer Punkte in allgemeiner Lage).
-  3. Bereitschaftstest (§4.3): zwei Staedte derselben Kultur verbinden sich
+  3. Bereitschaftstest (14_SIEDLUNGEN.md 5.2): zwei Staedte derselben Kultur verbinden sich
      ueber einfaches Terrain, zwei Doerfer verschiedener Kultur ueber
      gesperrtes/sehr teures Terrain nicht - direkt aus der Formel geprueft,
      nicht nur behauptet.
-  4. Kulturzusammenhang (§4.3 Ausnahme): Orte derselben Kultur sind nach dem
+  4. Kulturzusammenhang (14_SIEDLUNGEN.md 5.2 Ausnahme): Orte derselben Kultur sind nach dem
      Netzbau IMMER verbunden, auch wenn der direkte Kandidat durchgefallen
      waere.
   5. `city_cost_map` enthaelt kein np.inf mehr (§5.13) - genau das haette der
@@ -174,7 +174,7 @@ def main():
     gen.map_seed = 1
     gen._update_progress = None
 
-    # calculate_road_network() liefert seit dem Seeweg-Umbau (§4.4) ein Paar
+    # calculate_road_network() liefert seit dem Seeweg-Umbau (14_SIEDLUNGEN.md 5.3) ein Paar
     # (roads, sea_roads) - hier immer entpackt, sonst misst len() die Groesse
     # des 2-Tupels selbst (immer 2) statt der Wegeliste. Genau dieser Fehler
     # stand hier zuerst und meldete faelschlich "2 Wege" in allen drei Faellen.
@@ -194,7 +194,7 @@ def main():
                       "gebaut: %d Wege" % len(roads_doerfer))
 
     # Dieselbe Mauer, aber jetzt DERSELBEN Kultur - der Kulturzusammenhang
-    # (§4.3 Ausnahme) muss trotzdem eine Verbindung erzwingen, "egal was sie
+    # (14_SIEDLUNGEN.md 5.2 Ausnahme) muss trotzdem eine Verbindung erzwingen, "egal was sie
     # kostet". Bei einer einzelnen gesperrten Wasserspalte findet sich noch
     # ein endlicher LANDWEG drumherum (die Mauer ist nur 1 Pixel breit auf
     # einer 60 px hohen Karte) - erzwungen wird hier also der teure Umweg,

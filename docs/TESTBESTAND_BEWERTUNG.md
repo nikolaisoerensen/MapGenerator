@@ -47,7 +47,7 @@ Batches (A: 27, B: 27, C: 24) mit alphabetisch fortlaufender Dateiliste.
 
 2. **`tests/smoke_test_erosion_realismus.py` — Slope-Area-Gesetz rot.**
    Gemessen beta=-0.262 gegen Zielkorridor -0.4..-0.7 aus
-   `docs/SPEZIFIKATION.md` §3.2, deutlich abweichend von der dort selbst
+   `docs/spezifikation/10_REGIONEN.md` B.2, deutlich abweichend von der dort selbst
    dokumentierten Referenzmessung -0.638. Monotonie- und Konkavitäts-
    Prüfung (dieselbe Datei) bleiben grün. Gleicher produktiver Erosionspfad
    wie oben — beide Befunde könnten dieselbe Ursache haben.
@@ -57,7 +57,7 @@ Batches (A: 27, B: 27, C: 24) mit alphabetisch fortlaufender Dateiliste.
    `settlement.landmarks/landmark_list` und
    `settlement.landmark_roads/landmark_roads` liefern auf dem CPU-Pfad
    Daten, auf dem GPU-Pfad NUR NULL — ein Verstoß gegen die in
-   `docs/SPEZIFIKATION.md` §4.1 geforderte CPU/GPU-Parität.
+   `docs/spezifikation/02_INVARIANTEN.md` Abschnitt 1 geforderte CPU/GPU-Parität.
 
 4. **`tests/smoke_test_regionen_welt.py` — 4 Befunde, nur die Laufzeit war
    bekannt, der Inhalt nicht:**
@@ -69,7 +69,8 @@ Batches (A: 27, B: 27, C: 24) mit alphabetisch fortlaufender Dateiliste.
      gegen 0.891 im Regioninneren; erlaubt wären maximal +25%) — ein
      Naht-Problem im Sinne von CLAUDE.md.
    - 512px und 1024px derselben Region korrelieren nur mit r=0.94 statt
-     annähernd perfekt — verletzt die in der SPEZIFIKATION geforderte
+     annähernd perfekt — verletzt die in
+     `docs/spezifikation/90_MESSPROTOKOLLE.md` §10 belegte
      Auflösungsunabhängigkeit.
 
 5. **`tests/smoke_test_weather_temperature_direktnormierung.py` — 3 von 36

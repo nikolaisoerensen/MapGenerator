@@ -289,7 +289,7 @@ dem bereits bekannten, hier nicht behandelten `colour_ranges_fit_the_data`,
 siehe Abschnitt 3).
 ## 8. Sinuosität erstmals gemessen (Ticket #33)
 
-Die Kennzahl aus `docs/SPEZIFIKATION.md` §3.6 ("Mäander (Sinuosität der
+Die Kennzahl aus `docs/spezifikation/10_REGIONEN.md` B.6 ("Mäander (Sinuosität der
 Hauptläufe) | > 1,2 | nicht gemessen") ist jetzt gemessen. Neue Messfunktion
 in `core/fluss_sinuositaet.py` (`sinuositaet_pfad`, `fluss_segmente`,
 `sinuositaet_je_fluss`), TDD-getestet in
@@ -352,8 +352,8 @@ Flachland in diesem Programm NICHT stärker als das Gebirge — der
 Unterschied ist mit vier Regionen je Gruppe nicht von Null zu unterscheiden,
 und die schwache Korrelation zeigt eher in die Gegenrichtung. Das ist
 plausibel: der Mäander entsteht hier ausschließlich aus dem
-Kosten-Spannbaum, der dem Gelände ausweicht (`docs/SPEZIFIKATION.md`
-§15/§16) — dieser Mechanismus reagiert auf lokale Hangwechsel im
+Kosten-Spannbaum, der dem Gelände ausweicht
+(`docs/spezifikation/90_MESSPROTOKOLLE.md` §15/§16) — dieser Mechanismus reagiert auf lokale Hangwechsel im
 Wegverlauf, nicht auf den Regions-Median-Hang. Nevadin (steil, viele lokale
 Hindernisse zum Umlaufen) mäandert deswegen ähnlich stark wie die flachen
 Regionen. Ob das ein gewünschtes Verhalten ist oder ein eigenes Ticket

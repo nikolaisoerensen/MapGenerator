@@ -112,7 +112,7 @@ Drei Ordner für drei Zwecke:
   lesbare Fassung ist aus der zweiten Fassung übernommen, die sie als
   `welt_zustand.json` führte; ohne sie wäre beim Umstieg auf pickle die
   einzige außerhalb von Python lesbare Form der Siedlungsdaten verloren
-  gegangen (`docs/SIEDLUNGEN_ENTWURF.md` §6).
+  gegangen (`docs/spezifikation/14_SIEDLUNGEN.md` Abschnitt 7).
 
 ## Das LOD gehört ins Manifest
 
@@ -215,7 +215,7 @@ wird hier nur benannt, nicht umgesetzt.
 
 ## Siedlungsnaht (Verweis, nicht Neuerfindung)
 
-`docs/SIEDLUNGEN_ENTWURF.md` §6 dokumentiert bereits, welche 8 Felder das
+`docs/spezifikation/14_SIEDLUNGEN.md` Abschnitt 7 dokumentiert bereits, welche 8 Felder das
 Spiel aus Siedlungsdaten liest (`city_id`, `city_center`,
 `city_boundary_polygons`, `road_entry_points`, `city_size`/`house_count`,
 `city_size`/`radius`, `city_type`, `rank`, `culture`). 6 davon liefert die
