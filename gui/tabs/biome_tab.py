@@ -161,6 +161,16 @@ class BiomeTab(BaseMapTab):
         self.biome_classification_widget = BiomeClassificationWidget()
         self.control_panel.layout().addWidget(self.biome_classification_widget)
 
+        # NACHTRAEGLICHER AUFRUF, NICHT REDUNDANT. BaseMapTab.setup_ui()
+        # ruft _stillgelegte_regler_sperren() direkt nach
+        # create_parameter_controls() auf - der ist hier aber ein No-Op
+        # (siehe dessen Docstring), und self.parameter_sliders entsteht erst
+        # hier in create_biome_parameter_panel(), NACH super().__init__().
+        # Die Sperre aus der Basisklasse liefe damit ins Leere (leeres
+        # Dict). Deshalb hier ein zweiter, gezielter Aufruf, sobald die
+        # Regler tatsaechlich existieren.
+        self._stillgelegte_regler_sperren()
+
     def create_statistics_controls(self, layout: QVBoxLayout):
         """
         Überschreibt BaseMapTab: befüllt das Statistics-Tab (Spalte 3) mit den

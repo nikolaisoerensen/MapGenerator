@@ -1782,4 +1782,33 @@ def stillgelegte_regler():
         "statt in Zyklen je Pixel. Wirkt nur noch, wenn feature_size_m auf 0 "
         "steht.")
 
+    # `alpine_level`/`snow_level` (Biome-Reiter) sind KEIN Schalterfall wie
+    # oben - der Umbau, der sie stillgelegt hat, ist nicht umschaltbar,
+    # deshalb stehen sie hier unconditional und nicht in einem `if`-Block.
+    #
+    # Seit dem Umbau vom 2026-08-07 (core/biome_generator.py) lesen
+    # _calculate_alpine_level_probabilities() und
+    # _calculate_snow_level_probabilities() die festen Modulkonstanten
+    # BAUMGRENZE_JULI_C = 10.0 und FIRN_JULI_C = 0.0 (Julitemperatur statt
+    # Hoehe) - Begruendung dort: die alte Hoehenregel loeste beim damaligen
+    # Gelaende nie aus (hoechster Punkt 728 m, Schwelle ab 2750 m).
+    # `self.alpine_level` wird seither nur noch von
+    # _alt_alpine_level_probabilities() gelesen, einer nie aufgerufenen
+    # Vergleichsmethode (eigener Docstring: "steht nur noch zum Vergleich
+    # hier"). `self.snow_level` wird NIRGENDS mehr gelesen.
+    #
+    # Das gilt unabhaengig vom Aufrufpfad: der GPU-Handler
+    # shader_manager.request_biome_classification existiert im Repo gar
+    # nicht, jeder Pfad faellt also auf denselben toten CPU-Code zurueck.
+    grund_biome_juli = (
+        "Seit dem Julitemperatur-Umbau vom 2026-08-07 lesen "
+        "_calculate_alpine_level_probabilities()/_calculate_snow_level_"
+        "probabilities() (core/biome_generator.py) die festen Konstanten "
+        "BAUMGRENZE_JULI_C/FIRN_JULI_C statt dieses Reglers. `alpine_level` "
+        "wird nur noch von der toten Vergleichsmethode "
+        "_alt_alpine_level_probabilities() gelesen, `snow_level` von "
+        "keinem Code mehr.")
+    gesperrt["alpine_level"] = grund_biome_juli
+    gesperrt["snow_level"] = grund_biome_juli
+
     return gesperrt
