@@ -52,6 +52,7 @@ def check(label, bedingung, zusatz=""):
 class FakeDLM:
     def __init__(self):
         self._stores = {k: {} for k in KATEGORIEN}
+        self._lods = {k: 0 for k in KATEGORIEN}
         self._seed = 20260918
         self._distance_km = 128.0
         self._latitude = 47.5
@@ -62,11 +63,29 @@ class FakeDLM:
 
     def set_all_data(self, category, data, lod_level=1, parameters=None):
         self._stores[category].update(data)
+        self._lods[category] = max(self._lods.get(category, 0), int(lod_level))
+
+    def get_current_lod_level(self, category):
+        """welt_backen() schreibt das LOD jeder Kategorie ins Manifest, damit
+        welt_laden() die Daten nicht pauschal auf LOD 1 zurueckschiebt (siehe
+        core/welt_io.py, Kommentar ueber manifest["kategorien"]). Die Attrappe
+        muss das also beantworten koennen.
+
+        Der echte DataLODManager liefert {} aus get_all_data(), solange das
+        LOD unter 1 liegt - wer also ueberhaupt Daten sieht, sieht sie auf
+        mindestens LOD 1. Tests, die direkt in _stores schreiben (statt ueber
+        set_all_data), bekommen deshalb hier dieselbe Zusage.
+        """
+        gesetzt = self._lods.get(category, 0)
+        if gesetzt > 0:
+            return gesetzt
+        return 1 if self._stores[category] else 0
 
     def clear_all_data(self):
         self.clear_all_data_calls += 1
         for k in self._stores:
             self._stores[k].clear()
+            self._lods[k] = 0
 
     def get_map_seed(self):
         return self._seed
