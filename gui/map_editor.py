@@ -130,6 +130,16 @@ class MapEditorWindow(QMainWindow):
     - Comprehensive error recovery
     """
 
+    # Tab-Schluessel (siehe tab_order/tab_configs in _setup_tabs()), die keine
+    # eigene generate()-Methode haben und daher nicht ueber den globalen
+    # Footer-Knopf generieren koennen: Region- und Kontinent-Tab dienen der
+    # Voransicht/Parametrierung, die eigentliche Generierung beginnt erst ab
+    # dem Terrain-Tab. Fuer genau diese beiden zeigt der Footer-Knopf
+    # "WEITER" (danger/rot) statt "GENERIEREN" (primary/gruen) und springt
+    # zum naechsten Tab, statt zu versuchen zu generieren - siehe
+    # _update_footer_button_for_tab()/_on_footer_button_clicked().
+    WEITER_TAB_KEYS = frozenset({"region", "kontinent"})
+
     def __init__(self, main_menu=None):
         # Kein Qt-Parent: ein Top-Level-Fenster MIT Parent bekommt unter Windows
         # keinen eigenen Taskbar-Eintrag (besonders wenn der Owner nur versteckt,
@@ -400,7 +410,16 @@ class MapEditorWindow(QMainWindow):
     def _create_footer_bar(self) -> QWidget:
         """
         Fußzeile: gewichteter Ladebalken (29 Klassen x LOD-Kosten, siehe
-        WeightedProgressCalculator) links, permanenter [GENERIEREN]-Button rechts.
+        WeightedProgressCalculator) links, permanenter Knopf rechts.
+
+        Der Knopf ist EIN globales Widget fuer alle Tabs (nicht pro Tab), und
+        sein Verhalten haengt vom aktiven Tab ab: auf Region/Kontinent (siehe
+        WEITER_TAB_KEYS) zeigt er "WEITER" (danger/rot) und springt zum
+        naechsten Tab, weil diese beiden kein generate() haben; auf allen
+        anderen Tabs zeigt er "GENERIEREN" (primary/gruen) wie bisher.
+        _on_footer_button_clicked() ist der gemeinsame Klick-Handler, der
+        anhand des aktiven Tabs entscheidet; _update_footer_button_for_tab()
+        (aus _on_tab_changed() aufgerufen) haelt Text/Farbe synchron.
         """
         footer = QWidget()
         footer_layout = QHBoxLayout(footer)
@@ -410,7 +429,7 @@ class MapEditorWindow(QMainWindow):
         footer_layout.addWidget(self.footer_progress_bar, 1)
 
         self.generate_button = BaseButton("GENERIEREN", "primary")
-        self.generate_button.clicked.connect(self._generate_current_tab)
+        self.generate_button.clicked.connect(self._on_footer_button_clicked)
 
         # LEERTASTE FREIGEBEN (2026-07-28). Es gab nie einen Space-Shortcut im
         # Projekt - die Leertaste generierte, weil Qt damit den FOKUSSIERTEN
@@ -425,9 +444,56 @@ class MapEditorWindow(QMainWindow):
 
         for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             shortcut = QShortcut(QKeySequence(key), self)
-            shortcut.activated.connect(self._generate_current_tab)
+            shortcut.activated.connect(self._on_footer_button_clicked)
 
         return footer
+
+    def _on_footer_button_clicked(self):
+        """
+        Gemeinsamer Klick-Handler des globalen Footer-Knopfes (Maus-Klick UND
+        Enter/Return-Shortcut, siehe _create_footer_bar()). Verzweigt anhand
+        des aktuell aktiven Tabs: WEITER_TAB_KEYS (Region/Kontinent, kein
+        generate()) springt zum naechsten Tab, alle anderen generieren wie
+        bisher ueber _generate_current_tab().
+        """
+        current_index = self.main_tab_bar.currentIndex()
+        if 0 <= current_index < len(self.tab_order) and \
+                self.tab_order[current_index] in self.WEITER_TAB_KEYS:
+            self._advance_to_next_tab()
+        else:
+            self._generate_current_tab()
+
+    def _advance_to_next_tab(self):
+        """
+        Springt vom aktuellen zum naechsten Tab in main_tab_bar (WEITER-Knopf
+        auf Region/Kontinent). Ist der aktuelle Tab bereits der letzte, tut
+        dies bewusst nichts (statt auf einen ungueltigen Index zu springen) -
+        das kann WEITER_TAB_KEYS heute nicht treffen, weil Region und
+        Kontinent in tab_configs (_setup_tabs()) vor Terrain stehen und damit
+        nie die letzten Tabs sind, aber die Pruefung haelt die Funktion auch
+        dann sicher, wenn sich die Tab-Reihenfolge kuenftig aendert.
+        """
+        current_index = self.main_tab_bar.currentIndex()
+        next_index = current_index + 1
+        if next_index < self.main_tab_bar.count():
+            self.main_tab_bar.setCurrentIndex(next_index)
+        else:
+            self.logger.warning(
+                "WEITER-Knopf: kein naechster Tab nach Index %s vorhanden",
+                current_index)
+
+    def _update_footer_button_for_tab(self, tab_name_lower: str):
+        """
+        Haelt Beschriftung/Farbe des globalen Footer-Knopfes synchron zum
+        aktiven Tab - aufgerufen aus _on_tab_changed(). Siehe WEITER_TAB_KEYS
+        und _on_footer_button_clicked() fuer die zugehoerige Verzweigung.
+        """
+        if not self.generate_button:
+            return
+        if tab_name_lower in self.WEITER_TAB_KEYS:
+            self.generate_button.set_label("WEITER", "danger")
+        else:
+            self.generate_button.set_label("GENERIEREN", "primary")
 
     def _refresh_footer_progress(self):
         """
@@ -979,6 +1045,10 @@ class MapEditorWindow(QMainWindow):
             self.statistics_stack.setCurrentIndex(index)
 
             self.current_tab_label.setText(f"Current: {tab_text}")
+
+            # Footer-Knopf (GENERIEREN/WEITER) auf den neu aktiven Tab
+            # umschalten - siehe WEITER_TAB_KEYS/_update_footer_button_for_tab().
+            self._update_footer_button_for_tab(tab_name_lower)
 
             # Update navigation manager
             if self.navigation_manager:

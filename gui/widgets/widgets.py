@@ -100,6 +100,25 @@ class BaseButton(QPushButton):
             }}
         """)
 
+    def set_label(self, text: str, button_type: Optional[str] = None):
+        """
+        Funktionsweise: Aendert Beschriftung und optional den Typ (Farbe) zur
+        Laufzeit, ohne den Button neu zu erzeugen.
+        Aufgabe: Erlaubt z.B. dem globalen Shell-Footer-Knopf den Wechsel
+        zwischen "GENERIEREN" (primary, gruen) und "WEITER" (danger, rot) je
+        nach aktivem Tab (Ticket: Region-/Kontinent-Tab haben kein generate()
+        und sollen stattdessen zum naechsten Tab springen).
+
+        original_text wird mitgepflegt, damit set_loading(False) danach zur
+        NEUEN Beschriftung zurueckkehrt statt zur beim __init__ gesetzten.
+        """
+        self.original_text = text
+        if not self.is_loading:
+            self.setText(text)
+        if button_type is not None and button_type != self.button_type:
+            self.button_type = button_type
+            self.setup_styling()
+
     def set_loading(self, loading: bool):
         """
         Funktionsweise: Setzt Loading-Status mit Spinner
