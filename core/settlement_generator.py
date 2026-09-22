@@ -589,6 +589,16 @@ KUeSTE_GEWICHT = 0.75
 # Werte sind eine gutachterliche Einschaetzung (keine Messreihe, kein Regler
 # in docs/SIEDLUNGEN_ENTWURF.md) - fruchtbares Offenland/Laubwald hoch,
 # Nadel-/Bergwald mittel, Moor/Bruch/Steilheit/Hochlage niedrig.
+#
+# GEPRUEFT, NICHT AUS DER BIOM-MATRIX ABGELEITET (Ticket #15.2, 2026-09-23):
+# `BaseBiomeClassifier.biome_definitions` (core/biome_generator.py) haelt nur
+# Klima-/Feuchtigkeitsgrenzen (temp/precip/elevation/moisture,
+# moisture_capacity, evaporation_factor) - keinen Siedlungseignungswert, aus
+# dem sich diese Tabelle ableiten liesse. `docs/BIOME_MATRIX.md` enthaelt
+# ebenfalls keinen solchen Wert. Diese Tabelle ist die EINZIGE Quelle fuer
+# Siedlungseignung je Biom, keine Abschrift einer anderswo gepflegten Zahl -
+# eine Biom-Matrix-Aenderung kann sie deshalb nicht stillschweigend veralten
+# lassen, weil es nichts gibt, wovon sie abweichen koennte.
 BIOME_SIEDLUNGSEIGNUNG = {
     0: 0.30,   # hochmoor - nass, sauer, kaum tragfaehiger Baugrund (Moor)
     1: 0.40,   # bruchwald - Sumpfwald, staendig vernaesst
@@ -618,7 +628,6 @@ BIOME_SIEDLUNGSEIGNUNG = {
     25: 0.20,  # alpine_level - Hochlage oberhalb der Waldgrenze
     26: 0.00,  # sea_ice - kein Land
 }
-
 
 class TerrainSuitabilityAnalyzer:
     """
