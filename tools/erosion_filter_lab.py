@@ -206,8 +206,8 @@ def lauf_kennzahlen(size=192):
 
     # BEIDE Untergrundvarianten: 5 Oktaven ist die heutige Vorgabe, 1 Oktave
     # die, die nach lauf_basis() tatsaechlich benutzt werden soll. Nur auf der
-    # verworfenen Konfiguration zu messen waere §4.2 - der teuerste Fehlertyp
-    # dieses Projekts.
+    # verworfenen Konfiguration zu messen waere 02_INVARIANTEN.md 2 - der
+    # teuerste Fehlertyp dieses Projekts.
     for name, amplitude, potenz in (("04 Alpen", 700.0 + 3800.0, 2.0),
                                     ("21 Bamberg", 230.0 + 300.0, 2.5)):
         for okt_name, okt in (("5 Okt", 5), ("1 Okt", 1)):

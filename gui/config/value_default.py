@@ -44,8 +44,8 @@ class TERRAIN:
     # verdeckte den Fehler).
     #
     # Mit 0.0 ist das ausgeschlossen, weil AMPLITUDE bei 30 beginnt und damit
-    # immer über der Talsohle liegt. §1 und §4.7: kein Reglerstand darf ein
-    # unbrauchbares Ergebnis erzeugen.
+    # immer über der Talsohle liegt. §1 und 02_INVARIANTEN.md 7: kein
+    # Reglerstand darf ein unbrauchbares Ergebnis erzeugen.
     #
     # Der Meeresspiegel liegt entsprechend ebenfalls bei 0 m (siehe
     # BIOME.SEA_LEVEL) - die Karte bleibt damit landseitig, ohne dass die
@@ -131,7 +131,7 @@ class TERRAIN:
     # gemessen: mit 5 Oktaven Untergrund ist sein Ergebnis feinkörniges
     # Gekrissel, mit 1 Oktave ein zusammenhängendes verästeltes Netz. Ein
     # detailreicher Untergrund macht den Filter also nicht besser, sondern
-    # wirkungslos. §4.7: abhängige Defaults ziehen mit.
+    # wirkungslos. 02_INVARIANTEN.md 7: abhängige Defaults ziehen mit.
     #
     # Nebenbefund derselben Messung, unabhängig vom Filter: der glatte
     # Untergrund hat auch für sich die besseren Kennzahlen (9 statt 187
@@ -744,8 +744,8 @@ class RIVER_NETWORK:
     # muessen. das wird doch automatisch durch die terrain-hoehe bestimmt."
     # Genau richtig - 400 m Eintiefung bedeuten in einer 4000-m-Landschaft
     # etwas anderes als in einer 200-m-Landschaft, und der Wert musste bei
-    # jeder Änderung der Amplitude nachgezogen werden. §4.4: eine absolute
-    # Größe, wo eine relative hingehört.
+    # jeder Änderung der Amplitude nachgezogen werden. 02_INVARIANTEN.md 4:
+    # eine absolute Größe, wo eine relative hingehört.
     # 2026-08-06 auf 0.30: der Wert, mit dem taeler_eingraben() bisher fest
     # rechnete. Der alte Vorgabewert 0.55 gehoerte zum abgeloesten Netz.
     # 2026-08-25 von 0.30 auf 0.18 - die zweite Haelfte von "groesser, aber
@@ -957,7 +957,8 @@ class EROSION_FILTER:
     Regler des ATEF-Erosionsfilters (SPEZIFIKATION §9).
 
     Alle Werte sind RELATIV zur Karte und zu ihrer Hoehenspanne, keine
-    Meterwerte - nach §4.4 der wichtigste Punkt an diesem Filter.
+    Meterwerte - nach 02_INVARIANTEN.md 4 der wichtigste Punkt an diesem
+    Filter.
 
     Kein Reglerstand kann die Hoehenspanne verlassen: _calc_redistribution()
     bildet das Ergebnis nach dem Filter wieder auf
@@ -983,9 +984,9 @@ class EROSION_FILTER:
     # jedem Ausschnitt eine andere.
     #
     # Eine Rinne ist gegen die WIRKLICHKEIT bemessen, nicht gegen den
-    # Bildausschnitt - §4.4, "jede neue Konstante mit Einheit muss beantworten,
-    # gegen was sie bemessen ist". Die Umrechnung in den kartenrelativen Wert,
-    # den der Filter selbst braucht, macht
+    # Bildausschnitt - 02_INVARIANTEN.md 4, "jede neue Konstante mit Einheit
+    # muss beantworten, gegen was sie bemessen ist". Die Umrechnung in den
+    # kartenrelativen Wert, den der Filter selbst braucht, macht
     # BaseTerrainGenerator._erosion_filter_parameters().
     #
     # Vorgabe 2250 m = der frueherer Anteil 0.15 bei den vorgegebenen 15 km,
@@ -1060,7 +1061,7 @@ class EROSION_FILTER:
 # richtigen Form und Größe, alle Kanten und alle Verbraucher (water.*, biome.*,
 # erosion.slope, die Anzeige-Layer) laufen unverändert. Fünf handgepflegte
 # Generatorlisten haben in diesem Projekt je einen Deadlock oder eine fehlende
-# Invalidierung verursacht (SPEZIFIKATION §4.5) - ein Knoten, der Nullen
+# Invalidierung verursacht (02_INVARIANTEN.md 5) - ein Knoten, der Nullen
 # liefert, ist der Weg, der das nicht wieder auslöst.
 #
 # Absichtlich AUS seit 2026-07-30: die Erosion wird durch den Skelett-Ansatz
@@ -1463,7 +1464,8 @@ class BIOME:
     # TERRAIN.BASE_ELEVATION_M = 0.0 (siehe dort). Die Talsohle liegt jetzt
     # exakt bei 0 m; bliebe der Meeresspiegel bei 10 m, würde der untere Teil
     # jeder Karte als Ozean klassifiziert - SPEZIFIKATION §1 führt die Karten
-    # aber ausdrücklich OHNE Meer. §4.7: abhängige Defaults ziehen mit.
+    # aber ausdrücklich OHNE Meer. 02_INVARIANTEN.md 7: abhängige Defaults
+    # ziehen mit.
     SEA_LEVEL = {
         "min": 0, "max": 200, "default": 0, "step": 5, "suffix": "m",
         "description": "Höhe des Meeresspiegels - alles darunter wird als "

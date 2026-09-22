@@ -30,7 +30,7 @@ _calc_intrusions() Zeilen 1222-1239). Der Test nennt das deshalb getrennt
 Ebenso settlement.pathfinding/sea_roads: eine leere Liste ist auf DIESER
 Testkarte (SIZE/KM/SEED oben) korrekt, kein Ausfall (Ticket #80). Ein
 Seeweg entsteht nur, wenn ein Kulturpaar KEINEN endlichen Landweg hat
-(calculate_road_network(), §4.4-Zweig). Nachgemessen: bei diesem Seed
+(calculate_road_network(), 14_SIEDLUNGEN.md 5.3-Zweig). Nachgemessen: bei diesem Seed
 liegen alle 40 Siedlungen auf derselben, 5326 px grossen Hauptlandmasse
 (daneben nur neun Kleinstinseln mit 5-9 px, siedlungsfrei) - jedes der
 neun Kulturpaare findet also einen Landweg, 0 Seewege ist damit die
@@ -59,9 +59,9 @@ ZWEI DURCHGAENGE, das ist der zweite Zweck:
     ohne ShaderManager   der reine CPU-Pfad (jeder Generator hat einen)
 
 Unterscheiden sich die Ergebnisse in der FORM oder faellt ein Output nur in
-einem der beiden Durchgaenge aus, ist die Paritaet verletzt (SPEZIFIKATION
-§4.1: eine Aenderung an einem Pfad ist erst fertig, wenn der andere mitgezogen
-ist).
+einem der beiden Durchgaenge aus, ist die Paritaet verletzt
+(02_INVARIANTEN.md 1: eine Aenderung an einem Pfad ist erst fertig, wenn der
+andere mitgezogen ist).
 
 Aufruf:
     .venv/Scripts/python.exe tests/smoke_test_pipeline_outputs.py
@@ -150,7 +150,8 @@ def _generatoren(manager, shader_manager):
 
 
 def _reihenfolge():
-    """Topologische Reihenfolge aus dem Graphen - nicht von Hand gefuehrt (§4.5)."""
+    """Topologische Reihenfolge aus dem Graphen - nicht von Hand gefuehrt
+    (02_INVARIANTEN.md 5)."""
     from managers.calculator_graph import CALCULATOR_GRAPH
 
     offen = dict(CALCULATOR_GRAPH)

@@ -53,7 +53,7 @@ const vec2 GRAD2[8] = vec2[8](
 // Feldern - kein Zusammenhang. Kein Test hat das je geprueft, weil alle
 // vorhandenen Tests entweder nur den CPU-Pfad fahren oder nur die Form des
 // Ergebnisses ansehen. Sichtbar wurde es erst, als die Zoom-Pyramide verlangte,
-// dass jede Stufe dasselbe Weltfeld sieht (SPEZIFIKATION §4.1).
+// dass jede Stufe dasselbe Weltfeld sieht (02_INVARIANTEN.md 1).
 //
 // Jetzt exakt wie opensimplex.internals._extrapolate2:
 //     index = perm[(perm[xsb & 0xFF] + ysb) & 0xFF] & 0x0E

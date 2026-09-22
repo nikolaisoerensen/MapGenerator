@@ -493,7 +493,7 @@ def oktavenstapel(size, seed, shader_manager=None, mpp=None, hoehe=None):
     von Pruefwerkzeugen, die einen ANDEREN Weltausschnitt betrachten als die
     Karte (tools/inseltest.py zeigt Inseln von 150 m bis 10 km). Ohne diesen
     Weg muesste dort ein zweiter Rauschgenerator gebaut werden - und zwei
-    Rauschquellen waeren eine zweite Wahrheit (SPEZIFIKATION §4.5): das
+    Rauschquellen waeren eine zweite Wahrheit (02_INVARIANTEN.md 5): das
     Testgelaende saehe anders aus als das Programm, und niemand wuesste,
     welches der beiden man gerade beurteilt.
     """
@@ -2642,7 +2642,7 @@ def weltfeld(size, seed, punktzahl=200, tiefe_skala_m=1400.0, shader_manager=Non
     # Sie wird HIER gebildet und nicht spaeter noch einmal: der Siedlungs-
     # generator, der Terrain-Reiter und der Regional-Reiter brauchen alle
     # dieselbe Zuordnung, und `voronoi_regionen` ein zweites Mal aufzurufen
-    # waere eine zweite Wahrheit (SPEZIFIKATION §4.5). Der Regional-Reiter tat
+    # waere eine zweite Wahrheit (02_INVARIANTEN.md 5). Der Regional-Reiter tat
     # bis 2026-08-06 genau das.
     #
     # NACH der Glaettung, nicht davor: geglaettet sind die Gewichte, aus denen

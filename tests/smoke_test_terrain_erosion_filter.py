@@ -7,9 +7,9 @@ Prueft die Einbindung des ATEF-Erosionsfilters in den Terrain-Aufbau
 Fuenf Zusicherungen. Die drei letzten sind Gegenproben - nach §5.1.4 prueft
 eine Zusicherung, die auch ohne die Aenderung haelt, nichts.
 
-  1. Der Filter LAEUFT ueberhaupt. §4.2 ist der teuerste Fehlertyp dieses
-     Projekts (dreimal an einem Tag), deshalb wird nicht das Ergebnis
-     interpretiert, sondern belegt, dass der Zweig betreten wurde: die
+  1. Der Filter LAEUFT ueberhaupt. 02_INVARIANTEN.md 2 ist der teuerste
+     Fehlertyp dieses Projekts (dreimal an einem Tag), deshalb wird nicht das
+     Ergebnis interpretiert, sondern belegt, dass der Zweig betreten wurde: die
      ridge_map existiert nur, wenn er lief, und ihr Wertebereich ist ohne den
      Filter nicht herstellbar.
   2. Die Hoehenspanne ist exakt BASE_ELEVATION_M .. AMPLITUDE. §3.1 fuehrt sie
@@ -17,12 +17,13 @@ eine Zusicherung, die auch ohne die Aenderung haelt, nichts.
      bildet deshalb nach dem Filter zurueck.
   3. GEGENPROBE Reglerwirkung: erosion_filter_strength = 0 muss dieselbe
      Heightmap liefern wie der abgeschaltete Filter. Sonst tut der Regler
-     nicht, was sein Name sagt (§4.7).
+     nicht, was sein Name sagt (02_INVARIANTEN.md 7).
   4. GEGENPROBE Wirksamkeit: mit Vorgabewerten muss sich die Heightmap
      MESSBAR von der ungefilterten unterscheiden. Ohne diesen Teil wuerden
      die Punkte 1-3 auch bei einem Filter gruen sein, der nichts tut.
   5. GEGENPROBE Regler einzeln: jeder der sieben Regler muss eine sichtbare
-     Wirkung haben. Drei tote Water-Slider gab es hier monatelang (§4.7).
+     Wirkung haben. Drei tote Water-Slider gab es hier monatelang
+     (02_INVARIANTEN.md 7).
 
 Aufruf:
     .venv\\Scripts\\python.exe tests/smoke_test_terrain_erosion_filter.py

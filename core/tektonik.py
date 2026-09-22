@@ -41,7 +41,7 @@ ABLAUF
 
 Die Zellmaschinerie ist bewusst DIESELBE wie in `seegliederung()`
 (Poisson-Punkte -> cKDTree-Etiketten -> Pixel-Adjazenz -> Breitensuche) - ein
-zweiter Zellbau waere eine zweite Wahrheit (SPEZIFIKATION §4.5).
+zweiter Zellbau waere eine zweite Wahrheit (02_INVARIANTEN.md 5).
 """
 
 from collections import deque

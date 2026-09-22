@@ -5,7 +5,7 @@ CPU-Referenz des Advanced Terrain Erosion Filter (ATEF).
 
 Numpy-Portierung von shaders/terrain/ATEF_Buffer_A.comp und der davon
 benutzten Teile von ATEF_common.comp. Zeile fuer Zeile uebersetzt, damit sie
-als Vergleichsseite des GPU-Paritaetstests taugt (SPEZIFIKATION §4.1: jeder
+als Vergleichsseite des GPU-Paritaetstests taugt (02_INVARIANTEN.md 1: jeder
 Rechenweg mit GPU-Pfad hat einen Paritaetstest gegen die CPU, und eine
 Aenderung an einem Pfad ist erst fertig, wenn der andere mitgezogen ist).
 
@@ -17,10 +17,10 @@ Feld-Erosion (SPEZIFIKATION §7) ist das praktisch kostenlos.
 
 WAS ER NICHT IST: eine Entwaesserung. Er bewegt keine Masse, kennt kein
 Routing und keine Konnektivitaet. Die Kennzahlen aus §3.2 (Netzgroesse,
-Zusammenfluesse, Randabfluss) erfuellt er nicht, und §4.3 (Massenbilanz) gilt
-fuer ihn nicht, weil es nichts zu bilanzieren gibt. Er macht das AUSSEHEN von
-Erosion. Die Entwaesserung kommt aus dem Skelett-Ansatz (§8) - die beiden sind
-die zwei Haelften, nicht zwei Alternativen.
+Zusammenfluesse, Randabfluss) erfuellt er nicht, und 02_INVARIANTEN.md 3
+(Massenbilanz) gilt fuer ihn nicht, weil es nichts zu bilanzieren gibt. Er
+macht das AUSSEHEN von Erosion. Die Entwaesserung kommt aus dem Skelett-Ansatz
+(§8) - die beiden sind die zwei Haelften, nicht zwei Alternativen.
 
 Nuetzliche Nebenausgabe: die ridge_map, -1 in Kerben und +1 auf Kaemmen. Der
 Autor nennt sie ausdruecklich als Eingang fuer Entwaesserung.
@@ -54,7 +54,7 @@ TAU = 6.28318530717959
 # Erklaerungen stehen dort ab Zeile 296 und werden hier nicht verdoppelt.
 #
 # Alle Werte sind RELATIV (Einheitsquadrat, Hoehe in [0,1]) - keine Meterwerte.
-# Nach SPEZIFIKATION §4.4 ist das der wichtigste Punkt an diesem Filter: der
+# Nach 02_INVARIANTEN.md 4 ist das der wichtigste Punkt an diesem Filter: der
 # Fehlertyp "absolute Konstante, wo eine relative hingehoert" entsteht hier
 # nicht.
 ATEF_DEFAULTS: Dict[str, Any] = {

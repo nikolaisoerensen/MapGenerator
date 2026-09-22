@@ -203,7 +203,7 @@ def laufe(art, size=192, cpu=False, **overrides):
         shader_manager=None if cpu else ShaderManager())
     p = lab.default_parameters()
     p.update(overrides)
-    # SPEZIFIKATION §4.2: welcher Pfad laeuft, VOR jeder Schlussfolgerung.
+    # 02_INVARIANTEN.md 2: welcher Pfad laeuft, VOR jeder Schlussfolgerung.
     # Dreimal an einem Tag wurde eine CPU-Aenderung ueber den GPU-Pfad
     # gemessen und das Ergebnis als "unwirksam" gemeldet.
     print("   [Pfad: %s]" % ("GPU" if sim.has_gpu_path() else "CPU"))
@@ -308,7 +308,7 @@ def lauf_routing(size=128, schritte=3000):
 
     LAEUFT AUF DER CPU, weil dort die Aenderung sitzt. Der GPU-Shader kennt
     sie nicht - eine Messung ueber die GPU wuerde "unwirksam" melden, wie es
-    bei CHANNEL_WIDTH_SIGMA_PX tatsaechlich passiert ist (Spezifikation §4.2).
+    bei CHANNEL_WIDTH_SIGMA_PX tatsaechlich passiert ist (02_INVARIANTEN.md 2).
     Beide Zeilen derselbe Pfad, damit der Vergleich zaehlt.
     """
     import time

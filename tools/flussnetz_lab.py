@@ -341,7 +341,8 @@ def flusshoehen(punkte, eltern, reihenfolge, ordnung, P, size, p_param, mpp):
     # Vorher stand hier eine Steigung von 3% mal Kantenlaenge. Bei 3000 m
     # langen Kanten sind das 90 m ANSTIEG PRO KANTE, ueber zehn Kanten also
     # 900 m - das Flachland kam damit auf 707 m Relief statt 90 m. Wieder der
-    # Fehlertyp aus §4.4: eine absolute Groesse, wo eine relative hingehoert.
+    # Fehlertyp aus 02_INVARIANTEN.md 4: eine absolute Groesse, wo eine
+    # relative hingehoert.
     #
     # Der Anstieg hat hier nur EINE Aufgabe: strenge Monotonie herstellen, wo
     # P selbst eine Delle hat. Er ist deshalb winzig und am Gesamtrelief

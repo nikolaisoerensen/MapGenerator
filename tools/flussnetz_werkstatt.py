@@ -568,8 +568,8 @@ def baue_netz(P, mpp, punktzahl, drain_gewicht, lowland, seed, umlenkung_grad,
     # Ein Hauptauslass liegt selbst am Rand. Bliebe er in beiden Listen,
     # summierte csr_matrix die zwei Eintraege und er verloere seinen Vorrang.
     rand = np.setdiff1d(rand, np.asarray(haupt, dtype=np.int64))
-    # Preis relativ zum Netz, nicht in absoluten Zahlen (§4.4): 1.0 heisst
-    # "so teuer wie ein Lauf quer ueber die halbe Karte".
+    # Preis relativ zum Netz, nicht in absoluten Zahlen (02_INVARIANTEN.md 4):
+    # 1.0 heisst "so teuer wie ein Lauf quer ueber die halbe Karte".
     quer = 0.5 * size / max(float(np.median(laenge)), 1e-9)
     preis = randabfluss * quer * float(np.median(kosten_hin))
 

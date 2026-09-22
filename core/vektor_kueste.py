@@ -24,7 +24,7 @@ Beide rufen DIESELBE Funktion. Der Unterschied zwischen Mesh und Heightmap B
 ist damit ausschliesslich die Abtastdichte - kein Modellunterschied. Wuerden
 Mesh und Raster jeweils eigenen Code fuer "was macht dieser Vektor hier mit
 der Hoehe" haben, liefen sie unweigerlich auseinander; genau davor warnt
-SPEZIFIKATION §4.5, und genau das ist diesem Projekt schon mehrfach passiert.
+02_INVARIANTEN.md 5, und genau das ist diesem Projekt schon mehrfach passiert.
 
 WAS SICH GEGENUEBER `_kuesten_umformen()` AENDERT
 

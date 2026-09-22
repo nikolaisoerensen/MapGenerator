@@ -68,10 +68,10 @@ class SettlementRegionalTab(BaseMapTab):
         Die Zugehoerigkeit je Pixel - GELESEN, nicht gerechnet.
 
         Bis 2026-08-06 rief dieser Reiter kontinentform() und voronoi_regionen()
-        selbst auf. Das war eine zweite Wahrheit (SPEZIFIKATION §4.5): dieselbe
-        Rechnung an zwei Stellen, die bei jeder Aenderung an einer davon
-        auseinanderlaufen musste - und nebenbei ein zweiter, teurer Durchlauf
-        bei jedem Regionswechsel.
+        selbst auf. Das war eine zweite Wahrheit (02_INVARIANTEN.md 5):
+        dieselbe Rechnung an zwei Stellen, die bei jeder Aenderung an einer
+        davon auseinanderlaufen musste - und nebenbei ein zweiter, teurer
+        Durchlauf bei jedem Regionswechsel.
 
         Seitdem liefert terrain.redistribution `region_map` als eigenen Output.
         `size` und `seed` bleiben in der Signatur, weil der Aufrufer sie ohnehin

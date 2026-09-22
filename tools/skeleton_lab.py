@@ -14,8 +14,8 @@ gebaut - vom Auslass am Kartenrand aufwaerts, mit Strahler-Ordnung und
 MONOTON steigender Hoehe nach oben - und das Gelaende danach aus dem Abstand
 zum Fluss geformt. Noise ist dann Modulation, nicht Basis.
 
-Die falsifizierbare Vorhersage, um die es hier geht (SPEZIFIKATION §4.2/§5.1.4
-verlangen genau das VOR der Auswertung):
+Die falsifizierbare Vorhersage, um die es hier geht (02_INVARIANTEN.md 2 und
+03_ARBEITSREGELN.md 1.1 Punkt 4 verlangen genau das VOR der Auswertung):
 
     Wenn die Hoehe entlang des Netzes per Konstruktion monoton ist, muss der
     ENTWAESSERUNGSANTEIL deutlich ueber den 10-20% des Noise-Pfads liegen, und
@@ -142,7 +142,7 @@ def region(name):
         "fluss_relief_anteil": 0.45,
         # Laengsprofil: Steigung fuer Strahler-Ordnung 1, danach je Ordnung
         # flacher. Erzeugt das konkave Profil (steile Baeche, traeger
-        # Hauptfluss) und ist relativ, kein Meter-Wert (§4.4).
+        # Hauptfluss) und ist relativ, kein Meter-Wert (02_INVARIANTEN.md 4).
         "steigung_abfall": 0.55,
         "verzweigungswinkel_grad": 38.0,
         "laengen_verhaeltnis": 0.78,
@@ -427,7 +427,7 @@ def baue_gelaende(name, size=192, seed=LAB_SEED, mit_noise=True):
 
     # Abstand IN METERN und gleichzeitig der naechste Flussknoten. sampling
     # macht aus dem Pixelabstand einen Meterabstand - eine relative Groesse
-    # statt einer Pixelkonstante (§4.4).
+    # statt einer Pixelkonstante (02_INVARIANTEN.md 4).
     abstand, index = ndimage.distance_transform_edt(
         ~maske, sampling=(meter_pro_pixel, meter_pro_pixel), return_indices=True)
     z_nah = z_fluss[index[0], index[1]]

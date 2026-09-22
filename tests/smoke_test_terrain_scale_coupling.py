@@ -10,7 +10,7 @@ gegenseitig nicht verstellen:
 
 Die Frage, um die es geht: bleibt eine Landschaft DIESELBE Landschaft, wenn man
 nur die Aufloesung erhoeht oder nur den Ausschnitt vergroessert? Nach
-SPEZIFIKATION §4.4 muss jede Groesse mit Einheit beantworten, gegen WAS sie
+02_INVARIANTEN.md 4 muss jede Groesse mit Einheit beantworten, gegen WAS sie
 bemessen ist - und eine Rinne ist gegen die Wirklichkeit bemessen, nicht gegen
 den Bildausschnitt. Zoomt man heraus, muessen mehr Rinnen ins Bild passen, nicht
 groessere.
@@ -206,7 +206,7 @@ def baue(map_size, map_distance_km, filter_overrides=None):
 
     # Das Delta direkt vom Filter, ohne die Spannen-Rueckbildung dazwischen.
     # Genau derselbe Weg, den _apply_erosion_filter geht - sonst waere hier
-    # etwas anderes gemessen als in der App laeuft (§4.2).
+    # etwas anderes gemessen als in der App laeuft (02_INVARIANTEN.md 2).
     filter_parameter = generator._erosion_filter_parameters(
         int(map_size), float(map_distance_km))
     from core.terrain_erosion_filter import filter_heightmap
@@ -313,7 +313,7 @@ def lauf():
             "Rinnengroesse haengt an der Kartenausdehnung (Faktor %.2f). Eine "
             "Rinne ist gegen die Wirklichkeit bemessen, nicht gegen den "
             "Bildausschnitt - beim Herauszoomen muessen MEHR Rinnen ins Bild "
-            "passen, nicht groessere (§4.4)." % streuung)
+            "passen, nicht groessere (02_INVARIANTEN.md 4)." % streuung)
 
     print()
     if fehler:

@@ -14,8 +14,8 @@ eine Zusicherung, die auch ohne die Aenderung haelt, nichts.
   3. Der ENTWAESSERUNGSANTEIL steigt deutlich. Das ist der eigentliche Zweck:
      §7 mass 10-22% fuer die Feld-Erosion, der Noise-Pfad 10.1%.
   4. GEGENPROBE Tiefe 0: kein Einschnitt darf das Gelaende nicht veraendern.
-  5. GEGENPROBE Regler einzeln: jeder der sieben muss wirken (§4.7, drei tote
-     Water-Slider gab es hier monatelang).
+  5. GEGENPROBE Regler einzeln: jeder der sieben muss wirken
+     (02_INVARIANTEN.md 7, drei tote Water-Slider gab es hier monatelang).
   6. GEGENPROBE Aufloesung: derselbe Punktsatz bei 256 und 512 px. Der Satz
      wird in METERN erzeugt; haengt er doch an der Pixelzahl, springt das
      Gelaende zwischen den LOD-Stufen.
@@ -150,8 +150,8 @@ def lauf():
           % (100 * a_mit, 100 * a_ohne, "ok" if besser else "FEHLER"))
 
     # ---------- 4 ----------
-    # Der Regler muss tun, was sein Name sagt (§4.7): mehr Tiefe = tiefere
-    # Taeler, monoton ueber den ganzen Bereich.
+    # Der Regler muss tun, was sein Name sagt (02_INVARIANTEN.md 7): mehr Tiefe
+    # = tiefere Taeler, monoton ueber den ganzen Bereich.
     #
     # Frueher stand hier "Tiefe 0 muss bitgleich mit abgeschaltetem Netz sein".
     # Das war die falsche Frage, gemessen und verworfen: bei Tiefe 0 ist das
@@ -262,7 +262,8 @@ def lauf():
     alle = np.concatenate(spruenge)
     p99 = float(np.percentile(alle, 99))
     groesster = float(alle.max())
-    # Bezogen auf die Hoehenspanne, nicht als fester Meterwert (§4.4).
+    # Bezogen auf die Hoehenspanne, nicht als fester Meterwert
+    # (02_INVARIANTEN.md 4).
     grenze = 0.03 * TERRAIN.AMPLITUDE["default"]
     ok7 = groesster < grenze
     if not ok7:

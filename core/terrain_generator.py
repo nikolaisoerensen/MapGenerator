@@ -183,7 +183,8 @@ class TerrainData:
     # Beide waren toter Code - eine repo-weite Suche (core/, gui/, descriptor.py,
     # smoke_test_*, _old_*) fand ausser der jeweiligen Definition keinen
     # Aufrufer. Beide waren zugleich handgepflegte Listen der Art, die
-    # SPEZIFIKATION §4.5 ausdruecklich verbietet, und beide waren schon falsch:
+    # 02_INVARIANTEN.md 5 ausdruecklich verbietet, und beide waren schon
+    # falsch:
     #
     #   detect_critical_changes()   fuehrte fuenf Parameter als "kritisch" und
     #       liess redistribute_power, persistence und lacunarity aus, seit
@@ -2187,7 +2188,7 @@ class BaseTerrainGenerator:
         Wie beim Erosionsfilter bewusst KEIN eigener Calculator-Knoten: das
         Ergebnis ist die endgueltige Gelaendeform, und 20+ Lesestellen holen
         die Heightmap ueber ("terrain.redistribution", "heightmap"). Sie alle
-        umzuhaengen ist das Risiko aus §4.5.
+        umzuhaengen ist das Risiko aus 02_INVARIANTEN.md 5.
 
         Der Hoehenbereich wird danach NICHT hier zurueckgebildet - das macht
         _calc_redistribution ohnehin nach dem Erosionsfilter. Hier wird die
@@ -2209,7 +2210,7 @@ class BaseTerrainGenerator:
         meters_per_pixel = km * 1000.0 / float(size)
 
         # Reglerwerte durchreichen; fehlt einer, gilt die Vorgabe des Moduls
-        # (§4.1: durchreichen, nicht doppelt pflegen).
+        # (02_INVARIANTEN.md 1: durchreichen, nicht doppelt pflegen).
         netz_parameter = {}
         for parameter_key, modul_key in (
                 ("river_spacing_m", "river_spacing_m"),
@@ -2259,12 +2260,12 @@ class BaseTerrainGenerator:
         core/terrain_erosion_filter.py ab.
 
         Eigene Methode, damit Messwerkzeuge denselben Weg gehen koennen wie die
-        App. §4.2 ist der teuerste Fehlertyp dieses Projekts - dreimal an einem
-        Tag wurde etwas anderes gemessen als lief.
+        App. 02_INVARIANTEN.md 2 ist der teuerste Fehlertyp dieses Projekts -
+        dreimal an einem Tag wurde etwas anderes gemessen als lief.
 
         Fehlt ein Regler, gilt die Vorgabe des Filters. Es wird KEIN zweiter
-        Satz Konstanten hier gefuehrt (§4.1: durchreichen, nicht doppelt
-        pflegen).
+        Satz Konstanten hier gefuehrt (02_INVARIANTEN.md 1: durchreichen, nicht
+        doppelt pflegen).
         """
         from core.terrain_erosion_filter import ATEF_DEFAULTS
 
@@ -2390,8 +2391,8 @@ class BaseTerrainGenerator:
         liefert die endgueltige Geländeform, und 20+ Lesestellen in
         core/ und gui/ holen die Heightmap ueber
         ("terrain.redistribution", "heightmap"). Sie alle auf einen neuen Knoten
-        umzuhaengen ist genau das Risiko, vor dem §4.5 warnt (fuenf
-        handgepflegte Listen haben je einen Deadlock oder eine fehlende
+        umzuhaengen ist genau das Risiko, vor dem 02_INVARIANTEN.md 5 warnt
+        (fuenf handgepflegte Listen haben je einen Deadlock oder eine fehlende
         Invalidierung verursacht). So sehen Slope, Schatten, Geology, Weather,
         Water, Biome, die 2D-Anzeige, die 3D-Ansicht und der Export den Filter
         ohne eine einzige weitere Aenderung.
@@ -2427,7 +2428,7 @@ class BaseTerrainGenerator:
         # Zielspanne, laesst die Form also unberuehrt.
         #
         # Zweiter Zweck: damit kann kein Reglerstand des Filters die Karte aus
-        # ihrem Hoehenbereich schieben (§1, §4.7).
+        # ihrem Hoehenbereich schieben (§1, 02_INVARIANTEN.md 7).
         gefiltert = self._apply_redistribution(gefiltert, 1.0, amplitude)
 
         self.logger.debug(

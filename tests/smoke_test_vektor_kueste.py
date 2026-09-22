@@ -10,7 +10,7 @@ WAS HIER GEPRUEFT WIRD, UND WARUM JEDES DAVON
                         denselben Koordinaten muessen BITGLEICH sein. Das ist
                         die Kernzusicherung der ganzen Bauart: gaebe es zwei
                         Implementierungen, liefen Mesh und Heightmap
-                        auseinander (SPEZIFIKATION §4.5).
+                        auseinander (02_INVARIANTEN.md 5).
   2. RASTERFREIHEIT     An freien Punkten ZWISCHEN den Pixeln muss messbar
                         mehr Hoehendetail stehen als eine bilineare
                         Interpolation der Rasterkarte hergibt - sonst waere

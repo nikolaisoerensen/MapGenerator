@@ -328,7 +328,7 @@ def spanning_tree(points_px: np.ndarray, P: np.ndarray, size: int,
     #
     # Der Anstieg wird an der MITTLEREN Kantensteigung des Netzes bemessen,
     # nicht an einem festen Meterwert - damit wirkt der Regler in flachem wie
-    # in steilem Gelaende gleich (§4.4).
+    # in steilem Gelaende gleich (02_INVARIANTEN.md 4).
     delta = h_norm[edges[:, 1]] - h_norm[edges[:, 0]]
     steigung = np.abs(delta) / np.maximum(length, 1e-9)
     bezug = float(np.median(steigung)) or 1e-6
@@ -428,8 +428,8 @@ def spanning_tree(points_px: np.ndarray, P: np.ndarray, size: int,
     # Ein Hauptauslass liegt selbst am Rand. Bliebe er in beiden Listen,
     # summierte csr_matrix die zwei Eintraege und er verloere seinen Vorrang.
     rand = np.setdiff1d(rand, np.asarray(auslaesse, dtype=np.int64))
-    # Preis relativ zum Netz, nicht als absolute Zahl (§4.4): 1.0 heisst
-    # "so teuer wie ein Lauf quer ueber die halbe Karte".
+    # Preis relativ zum Netz, nicht als absolute Zahl (02_INVARIANTEN.md 4):
+    # 1.0 heisst "so teuer wie ein Lauf quer ueber die halbe Karte".
     quer = 0.5 * size / max(typisch, 1e-9)
     preis = max(float(border_outflow), 0.0) * quer * float(np.median(kosten_hin))
 
@@ -521,8 +521,9 @@ def river_heights(points_px, parents, order, strahler, P, size,
 
     Das Mindestgefaelle ist am Gesamtrelief bemessen, nicht als Steigung pro
     Meter. Als 3%-Steigung angesetzt ergab es bei 3000 m langen Kanten 90 m
-    PRO KANTE, und das Flachland kam auf 707 m Relief statt 90 m (§4.4).
-    Das Laengsprofil kommt aus P, nicht aus dieser Konstanten.
+    PRO KANTE, und das Flachland kam auf 707 m Relief statt 90 m
+    (02_INVARIANTEN.md 4). Das Laengsprofil kommt aus P, nicht aus dieser
+    Konstanten.
     """
     yi = np.clip(np.round(points_px[:, 0]).astype(int), 0, size - 1)
     xi = np.clip(np.round(points_px[:, 1]).astype(int), 0, size - 1)
@@ -1053,7 +1054,7 @@ def carve_river_network(P: np.ndarray, meters_per_pixel: float, peak_m: float,
     # voellig anderes als in einer 200-m-Landschaft. Bei 30 m Amplitude schnitt
     # die Vorgabe von 400 m dreizehnmal tiefer als die Landschaft hoch war.
     # Nach oben bei 0.6 gedeckelt: tief genug fuer einen Canyon, flach genug,
-    # dass die Landschaft erkennbar bleibt (§4.7).
+    # dass die Landschaft erkennbar bleibt (02_INVARIANTEN.md 7).
     einschnitt = float(np.clip(p["incision_share"], 0.0, 0.6)) * float(peak_m)
 
     z_dense = dense_heights(dense_px, dense_parents, dense_order, P, size,
@@ -1126,7 +1127,8 @@ def carve_river_network(P: np.ndarray, meters_per_pixel: float, peak_m: float,
         # einem festen Betrag. Seit die Auslaesse wirklich am Rand liegen, ist
         # dieser letzte Abschnitt oft nur ein, zwei Pixel lang - ein fester
         # Abfall stand dann als Stufe im Flussbett (gemessen 83 m bei 1800 m
-        # Hoehenspanne, waehrend p99 bei 11 m lag). §4.4, wieder.
+        # Hoehenspanne, waehrend p99 bei 11 m lag). 02_INVARIANTEN.md 4,
+        # wieder.
         strecke_px = float(np.hypot(target[0] - ay, target[1] - ax))
         abfall = max(gefaelle_auslauf * strecke_px * meters_per_pixel, 0.5)
         zeichne(ay, ax, target[0], target[1], z_dense[w],
@@ -1156,8 +1158,8 @@ def carve_river_network(P: np.ndarray, meters_per_pixel: float, peak_m: float,
     #
     # Grundmass ist der Flussabstand - die Wasserscheide liegt zwangslaeufig
     # etwa in der Mitte zwischen zwei Laeufen, ein absoluter Meterwert waere
-    # vom Netz entkoppelt (§4.4). Darauf skaliert das EINZUGSGEBIET: ein
-    # Hauptfluss strahlt weit, ein Quellbach kaum.
+    # vom Netz entkoppelt (02_INVARIANTEN.md 4). Darauf skaliert das
+    # EINZUGSGEBIET: ein Hauptfluss strahlt weit, ein Quellbach kaum.
     #
     # Vorher stand hier die Strahler-Ordnung. Sie ist eine Stufe und reicht bei
     # diesen Netzgroessen nur bis 3-5 - alle Taeler wurden dadurch gleich

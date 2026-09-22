@@ -46,7 +46,8 @@ _CALCULATOR_SPECS = [
     # ATEF-Erosionsfilter, der in _calc_redistribution() mitlaeuft (SPEZIFIKATION
     # §9). Bewusst kein eigener Knoten: der Filter liefert die endgueltige
     # Gelaendeform, und 20+ Lesestellen holen die Heightmap von hier - sie alle
-    # umzuhaengen ist das Risiko aus §4.5. Noch von niemandem gelesen.
+    # umzuhaengen ist das Risiko aus 02_INVARIANTEN.md 5. Noch von niemandem
+    # gelesen.
     # river_mask/river_order kommen seit 2026-07-30 aus dem Flussnetz-Skelett,
     # das ebenfalls in _calc_redistribution() mitlaeuft (SPEZIFIKATION §12).
     # Noch von niemandem gelesen und nicht als Anzeige-Layer registriert.
@@ -59,8 +60,8 @@ _CALCULATOR_SPECS = [
     # entsteht aus DEMSELBEN Gewichtsfeld, das auch die Gelaendeparameter
     # traegt - deshalb haengt sie an terrain und nicht an settlement, obwohl
     # settlement ihr Hauptleser ist. Ein zweiter Aufruf von voronoi_regionen()
-    # an anderer Stelle waere eine zweite Wahrheit (§4.5); der Regional-Reiter
-    # tat bis zu diesem Datum genau das.
+    # an anderer Stelle waere eine zweite Wahrheit (02_INVARIANTEN.md 5); der
+    # Regional-Reiter tat bis zu diesem Datum genau das.
     # NUR bei aktiver Weltkarte belegt - im alten Pfad gibt es keine Regionen.
     CalculatorSpec("terrain.redistribution", "terrain", ["terrain.noise"],
                    ["heightmap", "ridge_map", "river_mask", "river_order",

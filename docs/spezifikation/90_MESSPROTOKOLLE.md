@@ -168,11 +168,11 @@ dieser Form nicht mehr, weil es keine Becken gibt.
    Laeufers verlangte >= 1.0, der erste Schritt von 0.9 px kam nicht durch. Das
    Netz bestand aus EINEM Knoten, `d_norm` war auf 99.1% der Flaeche geklemmt,
    und die gemessenen 3% Abfluss waren keine Aussage ueber das Verfahren.
-   Wieder §4.2: erst belegen, dass der neue Zweig laeuft.
-2. **`tal_breite_m` war absolut**, wo eine relative Groesse hingehoert (§4.4,
-   fuenfter Fall dieses Typs). Die Talbreite ist kein freier Meterwert, sie ist
-   ein Anteil des Abstands zum Nachbarfluss - die Wasserscheide liegt in der
-   Mitte. Umgestellt: Abfluss 21.7% -> 32.4%.
+   Wieder 02_INVARIANTEN.md 2: erst belegen, dass der neue Zweig laeuft.
+2. **`tal_breite_m` war absolut**, wo eine relative Groesse hingehoert
+   (02_INVARIANTEN.md 4, fuenfter Fall dieses Typs). Die Talbreite ist kein
+   freier Meterwert, sie ist ein Anteil des Abstands zum Nachbarfluss - die
+   Wasserscheide liegt in der Mitte. Umgestellt: Abfluss 21.7% -> 32.4%.
 3. **`max_knoten` war zu klein**, aus der Netzdichte gerechnet statt aus der zu
    fuellenden Flaeche: ~780 Knoten, wo 192 px rund 3000 brauchen.
 
@@ -216,10 +216,10 @@ Buffer, keine Zeitschritte. Fuenf Oktaven mal eine 4x4-Zellenschleife, ein
 Durchgang, 11 us/px auf der CPU. Gegen die 6500-8000 Iterationen aus §7 ist das
 praktisch kostenlos.
 
-Er bewegt aber KEINE MASSE und kennt kein Routing. §4.3 gilt fuer ihn nicht,
-und die Entwaesserungs-Kennzahlen aus §3.2 kann er nicht erfuellen. Er macht
-das AUSSEHEN von Erosion; die Entwaesserung kommt aus dem Skelett (§8). Die
-beiden sind die zwei Haelften, nicht zwei Alternativen.
+Er bewegt aber KEINE MASSE und kennt kein Routing. 02_INVARIANTEN.md 3 gilt
+fuer ihn nicht, und die Entwaesserungs-Kennzahlen aus §3.2 kann er nicht
+erfuellen. Er macht das AUSSEHEN von Erosion; die Entwaesserung kommt aus dem
+Skelett (§8). Die beiden sind die zwei Haelften, nicht zwei Alternativen.
 
 Nuetzliche Nebenausgabe: eine `ridge_map`, -1 in Kerben und +1 auf Kaemmen, vom
 Autor ausdruecklich als Entwaesserungs-Eingang genannt. Noch nicht benutzt.
@@ -264,7 +264,7 @@ auswertbar - der Offset-Effekt ueberdeckte den Oktaveneffekt vollstaendig.
 ### Kennzahlen, 192 px, mit Gegenprobe
 
 Erst auf dem 5-Oktaven-Untergrund gemessen, also auf der bereits verworfenen
-Konfiguration - das ist §4.2 und wurde nachgeholt.
+Konfiguration - das ist 02_INVARIANTEN.md 2 und wurde nachgeholt.
 
 | Alpental | Abfluss | Senken | Netz | Nadeln | beta |
 |---|---|---|---|---|---|
@@ -295,27 +295,28 @@ Der Filter laeuft in `BaseTerrainGenerator._calc_redistribution()`, direkt nach
 der Power-Redistribution. Bewusst KEIN eigener Calculator-Knoten: er liefert die
 endgueltige Gelaendeform, und 20+ Lesestellen in core/ und gui/ holen die
 Heightmap ueber ("terrain.redistribution", "heightmap"). Sie alle umzuhaengen ist
-das Risiko aus §4.5. So sehen Slope, Schatten, Geology, Weather, Water, Biome,
-2D-Anzeige, 3D-Ansicht und Export den Filter ohne weitere Aenderung.
+das Risiko aus 02_INVARIANTEN.md 5. So sehen Slope, Schatten, Geology, Weather,
+Water, Biome, 2D-Anzeige, 3D-Ansicht und Export den Filter ohne weitere
+Aenderung.
 
 **Die Hoehenspanne wird nach dem Filter wiederhergestellt** (`_apply_redistribution`
 mit Potenz 1.0, also reine lineare Abbildung). Zwei Gruende: §3.1 fuehrt
 "Hoehenspanne genau BASE_ELEVATION_M .. AMPLITUDE" als erfuellt, und das Delta
 liess das Relief um 6-8% wachsen; und dadurch kann kein Reglerstand die Karte aus
-ihrem Hoehenbereich schieben (§1, §4.7).
+ihrem Hoehenbereich schieben (§1, 02_INVARIANTEN.md 7).
 
 Hauptschalter `EROSION_FILTER_AKTIV` (Vorgabe True), sieben Regler in
 `class EROSION_FILTER`, im Terrain-Tab als Gruppe "Erosion Filter".
-`TERRAIN.OCTAVES` von 4 auf 2 gesenkt (§4.7, abhaengige Defaults ziehen mit).
-`ridge_map` als zweiter Output desselben Knotens gespeichert und im
-CALCULATOR_GRAPH deklariert - noch von niemandem gelesen und NICHT als
+`TERRAIN.OCTAVES` von 4 auf 2 gesenkt (02_INVARIANTEN.md 7, abhaengige Defaults
+ziehen mit). `ridge_map` als zweiter Output desselben Knotens gespeichert und
+im CALCULATOR_GRAPH deklariert - noch von niemandem gelesen und NICHT als
 Anzeige-Layer registriert.
 
 `tests/smoke_test_terrain_erosion_filter.py`, alle fuenf gruen: Filter laeuft
 (ridge_map -0.998..0.997), Spanne exakt 100..4000 m, Staerke 0 gleich
 abgeschaltet (0 m Abweichung), Vorgabewerte wirken (192 m), und **jeder der
-sieben Regler hat eine messbare Wirkung** (38 bis 777 m) - §4.7, drei tote
-Water-Slider gab es hier monatelang.
+sieben Regler hat eine messbare Wirkung** (38 bis 777 m) - 02_INVARIANTEN.md 7,
+drei tote Water-Slider gab es hier monatelang.
 
 Laufzeit auf der CPU, Median aus drei Laeufen: 128 px 0.04 s, 256 px 0.29 s,
 512 px 6.38 s. Der Sprung ist ueberlinear, weil mit der Auflaesung auch die
@@ -325,7 +326,8 @@ den GPU-Pfad.
 
 ### Offen
 
-* Compute-Shader als GPU-Pfad plus Vertrags- und Paritaetstest (§4.1).
+* Compute-Shader als GPU-Pfad plus Vertrags- und Paritaetstest
+  (02_INVARIANTEN.md 1).
 * `ridge_map` als Eingang fuer die Entwaesserung pruefen - Beruehrungspunkt
   zum Skelett aus §8.
 * Die Optik ist noch nicht abgenommen; Kennzahlen koennen sie nicht ersetzen
@@ -506,7 +508,7 @@ Zum Vergleich: Noise-Pfad 10.1%, Feld-Erosion 10-22% (§7), gewachsener Baum
 
 1. **Steigung als 3% pro Meter** statt relativ. Bei 3000 m langen Kanten sind
    das 90 m Anstieg PRO KANTE - das Flachland kam auf 707 m Relief statt 90 m.
-   §4.4, wieder.
+   02_INVARIANTEN.md 4, wieder.
 2. **P nicht senkenfrei.** Auf der Hochflaeche gilt z = P, also erbt sie jede
    Delle des Rauschens. Aufgefuellt plus eine winzige Neigung zum Netz hin,
    damit die aufgefuellten Flaechen nicht eben bleiben.
@@ -941,7 +943,8 @@ Vorgabe 0.12 (12 %, ein steiler aber vorkommender Gebirgsbach). Ueberhoehung
 und Entwaesserung bleiben unberuehrt - die Aenderung kostet nichts.
 
 Als siebte Zusicherung in `tests/smoke_test_terrain_river_network.py`
-festgehalten, Grenze 3 % der Hoehenspanne statt eines festen Meterwerts (§4.4).
+festgehalten, Grenze 3 % der Hoehenspanne statt eines festen Meterwerts
+(02_INVARIANTEN.md 4).
 
 ### Nebenbefund
 
@@ -1066,9 +1069,10 @@ enger.
 ## §20 Pipeline-Test ueber alle Outputs, 2026-07-30
 
 `tests/smoke_test_pipeline_outputs.py`. Faehrt alle 38 Knoten des
-CALCULATOR_GRAPH in topologischer Reihenfolge (aus dem Graphen abgeleitet, §4.5)
-und prueft jeden der 73 deklarierten Outputs auf FEHLT / NUR NULL / KONSTANT /
-NICHT-ENDLICH / OK. Zwei Durchgaenge: mit ShaderManager (GPU) und ohne (CPU).
+CALCULATOR_GRAPH in topologischer Reihenfolge (aus dem Graphen abgeleitet,
+02_INVARIANTEN.md 5) und prueft jeden der 73 deklarierten Outputs auf FEHLT /
+NUR NULL / KONSTANT / NICHT-ENDLICH / OK. Zwei Durchgaenge: mit ShaderManager
+(GPU) und ohne (CPU).
 
 Angelegt, nachdem der Nutzer meldete, dass viele Anzeige-Schalter nichts mehr
 zeigen. Kein vorhandener Test haette das gefunden - sie pruefen je einen
@@ -1111,8 +1115,8 @@ Getrennt nachgemessen:
   (zwei Komponenten je Pixel); ein Zeichenweg, der ein 2D-Feld erwartet, kann
   damit nichts anfangen.
 
-Das ist noch nicht behoben und braucht die laufende App (§4.6: Anzeige und
-Skalen sind nur dort pruefbar).
+Das ist noch nicht behoben und braucht die laufende App (02_INVARIANTEN.md 6:
+Anzeige und Skalen sind nur dort pruefbar).
 
 
 ## §21 Ring am Kartenrand: Randabfluss, gelöst 2026-08-04
@@ -1133,8 +1137,8 @@ weil er sonst noch teurer wäre.
 Hauptauslasse gratis und JEDEN Randknoten zu einem festen Preis
 (`border_outflow`). Dijkstra entscheidet dann selbst: ein Randknoten verlässt
 die Karte an Ort und Stelle, sobald der Umweg zum Hauptauslass teurer ist als
-der Preis. Der Preis ist relativ angegeben (§4.4) – 1.0 heißt "so teuer wie ein
-Lauf über die halbe Karte".
+der Preis. Der Preis ist relativ angegeben (02_INVARIANTEN.md 4) – 1.0 heißt
+"so teuer wie ein Lauf über die halbe Karte".
 
 Das ist auch die physikalisch richtigere Aussage: aus einem 15-km-Fenster
 fließt Wasser an vielen Randstellen hinaus, nicht an einer.
