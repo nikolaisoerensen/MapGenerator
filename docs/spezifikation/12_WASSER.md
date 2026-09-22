@@ -189,7 +189,7 @@ Seemonster. **Umgesetzt** — `seegliederung()` in `core/terrain_weltkarte.py:15
 `core/terrain_weltkarte.py:1758-1759`, Eiswurf in `core/terrain_weltkarte.py:1776-1786`, Seewege in
 `core/settlement_generator.py:1225` und `core/settlement_generator.py:1278`.
 
-*Herkunft: docs/KLIMA_UND_SEE.md (Stand 2026-08-07, Vermerk 2026-08-12), §0 „Die Leitlinie: Festlegung statt Regelkreis" und §2 „Die See als Voronoi-Gliederung".*
+*Herkunft: docs/archiv/2026-09-01_KLIMA_UND_SEE.md (Stand 2026-08-07, Vermerk 2026-08-12), §0 „Die Leitlinie: Festlegung statt Regelkreis" und §2 „Die See als Voronoi-Gliederung".*
 
 ## 8. Reihenfolge im Gelände
 
@@ -214,7 +214,7 @@ verworfen.
 
 ## Offene Fragen
 
-1. **Seegrad 0: 0 m oder −3 m?** `docs/KLIMA_UND_SEE.md:159` nennt „0 | 0 m (unveraendert)"; der
+1. **Seegrad 0: 0 m oder −3 m?** `docs/archiv/2026-09-01_KLIMA_UND_SEE.md:159` nennt „0 | 0 m (unveraendert)"; der
    Code setzt seit 2026-08-11 −3 m (`core/terrain_weltkarte.py:1571`), begründet mit einem
    Nutzerbefund am laufenden Programm. Oben steht der jüngere Wert.
 2. **Talform-Werte weichen von der Messtabelle ab.**
@@ -222,7 +222,7 @@ verworfen.
    1.0, Clonagh/Estrande/Nebelrode je 1.4; `core/daten/regionen.toml` führt heute
    2.6 / 2.0 / 0.8 / 1.3 / 1.5 / 1.3. Oben stehen die TOML-Werte; wann und warum sie nachgezogen
    wurden, ist aus beiden Quellen nicht belegbar.
-3. **Regionsniederschlag gegen gemessenes Feld.** `docs/KLIMA_UND_SEE.md:51-59` gibt Skerrheim
+3. **Regionsniederschlag gegen gemessenes Feld.** `docs/archiv/2026-09-01_KLIMA_UND_SEE.md:51-59` gibt Skerrheim
    2250 mm, Samarcia 430 mm, Morobora 600 mm vor;
    `docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md:18-26` misst im Feld 1967 / 471 / 865 mm. Ob das
    allein die Voronoi-Überblendung und die Hangfeuchte erklärt, ist nicht belegt.
@@ -235,10 +235,10 @@ verworfen.
    Kantenkostenstruktur von Dijkstra im steilen Gelände, ausdrücklich ungeprüft. Solange das so
    bleibt, ist Abschnitt 3 eine Setzung über einem unverstandenen Verhalten.
 6. **Fjordland-/Hügelland-Sondertabellen und Seeeis stehen in keiner der beiden Quellen als
-   Tabelle.** `docs/KLIMA_UND_SEE.md:8-9` erwähnt sie nur im Kopfvermerk und verweist auf
+   Tabelle.** `docs/archiv/2026-09-01_KLIMA_UND_SEE.md:8-9` erwähnt sie nur im Kopfvermerk und verweist auf
    `docs/OFFENE_PUNKTE.md` 3.6. Die Zahlen in Abschnitt 7 stammen deshalb aus dem Code
    (`core/terrain_weltkarte.py:1578-1596`) — **nicht** aus einer Spezifikationsquelle.
-7. **Vorbehalt Kachelgröße ungeprüft.** `docs/KLIMA_UND_SEE.md:182-188` verlangt eine Sichtprobe, ob
+7. **Vorbehalt Kachelgröße ungeprüft.** `docs/archiv/2026-09-01_KLIMA_UND_SEE.md:182-188` verlangt eine Sichtprobe, ob
    die Seezellen als Kachelung sichtbar werden. Der Code steht auf `punktzahl_see=400`
    (`core/terrain_weltkarte.py:1599`), also bereits auf dem erhöhten Wert; ob die Sichtprobe
    stattgefunden hat, ist **nicht verifiziert**.

@@ -18,7 +18,7 @@ Die Küste ist eine Vektorbeschreibung, keine Rasteroperation. Sie ersetzt gedan
 das dieselbe Aufgabe auf Pixelmasken löst und dadurch auflösungsabhängig ist: 34.7 m statt
 11.9 m mittlere Abweichung zwischen 256 und 512 px.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „0. Der Grundgedanke in einem Satz".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „0. Der Grundgedanke in einem Satz".*
 
 ## 2. Konturen, Stationen, Sweep
 
@@ -30,7 +30,7 @@ Feld: ein KDTree über dicht abgetastete Linienpunkte liefert zu jedem Punkt *d*
 geometrisches Sweepen scheidet aus, weil sich die Querprofile in engen Buchten innen schneiden (Offsetkurven-Problem). Geschlossene Konturen
 müssen **zyklisch** umlaufen, sonst entsteht an der Startstelle einer Insel eine Naht.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „1. Konturen und Sweeps".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „1. Konturen und Sweeps".*
 
 ## 3. Profil in Metern, feste Zonen, Archetypen
 
@@ -48,7 +48,7 @@ Es gibt **27 Archetypen, jeder aus seiner eigenen Vorbildküste** (`tools/archet
 der eigenen Landmasse** (`ndimage.label`). Begründung: die frühere Streckung zerstörte das Verhältnis, um das es geht — die
 Weissmeer-Flachküste stand bei 187 m statt 15–30 m. Maßstab ist `tests/smoke_test_kuestenprofiltreue.py`.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „ACHTUNG: Abschnitte zu Reichweite und Profilform gelten nicht mehr".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „ACHTUNG: Abschnitte zu Reichweite und Profilform gelten nicht mehr".*
 
 ## 4. Küstenabschnitte: Segmente statt Dauermischung
 
@@ -66,7 +66,7 @@ Läufe unter der Mindestlänge werden in den Nachbarn eingeschmolzen; eine klein
 Überblendkurve ist **smoothstep-artig, nicht linear** — linear gäbe einen Knick in der Ableitung, sichtbar als Kante längs der Küste. Die
 **Typenzahl je Region** folgt der Küstenlänge: `max(1, Küstenlänge ÷ Ziellänge je Typ)`.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „2. Küstenabschnitte: Segmente statt Dauermischung".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „2. Küstenabschnitte: Segmente statt Dauermischung".*
 
 ## 5. Formklassen: Insel, Halbinsel, Festland
 
@@ -83,7 +83,7 @@ Daraus je Küstenabschnitt drei Zahlen: **Hinterlandtiefe**, **Halsbreite**, **Z
 sortiert — ein Abschnitt mit 50 m Hinterland kann eine tiefe Fjordwand nicht ziehen; damit wird die Maßstabsfrage eine Katalogspalte statt
 ein Sonderfall im Code. Kleinteiligkeit ist häufig, aber flächenmäßig nebensächlich (0.8 %): sie darf wenig Rechenzeit kosten.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „3. Formklassen: Insel, Halbinsel, Festland".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „3. Formklassen: Insel, Halbinsel, Festland".*
 
 ## 6. Kleine Inseln zur Mitte schließen
 
@@ -102,7 +102,7 @@ Landmasse geführt**: für kleine Inseln exakt, für das Festland grob, wo es oh
 Wellenform selbst mit Steigung null enden**, sonst entsteht auch mit Schließen ein Grat — eine Bedingung an den Katalog, **beim Laden zu
 prüfen**.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „4. Kleine Inseln: nicht stauchen, sondern zur Mitte schließen".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „4. Kleine Inseln: nicht stauchen, sondern zur Mitte schließen".*
 
 ## 7. Wo zwei Küsten sich treffen
 
@@ -120,7 +120,7 @@ Derselbe Querschnitt sinkt damit auf 3.9 m. Entscheidend ist die Form: ein **gew
 Beitrag beschränkt, Beiträge mehrerer Küsten können sich konstruktiv **nicht aufsummieren** — strukturell ausgeschlossen, nicht bloß
 unwahrscheinlich.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „5. Zwei Küsten, die sich treffen".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „5. Zwei Küsten, die sich treffen".*
 
 ## 8. Der Katalog der Wellenformen
 
@@ -137,7 +137,7 @@ Laden daraus gerechnet. Format JSON im Repo, mit Formatversion. Neben der Höhen
 
 Eine einzige monoton sättigende Kurve der Bauart `ziel · (1 − e^(−d/skala))` kann davon nur „Rampe" ausdrücken.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „6. Die Vektoren selbst".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „6. Die Vektoren selbst".*
 
 ## 9. Eine Höhenfunktion, zwei Abtaster
 
@@ -158,7 +158,7 @@ und einstellbar sein, nicht implizit; an freien Punkten steht damit Höhendetail
 Region und entwertete die Regionseichung. Zugesichert und geprüft: **0 Pixel** wechseln durch die Küstenformung die Seite. A darf den alten
 `_kuesten_umformen()`-Pass **nicht** mehr enthalten, sonst formen die Vektoren eine bereits geformte Küste ein zweites Mal.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „7. Die zwei Heightmaps".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „7. Die zwei Heightmaps".*
 
 ## 10. Das Mesh, befreit vom Gitter
 
@@ -171,7 +171,7 @@ gleicher Seite) ist mehrdeutig und wird über den Mittelwert der vier Ecken ents
 **nicht** auf einer Pixelecke, Höhen exakt 0, keine Kante an mehr als zwei Dreiecken, Fläche exakt erhalten, Mehrkosten rund +3 % Dreiecke.
 Umgesetzt in `gui/widgets/kuesten_schnitt.py`, geprüft von `tests/smoke_test_kuesten_schnitt.py`.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „8. Das Mesh, befreit vom Gitter".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „8. Das Mesh, befreit vom Gitter".*
 
 ## 11. Rauschgelände und Küste zusammen
 
@@ -183,7 +183,7 @@ eigenen, nicht-iterativen Formel über den Seegrad (`_seetiefe_aus_archetyp()`, 
 Wiederanstieg** hinter der Küste — eine Stufe, die vom Wasser weg erst fällt und dann wieder steigt: eine Monotoniebedingung, kein
 Glättungsproblem.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „9. Wie Rauschgelände und Küste zusammengehen".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „9. Wie Rauschgelände und Küste zusammengehen".*
 
 ## 12. Varianz — damit nicht jede Insel gleich aussieht
 
@@ -193,11 +193,11 @@ man. **Sondern drei Sorten Variation:** (1) **Typwahl** je Insel/Abschnitt, aus 
 autoregressiv aus Änderungsrate und Autokorrelationslänge oder aus einer je Typ gespeicherten **normierten Längs-Signatur** (Zielhöhe über
 die Abschnittslänge, 0..1), auf die Länge gestreckt.
 
-*Herkunft: docs/KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „10. Varianz — damit nicht jede Insel gleich aussieht".*
+*Herkunft: docs/archiv/2026-09-01_KUESTENMODELL.md (Stand 2026-08-18), Abschnitt „10. Varianz — damit nicht jede Insel gleich aussieht".*
 
 ## Was nicht mehr gilt
 
-Aufgehoben am **2026-08-24** (Warnkasten in `docs/KUESTENMODELL.md`, Zeilen 5–30) — nicht wieder einbauen:
+Aufgehoben am **2026-08-24** (Warnkasten in `docs/archiv/2026-09-01_KUESTENMODELL.md`, Zeilen 5–30) — nicht wieder einbauen:
 
 * **Profilform normiert auf 0..1, auf die Reichweite gestreckt** → Profil in Metern, `MESS_PROFIL_M_JE_ARCHETYP`, §3.
 * **Zielhöhe aus `hinterland × überhöhung + Sockel`, Katalogwert als Boden** → entfällt, die Höhe steht im Profil, §3.

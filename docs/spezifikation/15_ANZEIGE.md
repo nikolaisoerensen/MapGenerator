@@ -203,7 +203,7 @@ Siedlungen, Regional, Fluss.
 Siedlungs-Overlay über das Register; die vier übrigen Weichen sind Restschuld
 (Punkt 5).
 
-*Herkunft: `docs/SPEC_OVERLAYS.md` (Stand 2026-09-14), Abschnitt „Implementation
+*Herkunft: `docs/archiv/2026-09-21_SPEC_OVERLAYS.md` (Stand 2026-09-14), Abschnitt „Implementation
 Decisions"; die Einleitung oben aus „Problem Statement" und „Solution".*
 
 ---
@@ -236,7 +236,7 @@ ob die RGBA-Haut im 3D an der richtigen Stelle sitzt, sieht nur der Nutzer —
 dafür je umgestelltem Reiter ein Eintrag in
 `docs/archiv/2026-08-27_PRUEFLISTE_LIVE.md`.
 
-*Herkunft: `docs/SPEC_OVERLAYS.md` (Stand 2026-09-14), Abschnitt „Testing
+*Herkunft: `docs/archiv/2026-09-21_SPEC_OVERLAYS.md` (Stand 2026-09-14), Abschnitt „Testing
 Decisions".*
 
 ---
@@ -259,7 +259,7 @@ Nicht Gegenstand dieses Kapitels:
 * **Leistung.** Kein Ziel; nur das Umschalten zwischen 2D und 3D darf nicht
   spürbar langsamer werden als vorher.
 
-*Herkunft: `docs/SPEC_OVERLAYS.md` (Stand 2026-09-14), Abschnitt „Out of
+*Herkunft: `docs/archiv/2026-09-21_SPEC_OVERLAYS.md` (Stand 2026-09-14), Abschnitt „Out of
 Scope".*
 
 ---
@@ -267,7 +267,7 @@ Scope".*
 ## Offene Fragen
 
 1. **Sind Parzellengrenzen in 3D überhaupt sinnvoll?** Unentschieden — tausende
-   Parzellen könnten Pixelmatsch werden (`docs/SPEC_OVERLAYS.md`, „Out of
+   Parzellen könnten Pixelmatsch werden (`docs/archiv/2026-09-21_SPEC_OVERLAYS.md`, „Out of
    Scope"; `tests/smoke_test_display_methoden_existieren.py:208`).
 2. **Wie sieht der Zustand „angemeldet, aber ohne 3D-Weg" im Register aus?**
    Festlegung 5 verlangt für ihn Fehler bzw. WARNING; das Register kennt nur

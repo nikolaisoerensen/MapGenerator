@@ -22,7 +22,7 @@ Der Vorteil ist nicht bloß Geschwindigkeit: ein Regelkreis über 35 Schritte
 liefert bei 50 etwas anderes — dieser Drift zwang bisher zum Nachkalibrieren bei
 jeder Auflösungsänderung.
 
-*Herkunft: docs/KLIMA_UND_SEE.md (Stand 2026-08-07), Abschnitt „0. Die Leitlinie: Festlegung statt Regelkreis".*
+*Herkunft: docs/archiv/2026-09-01_KLIMA_UND_SEE.md (Stand 2026-08-07), Abschnitt „0. Die Leitlinie: Festlegung statt Regelkreis".*
 
 ## 2. Klimavorgaben je Region
 
@@ -50,7 +50,7 @@ Thalassia, Faktor 5 im Niederschlag zwischen Skerrheim und Samarcia.
 28.1 °C auf 230 m, und ist damit die heißeste Region der Karte — Nutzer: „lassen,
 kann gerne etwas heißer sein."
 
-*Herkunft: docs/BIOME_MATRIX.md (Stand 2026-08-07), Abschnitt „1. Klimavorgaben auf MEERESHOEHE"; docs/KLIMA_UND_SEE.md (Stand 2026-08-07), Abschnitte „Die Bezugsorte" und „Die Bezugshoehe ist der Knackpunkt".*
+*Herkunft: docs/archiv/2026-09-16_BIOME_MATRIX.md (Stand 2026-08-07), Abschnitt „1. Klimavorgaben auf MEERESHOEHE"; docs/archiv/2026-09-01_KLIMA_UND_SEE.md (Stand 2026-08-07), Abschnitte „Die Bezugsorte" und „Die Bezugshoehe ist der Knackpunkt".*
 
 ## 3. Die Temperatur des Meeres
 
@@ -76,7 +76,7 @@ Festlegung, kein Näherungsverfahren; sie löscht den zuvor offenen
 `weather.temperature` braucht damit keine Atmosphärensimulation mehr: Land aus
 Region und Höhe, See aus Breite und Strömung; Wind und Feuchte bleiben zunächst.
 
-*Herkunft: docs/KLIMA_UND_SEE.md (Stand 2026-08-07), Abschnitte „Das Meer" und „Was daraus folgt".*
+*Herkunft: docs/archiv/2026-09-01_KLIMA_UND_SEE.md (Stand 2026-08-07), Abschnitte „Das Meer" und „Was daraus folgt".*
 
 ## 4. Das Temperaturmodell: Raum und Zeit getrennt
 
@@ -123,7 +123,7 @@ bleiben möglich: im Januar liegt das Nevadin auf 800 m bei 3.5 − 4.8 =
 **−1.3 °C**, die Gipfel darunter. Mit einem reinen Frühlingsmodell wäre selbst
 der höchste Punkt schneefrei geblieben.
 
-*Herkunft: docs/KLIMA_UND_SEE.md (Stand 2026-08-07), Abschnitt „4. Das Temperaturmodell (entschieden 2026-08-07)"; docs/BIOME_MATRIX.md (Stand 2026-08-07), Abschnitt „5. Entschieden am 2026-08-07".*
+*Herkunft: docs/archiv/2026-09-01_KLIMA_UND_SEE.md (Stand 2026-08-07), Abschnitt „4. Das Temperaturmodell (entschieden 2026-08-07)"; docs/archiv/2026-09-16_BIOME_MATRIX.md (Stand 2026-08-07), Abschnitt „5. Entschieden am 2026-08-07".*
 
 ## 5. Was der Sonnenstand noch tut
 
@@ -133,7 +133,7 @@ Baumgrenze keine gerade Linie wird. Nur die jahreszeitliche Verschiebung fällt
 weg: 5 feste Richtungen statt 7 Winkel × 6 Monate, Schattenwurf einmal statt
 42-mal gerechnet.
 
-*Herkunft: docs/KLIMA_UND_SEE.md (Stand 2026-08-07), Abschnitt „Was der Sonnenstand dann noch tut".*
+*Herkunft: docs/archiv/2026-09-01_KLIMA_UND_SEE.md (Stand 2026-08-07), Abschnitt „Was der Sonnenstand dann noch tut".*
 
 ## 6. Die fünfzehn Grundbiome
 
@@ -165,7 +165,7 @@ bis drei Arten, sie waren zu grob.
 `temp_map_juli` gegenüberstellen, nicht `temp_map` — mit dem Jahresmittel liegt
 sie 8–9 K zu kalt, das Macchia wurde zu 47 % Bruchwald statt Steineichenwald.
 
-*Herkunft: docs/BIOME_MATRIX.md (Stand 2026-08-07), Abschnitte „Was aus dem Bestand fliegt" und „Die sechzehn Grundbiome".*
+*Herkunft: docs/archiv/2026-09-16_BIOME_MATRIX.md (Stand 2026-08-07), Abschnitte „Was aus dem Bestand fliegt" und „Die sechzehn Grundbiome".*
 
 ## 7. Die neun Superbiome
 
@@ -186,7 +186,7 @@ Sie überschreiben das Grundbiom nach **einer** Regel.
 **Zur Strandtiefe:** die Breite folgt aus dem Gelände — eine flache Küste
 (`kuestenform` 0.45) bekommt breite Strände, eine Klippenküste keine.
 
-*Herkunft: docs/BIOME_MATRIX.md (Stand 2026-08-07), Abschnitte „Die acht Superbiome" und „5. Entschieden am 2026-08-07".*
+*Herkunft: docs/archiv/2026-09-16_BIOME_MATRIX.md (Stand 2026-08-07), Abschnitte „Die acht Superbiome" und „5. Entschieden am 2026-08-07".*
 
 ## 8. Welche Biome je Region zu erwarten sind
 
@@ -210,7 +210,7 @@ haben dieselbe Kombination** — genau das ist die Vorgabe. **Ein Prüffall:** d
 Nevadin ist mit 22.0 °C auf Meereshöhe zu warm für Bergwald; der entsteht erst
 durch die Höhenabnahme auf 800 m und ist damit die Probe darauf, dass sie wirkt.
 
-*Herkunft: docs/BIOME_MATRIX.md (Stand 2026-08-07), Abschnitt „3. Welche Biome je Region zu erwarten sind".*
+*Herkunft: docs/archiv/2026-09-16_BIOME_MATRIX.md (Stand 2026-08-07), Abschnitt „3. Welche Biome je Region zu erwarten sind".*
 
 ## 9. Vereinfachung des Wettersystems
 
@@ -229,7 +229,7 @@ ein Feld über 25–50 Zeitschritte einschwingen, wobei die Schrittzahl an der
 Auflösung hing — genau der Drift aus §1. Die Simulation bleibt nur für **Wind und
 Feuchte**, und dort mit **fester Schrittzahl**.
 
-*Herkunft: docs/BIOME_MATRIX.md (Stand 2026-08-07), Abschnitt „4. Wie das Wettersystem einfacher wird".*
+*Herkunft: docs/archiv/2026-09-16_BIOME_MATRIX.md (Stand 2026-08-07), Abschnitt „4. Wie das Wettersystem einfacher wird".*
 
 ## 10. Umsetzungsstand
 
@@ -239,11 +239,11 @@ Alpin und Firn als Temperaturregel; Temperatur und Niederschlag direkt auf ihren
 Zielwert normiert. Offen: **Fels, Dünen und Aue** als Superbiome; das
 Zurückschneiden der Atmosphärensimulation auf Wind und Feuchte.
 
-*Herkunft: docs/BIOME_MATRIX.md (Stand 2026-08-07), Kopfvermerk; docs/KLIMA_UND_SEE.md (Stand 2026-08-07), Kopfvermerk und Abschnitt „3. Reihenfolge".*
+*Herkunft: docs/archiv/2026-09-16_BIOME_MATRIX.md (Stand 2026-08-07), Kopfvermerk; docs/archiv/2026-09-01_KLIMA_UND_SEE.md (Stand 2026-08-07), Kopfvermerk und Abschnitt „3. Reihenfolge".*
 
 ## Grenzfälle
 
-An `12_WASSER.md` abgegeben, alle aus `docs/KLIMA_UND_SEE.md`. Nur die Zeile
+An `12_WASSER.md` abgegeben, alle aus `docs/archiv/2026-09-01_KLIMA_UND_SEE.md`. Nur die Zeile
 „Schelftiefe → Tiefe je Seegrad" in §1 bleibt hier, als Beispiel für die
 Leitlinie.
 
@@ -255,27 +255,27 @@ Leitlinie.
 
 ## Offene Fragen
 
-1. **15 oder 16 Grundbiome (Widerspruch).** `docs/BIOME_MATRIX.md:84` und :106
+1. **15 oder 16 Grundbiome (Widerspruch).** `docs/archiv/2026-09-16_BIOME_MATRIX.md:84` und :106
    führen 16 Grundbiome samt Dünen, :108 acht Superbiome; :217-219 legt Dünen
    als Superbiom fest, also 15/9. Hier ist der jüngere Stand verwendet (15/9).
-2. **Samarcia 29.5 oder 27.0 °C (Widerspruch).** `docs/BIOME_MATRIX.md:63-68`
+2. **Samarcia 29.5 oder 27.0 °C (Widerspruch).** `docs/archiv/2026-09-16_BIOME_MATRIX.md:63-68`
    empfiehlt 27.0 °C, :214-215 entscheidet 29.5. Hier 29.5, gestützt durch
-   dasselbe Nutzerzitat in `docs/KLIMA_UND_SEE.md:84-86`.
+   dasselbe Nutzerzitat in `docs/archiv/2026-09-01_KLIMA_UND_SEE.md:84-86`.
 3. **„Nur Frühling" gegen „Sommer und Winter bleiben" (Widerspruch).**
-   `docs/BIOME_MATRIX.md:168` führt „Nur Frühling" mit Faktor 6, :221-232
+   `docs/archiv/2026-09-16_BIOME_MATRIX.md:168` führt „Nur Frühling" mit Faktor 6, :221-232
    verwirft es (sonst bliebe selbst der höchste Punkt schneefrei) zugunsten des
-   Jahresgangs aus `docs/KLIMA_UND_SEE.md:191-238`. Hier: Jahresgang.
-4. **Sind die Klimazahlen gegengeprüft?** `docs/KLIMA_UND_SEE.md:45-47` nennt sie
+   Jahresgangs aus `docs/archiv/2026-09-01_KLIMA_UND_SEE.md:191-238`. Hier: Jahresgang.
+4. **Sind die Klimazahlen gegengeprüft?** `docs/archiv/2026-09-01_KLIMA_UND_SEE.md:45-47` nennt sie
    aus dem Gedächtnis zusammengetragen, auf ein bis zwei Grad genau, und verlangt
    eine Gegenprüfung (:279, Schritt 1, Nutzer). Ob sie geschah, sagt keine Quelle.
-5. **Hügelland als Vergleichsregion.** `docs/KLIMA_UND_SEE.md:261` vergleicht die
+5. **Hügelland als Vergleichsregion.** `docs/archiv/2026-09-01_KLIMA_UND_SEE.md:261` vergleicht die
    Morobora mit „dem Hügelland"; eine Region dieses Namens gibt es unter den
    neun nicht. Hier durch „die größte Jahresspanne der Karte" ersetzt.
 6. **Affinitäten, Farben und Namen fehlen als Tabelle.**
-   `docs/BIOME_MATRIX.md:7-9` nennt sie als umgesetzt, ohne die Werte zu führen.
-7. **Küstenüberblendung ohne Zahl.** `docs/KLIMA_UND_SEE.md:123` sagt „über
+   `docs/archiv/2026-09-16_BIOME_MATRIX.md:7-9` nennt sie als umgesetzt, ohne die Werte zu führen.
+7. **Küstenüberblendung ohne Zahl.** `docs/archiv/2026-09-01_KLIMA_UND_SEE.md:123` sagt „über
    wenige hundert Meter", nennt aber keine Breite.
-8. **Mittelhöhe der Estrande fehlt.** `docs/BIOME_MATRIX.md:47-56` lässt sie als
+8. **Mittelhöhe der Estrande fehlt.** `docs/archiv/2026-09-16_BIOME_MATRIX.md:47-56` lässt sie als
    einzige Region aus, damit auch ihren Julitemperaturwert auf Regionshöhe.
-9. **`AMPLITUDE_STROEMUNG` ist unbelegt.** `docs/KLIMA_UND_SEE.md:97-98` benutzt
+9. **`AMPLITUDE_STROEMUNG` ist unbelegt.** `docs/archiv/2026-09-01_KLIMA_UND_SEE.md:97-98` benutzt
    die Konstante, die ±2 K stehen nur im Fließtext (:112-113), ein Codeort fehlt.

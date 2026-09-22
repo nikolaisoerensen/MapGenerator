@@ -75,10 +75,15 @@ Zusammengeführt am **2026-09-23** aus neun Dokumenten, die dieselbe Sache an
 verschiedenen Stellen und teils widersprüchlich beschrieben hatten:
 
 `docs/archiv/2026-07-29_SPEZIFIKATION.md` (1626 Zeilen, davon 1153
-Messprotokolle) · `docs/SOLLBESCHREIBUNG.md` · `docs/KUESTENMODELL.md` ·
-`docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md` · `docs/KLIMA_UND_SEE.md` ·
-`docs/BIOME_MATRIX.md` · `docs/SIEDLUNGEN_ENTWURF.md` ·
-`docs/KULTUREN_UND_ORTE.md` · `docs/SPEC_OVERLAYS.md`.
+Messprotokolle) · `docs/archiv/2026-09-16_SOLLBESCHREIBUNG.md` · `docs/archiv/2026-09-01_KUESTENMODELL.md` ·
+`docs/archiv/2026-08-24_FLUESSE_UND_WASSER.md` · `docs/archiv/2026-09-01_KLIMA_UND_SEE.md` ·
+`docs/archiv/2026-09-16_BIOME_MATRIX.md` · `docs/archiv/2026-09-22_SIEDLUNGEN_ENTWURF.md` ·
+`docs/archiv/2026-09-01_KULTUREN_UND_ORTE.md` · `docs/archiv/2026-09-21_SPEC_OVERLAYS.md`.
+
+**Alle neun liegen seit dem 2026-09-23 in `docs/archiv/`**, mit Datumspräfix und
+dem Stand ihres letzten Commits — gelöscht wurde nichts. `docs/archiv/README.md`
+sagt ausdrücklich, dass dort nichts mehr gilt: wer eine Herkunftszeile
+nachschlägt, findet den Wortlaut, arbeitet aber im Baum weiter.
 
 Widersprüche zwischen den Quellen wurden **nicht** stillschweigend aufgelöst:
 Wo zwei Dokumente verschiedene Zahlen nannten, steht im Fließtext der jüngere

@@ -7,7 +7,7 @@ Punkt steht hier, weil er einmal Geld gekostet hat.
 
 *Herkunft: `docs/archiv/2026-07-29_SPEZIFIKATION.md` (Stand 2026-07-29), §4
 „Invarianten — bei JEDER Änderung zu prüfen", sowie
-`docs/SOLLBESCHREIBUNG.md` (Stand 2026-09-16), Abschnitt „8. Stehende Regeln,
+`docs/archiv/2026-09-16_SOLLBESCHREIBUNG.md` (Stand 2026-09-16), Abschnitt „8. Stehende Regeln,
 die weiter gelten".*
 
 ---

@@ -6,7 +6,7 @@ Die Prüfliste **was** dabei jedes Mal zu prüfen ist, steht getrennt in
 [02_INVARIANTEN.md](02_INVARIANTEN.md).
 
 *Herkunft: `docs/archiv/2026-07-29_SPEZIFIKATION.md` (Stand 2026-07-29), §5
-„Arbeitsregeln" und §6 „Werkzeuge", sowie `docs/SOLLBESCHREIBUNG.md` (Stand
+„Arbeitsregeln" und §6 „Werkzeuge", sowie `docs/archiv/2026-09-16_SOLLBESCHREIBUNG.md` (Stand
 2026-09-16), Abschnitt „Testing Decisions".*
 
 ---
@@ -105,7 +105,7 @@ Die Lehren dieses Projekts, alle teuer erkauft:
 * **Über die Naht prüfen, nicht daran vorbei.** Was ein Test nur erreicht,
   indem er ins Innere greift, hat vermutlich die falsche Form.
 
-*Herkunft: `docs/SOLLBESCHREIBUNG.md` (Stand 2026-09-16), Abschnitt „Was einen
+*Herkunft: `docs/archiv/2026-09-16_SOLLBESCHREIBUNG.md` (Stand 2026-09-16), Abschnitt „Was einen
 guten Test hier ausmacht".*
 
 ## 4. Das Prüfumfeld
@@ -142,7 +142,7 @@ Entschieden über [#22](https://github.com/nikolaisoerensen/MapGenerator/issues/
   ([#45](https://github.com/nikolaisoerensen/MapGenerator/issues/45), Ergebnis
   in `docs/TESTBESTAND_BEWERTUNG.md`)
 
-*Herkunft: `docs/SOLLBESCHREIBUNG.md` (Stand 2026-09-16), Abschnitt „Das
+*Herkunft: `docs/archiv/2026-09-16_SOLLBESCHREIBUNG.md` (Stand 2026-09-16), Abschnitt „Das
 Prüfumfeld".*
 
 ## 5. Der nächtliche Betrieb
@@ -170,5 +170,5 @@ das Verfahren im Einzelnen steht in `docs/NACHTBETRIEB.md`.
   welche Kennzahlen sich bewegt haben, welche stillen Rückfälle gemeldet
   wurden. ([#60](https://github.com/nikolaisoerensen/MapGenerator/issues/60))
 
-*Herkunft: `docs/SOLLBESCHREIBUNG.md` (Stand 2026-09-16), Abschnitt „Der
+*Herkunft: `docs/archiv/2026-09-16_SOLLBESCHREIBUNG.md` (Stand 2026-09-16), Abschnitt „Der
 nächtliche Betrieb".*

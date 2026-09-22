@@ -6,7 +6,7 @@ zu treffen hat und nicht weiß, woran er sie messen soll, liest zuerst diese
 Datei.
 
 *Herkunft: `docs/archiv/2026-07-29_SPEZIFIKATION.md` (Stand 2026-07-29), §1
-„Oberziel", und `docs/SOLLBESCHREIBUNG.md` (Stand 2026-09-16), Abschnitte
+„Oberziel", und `docs/archiv/2026-09-16_SOLLBESCHREIBUNG.md` (Stand 2026-09-16), Abschnitte
 „Solution", „Implementation Decisions" 1–7 und „Out of Scope".*
 
 ---
