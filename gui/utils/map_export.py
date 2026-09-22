@@ -552,13 +552,32 @@ def _fixed_range(layer_key):
     return float(entry[1]), float(entry[2])
 
 
-def _normalize_to_16bit(values, vmin, vmax):
+def _normalize_to_unit(values, vmin, vmax):
+    """
+    Linear auf [0, 1] strecken und klemmen - der gemeinsame erste Schritt
+    jeder Bildnormalisierung in diesem Modul (Ticket #15.4, 2026-09-23:
+    stand bis dahin dreifach separat in _normalize_to_16bit() und im
+    scalar_8bit-Zweig von export_all_layers()).
+    """
     values = np.asarray(values, dtype=np.float64)
     span = vmax - vmin
     if span <= 0:
-        normalized = np.zeros_like(values)
-    else:
-        normalized = np.clip((values - vmin) / span, 0.0, 1.0)
+        return np.zeros_like(values)
+    return np.clip((values - vmin) / span, 0.0, 1.0)
+
+
+def _quantize_uint8(anteil):
+    """
+    Letzter Schritt: ein bereits auf [0, 1] normiertes Feld auf 8-Bit-
+    Grauwerte bringen - gemeinsamer Helfer fuer alle vier PNG-Zweige in
+    export_all_layers(), die 8-Bit ohne Vorzeichen schreiben (rgb_anteil,
+    scalar_8bit, wassertiefe, noise_damping_mask; Ticket #15.4, 2026-09-23).
+    """
+    return np.clip(np.asarray(anteil, dtype=np.float64) * 255.0, 0, 255).round().astype(np.uint8)
+
+
+def _normalize_to_16bit(values, vmin, vmax):
+    normalized = _normalize_to_unit(values, vmin, vmax)
     return (normalized * 65535.0).round().astype(np.uint16)
 
 
@@ -745,7 +764,7 @@ def export_all_layers(data_lod_manager, parameter_manager, output_root, filename
                 summe = werte.sum(axis=2, keepdims=True)
                 werte = np.divide(werte, summe, out=np.zeros_like(werte),
                                   where=summe > 0)
-                arr = np.clip(werte * 255.0, 0, 255).round().astype(np.uint8)
+                arr = _quantize_uint8(werte)
                 Image.fromarray(arr).save(file_path)
                 manifest["layers"][label] = {
                     "file": file_name, "kind": "rgb_anteil_8bit",
@@ -789,9 +808,8 @@ def export_all_layers(data_lod_manager, parameter_manager, output_root, filename
                 fixed = _fixed_range(label)
                 vmin, vmax = fixed if fixed is not None else (
                     float(np.nanmin(werte)), float(np.nanmax(werte)))
-                spanne = vmax - vmin
-                norm = np.zeros_like(werte) if spanne <= 0 else                     np.clip((werte - vmin) / spanne, 0.0, 1.0)
-                Image.fromarray((norm * 255.0).round().astype(np.uint8)).save(file_path)
+                norm = _normalize_to_unit(werte, vmin, vmax)
+                Image.fromarray(_quantize_uint8(norm)).save(file_path)
                 manifest["layers"][label] = {
                     "file": file_name, "kind": "scalar_8bit",
                     "value_min": vmin, "value_max": vmax,
@@ -842,7 +860,7 @@ def export_all_layers(data_lod_manager, parameter_manager, output_root, filename
             tmax = float(np.nanmax(tiefe))
             tmax = tmax if tmax > 0 else 1.0
             Image.fromarray(
-                np.clip(tiefe / tmax * 255.0, 0, 255).round().astype(np.uint8)
+                _quantize_uint8(tiefe / tmax)
             ).save(os.path.join(output_dir, datei))
             manifest["layers"]["wassertiefe"] = {
                 "file": datei, "kind": "scalar_8bit",
@@ -880,7 +898,7 @@ def export_all_layers(data_lod_manager, parameter_manager, output_root, filename
             # 0 und 1 sind 256 Stufen mehr als genug. Als 16-Bit-Datei stuende
             # hier eine Genauigkeit, die auf der anderen Seite nie ankommt.
             Image.fromarray(
-                np.clip(maske * 255.0, 0, 255).round().astype(np.uint8)
+                _quantize_uint8(maske)
             ).save(os.path.join(output_dir, datei))
             manifest["layers"]["noise_damping_mask"] = {
                 "file": datei, "kind": "scalar_8bit",
