@@ -253,8 +253,8 @@ class SettlementData:
         return status
 
 
-# Drei Raenge, alle klein (docs/spezifikation/14_SIEDLUNGEN.md §1) - Unterscheidung ist
-# eine der Rang-Spanne, nicht Stadt gegen Metropole.
+# Drei Raenge, alle klein (docs/spezifikation/14_SIEDLUNGEN.md 1) -
+# Unterscheidung ist eine der Rang-Spanne, nicht Stadt gegen Metropole.
 RANG_HAEUSER = {"dorf": (15, 25), "siedlung": (25, 35), "stadt": (35, 50)}
 RANG_REIHENFOLGE = ("dorf", "siedlung", "stadt")
 
@@ -431,7 +431,8 @@ class Location:
     Funktionsweise: Datenstruktur für alle Arten von Locations (Settlements, Landmarks, Roadsites)
     Aufgabe: Einheitliche Repräsentation aller Siedlungs-Objekte
 
-    `culture`/`rank`/`house_count` (2026-08-10, docs/spezifikation/14_SIEDLUNGEN.md §1+3):
+    `culture`/`rank`/`house_count` (2026-08-10,
+    docs/spezifikation/14_SIEDLUNGEN.md 1 und 3):
     nur fuer location_type == 'settlement' belegt. `culture` ist der Name aus
     core.terrain_weltkarte (`volk`-Feld je Region), `rank` einer von
     'dorf'/'siedlung'/'stadt' (15-25/25-35/35-50 Haeuser), `house_count` die
@@ -2625,12 +2626,13 @@ def _polygon_area(vertices):
 
 
 def _wege_anschlusspunkte(roads, stadtgrenzen_polygone):
-    """Schnittpunkte des ueberregionalen Wegenetzes (docs/spezifikation/14_SIEDLUNGEN.md
-    §4, `roads` aus settlement.pathfinding - geroutete Land-Verbindungen
-    zwischen den Orten, NICHT die spaeteren Innenstadt-Strassen aus
-    settlement.plot_nodes) mit der Stadtgrenzen-Kontur jeder Siedlung
-    (§6.1 "Anschlusspunkte der Wege"). Liefert {settlement_id: [(x, y), ...]}
-    in Karten-Pixel-Koordinaten der aktuellen Aufloesung.
+    """Schnittpunkte des ueberregionalen Wegenetzes
+    (docs/spezifikation/14_SIEDLUNGEN.md 5, `roads` aus settlement.pathfinding
+    - geroutete Land-Verbindungen zwischen den Orten, NICHT die spaeteren
+    Innenstadt-Strassen aus settlement.plot_nodes) mit der Stadtgrenzen-Kontur
+    jeder Siedlung (docs/spezifikation/14_SIEDLUNGEN.md 7, "Anschlusspunkte
+    der Wege"). Liefert {settlement_id: [(x, y), ...]} in
+    Karten-Pixel-Koordinaten der aktuellen Aufloesung.
 
     Nutzt denselben Segment/Kontur-Schnitt (LineString.intersection() +
     _extract_intersection_points()) wie bereits
@@ -5319,12 +5321,12 @@ class SettlementGenerator:
         self.scale_factor = heightmap.shape[0] / 128.0
         self.area_scale_factor = self.scale_factor ** 2
 
-        # Kulturregionen (2026-08-10, docs/spezifikation/14_SIEDLUNGEN.md §3). OHNE
-        # Pflichtpruefung: terrain.redistribution ist zwar bereits eine echte
-        # Abhaengigkeit von settlement.settlements (calculator_graph.py), aber
-        # nur im WELTKARTE_AKTIV-Pfad liefert sie ueberhaupt region_map -
-        # calculate_settlements() faellt bei None auf eine einzige namenlose
-        # Kultur zurueck (altes Verhalten).
+        # Kulturregionen (2026-08-10, docs/spezifikation/14_SIEDLUNGEN.md 3).
+        # OHNE Pflichtpruefung: terrain.redistribution ist zwar bereits eine
+        # echte Abhaengigkeit von settlement.settlements
+        # (calculator_graph.py), aber nur im WELTKARTE_AKTIV-Pfad liefert sie
+        # ueberhaupt region_map - calculate_settlements() faellt bei None auf
+        # eine einzige namenlose Kultur zurueck (altes Verhalten).
         region_map = self.data_lod_manager.get_calculator_output(
             "terrain.redistribution", "region_map", lod_level)
 
@@ -5807,7 +5809,8 @@ class SettlementGenerator:
 
     def _rang_zuweisen(self, werte_mit_rauschen):
         """
-        Rang je Settlement EINER Kultur, docs/spezifikation/14_SIEDLUNGEN.md §3.
+        Rang je Settlement EINER Kultur,
+        docs/spezifikation/14_SIEDLUNGEN.md 3.
 
         Der beste Wert wird immer 'stadt' - das ist genau "mindestens ein Ort
         je Kultur ist Stadt". Vom Rest (r = n-1 Orte) wird die obere Haelfte
@@ -5817,10 +5820,9 @@ class SettlementGenerator:
             r=3 (n=4): 1 siedlung, 2 dorf
             r=4 (n=5): 2 siedlung, 2 dorf
         `werte_mit_rauschen` ist der Eignungswert am Standort PLUS Rauschen
-        (§2: "Gezogen wird mit Rauschen um den Wert herum, sodass gelegentlich
-        ein Dorf an bester Lage sitzt und eine Stadt an mittelmaessiger") - der
-        Rang folgt also nicht dem rohen Eignungswert, sondern dieser bereits
-        verrauschten Fassung.
+        (docs/spezifikation/14_SIEDLUNGEN.md 2, "Varianz ist Pflicht: der Rang
+        wird mit Rauschen um den Wert gezogen") - der Rang folgt also nicht
+        dem rohen Eignungswert, sondern dieser bereits verrauschten Fassung.
         """
         n = len(werte_mit_rauschen)
         reihenfolge = sorted(range(n), key=lambda i: -werte_mit_rauschen[i])
@@ -6053,9 +6055,10 @@ class SettlementGenerator:
                         break
                     x, y = zufall_s.choice(best_positions[:min(10, len(best_positions))])
 
-                    # Rang-Rauschen (§2) direkt am gewaehlten Standort - "an
-                    # bester Lage" heisst hoechster Eignungswert, das Rauschen
-                    # kann das verschieben, ohne die Lage selbst zu aendern.
+                    # Rang-Rauschen (14_SIEDLUNGEN.md 2) direkt am gewaehlten
+                    # Standort - "an bester Lage" heisst hoechster
+                    # Eignungswert, das Rauschen kann das verschieben, ohne
+                    # die Lage selbst zu aendern.
                     rang_wert = float(suitability_map[int(y), int(x)]) + zufall_s.uniform(-0.25, 0.25)
 
                     platzhalter = Location(
@@ -6982,7 +6985,7 @@ class SettlementGenerator:
         # sitzen.
         #
         # Das Rauschen bleibt als leichter Stoerterm erhalten (wie bei der
-        # Rangvergabe der Siedlungen, SIEDLUNGEN_ENTWURF §2): sonst saehe
+        # Rangvergabe der Siedlungen, 14_SIEDLUNGEN.md 2): sonst saehe
         # jede Karte mit gleichem Seed nicht nur gleich aus, sondern jede
         # Region auch immer nach demselben Muster.
         eignungen = self.landmark_eignungen(civ_map, heightmap, slopemap, water_map)

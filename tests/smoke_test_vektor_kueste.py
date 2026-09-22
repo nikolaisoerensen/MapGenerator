@@ -16,7 +16,8 @@ WAS HIER GEPRUEFT WIRD, UND WARUM JEDES DAVON
                         Interpolation der Rasterkarte hergibt - sonst waere
                         der ganze Vektorweg wirkungslos.
   3. AUFLOESUNG         Die Vektorbeschreibung (Linienlaenge, Saatpunktzahl in
-                        METERN) darf nicht an der Pixelzahl haengen (§10).
+                        METERN) darf nicht an der Pixelzahl haengen
+                        (90_MESSPROTOKOLLE.md §10).
   4. DETERMINISMUS      Gleicher Seed -> bitgleiches Ergebnis.
   5. KUESTENLINIE       Die 0-Linie darf sich durch die Umformung NICHT
                         verschieben: Land bleibt Land, See bleibt See. Sonst

@@ -2,11 +2,12 @@
 Path: tests/smoke_test_erosion_hauptschalter.py
 
 Prueft den Hauptschalter value_default.EROSION_AKTIV (eingefuehrt 2026-07-30,
-siehe SPEZIFIKATION §8): steht er auf False, muss erosion.hydraulic fuer JEDES
-LOD Nullkarten liefern und das Gelaende exakt unveraendert lassen.
+siehe 90_MESSPROTOKOLLE.md §8): steht er auf False, muss erosion.hydraulic
+fuer JEDES LOD Nullkarten liefern und das Gelaende exakt unveraendert lassen.
 
-Drei Zusicherungen, und die dritte ist die eigentliche - SPEZIFIKATION §5.1.4:
-eine Zusicherung, die auch OHNE die Aenderung haelt, prueft nichts.
+Drei Zusicherungen, und die dritte ist die eigentliche -
+03_ARBEITSREGELN.md 1.1 Punkt 4: eine Zusicherung, die auch OHNE die
+Aenderung haelt, prueft nichts.
 
   1. mit EROSION_AKTIV=False sind alle sieben Karten exakt null
   2. das kombinierte Gelaende ist bitgleich mit dem unerodierten Terrain
@@ -56,8 +57,9 @@ def _aufbau():
     heightmap = manager.get_calculator_output(
         "terrain.redistribution", "heightmap", LOD)
     assert heightmap.shape == (SIZE, SIZE), (
-        "Werkzeug liefert %s statt %dx%d - §5.2, build_terrain(512) gab schon "
-        "einmal still ein 256er Array zurueck" % (heightmap.shape, SIZE, SIZE))
+        "Werkzeug liefert %s statt %dx%d - 03_ARBEITSREGELN.md 1.2, "
+        "build_terrain(512) gab schon einmal still ein 256er Array zurueck"
+        % (heightmap.shape, SIZE, SIZE))
 
     # Haerte gleichmaessig: hier wird die Erosion geprueft, nicht die Geologie.
     manager.set_calculator_output(

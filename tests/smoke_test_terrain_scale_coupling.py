@@ -29,9 +29,10 @@ die Groesse, um die es geht.
 Drei Laeufe:
 
   0. GEGENPROBE MESSGERAET. Wird die eingestellte Rinnengroesse verdoppelt,
-     muss die gemessene Wellenlaenge sich verdoppeln. §5.2 fuehrt vier Faelle,
-     in denen das Messgeraet selbst falsch war ("die Senkenmessung hatte Rand
-     und Innenbereich vertauscht"). Ohne diesen Lauf sagen die anderen nichts.
+     muss die gemessene Wellenlaenge sich verdoppeln. 03_ARBEITSREGELN.md 1.2
+     fuehrt fuenf Faelle, in denen das Messgeraet selbst falsch war ("Die
+     Senkenmessung hatte Rand und Innenbereich vertauscht"). Ohne diesen Lauf
+     sagen die anderen nichts.
   1. AUFLOESUNG. map_size 128/256/512 bei fester Ausdehnung. Die grobe Form und
      die Rinnengroesse in Metern muessen gleich bleiben; hoehere Aufloesung
      darf nur FEINERES hinzufuegen.
@@ -178,8 +179,9 @@ def baue(map_size, map_distance_km, filter_overrides=None):
 
     heightmap = manager.get_calculator_output(
         "terrain.redistribution", "heightmap", lod)
-    # §5.2: ein Werkzeug, das still etwas anderes liefert als angefragt, macht
-    # jede damit gewonnene Zahl wertlos. build_terrain(512) gab einmal 256.
+    # 03_ARBEITSREGELN.md 1.2: ein Werkzeug, das still etwas anderes liefert
+    # als angefragt, macht jede damit gewonnene Zahl wertlos.
+    # build_terrain(512) gab einmal 256.
     assert heightmap.shape == (int(map_size), int(map_size)), (
         "angefragt %d px, bekommen %s" % (map_size, heightmap.shape))
 

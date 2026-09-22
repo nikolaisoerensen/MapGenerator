@@ -14,8 +14,9 @@ Geprueft wird hier das NEUE Verhalten, nicht ob es "gut aussieht":
   3. Jede vorhandene Kultur hat GENAU eine Stadt (die Zusicherung des Entwurfs
      ist "mindestens eine" - die Umsetzung hier liefert immer exakt eine).
   4. Haeuserzahl liegt im Bereich des zugewiesenen Rangs.
-  5. Der Rang ist NICHT einfach der Eignungswert - das Rauschen aus §2 muss
-     ueber mehrere Seeds sichtbar etwas verschieben, sonst waere es totes Code.
+  5. Der Rang ist NICHT einfach der Eignungswert - das Rauschen aus
+     14_SIEDLUNGEN.md 2 muss ueber mehrere Seeds sichtbar etwas verschieben,
+     sonst waere es totes Code.
 
 Faehrt die echte Pipeline (Terrain bis Settlements) bei kleiner Kartengroesse,
 mehrere Seeds - das ist teuer, deshalb bewusst nur 3 Seeds bei 96 px.

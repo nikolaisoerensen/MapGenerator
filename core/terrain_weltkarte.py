@@ -487,7 +487,8 @@ def oktavenstapel(size, seed, shader_manager=None, mpp=None, hoehe=None):
     raeumlich aendern duerfen.
 
     Wellenlaenge der Oktave k: GRUNDFORM_M / 2^k, in METERN. Damit haengt das
-    Ergebnis an der Wirklichkeit und nicht an der Pixelzahl (SPEZIFIKATION §10).
+    Ergebnis an der Wirklichkeit und nicht an der Pixelzahl
+    (90_MESSPROTOKOLLE.md §10).
 
     `mpp` ueberschreibt die aus WELT_KM abgeleitete Pixelgroesse. Gebraucht
     von Pruefwerkzeugen, die einen ANDEREN Weltausschnitt betrachten als die
@@ -551,7 +552,7 @@ def oktavengewicht(k, formgroesse, rauheit):
     WARUM ES DIESE FUNKTION GIBT (2026-08-26): sie stand zweimal im Code -
     einmal in `weltfeld()` (mit ortsabhaengigen Feldern) und einmal in
     `regionsfeld()` (mit einem Zahlensatz). Zwei Fassungen derselben Formel
-    sind zwei Wahrheiten (SPEZIFIKATION 4.5): aendert jemand das Tor in
+    sind zwei Wahrheiten (02_INVARIANTEN.md 5): aendert jemand das Tor in
     `weltfeld()` und vergisst die Vorschau, stellt der Nutzer seine Regionen
     an einem Gelaende ein, das es auf der Karte nicht gibt - ohne
     Fehlermeldung, nur "irgendwie anders".
@@ -890,7 +891,7 @@ def voronoi_regionen(maske, seed, punktzahl=200, zweitanteil=0.35,
     # `seegliederung()` den Seegrad ueber denselben Graphen nach aussen
     # traegt. Ohne die Etiketten muesste es eine zweite Zellzerlegung
     # bauen - und zwei Zerlegungen waeren zwei Wahrheiten ueber dieselbe
-    # Karte (SPEZIFIKATION 4.5).
+    # Karte (02_INVARIANTEN.md 5).
     return gewichte, etikett
 
 
@@ -1598,8 +1599,8 @@ def regionsfeld(regionsname, breite_px, hoehe_px=None, seed=0,
     return H, r
 
 # Zieltiefe je Seegrad, docs/spezifikation/12_WASSER.md Abschnitt 7 - eine TABELLE statt einer
-# Formel (§0: "keine Simulationskreise mehr, sondern in jedem Kreis
-# Festlegungen"). 4+ ist der Meeresboden.
+# Formel (13_KLIMA_UND_BIOME.md 1: "keine Simulationskreise mehr, sondern in
+# jedem Kreis Festlegungen"). 4+ ist der Meeresboden.
 #
 # GRAD 0 NICHT MEHR 0.0 (2026-08-11, Nutzer-Befund am laufenden Programm):
 # "das meer ist nicht vertieft ... es gibt land um die regionen herum

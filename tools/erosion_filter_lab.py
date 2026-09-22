@@ -13,14 +13,15 @@ Zwei getrennte Fragen, die nicht vermischt werden duerfen:
             steht, ist ein schlechtes Ergebnis hier eine Aussage ueber die
             Anwendung und nicht ueber den Port.
 
-Diese Trennung ist der Grund, warum es zwei Laeufe gibt: SPEZIFIKATION §5.1.2
-verlangt eine Sache auf einmal, und Portierung UND Anwendung gleichzeitig zu
-beurteilen war in diesem Projekt schon einmal eine halbe Stunde Suche.
+Diese Trennung ist der Grund, warum es zwei Laeufe gibt:
+03_ARBEITSREGELN.md 1.1 Punkt 2 verlangt eine Sache auf einmal, und
+Portierung UND Anwendung gleichzeitig zu beurteilen war in diesem Projekt
+schon einmal eine halbe Stunde Suche.
 
-  "kennzahlen"  Was der Filter an den Kennzahlen aus §3.1/§3.2 aendert, mit
-                Gegenprobe (Filter aus). Er kann die Entwaesserungs-Kennzahlen
-                NICHT verbessern - er bewegt keine Masse. Der Lauf ist da, um
-                das zu belegen statt zu behaupten.
+  "kennzahlen"  Was der Filter an den Kennzahlen aus 10_REGIONEN.md B.1/B.2
+                aendert, mit Gegenprobe (Filter aus). Er kann die
+                Entwaesserungs-Kennzahlen NICHT verbessern - er bewegt keine
+                Masse. Der Lauf ist da, um das zu belegen statt zu behaupten.
 
 Aufruf:
     .venv\\Scripts\\python.exe tools/erosion_filter_lab.py demo
@@ -237,7 +238,8 @@ def lauf_kennzahlen(size=192):
 
     print("Erwartung, vorab notiert: Abfluss und Senken aendern sich kaum bis")
     print("gar nicht zum Besseren. Der Filter bewegt keine Masse und kennt kein")
-    print("Routing - er macht das Aussehen, nicht die Entwaesserung (§8).")
+    print("Routing - Aussehen, nicht Entwaesserung "
+          "(90_MESSPROTOKOLLE.md §8).")
     return 0
 
 

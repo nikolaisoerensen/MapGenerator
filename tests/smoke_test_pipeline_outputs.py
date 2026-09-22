@@ -20,21 +20,21 @@ Geprueft wird je Output eine von fuenf Lagen:
     TEILWEISE, NaN dokumentiert  Sonderfall von NICHT-ENDLICH, siehe unten
 
 "NUR NULL" ist nicht automatisch ein Fehler: erosion.* liefert absichtlich
-Nullkarten, solange EROSION_AKTIV auf False steht (§8). Dasselbe gilt fuer
-geology.intrusions/height_delta - die Nullkarte ist dort Absicht, nicht
-Ausfall (Nutzer-Vorgabe "Stoerungen greifen nicht in das Terrain ein",
-siehe core/geology_generator.py Modul-Docstring Zeilen 15-25 und
-_calc_intrusions() Zeilen 1222-1239). Der Test nennt das deshalb getrennt
-(Ticket #79).
+Nullkarten, solange EROSION_AKTIV auf False steht (90_MESSPROTOKOLLE.md §8).
+Dasselbe gilt fuer geology.intrusions/height_delta - die Nullkarte ist dort
+Absicht, nicht Ausfall (Nutzer-Vorgabe "Stoerungen greifen nicht in das
+Terrain ein", siehe core/geology_generator.py Modul-Docstring Zeilen 15-25
+und _calc_intrusions() Zeilen 1222-1239). Der Test nennt das deshalb
+getrennt (Ticket #79).
 
 Ebenso settlement.pathfinding/sea_roads: eine leere Liste ist auf DIESER
 Testkarte (SIZE/KM/SEED oben) korrekt, kein Ausfall (Ticket #80). Ein
 Seeweg entsteht nur, wenn ein Kulturpaar KEINEN endlichen Landweg hat
-(calculate_road_network(), 14_SIEDLUNGEN.md 5.3-Zweig). Nachgemessen: bei diesem Seed
-liegen alle 40 Siedlungen auf derselben, 5326 px grossen Hauptlandmasse
-(daneben nur neun Kleinstinseln mit 5-9 px, siedlungsfrei) - jedes der
-neun Kulturpaare findet also einen Landweg, 0 Seewege ist damit die
-richtige Zahl fuer diese Karte, nicht ein Zeichen fehlender Berechnung.
+(calculate_road_network(), 14_SIEDLUNGEN.md 5.3-Zweig). Nachgemessen: bei
+diesem Seed liegen alle 40 Siedlungen auf derselben, 5326 px grossen
+Hauptlandmasse (daneben nur neun Kleinstinseln mit 5-9 px, siedlungsfrei) -
+jedes der neun Kulturpaare findet also einen Landweg, 0 Seewege ist damit
+die richtige Zahl fuer diese Karte, nicht ein Zeichen fehlender Berechnung.
 
 "NICHT-ENDLICH" (NaN/Inf im Feld) ist ebenfalls nicht automatisch ein
 Fehler: manche Felder benutzen NaN als dokumentiertes "nicht zutreffend"-

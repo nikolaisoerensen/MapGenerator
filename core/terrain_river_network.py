@@ -1,7 +1,7 @@
 """
 Path: core/terrain_river_network.py
 
-Flussnetz-Skelett mit Hochebene (SPEZIFIKATION §12).
+Flussnetz-Skelett mit Hochebene (90_MESSPROTOKOLLE.md §12).
 
 Die Hoehe wird nicht vom Fluss AUFGEBAUT, sondern zwischen dem Fluss und einer
 globalen Flaeche GEBLENDET:
@@ -15,16 +15,17 @@ z_Fluss, an der Wasserscheide (d~=1, Profil=1) ergibt es P.
 WARUM DIESE UMKEHRUNG. Die naheliegende Form `z = z_Fluss(naechster) + Profil*H`
 kann keine Hochebene erzeugen: jenseits der Talbreite haengt sie nur noch am
 NAECHSTEN Fluss, und dessen Hoehe springt an jeder Wasserscheide. Ergebnis war
-ein Flickwerk exakt ebener Terrassen mit Nahtstellen (§8: 62% aller Zellen ohne
-streng tieferen Nachbarn). Hier laufen an der Wasserscheide beide Seiten gegen
-denselben Wert P, der einwertig ist - die Naht faellt weg, und zwischen den
-Taelern kann eine echte Hochflaeche liegen.
+ein Flickwerk exakt ebener Terrassen mit Nahtstellen (90_MESSPROTOKOLLE.md
+§8: 62% aller Zellen ohne streng tieferen Nachbarn). Hier laufen an der
+Wasserscheide beide Seiten gegen denselben Wert P, der einwertig ist - die
+Naht faellt weg, und zwischen den Taelern kann eine echte Hochflaeche liegen.
 
 Aufbau in vier Schritten, alle nicht-iterativ:
 
   1. Poisson-Disk-Punktsatz mit Mindestabstand IN METERN. Deckt die Karte per
-     Konstruktion ab - das war die offene Baustelle aus §8, wo ein gewachsener
-     Baum bei 192 px nur 139 px weit kam.
+     Konstruktion ab - das war die offene Baustelle aus
+     90_MESSPROTOKOLLE.md §8, wo ein gewachsener Baum bei 192 px nur 139 px
+     weit kam.
   2. Delaunay-Graph. Planar, deshalb kann sich kein Teilgraph selbst kreuzen.
   3. Kuerzeste-Wege-Baum vom Auslass am Kartenrand, Kantenkosten steigen mit
      der Hoehe von P. Die Fluesse suchen sich dadurch das Tiefe, ohne an den
@@ -38,9 +39,9 @@ auf das Pixelgitter abgebildet. Dadurch liefert jede Aufloesung DASSELBE Netz -
 sonst haette jede LOD-Stufe ein anderes Gelaende und die Karte spraenge
 waehrend der progressiven Darstellung.
 
-Gemessener Stand (§12), 25 km, 384 px, ohne jede Erosionsiteration:
-Entwaesserungsanteil 61-97% gegen 10.1% im reinen Noise-Pfad und 10-22% der
-Feld-Erosion (§7).
+Gemessener Stand (90_MESSPROTOKOLLE.md §12), 25 km, 384 px, ohne jede
+Erosionsiteration: Entwaesserungsanteil 61-97% gegen 10.1% im reinen
+Noise-Pfad und 10-22% der Feld-Erosion (90_MESSPROTOKOLLE.md §7).
 """
 
 import logging
@@ -168,7 +169,7 @@ def poisson_points(extent_m: float, min_distance_m: float, seed: int,
 
     In Metern und nicht in Pixeln, damit jede Aufloesung dasselbe Netz
     bekommt - dieselbe Ueberlegung wie bei FEATURE_SIZE_M und GULLY_SIZE_M in
-    §10.
+    90_MESSPROTOKOLLE.md §10.
     """
     # DIE ZUFALLSREIHENFOLGE IST UNANTASTBAR (2026-08-23).
     #
@@ -587,7 +588,7 @@ def densify(points_px, parents, order, strahler, step_px, meander, seed,
     lag - bei 2500 m Knotenabstand ueber einen ganzen Berg. Gemessen: der
     groesste Abtrag sass am HOECHSTEN Punkt der Karte, das Flussbett wurde dort
     auf -397 m gedrueckt, und 16 % aller Flusspixel hatten ueber 1000 m Abtrag
-    (SPEZIFIKATION §15).
+    (90_MESSPROTOKOLLE.md §15).
 
     Jetzt sucht sich jede Kante ihren Weg durch das Gelaende. Der Maeander
     entsteht dabei von selbst - der Lauf geht um den Berg herum, nicht
@@ -825,7 +826,7 @@ def dense_heights(dense_px, dense_parents, dense_order, P, size,
                   area_norm=None, area_exponent=0.30, max_gradient=0.0):
     """
     Hoehe je verdichtetem Punkt: dem Gelaende folgen, dann flussabwaerts
-    eintiefen (nie anheben - siehe Modulkopf und §12).
+    eintiefen (nie anheben - siehe Modulkopf und 90_MESSPROTOKOLLE.md §12).
 
     Das Mindestgefaelle wird PRO METER LAUFLAENGE angesetzt, nicht pro
     Segment. Als Wert je Segment gerechnet haengt es an der Zahl der
@@ -990,7 +991,7 @@ def carve_river_network(P: np.ndarray, meters_per_pixel: float, peak_m: float,
     # Untergrenzen: unter vier Laeufen je Kartenkante ist ein "Netz" kein Netz
     # mehr, und unter drei Pixeln Abstand ist es nicht darstellbar. Bewusst
     # geometrisch statt als fester Meterwert - dieselbe Ueberlegung wie bei der
-    # Drei-Pixel-Grenze der Rinnengroesse in §10.
+    # Drei-Pixel-Grenze der Rinnengroesse in 90_MESSPROTOKOLLE.md §10.
     if extent_m / max(spacing_m, 1e-6) < 4.0:
         logger.debug("Flussnetz uebersprungen: Abstand %.0f m auf %.0f m Karte "
                      "ergibt weniger als vier Laeufe", spacing_m, extent_m)
@@ -1004,7 +1005,7 @@ def carve_river_network(P: np.ndarray, meters_per_pixel: float, peak_m: float,
     # 17% Entwaesserung, 256 px (43 px je Tal) dagegen 87%.
     # Schwelle 2026-07-30 von 30 auf 40 angehoben: unterhalb von etwa 40
     # Pixeln je Tal treten zusaetzlich zu den Entwaesserungsproblemen einzelne
-    # Ueberschneidungen der Laeufe auf (§16).
+    # Ueberschneidungen der Laeufe auf (90_MESSPROTOKOLLE.md §16).
     pixel_je_tal = spacing_m / float(meters_per_pixel)
     if pixel_je_tal < 40.0:
         logger.warning(

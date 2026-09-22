@@ -217,7 +217,7 @@ Durchgang, 11 us/px auf der CPU. Gegen die 6500-8000 Iterationen aus §7 ist das
 praktisch kostenlos.
 
 Er bewegt aber KEINE MASSE und kennt kein Routing. 02_INVARIANTEN.md 3 gilt
-fuer ihn nicht, und die Entwaesserungs-Kennzahlen aus §3.2 kann er nicht
+fuer ihn nicht, und die Entwaesserungs-Kennzahlen aus 10_REGIONEN.md B.2 kann er nicht
 erfuellen. Er macht das AUSSEHEN von Erosion; die Entwaesserung kommt aus dem
 Skelett (§8). Die beiden sind die zwei Haelften, nicht zwei Alternativen.
 
@@ -259,7 +259,7 @@ entfaellt, weil `_apply_redistribution` die Hoehenspanne ohnehin neu festlegt.
 
 Der erste Sweep variierte Oktaven UND Offset gleichzeitig und war dadurch nicht
 auswertbar - der Offset-Effekt ueberdeckte den Oktaveneffekt vollstaendig.
-§5.1.2, eine Sache auf einmal, zum zweiten Mal an einem Tag.
+03_ARBEITSREGELN.md 1.1 Punkt 2, eine Sache auf einmal, zum zweiten Mal an einem Tag.
 
 ### Kennzahlen, 192 px, mit Gegenprobe
 
@@ -300,10 +300,10 @@ Water, Biome, 2D-Anzeige, 3D-Ansicht und Export den Filter ohne weitere
 Aenderung.
 
 **Die Hoehenspanne wird nach dem Filter wiederhergestellt** (`_apply_redistribution`
-mit Potenz 1.0, also reine lineare Abbildung). Zwei Gruende: §3.1 fuehrt
+mit Potenz 1.0, also reine lineare Abbildung). Zwei Gruende: 10_REGIONEN.md B.1 fuehrt
 "Hoehenspanne genau BASE_ELEVATION_M .. AMPLITUDE" als erfuellt, und das Delta
 liess das Relief um 6-8% wachsen; und dadurch kann kein Reglerstand die Karte aus
-ihrem Hoehenbereich schieben (§1, 02_INVARIANTEN.md 7).
+ihrem Hoehenbereich schieben (01_ZIEL.md §2, 02_INVARIANTEN.md 7).
 
 Hauptschalter `EROSION_FILTER_AKTIV` (Vorgabe True), sieben Regler in
 `class EROSION_FILTER`, im Terrain-Tab als Gruppe "Erosion Filter".
@@ -331,7 +331,7 @@ den GPU-Pfad.
 * `ridge_map` als Eingang fuer die Entwaesserung pruefen - Beruehrungspunkt
   zum Skelett aus §8.
 * Die Optik ist noch nicht abgenommen; Kennzahlen koennen sie nicht ersetzen
-  (§5.1.3).
+  (03_ARBEITSREGELN.md 1.1 Punkt 3).
 
 
 ---
@@ -405,7 +405,7 @@ hoehere Aufloesung ergaenzt nur Detail.
    vier oder fuenf zu, das Maximum springt auf eine andere Oktave - Faktor
    1.38 statt 2.0. Jetzt mit einer Oktave und Schwerpunkt statt Maximum.
 
-Beide Male haette die Messung ohne die Gegenprobe aus §5.1.4 eine falsche
+Beide Male haette die Messung ohne die Gegenprobe aus 03_ARBEITSREGELN.md 1.1 Punkt 4 eine falsche
 Aussage geliefert.
 
 ---
@@ -598,7 +598,7 @@ Die Frage war jedesmal "wie tief schneidet das Tal ein". Drei Anlaeufe:
 Erst die dritte Fassung zeigte, dass der Regler sauber wirkt. Die zweite hatte
 ausserdem eine falsche Ursache nahegelegt (das Mindestgefaelle), was zu einer
 Aenderung fuehrte, die die Entwaesserung von 90% auf 15% brach - siehe unten.
-§5.2 fuehrt vier Faelle falscher Messgeraete; das sind Fall fuenf bis sieben.
+03_ARBEITSREGELN.md 1.2 fuehrt vier Faelle falscher Messgeraete; das sind Fall fuenf bis sieben.
 
 ### Das Mindestgefaelle, zweimal falsch bemessen
 
@@ -813,8 +813,8 @@ nachweislich richtig, nur nicht hinreichend.
 
 Der Vorabtest mass den erzwungenen Anstieg auf KNOTENEBENE und zeigte eine
 klare Verbesserung. Das fertige Gelaende zeigte keine. Zwei verschiedene
-Groessen, und die erste ist fuer die Frage nicht die richtige - §5.2, Fall
-acht.
+Groessen, und die erste ist fuer die Frage nicht die richtige -
+03_ARBEITSREGELN.md 1.2, Fall acht.
 
 
 ---

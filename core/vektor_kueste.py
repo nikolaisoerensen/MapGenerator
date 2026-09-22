@@ -71,7 +71,8 @@ from core.terrain_weltkarte import (KUESTEN_ARCHETYPEN, KUESTENHOEHE_M,
 
 # Abstand der Saatpunkte auf der Kuestenlinie, in METERN. Bestimmt, wie
 # kleinteilig die Archetypen laengs der Kueste wechseln. In Metern und nicht
-# in Pixeln, damit jede Aufloesung dieselben Zonen bekommt (§10).
+# in Pixeln, damit jede Aufloesung dieselben Zonen bekommt
+# (90_MESSPROTOKOLLE.md §10).
 SAAT_ABSTAND_M = 420.0
 
 # Abtastabstand der Linie selbst, in METERN - nur fuer die Abstandsmessung.
@@ -577,7 +578,7 @@ MESS_PROFIL_M_JE_ARCHETYP = {
 #
 # ABGELEITET, NICHT GETIPPT: der Wert wird aus MESS_PROFIL_M_JE_ARCHETYP
 # gerechnet. Eine zweite von Hand gepflegte Tabelle waere eine zweite
-# Wahrheit ueber dieselbe Messung (SPEZIFIKATION 4.5).
+# Wahrheit ueber dieselbe Messung (02_INVARIANTEN.md 5).
 HINTERLAND_BAND_M = (400.0, 700.0)
 
 
@@ -598,7 +599,7 @@ def _gemessene_hinterlandhoehen():
 #
 # `tools/archetyp_masse_messen.py` erzeugt die Tabelle weiterhin. Wer sie
 # wieder einfuegt, braucht zuerst einen Leser dafuer; eine zweite Tabelle
-# ueber dieselbe Messung waere eine zweite Wahrheit (SPEZIFIKATION 4.5).
+# ueber dieselbe Messung waere eine zweite Wahrheit (02_INVARIANTEN.md 5).
 # Die Zahlen stehen unveraendert in der Git-Historie dieser Datei.
 
 

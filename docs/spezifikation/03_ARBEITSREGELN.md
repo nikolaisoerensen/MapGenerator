@@ -24,7 +24,8 @@ Die Prüfliste **was** dabei jedes Mal zu prüfen ist, steht getrennt in
    Drainage-Dichte stufte die beste Variante als schlechteste ein.
 4. **Gegenprobe.** Eine Zusicherung, die auch ohne die Änderung hält, prüft
    nichts.
-5. **Nach der Änderung die volle Prüfliste** aus §4 — nicht nur den Test, der
+5. **Nach der Änderung die volle Prüfliste** aus
+   [02_INVARIANTEN.md](02_INVARIANTEN.md) — nicht nur den Test, der
    zur Änderung gehört.
 
 ### 1.2 Messfallen, die schon zugeschlagen haben
@@ -49,7 +50,8 @@ Bei jeder Änderung diese vier Fragen beantworten:
 1. **Wie ginge es besser?** Ist das die Ursache oder ein Symptom?
 2. **Rechnen CPU und GPU noch dasselbe?**
 3. **Welcher Regler gehört dazu, und mit welchem hängt er zusammen?**
-4. **Was in §4 könnte ich damit gerade kaputt machen?**
+4. **Was in [02_INVARIANTEN.md](02_INVARIANTEN.md) könnte ich damit gerade
+   kaputt machen?**
 
 ---
 

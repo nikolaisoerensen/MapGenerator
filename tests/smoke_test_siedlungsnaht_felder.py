@@ -3,11 +3,12 @@ Ticket #35: Die Feldliste der Siedlungsnaht festschreiben.
 Ticket #72: Kontur der Stadtgrenze als Polygon exportieren.
 Ticket #73: Anschlusspunkte der Wege an der Stadtgrenze berechnen.
 
-Prueft die "Naht" aus docs/spezifikation/14_SIEDLUNGEN.md §6 - die eine Stelle, an
-der das Spiel Siedlungsdaten abholt. Entschieden in Issue #19 (Fragen 19.2
-und 19.3): der Editor liefert genau sechs Felder (Kontur der Stadtgrenze,
-Anschlusspunkte der Wege, Stadtgroesse, Stadttyp, Rang, Kultur) und NICHT
-Parzellen/Innenstrassen/Haeuserformen/Gewerbe - das entsteht im Spiel.
+Prueft die "Naht" aus docs/spezifikation/14_SIEDLUNGEN.md 7 - die eine
+Stelle, an der das Spiel Siedlungsdaten abholt. Entschieden in Issue #19
+(Fragen 19.2 und 19.3): der Editor liefert genau sechs Felder (Kontur der
+Stadtgrenze, Anschlusspunkte der Wege, Stadtgroesse, Stadttyp, Rang,
+Kultur) und NICHT Parzellen/Innenstrassen/Haeuserformen/Gewerbe - das
+entsteht im Spiel.
 
 Von den sechs Feldern liefert `settlement_list` VIER (Kultur, Rang,
 Stadtgroesse ueber house_count, Stadttyp) auf jedem `Location`-Eintrag mit
@@ -18,9 +19,9 @@ Knoten `settlement.city_boundary` zusaetzlich `city_boundary_polygons`
 Dict {settlement_id: [(x, y), ...]} mit den Schnittpunkten des
 ueberregionalen Wegenetzes (`roads`) mit derselben Stadtgrenzen-Kontur -
 NICHT als Attribut auf `Location` oder in `s.properties`, sondern als
-eigener Calculator-Output (siehe §6.1/§6.2). Damit sind alle sechs Felder
-aus §6.1 geliefert; dieser Test haelt fest, dass alle sechs
-typ-/wertebereichsgeprueft bleiben.
+eigener Calculator-Output (siehe 14_SIEDLUNGEN.md 7). Damit sind alle sechs
+Felder aus 14_SIEDLUNGEN.md 7 geliefert; dieser Test haelt fest, dass alle
+sechs typ-/wertebereichsgeprueft bleiben.
 
 Faehrt die echte Pipeline (Terrain bis settlement.pathfinding) bei kleiner
 Kartengroesse, ein Seed reicht - hier geht es um Feldvorhandensein/-typ,
@@ -235,7 +236,7 @@ def main():
             print("  - " + f)
         return 1
 
-    print("Alle Naht-Feld-Pruefungen bestanden (§6.4).")
+    print("Alle Naht-Feld-Pruefungen bestanden (14_SIEDLUNGEN.md 7).")
     return 0
 
 

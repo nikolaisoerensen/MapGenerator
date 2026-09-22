@@ -223,7 +223,8 @@ Spiel aus Siedlungsdaten liest (`city_id`, `city_center`,
 offen (`city_boundary_polygons` → Ticket #72, `road_entry_points` →
 Ticket #73). `welt_backen`/`welt_laden` transportieren einfach die
 komplette `Location`-Liste über den Kategorie-Schnappschuss - sie erfinden
-keine eigene Siedlungs-Feldliste, sondern reichen §6 unverändert durch.
+keine eigene Siedlungs-Feldliste, sondern reichen die Naht aus
+`docs/spezifikation/14_SIEDLUNGEN.md` Abschnitt 7 unverändert durch.
 
 ## Die `erosion`-Lücke ist geschlossen
 

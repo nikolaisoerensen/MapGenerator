@@ -3,8 +3,8 @@ Path: tools/skeleton_lab.py
 
 WERKZEUG fuer den Umbau "STRUKTUR VOR NOISE" (2026-07-30).
 
-Ausgangspunkt ist der Stand aus SPEZIFIKATION §7: die Erosion soll die
-Entwaesserung aus isotropem fBm HERAUSHOLEN und schafft es nicht - 10-20%
+Ausgangspunkt ist der Stand aus 90_MESSPROTOKOLLE.md §7: die Erosion soll
+die Entwaesserung aus isotropem fBm HERAUSHOLEN und schafft es nicht - 10-20%
 Entwaesserungsanteil, 824-1559 geschlossene Senken, und laenger rechnen macht
 es SCHLECHTER (Befund 2). Der Kapazitaetsfaktor ist bei 1.0 geklemmt, eine
 Gerinne-Hierarchie ist im Feldmodell gar nicht ausdrueckbar (Befund 4).
@@ -25,9 +25,10 @@ Traegt die Vorhersage nicht, ist der ganze Umbau falsch und man sieht es hier,
 bevor eine Datei in core/ angefasst wird.
 
 Gemessen wird mit dem Werkzeug, das dafuer schon existiert:
-tools.drainage_lab.bewerte() - dieselben Kennzahlen wie in §7, damit die
-Zahlen direkt vergleichbar sind. Kontaktabzug und Querschnitt gehoeren nach §6
-zu jeder Messung und werden hier immer mitgeschrieben.
+tools.drainage_lab.bewerte() - dieselben Kennzahlen wie in
+90_MESSPROTOKOLLE.md §7, damit die Zahlen direkt vergleichbar sind.
+Kontaktabzug und Querschnitt gehoeren nach 03_ARBEITSREGELN.md 2 zu jeder
+Messung und werden hier immer mitgeschrieben.
 
 NICHT umgesetzt, bewusst: die Talform "Tuerme" (Region 06 Guilin). Tuerme sind
 eine Eigenschaft der DRAUFSICHT (isolierte Kegel in einer Ebene), nicht des
@@ -227,10 +228,11 @@ def wachse_netz(size, p, seed=LAB_SEED):
 
             # Der Rand ist ERLAUBT, nicht verboten: der Auslass sitzt per
             # Definition auf y=0 bzw. x=0, und ein Lauf, der die Karte
-            # verlaesst, ist genau das gewuenschte Verhalten (§3.6: "Fluesse
-            # verlassen die Karte"). Die frueheren Grenzen 1.0 .. size-2.0
-            # liessen den ersten Schritt von 0.9 px vom Auslass aus nicht
-            # durch - der Baum bestand aus einem einzigen Knoten.
+            # verlaesst, ist genau das gewuenschte Verhalten
+            # (10_REGIONEN.md B.6: "Fluesse verlassen die Karte"). Die
+            # frueheren Grenzen 1.0 .. size-2.0 liessen den ersten Schritt
+            # von 0.9 px vom Auslass aus nicht durch - der Baum bestand aus
+            # einem einzigen Knoten.
             if not (0.0 <= y_neu <= size - 1.0 and 0.0 <= x_neu <= size - 1.0):
                 break
             # Die Sperrzone des eigenen Segments und des Elternasts liegt
@@ -285,10 +287,10 @@ def strahler(netz):
     Strahler-Ordnung, ein Rueckwaertslauf (eltern[i] < i, siehe wachse_netz).
 
     Damit hat jedes Segment eine EXPLIZITE Groessenklasse. Genau das fehlt dem
-    Feldmodell nach §7 Befund 4: dort ist discharge_factor bei 1.0 geklemmt,
-    ein Bach mit 50 Zellen Einzug bekommt dieselbe Kapazitaet wie ein
-    Hauptfluss mit 5000. Hier ist die Hierarchie kein Rechenergebnis, sondern
-    eine Eigenschaft des Graphen.
+    Feldmodell nach 90_MESSPROTOKOLLE.md §7 Befund 4: dort ist
+    discharge_factor bei 1.0 geklemmt, ein Bach mit 50 Zellen Einzug bekommt
+    dieselbe Kapazitaet wie ein Hauptfluss mit 5000. Hier ist die Hierarchie
+    kein Rechenergebnis, sondern eine Eigenschaft des Graphen.
     """
     eltern = netz["eltern"]
     n = len(eltern)
@@ -355,7 +357,7 @@ def talformer(d_norm, p):
     Querprofil des Tals ueber dem NORMIERTEN Flussabstand d_norm in [0,1].
     profil(0) = 0 an der Talsohle, profil(1) = 1 am Kamm.
 
-    Ein einziger Exponent deckt die Spalte "Talform" aus SPEZIFIKATION §2
+    Ein einziger Exponent deckt die Spalte "Talform" aus 10_REGIONEN.md A.1
     monoton ab:
 
         Exponent < 1   Wand direkt am Fluss, dann Plateau   -> Schlucht
@@ -441,7 +443,8 @@ def baue_gelaende(name, size=192, seed=LAB_SEED, mit_noise=True):
     profil = talformer(d_norm, p)
 
     # Flankenhoehe so, dass die Spanne exakt basis_m .. basis_m+relief_m wird -
-    # dieselbe Garantie, die §3.1 fuer den Noise-Pfad schon als erfuellt fuehrt.
+    # dieselbe Garantie, die 10_REGIONEN.md B.1 fuer den Noise-Pfad schon als
+    # erfuellt fuehrt.
     gipfel = p["basis_m"] + p["relief_m"]
     h_flanke = gipfel - float(netz["z"].max())
     z = z_nah + profil * h_flanke
@@ -468,7 +471,8 @@ def baue_gelaende(name, size=192, seed=LAB_SEED, mit_noise=True):
 
 
 # =============================================================================
-# 4. KENNZAHLEN - dieselben wie in §7, damit die Zahlen vergleichbar sind
+# 4. KENNZAHLEN - dieselben wie in 90_MESSPROTOKOLLE.md §7, damit die Zahlen
+# vergleichbar sind
 # =============================================================================
 
 def bewerte(z, meter_pro_pixel):
@@ -490,7 +494,8 @@ def zeile(name, w):
 
 
 # =============================================================================
-# 5. BILDER - §6: Kontaktabzug und Querschnitt sind Teil jeder Messung
+# 5. BILDER - 03_ARBEITSREGELN.md 2: Kontaktabzug und Querschnitt sind Teil
+# jeder Messung
 # =============================================================================
 
 def _matplotlib():
@@ -565,8 +570,8 @@ def kontaktabzug(z, meter_pro_pixel, teile, datei):
 
 def querschnitt(faelle, datei):
     """
-    Querschnitte uebereinander. §5.1.3: vier Kennzahlen haben die
-    45-Grad-Pyramiden nicht gefunden, ein Bild sofort.
+    Querschnitte uebereinander. 03_ARBEITSREGELN.md 1.1 Punkt 3: vier
+    Kennzahlen haben die 45-Grad-Pyramiden nicht gefunden, ein Bild sofort.
     """
     plt = _matplotlib()
     fig, ax = plt.subplots(len(faelle), 1, figsize=(13, 2.6 * len(faelle)),
@@ -641,8 +646,8 @@ def lauf_regionen(size=192):
 def lauf_vergleich(size=192):
     """
     Die eigentliche Gegenprobe: Skelett gegen den heutigen Noise-Pfad, auf
-    denselben zwei Zielgelaenden wie in §7 (Alpental und Nebelrode) und mit
-    demselben Messgeraet.
+    denselben zwei Zielgelaenden wie in 90_MESSPROTOKOLLE.md §7 (Alpental und
+    Nebelrode) und mit demselben Messgeraet.
 
     Erwartung, vor dem Lauf notiert: Abfluss deutlich ueber den 10-20% des
     Noise-Pfads, Senken deutlich unter dessen 824-1559.

@@ -101,13 +101,13 @@ def geschachtelte_punkte(H, seed, abstand_makro_m=None,
     # KEIN KNOTEN FEINER ALS VIER PIXEL.
     #
     # Der Knotenabstand steht in Metern, damit die Landschaft nicht an der
-    # Pixelzahl haengt (SPEZIFIKATION §10). Unterhalb von etwa vier Pixeln
-    # traegt ein weiterer Knoten aber keine Information mehr - das Gelaende
-    # zwischen ihm und dem Nachbarn hat gar keine Stuetzstellen. Gemessen bei
-    # 256 px: 150 m Abstand sind dort 1.8 Pixel, es entstanden 8575 Knoten fuer
-    # 65536 Bildpunkte, und das Netz brauchte 64 Sekunden - laenger als bei
-    # 512 px. Die Grenze macht die grobe Stufe wieder schnell, ohne die feine
-    # zu beschneiden.
+    # Pixelzahl haengt (90_MESSPROTOKOLLE.md §10). Unterhalb von etwa vier
+    # Pixeln traegt ein weiterer Knoten aber keine Information mehr - das
+    # Gelaende zwischen ihm und dem Nachbarn hat gar keine Stuetzstellen.
+    # Gemessen bei 256 px: 150 m Abstand sind dort 1.8 Pixel, es entstanden
+    # 8575 Knoten fuer 65536 Bildpunkte, und das Netz brauchte 64 Sekunden -
+    # laenger als bei 512 px. Die Grenze macht die grobe Stufe wieder
+    # schnell, ohne die feine zu beschneiden.
     fein = max(fein, 4.0 * mpp)
 
     punkte = rn.poisson_points(extent_m, fein, seed) / mpp

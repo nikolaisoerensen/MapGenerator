@@ -1723,12 +1723,13 @@ class BaseTerrainGenerator:
             outputs["ridge_map"] = gefiltert["ridge_map"]
 
         # Flussnetz NACH dem Erosionsfilter: dessen Ergebnis ist die Flaeche P,
-        # in die eingeschnitten wird (SPEZIFIKATION §12).
+        # in die eingeschnitten wird (90_MESSPROTOKOLLE.md §12).
         netz = self._apply_river_network(outputs["heightmap"], amplitude)
         if netz is not None:
             # Spanne erneut setzen: der Einschnitt drueckt die Talsohle unter
-            # die Talsohlenhoehe (gemessen -1260 m bei den Alpen, §12). Mit
-            # Potenz 1.0 ist das eine reine lineare Abbildung, die Form bleibt.
+            # die Talsohlenhoehe (gemessen -1260 m bei den Alpen,
+            # 90_MESSPROTOKOLLE.md §12). Mit Potenz 1.0 ist das eine reine
+            # lineare Abbildung, die Form bleibt.
             outputs["heightmap"] = self._apply_redistribution(
                 netz["heightmap"], 1.0, amplitude)
             outputs["river_mask"] = netz["river_mask"]
@@ -2182,8 +2183,8 @@ class BaseTerrainGenerator:
 
     def _apply_river_network(self, P: np.ndarray, amplitude: float):
         """
-        Flussnetz-Skelett in die Flaeche P schneiden (SPEZIFIKATION §12,
-        core/terrain_river_network.py).
+        Flussnetz-Skelett in die Flaeche P schneiden (90_MESSPROTOKOLLE.md
+        §12, core/terrain_river_network.py).
 
         Wie beim Erosionsfilter bewusst KEIN eigener Calculator-Knoten: das
         Ergebnis ist die endgueltige Gelaendeform, und 20+ Lesestellen holen
@@ -2384,8 +2385,9 @@ class BaseTerrainGenerator:
 
     def _apply_erosion_filter(self, heightmap: np.ndarray, amplitude: float):
         """
-        ATEF-Erosionsfilter auf die fertig umverteilte Heightmap (SPEZIFIKATION
-        §9, Portierung in core/terrain_erosion_filter.py).
+        ATEF-Erosionsfilter auf die fertig umverteilte Heightmap
+        (90_MESSPROTOKOLLE.md §9, Portierung in
+        core/terrain_erosion_filter.py).
 
         Absichtlich HIER und nicht als eigener Calculator-Knoten: der Filter
         liefert die endgueltige Geländeform, und 20+ Lesestellen in
@@ -2421,14 +2423,15 @@ class BaseTerrainGenerator:
         ergebnis = filter_heightmap(heightmap, meters_per_pixel, filter_parameters)
         gefiltert = heightmap + ergebnis["height_delta"]
 
-        # Hoehenspanne wiederherstellen. §3.1 fuehrt "Hoehenspanne genau
-        # BASE_ELEVATION_M .. AMPLITUDE" als erfuellt, und ein Delta obendrauf
-        # reisst sie - gemessen wuchs das Relief um 6-8%. redistribute_power=1.0
-        # macht _apply_redistribution() zur reinen linearen Abbildung auf die
-        # Zielspanne, laesst die Form also unberuehrt.
+        # Hoehenspanne wiederherstellen. 10_REGIONEN.md B.1 fuehrt
+        # "Hoehenspanne genau BASE_ELEVATION_M .. AMPLITUDE" als erfuellt, und
+        # ein Delta obendrauf reisst sie - gemessen wuchs das Relief um 6-8%.
+        # redistribute_power=1.0 macht _apply_redistribution() zur reinen
+        # linearen Abbildung auf die Zielspanne, laesst die Form also
+        # unberuehrt.
         #
         # Zweiter Zweck: damit kann kein Reglerstand des Filters die Karte aus
-        # ihrem Hoehenbereich schieben (§1, 02_INVARIANTEN.md 7).
+        # ihrem Hoehenbereich schieben (01_ZIEL.md §2, 02_INVARIANTEN.md 7).
         gefiltert = self._apply_redistribution(gefiltert, 1.0, amplitude)
 
         self.logger.debug(

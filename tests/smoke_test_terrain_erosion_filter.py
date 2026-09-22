@@ -2,19 +2,21 @@
 Path: tests/smoke_test_terrain_erosion_filter.py
 
 Prueft die Einbindung des ATEF-Erosionsfilters in den Terrain-Aufbau
-(BaseTerrainGenerator._apply_erosion_filter, SPEZIFIKATION §9).
+(BaseTerrainGenerator._apply_erosion_filter, 90_MESSPROTOKOLLE.md §9).
 
-Fuenf Zusicherungen. Die drei letzten sind Gegenproben - nach §5.1.4 prueft
-eine Zusicherung, die auch ohne die Aenderung haelt, nichts.
+Fuenf Zusicherungen. Die drei letzten sind Gegenproben - nach
+03_ARBEITSREGELN.md 1.1 Punkt 4 prueft eine Zusicherung, die auch ohne die
+Aenderung haelt, nichts.
 
   1. Der Filter LAEUFT ueberhaupt. 02_INVARIANTEN.md 2 ist der teuerste
      Fehlertyp dieses Projekts (dreimal an einem Tag), deshalb wird nicht das
      Ergebnis interpretiert, sondern belegt, dass der Zweig betreten wurde: die
      ridge_map existiert nur, wenn er lief, und ihr Wertebereich ist ohne den
      Filter nicht herstellbar.
-  2. Die Hoehenspanne ist exakt BASE_ELEVATION_M .. AMPLITUDE. §3.1 fuehrt sie
-     als erfuellt, und ein Delta obendrauf reisst sie - _calc_redistribution
-     bildet deshalb nach dem Filter zurueck.
+  2. Die Hoehenspanne ist exakt BASE_ELEVATION_M .. AMPLITUDE.
+     10_REGIONEN.md B.1 fuehrt sie als erfuellt, und ein Delta obendrauf
+     reisst sie - _calc_redistribution bildet deshalb nach dem Filter
+     zurueck.
   3. GEGENPROBE Reglerwirkung: erosion_filter_strength = 0 muss dieselbe
      Heightmap liefern wie der abgeschaltete Filter. Sonst tut der Regler
      nicht, was sein Name sagt (02_INVARIANTEN.md 7).
@@ -106,7 +108,8 @@ def _heightmap(parameter_overrides=None, filter_aktiv=True):
         ridge_map = manager.get_calculator_output(
             "terrain.redistribution", "ridge_map", LOD)
         assert heightmap.shape == (SIZE, SIZE), (
-            "Werkzeug liefert %s statt %dx%d - §5.2" % (heightmap.shape, SIZE, SIZE))
+            "Werkzeug liefert %s statt %dx%d - 03_ARBEITSREGELN.md 1.2"
+            % (heightmap.shape, SIZE, SIZE))
         return heightmap.astype(np.float64), ridge_map
     finally:
         vd.EROSION_FILTER_AKTIV = original

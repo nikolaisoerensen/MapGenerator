@@ -25,9 +25,9 @@ Zwei Zusicherungen:
   1. SHADERS_ROOT zeigt auf das shaders/-Verzeichnis DIESES Projekts.
   2. Jede in get_program("kategorie", "operation") genannte Datei existiert.
      Die Aufrufstellen werden aus dem SYNTAXBAUM gelesen, nicht per
-     Textsuche - SPEZIFIKATION §5.2 fuehrt den Fall, in dem ein eigener
-     Erklaerkommentar von der Suche gefunden wurde, die den Code pruefen
-     sollte.
+     Textsuche - 03_ARBEITSREGELN.md 1.2 fuehrt den Fall, in dem ein
+     eigener Erklaerkommentar von der Suche gefunden wurde, die den Code
+     pruefen sollte.
 
 Aufruf:
     .venv/Scripts/python.exe tests/smoke_test_shader_paths.py

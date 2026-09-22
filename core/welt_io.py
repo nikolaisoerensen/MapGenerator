@@ -420,7 +420,7 @@ def welt_backen(pfad: str, data_lod_manager, parameter_manager=None) -> Dict[str
     # Klartext ablegte - ohne sie waere diese Auskunft beim Umstieg auf das
     # Pickle-Format verloren gegangen, obwohl sie fuer Menschen (und fuer
     # jeden Leser ausserhalb von Python) die einzige lesbare Form der
-    # Siedlungsdaten ist, siehe docs/spezifikation/14_SIEDLUNGEN.md §6.
+    # Siedlungsdaten ist, siehe docs/spezifikation/14_SIEDLUNGEN.md 7.
     # EINBAHNSTRASSE: welt_laden() liest diese Datei NICHT zurueck - der
     # Rundlauf laeuft ausschliesslich ueber zustand/*.pkl. Sie ist Vorschau,
     # kein zweiter Speicherpfad.

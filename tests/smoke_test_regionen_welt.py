@@ -20,7 +20,8 @@ echten Fehler gefunden:
                           sollen smooth ineinanderlaufen".
   4. AUFLOESUNG           512 und 1024 px muessen dieselbe Landschaft ergeben,
                           nur feiner - sonst haengt die Welt an der Pixelzahl
-                          statt an der Wirklichkeit (SPEZIFIKATION §10).
+                          statt an der Wirklichkeit
+                          (90_MESSPROTOKOLLE.md §10).
   5. GPU/CPU-PARITAET     Beide Pfade muessen dasselbe Gelaende liefern. Fand
                           am 2026-08-04, dass der Noise-Shader eine andere
                           Permutationstabelle benutzte als die CPU und damit

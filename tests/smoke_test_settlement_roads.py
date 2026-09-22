@@ -1,5 +1,6 @@
 """
-Wegenetz nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5 (Umbau 2026-08-10).
+Wegenetz nach docs/spezifikation/14_SIEDLUNGEN.md Abschnitt 5
+(Umbau 2026-08-10).
 
 Vorher: `calculate_road_network` verband Siedlungen ueber ein einfaches
 Minimum-Spanning-Tree (naechster unverbundener Nachbar), Wegkosten kannten nur
@@ -8,9 +9,9 @@ kein Bereitschaftstest.
 
 Geprueft wird hier das NEUE Verhalten:
 
-  1. Kostenfeld (14_SIEDLUNGEN.md 5.1): die drei Wasserstufen und der Wegerabatt wirken
-     tatsaechlich, Hangkosten wachsen EXPONENTIELL und werden ab
-     MAX_WEG_STEIGUNG_GRAD gesperrt.
+  1. Kostenfeld (14_SIEDLUNGEN.md 5.1): die drei Wasserstufen und der
+     Wegerabatt wirken tatsaechlich, Hangkosten wachsen EXPONENTIELL und
+     werden ab MAX_WEG_STEIGUNG_GRAD gesperrt.
 
      ACHTUNG, HIER STAND BIS ZUM 2026-08-25 "quadratisch". Das war der alte
      Vertrag; der Code rechnet seit der Nutzervorgabe *"hoehenkosten sollten
@@ -25,19 +26,22 @@ Geprueft wird hier das NEUE Verhalten:
      so etwas nicht: die Datei importiert sauber, verweist auf keine
      geloeschte Datei und sieht in jeder Hinsicht gesund aus. Veraltete
      ZUSICHERUNGEN findet man ausschliesslich, indem man sie ausfuehrt.
-  2. Gabriel-Graph (14_SIEDLUNGEN.md 5.2): sparse (nicht Vollverknuepfung) UND zusammenhaengend
-     (Eigenschaft von Gabriel-Graphen fuer Punkte in allgemeiner Lage).
-  3. Bereitschaftstest (14_SIEDLUNGEN.md 5.2): zwei Staedte derselben Kultur verbinden sich
-     ueber einfaches Terrain, zwei Doerfer verschiedener Kultur ueber
-     gesperrtes/sehr teures Terrain nicht - direkt aus der Formel geprueft,
-     nicht nur behauptet.
-  4. Kulturzusammenhang (14_SIEDLUNGEN.md 5.2 Ausnahme): Orte derselben Kultur sind nach dem
-     Netzbau IMMER verbunden, auch wenn der direkte Kandidat durchgefallen
-     waere.
-  5. `city_cost_map` enthaelt kein np.inf mehr (§5.13) - genau das haette der
-     gemeinsame Anzeige-Validator (map_display_2d.py/_validate_input_data)
-     JEDE Anzeige dieses Feldes verweigert.
-  6. `settlement.outer_roads` existiert nicht mehr im CALCULATOR_GRAPH (§5.11).
+  2. Gabriel-Graph (14_SIEDLUNGEN.md 5.2): sparse (nicht Vollverknuepfung)
+     UND zusammenhaengend (Eigenschaft von Gabriel-Graphen fuer Punkte in
+     allgemeiner Lage).
+  3. Bereitschaftstest (14_SIEDLUNGEN.md 5.2): zwei Staedte derselben Kultur
+     verbinden sich ueber einfaches Terrain, zwei Doerfer verschiedener
+     Kultur ueber gesperrtes/sehr teures Terrain nicht - direkt aus der
+     Formel geprueft, nicht nur behauptet.
+  4. Kulturzusammenhang (14_SIEDLUNGEN.md 5.2 Ausnahme): Orte derselben
+     Kultur sind nach dem Netzbau IMMER verbunden, auch wenn der direkte
+     Kandidat durchgefallen waere.
+  5. `city_cost_map` enthaelt kein np.inf mehr (OFFENE_PUNKTE.md 5.13) -
+     genau das haette der gemeinsame Anzeige-Validator
+     (map_display_2d.py/_validate_input_data) JEDE Anzeige dieses Feldes
+     verweigert.
+  6. `settlement.outer_roads` existiert nicht mehr im CALCULATOR_GRAPH
+     (OFFENE_PUNKTE.md 5.11).
 """
 import os
 import sys

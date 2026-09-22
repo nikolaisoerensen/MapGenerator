@@ -8,7 +8,7 @@ Hoehe, rund 200 km Bildbreite. Gesucht ist nicht die Nachbildung dieser Bilder,
 sondern ein AUSSCHNITT von 25 x 25 km im jeweiligen Stil - und damit ein
 Gefuehl dafuer, welche Meterwerte welche Landschaft ergeben.
 
-Erst seit der Skalenverknuepfung (SPEZIFIKATION §10) ist das ueberhaupt
+Erst seit der Skalenverknuepfung (90_MESSPROTOKOLLE.md §10) ist das ueberhaupt
 sinnvoll: vorher haetten dieselben Regler bei 25 km eine andere Landschaft
 ergeben als bei 15 km, weil Grundformen und Rinnen am Bildausschnitt hingen
 statt an der Wirklichkeit.

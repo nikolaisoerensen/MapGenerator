@@ -13,14 +13,15 @@ WAS DIESER FILTER IST: ein Filter PRO PIXEL, keine Simulation. Er liest
 ausschliesslich den Punkt und dessen Hoehe samt Ableitungen - kein
 Nachbarzugriff, keine Ping-Pong-Buffer, keine Zeitschritte. Fuenf Oktaven mal
 eine 4x4-Zellenschleife, ein Durchgang. Gegen die 6500-8000 Iterationen der
-Feld-Erosion (SPEZIFIKATION §7) ist das praktisch kostenlos.
+Feld-Erosion (90_MESSPROTOKOLLE.md §7) ist das praktisch kostenlos.
 
 WAS ER NICHT IST: eine Entwaesserung. Er bewegt keine Masse, kennt kein
-Routing und keine Konnektivitaet. Die Kennzahlen aus §3.2 (Netzgroesse,
-Zusammenfluesse, Randabfluss) erfuellt er nicht, und 02_INVARIANTEN.md 3
-(Massenbilanz) gilt fuer ihn nicht, weil es nichts zu bilanzieren gibt. Er
-macht das AUSSEHEN von Erosion. Die Entwaesserung kommt aus dem Skelett-Ansatz
-(§8) - die beiden sind die zwei Haelften, nicht zwei Alternativen.
+Routing und keine Konnektivitaet. Die Kennzahlen aus 10_REGIONEN.md B.2
+(Netzgroesse, Zusammenfluesse, Randabfluss) erfuellt er nicht, und
+02_INVARIANTEN.md 3 (Massenbilanz) gilt fuer ihn nicht, weil es nichts zu
+bilanzieren gibt. Er macht das AUSSEHEN von Erosion. Die Entwaesserung kommt
+aus dem Skelett-Ansatz (90_MESSPROTOKOLLE.md §8) - die beiden sind die zwei
+Haelften, nicht zwei Alternativen.
 
 Nuetzliche Nebenausgabe: die ridge_map, -1 in Kerben und +1 auf Kaemmen. Der
 Autor nennt sie ausdruecklich als Eingang fuer Entwaesserung.

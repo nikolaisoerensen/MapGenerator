@@ -3,9 +3,9 @@ Path: tools/flussnetz_lab.py
 
 WERKZEUG fuer das Flussnetz mit Hochebenen (Entwurf vom 2026-07-30).
 
-Loest den Ansatz aus SPEZIFIKATION §8 ab. Der Unterschied in einem Satz: die
-Hoehe wird nicht mehr VOM FLUSS AUFGEBAUT, sondern zwischen dem Fluss und einer
-globalen Flaeche GEBLENDET.
+Loest den Ansatz aus 90_MESSPROTOKOLLE.md §8 ab. Der Unterschied in einem
+Satz: die Hoehe wird nicht mehr VOM FLUSS AUFGEBAUT, sondern zwischen dem
+Fluss und einer globalen Flaeche GEBLENDET.
 
     z = P - (P - z_Fluss) * (1 - Profil(d~))
 
@@ -16,9 +16,10 @@ ergibt es P.
 WARUM DIESE UMKEHRUNG. Die alte Form `z = z_Fluss(naechster) + Profil * H`
 konnte keine Hochebene erzeugen: jenseits der Talbreite haengt sie nur noch am
 NAECHSTEN Fluss, und dessen Hoehe springt an jeder Wasserscheide. Das Ergebnis
-war ein Flickwerk aus exakt ebenen Terrassen mit Nahtstellen - gemessen in §8
-als 62% aller Zellen ohne streng tieferen Nachbarn. In der neuen Form laufen an
-der Wasserscheide beide Seiten gegen denselben Wert P, der einwertig ist.
+war ein Flickwerk aus exakt ebenen Terrassen mit Nahtstellen - gemessen in
+90_MESSPROTOKOLLE.md §8 als 62% aller Zellen ohne streng tieferen Nachbarn. In
+der neuen Form laufen an der Wasserscheide beide Seiten gegen denselben Wert
+P, der einwertig ist.
 
 Drei Groessen tragen damit den Charakter einer Landschaft:
 
@@ -30,8 +31,9 @@ Drei Groessen tragen damit den Charakter einer Landschaft:
 Der Bau des Netzes in vier Schritten:
 
   1. Poisson-Disk-Punktsatz mit Mindestabstand in METERN. Deckt die Karte per
-     Konstruktion ab - das war die offene Baustelle aus §8, wo der gewachsene
-     Baum bei 192 px Karte nur 139 px weit kam.
+     Konstruktion ab - das war die offene Baustelle aus
+     90_MESSPROTOKOLLE.md §8, wo der gewachsene Baum bei 192 px Karte nur
+     139 px weit kam.
   2. Delaunay-Graph darueber. Planar, deshalb kann sich kein Teilgraph davon
      selbst kreuzen.
   3. Kuerzeste-Wege-Baum vom Auslass am Kartenrand, mit Kantenkosten, die mit
@@ -155,10 +157,10 @@ def poisson_punkte(size, min_abstand, rng, versuche=30):
     """
     Punktsatz mit garantiertem Mindestabstand, der die Flaeche fuellt.
 
-    Genau die Eigenschaft, die dem gewachsenen Baum aus §8 fehlte: dort blieb
-    der maximale Flussabstand bei 139 px auf einer 192-px-Karte, weil das
-    Wachstum auslief. Ein Poisson-Satz deckt die Karte ab, BEVOR irgendetwas
-    verbunden wird.
+    Genau die Eigenschaft, die dem gewachsenen Baum aus 90_MESSPROTOKOLLE.md
+    §8 fehlte: dort blieb der maximale Flussabstand bei 139 px auf einer
+    192-px-Karte, weil das Wachstum auslief. Ein Poisson-Satz deckt die Karte
+    ab, BEVOR irgendetwas verbunden wird.
     """
     zelle = min_abstand / np.sqrt(2.0)
     n = int(np.ceil(size / zelle)) + 1
@@ -322,8 +324,9 @@ def flusshoehen(punkte, eltern, reihenfolge, ordnung, P, size, p_param, mpp):
     echter Fluesse; ein konstanter Wert pro Meter gaebe eine Gerade.
 
     Die Monotonie gewinnt gegen P, nicht umgekehrt. Genau diese Entscheidung
-    hat in §8 die Entwaesserung ueberhaupt erst hergestellt, und der
-    umgekehrte Weg ist der, an dem §7 gescheitert ist.
+    hat in 90_MESSPROTOKOLLE.md §8 die Entwaesserung ueberhaupt erst
+    hergestellt, und der umgekehrte Weg ist der, an dem
+    90_MESSPROTOKOLLE.md §7 gescheitert ist.
 
     Danach wird der Einschnitt abgezogen: z_Fluss = s - Einschnitt(Ordnung).
     Grosse Fluesse schneiden tiefer, und weil die Ordnung flussabwaerts
@@ -498,7 +501,7 @@ def baue(name, size):
     # hatte: nur 0.1% der Zellen waren Senken, der Abfluss lag trotzdem bei
     # 1.0%. Fast alles floss also zusammen - nur nicht von der Karte herunter.
     # Die Senkenzahl allein haette diesen Fehler nie gezeigt; erst der
-    # Entwaesserungsanteil aus §7 macht ihn sichtbar.
+    # Entwaesserungsanteil aus 90_MESSPROTOKOLLE.md §7 macht ihn sichtbar.
     ay, ax = punkte[auslass]
     ziel = min(((0.0, ax), (size - 1.0, ax), (ay, 0.0), (ay, size - 1.0)),
                key=lambda q: (q[0] - ay) ** 2 + (q[1] - ax) ** 2)
@@ -525,7 +528,7 @@ def baue(name, size):
     #   2. eine winzige Neigung ZUM NETZ HIN addieren, damit die aufgefuellten
     #      Flaechen nicht eben bleiben. Eben ist fuer D8 dasselbe wie eine
     #      Senke - genau diese Verwechslung steckte hinter den "62% Senken" in
-    #      §8, die in Wahrheit Plateaus waren.
+    #      90_MESSPROTOKOLLE.md §8, die in Wahrheit Plateaus waren.
     from skimage.morphology import reconstruction
     saat = P.max() * np.ones_like(P)
     saat[0], saat[-1], saat[:, 0], saat[:, -1] = P[0], P[-1], P[:, 0], P[:, -1]
@@ -535,8 +538,9 @@ def baue(name, size):
     ordnung_nah = ordnung_raster[index[0], index[1]]
 
     # Talbreite als Anteil des PUNKTABSTANDS - die Wasserscheide liegt
-    # zwangslaeufig etwa in der Mitte zwischen zwei Laeufen (§8, Fehlertyp
-    # "absolute Groesse, wo eine relative hingehoert").
+    # zwangslaeufig etwa in der Mitte zwischen zwei Laeufen
+    # (90_MESSPROTOKOLLE.md §8, Fehlertyp "absolute Groesse, wo eine relative
+    # hingehoert").
     breite = (L["tal_breite_anteil"] * L["punktabstand_m"]
               * np.power(np.maximum(ordnung_nah, 1), L["tal_breite_exponent"]))
     d_norm = np.clip(abstand / breite, 0.0, 1.0)

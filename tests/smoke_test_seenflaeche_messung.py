@@ -3,9 +3,9 @@ Path: tests/smoke_test_seenflaeche_messung.py
 
 Ticket #32: `docs/TESTBERICHT.md` meldete eine Seenflaeche von 0,0 % gegen
 ein Ziel groesser null. Dieser Test erhebt den IST-Wert neu, auf echten
-Kartengroessen (256/512/1024 px, SPEZIFIKATION §10 - nicht 129/257, das war
-schon einmal die Ursache dafuer, dass zehn gruene Tests eine tote Funktion
-verdeckt haben, siehe CLAUDE.md).
+Kartengroessen (256/512/1024 px, 90_MESSPROTOKOLLE.md §10 - nicht 129/257,
+das war schon einmal die Ursache dafuer, dass zehn gruene Tests eine tote
+Funktion verdeckt haben, siehe CLAUDE.md).
 
 Gemessen wird nur die fuer den Seenanteil noetige Teilkette (terrain ->
 geology-Kette -> erosion.hydraulic -> water.lake_detection), NICHT die volle

@@ -302,7 +302,7 @@ Namen unten tauchen nirgends im Code auf.
 
 ## Offene Fragen
 
-1. **`city_type` hat fünf Werte, nicht vier.** §6.1 und der Docstring von `Location.settlement_type`
+1. **`city_type` hat fünf Werte, nicht vier.** §6.1 des Entwurfs und der Docstring von `Location.settlement_type`
    nennen vier Typen, `STADTTYPEN` zusätzlich `fischersiedlung`. Der Text folgt dem Code.
 2. **Hangkosten quadratisch oder exponentiell?** Abschnitt 5.1 sagt „Quadrat der Neigung", der Code
    rechnet seit 2026-08-13 exponentiell im Neigungswinkel. Der Text folgt dem Code.

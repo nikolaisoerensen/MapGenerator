@@ -3,16 +3,19 @@ Path: tests/smoke_test_terrain_river_network.py
 
 Prueft das Flussnetz-Skelett im Terrain-Aufbau
 (BaseTerrainGenerator._apply_river_network, core/terrain_river_network.py,
-SPEZIFIKATION §12).
+90_MESSPROTOKOLLE.md §12).
 
-Sieben Zusicherungen. Die letzten drei sind Gegenproben - nach §5.1.4 prueft
-eine Zusicherung, die auch ohne die Aenderung haelt, nichts.
+Sieben Zusicherungen. Die letzten drei sind Gegenproben - nach
+03_ARBEITSREGELN.md 1.1 Punkt 4 prueft eine Zusicherung, die auch ohne die
+Aenderung haelt, nichts.
 
   1. Das Netz LAEUFT. river_mask existiert nur, wenn es lief.
   2. Die Hoehenspanne ist exakt BASE_ELEVATION_M .. AMPLITUDE. Der Einschnitt
-     drueckt die Talsohle sonst darunter (gemessen -1260 m, §12).
+     drueckt die Talsohle sonst darunter (gemessen -1260 m,
+     90_MESSPROTOKOLLE.md §12).
   3. Der ENTWAESSERUNGSANTEIL steigt deutlich. Das ist der eigentliche Zweck:
-     §7 mass 10-22% fuer die Feld-Erosion, der Noise-Pfad 10.1%.
+     90_MESSPROTOKOLLE.md §7 mass 10-22% fuer die Feld-Erosion, der
+     Noise-Pfad 10.1%.
   4. GEGENPROBE Tiefe 0: kein Einschnitt darf das Gelaende nicht veraendern.
   5. GEGENPROBE Regler einzeln: jeder der sieben muss wirken
      (02_INVARIANTEN.md 7, drei tote Water-Slider gab es hier monatelang).
@@ -106,7 +109,8 @@ def _bauen(size=256, netz_aktiv=True, overrides=None):
         maske = manager.get_calculator_output(
             "terrain.redistribution", "river_mask", lod)
         assert z.shape == (size, size), (
-            "angefragt %d px, bekommen %s - §5.2" % (size, z.shape))
+            "angefragt %d px, bekommen %s - 03_ARBEITSREGELN.md 1.2"
+            % (size, z.shape))
         return z.astype(np.float64), maske, KM * 1000.0 / size
     finally:
         vd.FLUSSNETZ_AKTIV = original
@@ -164,8 +168,8 @@ def lauf():
     # Gemessen wird die Sohle gegen die Flaeche P, IN DIE eingeschnitten wird,
     # und direkt am Modul - vor der Spannen-Rueckbildung.
     #
-    # Zwei falsche Messgroessen davor, beide verworfen (§5.2, "falsche Formel
-    # im Messgeraet"):
+    # Zwei falsche Messgroessen davor, beide verworfen
+    # (03_ARBEITSREGELN.md 1.2, "Falsche Formel im Messgeraet"):
     #   * "Tiefe 0 muss gleich Netz aus sein" - ist es nicht, weil der Lauf
     #     zwischen zwei Knoten auch ohne eingestellte Tiefe durchs Gelaende
     #     schneidet.

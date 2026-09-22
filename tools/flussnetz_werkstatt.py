@@ -176,9 +176,12 @@ def gelaende_farben():
     Die Gelaendefarben OHNE Blau - ab Gruen aufwaerts.
 
     matplotlib.terrain beginnt bei Blau (Meer) und wird erst ab etwa 0.25
-    gruen. Diese Karten haben aber kein Meer (SPEZIFIKATION §1), also waere
-    jede blaue Flaeche eine Falschaussage: sie sieht aus wie Wasser und ist
-    doch nur tiefes Land. Deshalb wird die Skala bei 0.25 abgeschnitten.
+    gruen. Diese Werkstattkarten haben aber kein Meer - sie sind reine
+    Binnenausschnitte; das frueher im Oberziel mitgefuehrte "ohne Meer" ist
+    in 01_ZIEL.md §2 ausdruecklich gestrichen und gilt fuer die Weltkarte
+    NICHT mehr. Hier waere jede blaue Flaeche eine Falschaussage: sie sieht
+    aus wie Wasser und ist doch nur tiefes Land. Deshalb wird die Skala bei
+    0.25 abgeschnitten.
     """
     import matplotlib
     from matplotlib.colors import LinearSegmentedColormap

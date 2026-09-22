@@ -3,10 +3,10 @@ Path: core/fluss_sinuositaet.py
 
 Sinuositaet der Fluesse - Ticket #33.
 
-Maeander waren in der Spezifikation seit jeher ein Ziel (§3.6: "Sinuositaet
-der Hauptlaeufe > 1.2"), aber nie gemessen - Stand dort bis heute "nicht
-gemessen". Dieses Modul liefert die Messfunktion; die Ist-Erhebung (Verteilung
-nach Flussordnung und Region, 512/1024 px, drei Seeds) steht im
+Maeander waren in der Spezifikation seit jeher ein Ziel (10_REGIONEN.md B.6:
+"Sinuositaet der Hauptlaeufe > 1.2"), aber nie gemessen - Stand dort bis heute
+"nicht gemessen". Dieses Modul liefert die Messfunktion; die Ist-Erhebung
+(Verteilung nach Flussordnung und Region, 512/1024 px, drei Seeds) steht im
 Commit-Text und in docs/TESTBERICHT.md.
 
 WAS SINUOSITAET IST: Lauflaenge eines Flusses geteilt durch die Luftlinie
@@ -17,8 +17,9 @@ WELCHES NETZ. Die Weltkarte erzeugt ihr Flussnetz in `core/terrain_weltfluesse.
 flussnetz()` (STUFE B, seit 2026-08-05 der Kern der Kartengenerierung, siehe
 `terrain_generator._weltfluesse()`) - ein Spannbaum aus Poisson-Disk-Knoten,
 dessen Kanten dem Gelaende ausweichen (Kosten steigen mit dem Anstieg). Genau
-dieses Ausweichen IST der Maeander in diesem Programm (SPEZIFIKATION §15/§16:
-"der Maeander entsteht dabei von selbst - der Lauf geht um den Berg herum").
+dieses Ausweichen IST der Maeander in diesem Programm
+(90_MESSPROTOKOLLE.md §15/§16: "der Maeander entsteht dabei von selbst - der
+Lauf geht um den Berg herum statt hindurch").
 Die hier gemessene Sinuositaet nimmt deshalb die KNOTENPOLYLINIE des
 Spannbaums (`netz["punkte"]`, verbunden ueber `netz["eltern"]`) - nicht die
 zusaetzliche Catmull-Rom-Gl'aettung aus `kantenpunkte()`, die nur scharfe
