@@ -51,6 +51,11 @@ class BiomeData:
         self.biome_map_super = None             # 2D numpy.uint8 array, 2x supersampled für weiche Übergänge
         self.super_biome_mask = None            # 2D numpy.bool array, Override-Bereiche-Maske
         self.climate_classification = None       # 2D numpy.uint8 array, Whittaker-Klimazone-Zuordnung
+        # Eignungsfeld (Godot-Export, Punkt b): nicht nur der Gewinner,
+        # sondern die drei bestpassenden Basisbiome je Ort mit ihrem Anteil.
+        self.biom_top3_ids = None               # 3D numpy.uint8 (H,W,3), Biom-Kennungen, absteigend
+        self.biom_top3_anteil = None            # 3D numpy.float32 (H,W,3), Anteile, Summe 1
+        self.biom_eindeutigkeit = None          # 2D numpy.float32, rohe Eignungssumme vor Normalisierung
         self.biome_statistics = None            # Dict mit Verteilungs-Prozenten und Diversity-Metriken
         self.lod_level = 1                      # Numerisches LOD-Level
         self.actual_size = 32                   # Tatsächliche Kartengröße
@@ -412,6 +417,12 @@ class BiomeClassificationSystem:
             "biome.super_override", "super_biome_mask", lod_level)
         climate_classification = self.data_lod_manager.get_calculator_output(
             "biome.climate_classification", "climate_classification", lod_level)
+        top3_ids = self.data_lod_manager.get_calculator_output(
+            "biome.base_classification", "biom_top3_ids", lod_level)
+        top3_anteil = self.data_lod_manager.get_calculator_output(
+            "biome.base_classification", "biom_top3_anteil", lod_level)
+        eindeutigkeit = self.data_lod_manager.get_calculator_output(
+            "biome.base_classification", "biom_eindeutigkeit", lod_level)
 
         if final_biome_map is None or super_biome_mask is None:
             raise ValueError(f"assemble_biome_data: fehlende Calculator-Outputs für LOD {lod_level}")
@@ -424,6 +435,9 @@ class BiomeClassificationSystem:
         biome_data.biome_map_super = biome_map_super
         biome_data.super_biome_mask = super_biome_mask
         biome_data.climate_classification = climate_classification
+        biome_data.biom_top3_ids = top3_ids
+        biome_data.biom_top3_anteil = top3_anteil
+        biome_data.biom_eindeutigkeit = eindeutigkeit
         biome_data.biome_statistics = self._calculate_biome_statistics(biome_data)
         biome_data.validity_state = self._validate_biome_data(biome_data)
 
@@ -663,10 +677,19 @@ class BiomeClassificationSystem:
         # sie klassifiziert der Aufruf wie zuvor, nur nach Klima.
         region_map = self.data_lod_manager.get_calculator_output(
             "terrain.redistribution", "region_map", lod_level)
-        base_biome_map = self.base_biome_classifier.classify_base_biomes(
+        # klassifiziere_mit_eignungsfeld() statt classify_base_biomes(): es
+        # liefert dasselbe base_biome_map und zusaetzlich das Eignungsfeld,
+        # ohne die Gauss-Rechnung ein zweites Mal zu fahren.
+        (base_biome_map, top3_ids, top3_anteil,
+         eindeutigkeit) = self.base_biome_classifier.klassifiziere_mit_eignungsfeld(
             inputs['heightmap'], inputs['temp_map_juli'], inputs['precip_map'],
             inputs['soil_moist_map'], region_map=region_map)
-        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {"base_biome_map": base_biome_map})
+        self.data_lod_manager.set_calculator_output(calculator_id, lod_level, {
+            "base_biome_map": base_biome_map,
+            "biom_top3_ids": top3_ids,
+            "biom_top3_anteil": top3_anteil,
+            "biom_eindeutigkeit": eindeutigkeit,
+        })
 
     def _calc_super_override(self, calculator_id: str, lod_level: int) -> None:
         """Calculator-Node 'biome.super_override' (#24) - Sibling zu base_classification"""
@@ -1260,14 +1283,17 @@ class BaseBiomeClassifier:
             bonus[:, :, k] = ndimage.gaussian_filter(bonus[:, :, k], sigma)
         return bonus
 
-    def classify_base_biomes(self, heightmap, temp_map, precip_map, soil_moist_map,
-                             region_map=None):
+    def _eignungsfelder(self, heightmap, temp_map, precip_map, soil_moist_map,
+                        region_map=None):
         """
-        Klassifiziert Base-Biomes mit wissenschaftlich fundierter Multi-Factor-Analysis
+        Die rohen Eignungswerte aller 15 Basisbiome je Pixel: (H, W, 15).
 
-        `region_map` ist seit 2026-08-07 dazugekommen: sie traegt die
-        Regionsaffinitaet (siehe _affinitaetsbonus). Ohne sie klassifiziert die
-        Methode wie zuvor, nur nach Klima.
+        Frueher stand diese Rechnung direkt in classify_base_biomes() und ihr
+        Ergebnis ueberlebte den abschliessenden argmax nicht - 14 von 15
+        Werten waren nach dem Aufruf verloren. Fuer den Godot-Export (Punkt b:
+        "23 % Macchia, 21 % Grasland, ...") werden sie aber gebraucht, und
+        zwar ohne die Rechnung ein zweites Mal zu fahren. Darum jetzt eine
+        eigene Methode mit zwei Abnehmern.
         """
         height, width = heightmap.shape
         fitness_maps = np.zeros((height, width, 15), dtype=np.float32)
@@ -1296,9 +1322,85 @@ class BaseBiomeClassifier:
         if bonus is not None:
             fitness_maps = fitness_maps + bonus
 
+        return fitness_maps
+
+    def classify_base_biomes(self, heightmap, temp_map, precip_map, soil_moist_map,
+                             region_map=None):
+        """
+        Klassifiziert Base-Biomes mit wissenschaftlich fundierter Multi-Factor-Analysis
+
+        `region_map` ist seit 2026-08-07 dazugekommen: sie traegt die
+        Regionsaffinitaet (siehe _affinitaetsbonus). Ohne sie klassifiziert die
+        Methode wie zuvor, nur nach Klima.
+        """
+        fitness_maps = self._eignungsfelder(
+            heightmap, temp_map, precip_map, soil_moist_map, region_map=region_map)
         # Dominantes Biome pro Pixel
         dominant_biomes = np.argmax(fitness_maps, axis=2)
         return dominant_biomes.astype(np.uint8)
+
+    def klassifiziere_mit_eignungsfeld(self, heightmap, temp_map, precip_map,
+                                       soil_moist_map, region_map=None):
+        """
+        Wie classify_base_biomes(), liefert aber zusaetzlich das Eignungsfeld.
+
+        Return: (dominant, top3_ids, top3_anteil, eindeutigkeit)
+
+        * `dominant`      (H, W) uint8  - genau das, was classify_base_biomes()
+                                          auch liefert; der Aufruf ist ein
+                                          vollwertiger Ersatz.
+        * `top3_ids`      (H, W, 3) uint8   - die Kennungen der drei am besten
+                                          passenden Basisbiome, absteigend
+                                          sortiert. Kanal 0 ist der Gewinner
+                                          und damit identisch mit `dominant`.
+        * `top3_anteil`   (H, W, 3) float32 - ihre Anteile, auf Summe 1
+                                          normalisiert. Das ist die
+                                          "23 % / 21 % / 12 %"-Angabe.
+        * `eindeutigkeit` (H, W) float32 - die ROHE Summe aller 15
+                                          Eignungswerte, VOR der Normalisierung.
+
+        Warum die Eindeutigkeit mitkommt: das Normalisieren auf 100 % loescht
+        eine echte Information. An einem alpinen Ort sind die Eignungen hoch
+        und eng (Fjell 48 %, Bergwald 38 %), in einem mitteleuropaeischen
+        Uebergangsraum flach und breit (Spitzenreiter 14 %, vierzehn Biome
+        ueber 2 %). Nach der Normalisierung sehen beide gleich aus. Die rohe
+        Summe schwankt zwischen diesen Faellen um den Faktor 6 und ist damit
+        ein brauchbares Mass dafuer, wie eindeutig ein Ort klimatisch ist -
+        spaeter das Stellrad dafuer, wie stark eine Biomgrenze ausfranst.
+
+        SCHAERFUNG: die Eignungen werden vor dem Normalisieren mit
+        EIGNUNG_SCHAERFUNG potenziert. Ungeschaerft deckten die besten drei
+        nur 38-48 % ab, der Rest verteilte sich auf ein Dutzend Biome - eine
+        Bodentextur daraus waere ueberall dieselbe Graubraunmischung. Die
+        Potenz aendert die Reihenfolge nicht, nur den Abstand: bei Exponent 3
+        decken die besten drei 73-100 % ab. Der Exponent ist ein Regler fuer
+        die Weichheit der Biomgrenzen, kein Fehlerkorrektur - bei 1 laufen
+        alle Biome ineinander, bei 6 ist man praktisch wieder beim argmax.
+        """
+        fitness_maps = self._eignungsfelder(
+            heightmap, temp_map, precip_map, soil_moist_map, region_map=region_map)
+
+        dominant = np.argmax(fitness_maps, axis=2).astype(np.uint8)
+        eindeutigkeit = fitness_maps.sum(axis=2).astype(np.float32)
+
+        gewicht = np.maximum(fitness_maps, 0.0) ** EIGNUNG_SCHAERFUNG
+
+        # argpartition statt argsort: es genuegt, die besten EIGNUNG_ANZAHL
+        # nach vorn zu holen: bei 1024x1024x15 ist das der Unterschied
+        # zwischen einmal und viermal durch den Speicher.
+        vorne = np.argpartition(-gewicht, EIGNUNG_ANZAHL - 1,
+                                axis=2)[:, :, :EIGNUNG_ANZAHL]
+        werte = np.take_along_axis(gewicht, vorne, axis=2)
+        reihenfolge = np.argsort(-werte, axis=2)
+        top3_ids = np.take_along_axis(vorne, reihenfolge, axis=2).astype(np.uint8)
+        top3_werte = np.take_along_axis(werte, reihenfolge, axis=2)
+
+        summe = top3_werte.sum(axis=2, keepdims=True)
+        top3_anteil = np.divide(top3_werte, summe,
+                                out=np.zeros_like(top3_werte),
+                                where=summe > 0).astype(np.float32)
+
+        return dominant, top3_ids, top3_anteil, eindeutigkeit
 
     def _calculate_gaussian_fitness(self, data_map, value_range):
         """
@@ -1349,6 +1451,19 @@ BAUMGRENZE_JULI_C = 10.0
 FIRN_JULI_C = 0.0
 
 AFFINITAETSBONUS = 0.35
+
+# --- Eignungsfeld fuer den Godot-Export ------------------------------------
+#
+# Wie viele Biome je Ort ausgegeben werden und wie stark ihr Abstand vorher
+# gespreizt wird. Beide Zahlen sind Regler, keine Naturkonstanten - die
+# Begruendung steht ausfuehrlich bei klassifiziere_mit_eignungsfeld().
+#
+# Die 3 haengt an Terrain3D: seine Control-Textur haelt je Pixel zwei
+# Textur-Kennungen, und weil vier benachbarte Texel bilinear gemischt werden,
+# kommen im gerenderten Bild bis zu acht zusammen. Drei je Ort sind damit
+# darstellbar, ohne dass die Mischung zu Matsch wird.
+EIGNUNG_ANZAHL = 3
+EIGNUNG_SCHAERFUNG = 3.0
 
 
 class SuperBiomeOverrideSystem:

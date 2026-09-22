@@ -64,7 +64,8 @@ _CALCULATOR_SPECS = [
     # NUR bei aktiver Weltkarte belegt - im alten Pfad gibt es keine Regionen.
     CalculatorSpec("terrain.redistribution", "terrain", ["terrain.noise"],
                    ["heightmap", "ridge_map", "river_mask", "river_order",
-                    "river_generation", "region_map", "klima_map", "spielkarte"]),
+                    "river_generation", "river_lines", "region_map", "klima_map",
+                    "spielkarte"]),
     CalculatorSpec("terrain.slope", "terrain", ["terrain.redistribution"], ["slopemap"]),
     CalculatorSpec("terrain.shadow", "terrain", ["terrain.redistribution"], ["shadowmap"]),
 
@@ -334,7 +335,9 @@ _CALCULATOR_SPECS = [
                    ["terrain.redistribution", "erosion.slope"], ["preseed_biome_map"]),
     CalculatorSpec("biome.base_classification", "biome",
                    ["terrain.redistribution", "weather.temperature", "weather.precipitation",
-                    "water.soil_moisture"], ["base_biome_map"]),
+                    "water.soil_moisture"],
+                   ["base_biome_map", "biom_top3_ids", "biom_top3_anteil",
+                    "biom_eindeutigkeit"]),
     # water.manning_flow statt water.flow_network: Biome brauchen die FINALE,
     # gemalte Wasser-Klassifikation (Fluss in voller Breite), nicht die
     # ein Pixel breite Zentrallinie - siehe water.manning_flow-Kommentar oben.

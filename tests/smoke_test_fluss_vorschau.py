@@ -112,7 +112,7 @@ def lauf():
         gen.data_lod_manager = None
         gen.logger = logging.getLogger("vorschau")
         gen._current_parameters = {"river_valley_width": breite}
-        H, _m, _o, _g, _w = gen._weltfluesse(
+        H, _m, _o, _g, _w, _l = gen._weltfluesse(
             basis.copy(), felder, VORSCHAU_PX, reiter._vorschau_seed)
         return np.asarray(H, dtype=np.float64)
 

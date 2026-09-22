@@ -3349,6 +3349,20 @@ class DataLODManager(QObject):
                 self.set_terrain_data_lod(schluessel, wert, lod_level, parameters)
                 data_keys.append(schluessel)
 
+        # river_lines (Ticket #37, core/fluss_export.py): der Flussbaum als
+        # Linienzuege fuer den Vektorexport, eine Liste von Dicts - KEIN
+        # np.ndarray. Deshalb NICHT ueber die obige Schleife (die geht ueber
+        # set_terrain_data_lod(), das strikt auf np.ndarray prueft und einen
+        # nicht-Array-Wert nur mit einer WARNING verwirft - siehe
+        # _validate_lod_input()). Stattdessen derselbe generische Pfad wie bei
+        # geology_data.delta_components (set_geology_data_complete_lod()):
+        # require_array=False.
+        river_lines = getattr(terrain_data, "river_lines", None)
+        if river_lines is not None:
+            self._set_data_lod("terrain", self._terrain_data, "river_lines", river_lines,
+                                lod_level, parameters, require_array=False)
+            data_keys.append("river_lines")
+
         # Cache und Metadaten
         self._update_cache_timestamp("terrain", lod_level, "complete", parameters)
         self._current_lods["terrain"] = max(self._current_lods["terrain"], lod_level)
@@ -3860,8 +3874,15 @@ class DataLODManager(QObject):
         """
         self._biome_data[f"lod_{lod_level}_biome_data_object"] = biome_data
 
+        # biom_*: Eignungsfeld fuer den Godot-Export. Ohne den
+        # Eintrag hier steht das Feld zwar im BiomeData-Objekt, aber
+        # get_biome_data() liefert None und der Export ueberspringt es still -
+        # derselbe Bug-Typ wie frueher bei plot_map/civ_map (siehe
+        # set_settlement_data_complete_lod weiter unten).
         data_keys = []
-        for key in ("biome_map", "biome_map_super", "super_biome_mask", "climate_classification"):
+        for key in ("biome_map", "biome_map_super", "super_biome_mask",
+                    "climate_classification",
+                    "biom_top3_ids", "biom_top3_anteil", "biom_eindeutigkeit"):
             value = getattr(biome_data, key, None)
             if value is not None:
                 self._set_data_lod("biome", self._biome_data, key, value, lod_level, parameters)

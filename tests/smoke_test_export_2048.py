@@ -30,8 +30,9 @@ import numpy as np
 sys.path.insert(0, ".")
 
 from gui.utils.map_export import (EXPORT_KANTENLAENGE_PX, VEKTOR_DATEI,
-                                  _auf_exportgroesse, daempfungsmaske,
-                                  export_all_layers, vektordaten)
+                                  SEESPIEGEL_STANDARD_M, _auf_exportgroesse,
+                                  daempfungsmaske, export_all_layers,
+                                  vektordaten, wassertiefe)
 
 
 def check(label, bedingung, zusatz=""):
@@ -51,18 +52,44 @@ class FakeDLM:
         self.city = np.zeros((size, size), dtype=bool)
         self.city[size // 3:size // 3 + 20, size // 3:size // 3 + 20] = True
         self.roads = [[(i, size // 2) for i in range(10, size - 10, 3)]]
+        # Ticket #37: ein Flusslinienzug wie ihn core.fluss_export.fluss_linien()
+        # liefert - Punkte in [x_px, y_px], wie "roads" oben.
+        self.river_lines = [{"punkte": [[5, 20], [5, 80], [5, 140]],
+                             "ordnung": 2, "breite_m": 12.5}]
+
+        # --- Eignungsfeld und Wasser, wie sie die echte Pipeline liefert ---
+        #
+        # Die Hoehenkarte oben geht von -100 bis +300 m; alles unter dem
+        # Meeresspiegel wird hier als Meer markiert, damit die Wassertiefe
+        # etwas zu rechnen hat.
+        self.super_mask = np.zeros((size, size), dtype=np.uint8)
+        self.super_mask[self.H < SEESPIEGEL_STANDARD_M] = 15      # ocean
+        self.water_map = np.zeros((size, size), dtype=np.float32)
+        self.water_map[size // 4:size // 4 + 6, :] = 3.5          # ein Fluss
+
+        # Drei Biom-Kennungen je Ort mit Anteilen, die auf 1 summieren.
+        rng = np.random.default_rng(4711)
+        self.top3_ids = rng.integers(0, 15, (size, size, 3), dtype=np.uint8)
+        roh = rng.random((size, size, 3)).astype(np.float32) + 0.05
+        roh = np.sort(roh, axis=2)[:, :, ::-1]
+        self.top3_anteil = (roh / roh.sum(axis=2, keepdims=True)).astype(np.float32)
+        self.eindeutigkeit = rng.random((size, size)).astype(np.float32) * 3.0
 
     def get_terrain_data_combined(self, key):
         return self.H if key == "heightmap" else None
 
     def get_terrain_data(self, key):
-        return self.H if key == "heightmap" else None
+        if key == "heightmap":
+            return self.H
+        if key == "river_lines":
+            return self.river_lines
+        return None
 
     def get_settlement_data(self, key):
         return {"city_mask": self.city, "roads": self.roads}.get(key)
 
     def get_water_data(self, key):
-        return None
+        return self.water_map if key == "water_map" else None
 
     def get_geology_data(self, key):
         return None
@@ -71,7 +98,10 @@ class FakeDLM:
         return None
 
     def get_biome_data(self, key):
-        return None
+        return {"super_biome_mask": self.super_mask,
+                "biom_top3_ids": self.top3_ids,
+                "biom_top3_anteil": self.top3_anteil,
+                "biom_eindeutigkeit": self.eindeutigkeit}.get(key)
 
 
 def run_groesse_und_verfahren():
@@ -153,13 +183,19 @@ def run_export_laeuft_durch():
                     "noise_damping_mask" in manifest["layers"],
                     ", ".join(sorted(manifest["layers"])[:6]))
         falsch = []
+        bilder = 0
         for name, eintrag in manifest["layers"].items():
+            # Die Hoehenkarte ist kein Bild mehr, sondern eine rohe
+            # 16-Bit-Datei - sie wird in run_godot_formate() geprueft.
+            if eintrag["kind"] == "hoehe_r16":
+                continue
+            bilder += 1
             bild = Image.open(os.path.join(ziel, eintrag["file"]))
             if bild.size != (EXPORT_KANTENLAENGE_PX, EXPORT_KANTENLAENGE_PX):
                 falsch.append(f"{name} {bild.size}")
         ok &= check("alle Bilder haben die Exportgroesse", not falsch,
                     "; ".join(falsch) if falsch else
-                    f"{len(manifest['layers'])} Bilder geprueft")
+                    f"{bilder} Bilder geprueft")
         return ok
     finally:
         shutil.rmtree(ordner, ignore_errors=True)
@@ -183,9 +219,154 @@ def run_vektordaten():
     # zu unterscheiden.
     ok &= check("Fehlendes ist begruendet", len(v["fehlt"]) > 0,
                 f"{len(v['fehlt'])} Eintraege")
-    ok &= check("Fluesse sind ausdruecklich benannt",
-                any("fluesse" in eintrag for eintrag in v["fehlt"]),
+
+    # TICKET #37: Fluesse sind jetzt kein "fehlt"-Eintrag mehr, sondern
+    # echte Linienzuege mit Ordnung und Breite - vorher stand hier die
+    # Gegenprobe (Fluesse ausdruecklich als fehlend benannt).
+    ok &= check("Fluesse sind dabei", len(v["fluesse"]) == 1,
+                f"{len(v['fluesse'])}")
+    ok &= check("Fluesse sind NICHT mehr unter 'fehlt' gelistet",
+                not any("fluesse" in eintrag for eintrag in v["fehlt"]),
                 "; ".join(v["fehlt"])[:90])
+    if v["fluesse"]:
+        fluss = v["fluesse"][0]
+        erster = fluss["punkte"][0]
+        # Der erste Flusspunkt liegt bei Pixel (5, 20) - [x_px, y_px].
+        ok &= check("Flusspunkt ist in Meter umgerechnet",
+                    abs(erster[0] - 5 * mpp) < 0.5
+                    and abs(erster[1] - 20 * mpp) < 0.5,
+                    f"{erster} erwartet ~[{5*mpp:.1f}, {20*mpp:.1f}]")
+        ok &= check("Flussordnung und -breite sind uebernommen",
+                    fluss.get("ordnung") == 2
+                    and abs(fluss.get("breite_m", 0.0) - 12.5) < 0.5,
+                    f"{fluss}")
+    return ok
+
+
+def run_godot_formate():
+    """
+    Die Zusicherungen, an denen der Godot-Import haengt.
+
+    ZWEI ENDEN GEGENEINANDER: die Hoehenkarte wird geschrieben UND wieder
+    eingelesen und in Meter zurueckgerechnet. Eine Pruefung nur auf "Datei
+    ist da und hat die richtige Groesse" wuerde eine vertauschte
+    Bytereihenfolge oder eine falsche Normalisierung nicht bemerken - in
+    Godot saehe man dann verrauschtes Gebirge und wuesste nicht, warum.
+    """
+    from PIL import Image
+
+    dlm = FakeDLM(256)
+    ordner = tempfile.mkdtemp(prefix="mapexport_godot_")
+    try:
+        erfolg, meldung, ziel = export_all_layers(dlm, None, ordner, "probe")
+        if not check("Export meldet Erfolg", erfolg, meldung):
+            return False
+        with open(os.path.join(ziel, "manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        schichten = manifest["layers"]
+
+        # --- Hoehenkarte als rohe 16-Bit-Datei ---
+        h = schichten.get("heightmap")
+        ok = check("Hoehenkarte ist eine .r16",
+                   h is not None and h["file"].endswith(".r16"),
+                   h["file"] if h else "fehlt")
+        if not ok:
+            return False
+        pfad = os.path.join(ziel, h["file"])
+        bytes_soll = EXPORT_KANTENLAENGE_PX * EXPORT_KANTENLAENGE_PX * 2
+        ok &= check("Dateigroesse passt genau",
+                    os.path.getsize(pfad) == bytes_soll,
+                    f"{os.path.getsize(pfad)} statt {bytes_soll}")
+        ok &= check("Manifest nennt die Wertespanne",
+                    "value_min" in h and "value_max" in h,
+                    f"{h.get('value_min')} .. {h.get('value_max')}")
+
+        roh = np.fromfile(pfad, dtype="<u2").reshape(
+            EXPORT_KANTENLAENGE_PX, EXPORT_KANTENLAENGE_PX)
+        zurueck = h["value_min"] + roh / 65535.0 * (h["value_max"] - h["value_min"])
+        original, _v = _auf_exportgroesse(dlm.H, "hoehe_r16")
+        abweichung = float(np.abs(zurueck - original).max())
+        stufe = (h["value_max"] - h["value_min"]) / 65535.0
+        ok &= check("Hoehen kommen in Metern zurueck", abweichung <= stufe,
+                    f"groesste Abweichung {abweichung:.5f} m, "
+                    f"eine Stufe ist {stufe:.5f} m")
+
+        # --- Eignungsfeld ---
+        for name in ("biom_top3_ids", "biom_top3_anteil", "biom_eindeutigkeit"):
+            ok &= check(f"{name} ist im Export", name in schichten,
+                        ", ".join(sorted(schichten)))
+        if "biom_top3_anteil" in schichten:
+            bild = np.asarray(Image.open(
+                os.path.join(ziel, schichten["biom_top3_anteil"]["file"])))
+            ok &= check("Anteile sind ein RGB-Bild",
+                        bild.ndim == 3 and bild.shape[2] == 3, str(bild.shape))
+            summe = bild.astype(np.int32).sum(axis=2)
+            ok &= check("die drei Anteile summieren auf 100 %",
+                        int(np.abs(summe - 255).max()) <= 2,
+                        f"groesste Abweichung {int(np.abs(summe - 255).max())}/255")
+            ok &= check("Platz 1 ist nirgends kleiner als Platz 2",
+                        bool((bild[:, :, 0] >= bild[:, :, 1]).all()))
+        if "biom_top3_ids" in schichten:
+            ids = np.asarray(Image.open(
+                os.path.join(ziel, schichten["biom_top3_ids"]["file"])))
+            # Kennungen duerfen beim Hochrechnen NICHT gemittelt werden -
+            # zwischen Biom 3 und Biom 7 liegt kein Biom 5.
+            ok &= check("Kennungen erfinden keine neuen Biome",
+                        set(np.unique(ids).tolist())
+                        <= set(np.unique(dlm.top3_ids).tolist()))
+        if "biom_eindeutigkeit" in schichten:
+            e = Image.open(os.path.join(
+                ziel, schichten["biom_eindeutigkeit"]["file"]))
+            ok &= check("Eindeutigkeit ist echtes 8-Bit-Grau", e.mode == "L",
+                        e.mode)
+
+        # --- Daempfungsmaske jetzt ebenfalls 8 Bit ---
+        if "noise_damping_mask" in schichten:
+            m = Image.open(os.path.join(
+                ziel, schichten["noise_damping_mask"]["file"]))
+            ok &= check("Daempfungsmaske ist echtes 8-Bit-Grau", m.mode == "L",
+                        m.mode)
+
+        # --- Wassertiefe ---
+        w = schichten.get("wassertiefe")
+        ok &= check("Wassertiefe ist im Export", w is not None)
+        if w is not None:
+            ok &= check("Wassertiefe hat eine benannte Spanne in Metern",
+                        w.get("value_max", 0) > 0,
+                        f"0 .. {w.get('value_max')} m")
+        return ok
+    finally:
+        shutil.rmtree(ordner, ignore_errors=True)
+
+
+def run_wassertiefe_inhaltlich():
+    """
+    Meer und Binnengewaesser haben VERSCHIEDENE Wasserspiegel.
+
+    Wuerde man auch fuer einen Bergsee "Meeresspiegel minus Hoehe" rechnen,
+    kaeme im Bergland ueberall 0 heraus und jeder See saehe aus wie eine
+    Pfuetze. Darum zwei Quellen, und darum werden hier beide einzeln
+    geprueft.
+    """
+    dlm = FakeDLM(256)
+    tiefe = wassertiefe(dlm, None, None)
+    ok = check("Wassertiefe entsteht", tiefe is not None)
+    if tiefe is None:
+        return False
+    hoch = dlm.H > 200
+    if hoch.any():
+        ok &= check("auf hohem Land ist die Tiefe 0",
+                    float(tiefe[hoch].max()) == 0.0)
+    meer = dlm.super_mask == 15
+    ok &= check("im Meer ist die Tiefe positiv", bool((tiefe[meer] > 0).any()),
+                f"tiefste Stelle {float(tiefe[meer].max()):.1f} m")
+    ok &= check("Meerestiefe ist Meeresspiegel minus Hoehe",
+                abs(float(tiefe[meer].max())
+                    - float(SEESPIEGEL_STANDARD_M - dlm.H[meer].min())) < 1e-3)
+    fluss = dlm.water_map > 0
+    ok &= check("der Fluss bekommt seine eigene Tiefe",
+                float(tiefe[fluss].max()) >= 3.5,
+                f"{float(tiefe[fluss].max()):.1f} m")
     return ok
 
 
@@ -197,7 +378,9 @@ def main():
     for name, funktion in [("Groesse und Verfahren", run_groesse_und_verfahren),
                            ("Daempfungsmaske", run_daempfungsmaske),
                            ("Vektordaten", run_vektordaten),
-                           ("Export laeuft durch", run_export_laeuft_durch)]:
+                           ("Export laeuft durch", run_export_laeuft_durch),
+                           ("Godot-Formate", run_godot_formate),
+                           ("Wassertiefe inhaltlich", run_wassertiefe_inhaltlich)]:
         print(f"\n--- {name} ---")
         ergebnisse.append(funktion())
     print("\n" + "=" * 70)
