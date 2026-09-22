@@ -907,12 +907,15 @@ class OverviewTab(BaseMapTab):
         # siehe Docstring oben.
         from managers.data_lod_manager import calculate_max_lod_for_size
         parameter = zustand_datei.get("parameter", {})
+        fehlende_setter = []
         for generator, setter_name in (
             ("terrain", "set_terrain_data_lod"),
             ("geology", "set_geology_data_lod"),
         ):
             setter = getattr(self.data_lod_manager, setter_name, None)
             if setter is None:
+                if ergebnis.get(generator):
+                    fehlende_setter.append(generator)
                 continue
             for feld, wert in ergebnis.get(generator, {}).items():
                 if not isinstance(wert, np.ndarray):
@@ -920,10 +923,10 @@ class OverviewTab(BaseMapTab):
                 lod_level = calculate_max_lod_for_size(wert.shape[0])
                 setter(feld, wert, lod_level, parameter.get(generator, {}))
 
-        nicht_geschrieben = sorted(
+        nicht_geschrieben = sorted(set(fehlende_setter) | {
             g for g in ("weather", "erosion", "water", "biome", "settlement")
             if ergebnis.get(g)
-        )
+        })
         if nicht_geschrieben:
             self.logger.warning(
                 "welt_laden: Daten fuer " + ", ".join(nicht_geschrieben) +
