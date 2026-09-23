@@ -10,9 +10,63 @@
 | `docs/UEBERGABE_SITZUNG_2026-09-23.md` | **JÜNGSTE SITZUNG.** Was auf `main` gemergt ist (Tickets 3/7/9/11 und #86–#91), der geloeschte naechtliche Trigger, drei nur besprochene Ideen ohne Freigabe. Der dort noch als offen vermerkte Punkt #44 (Aufteilung der Spezifikation) ist inzwischen erledigt. |
 | `docs/spezifikation/12_WASSER.md` | **Fluesse, Erosion und Seen — die Ordnung dieses Themas.** Woher ein Flussknoten sein Wasser bekommt, welche Region einen Hauptstrom hat, wie die See in Seegrade und Zieltiefen gegliedert ist. Was dort nicht steht, ist nicht beschlossen. |
 | `docs/OFFENE_PUNKTE.md` | **Die einzige Aufgabenliste.** `docs/TODO.md` gibt es nicht mehr, sie ist dort in Abschnitt 12 aufgegangen. |
+| `docs/PRUEFLISTE.md` | **Was am laufenden Programm noch angesehen werden muss.** Jedes abgeschlossene Ticket traegt hier ein, woran man sieht, dass es wirkt. Gegenstueck zur Marke `[!]` in der Aufgabenliste. |
 | `docs/NACHTBETRIEB.md` | **Wer nachts allein arbeitet, liest zuerst das.** Sperrliste (wo nicht hingefasst wird, mit Begruendung), Nachtbranch, ein Commit je Ticket, Morgenbericht, Ruecknahme einzelner Tickets. |
 | `docs/TESTBERICHT.md` | Was gerade gruen ist und was nicht, mit Erklaerung je Fehlschlag |
 | `docs/archiv/` | Historisch, gilt nicht mehr — nicht als Beschreibung des Ist-Zustands lesen |
+
+
+## STEHENDE REGEL: ein Ticket ist erst fertig, wenn es geprueft wurde
+
+**Nutzervorgabe 2026-09-23, woertlich:** *"tickets werden lokal oder bei github
+angelegt. wenn ein ticket abgeschlossen wird soll dieses auf 'pruefen' gesetzt
+werden. weiterhin wird auf die Prueliste eingetragen was mit umsetzung des
+tickets einmal geprueft werden soll. lokal werden zudem die zugehoerigen
+spezifikation angepasst."*
+
+Es gibt damit **drei Zustaende, nicht zwei**: offen, geprueft-wird-noch,
+erledigt. Der mittlere fehlte bisher, und deshalb war "erledigt" eine Behauptung
+ueber Dinge, die nie jemand gesehen hat.
+
+### Wo Tickets stehen
+
+* **Lokal**: `docs/OFFENE_PUNKTE.md`, die einzige Aufgabenliste des Projekts.
+* **Auf GitHub**: der Issue-Tracker des Repos.
+
+Beides ist erlaubt, beides ist gleichwertig. Ein Ticket steht an EINER der
+beiden Stellen, nicht an beiden.
+
+### Was beim Abschluss passiert - alle vier Schritte, immer
+
+1. **Marke auf pruefen setzen.** Lokal `[!]` statt `[x]` (siehe Legende in
+   `docs/OFFENE_PUNKTE.md`). Auf GitHub: das Issue **bleibt offen** und bekommt
+   die Etikette `pruefen`; `ready-for-agent` wird entfernt, damit es kein Agent
+   erneut aufgreift.
+2. **Eintrag in `docs/PRUEFLISTE.md`.** Eine Zeile: was man ansieht, was richtig
+   ist, was schiefgehen kann. Ohne diesen Eintrag ist nicht bekannt, WORAN man
+   erkennen soll, dass die Aenderung wirkt - und dann wird sie auch nicht
+   geprueft.
+3. **Die zugehoerige Spezifikation nachziehen** - die passende Datei unter
+   `docs/spezifikation/`. Wenn sich das Soll geaendert hat, steht es dort, sonst
+   beschreibt die Spezifikation ein Programm, das es nicht mehr gibt.
+4. **Erst wenn der Nutzer es am laufenden Programm bestaetigt hat**, wird `[!]`
+   zu `[x]` und das GitHub-Issue geschlossen. Das ist ein Schritt des Nutzers,
+   nicht des Agenten.
+
+### Warum das ausdruecklich dasteht
+
+Die Etikette `sichtpruefung` ("Nur am laufenden Programm zu bestaetigen,
+headless nicht") gab es schon - und sie hat nichts bewirkt: von den sieben
+Tickets, die sie trugen, waren **sechs trotzdem geschlossen** (#5, #8, #9, #10,
+#11, #12, die Naht-Umstellung der Reiter). Eine Etikette, die das Schliessen
+nicht verhindert, ist nur eine Notiz. Der Zustand `pruefen` ist deshalb kein
+Zusatz zum Abschluss, sondern **ist** der Abschluss; geschlossen wird erst
+danach.
+
+Derselbe Fehler in der lokalen Liste: `[x]` hiess dort "erledigt und gemessen",
+und gemessen heisst bei uns fast immer headless - ein Skript hat Zahlen
+gerechnet. Fuer alles, was nur im Bild sichtbar ist (Overlays, Regler, Menues,
+Kuestenformen), sagte `[x]` damit mehr, als belegt war.
 
 
 ## STEHENDE REGEL: was in 2D sichtbar ist, gehoert auch in 3D
